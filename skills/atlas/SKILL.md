@@ -76,7 +76,11 @@ Before starting any work:
 2. If found, present to user: "[formatCheckpoint output]. Resume or restart?"
    - **Resume** → skip to saved phase, restore `completedStories` from checkpoint
    - **Restart** → `clearCheckpoint('atlas')`, proceed normally
-3. If no checkpoint found, check for `.omc/progress.txt` migration (see wisdom system)
+
+#### Load Prior Wisdom
+1. Run `migrateProgressTxt()` if `.omc/progress.txt` exists (one-time migration to wisdom.jsonl)
+2. Call `queryWisdom(null, 20)` to get recent learnings
+3. Inject into analysis context via `formatWisdomForPrompt()`
 
 Classify and pick strategy. Spawn **simultaneously**:
 
@@ -90,6 +94,7 @@ Agent B (deep): Task(subagent_type="agent-olympus:metis", model="opus",
   COMPLEXITY: trivial / moderate / complex / architectural
   SCOPE: single-file / multi-file / cross-system
   NEEDS_CODEX: yes/no
+  Prior learnings: <formatWisdomForPrompt()>
   Task: <user_request>")
 ```
 
@@ -198,18 +203,24 @@ tmux send-keys -t "atlas-codex-<N>" 'codex exec "<implementation prompt>"' Enter
 
 3. After each story completes, verify its acceptance criteria with FRESH evidence
 4. Mark `passes: true` in prd.json only when ALL criteria verified
-5. Record in `.omc/progress.txt`: what was done, files changed, learnings
+5. Record learnings via wisdom calls after each story:
+   ```
+   addWisdom({ category: 'pattern', lesson: '<codebase convention discovered>', confidence: 'high' })
+   addWisdom({ category: 'debug',   lesson: '<pitfall to avoid>',              confidence: 'high' })
+   addWisdom({ category: 'build',   lesson: '<build/test learning>',           confidence: 'medium' })
+   ```
 6. After each story passes: `saveCheckpoint('atlas', { phase: 3, prdSnapshot: <updated prd.json>, completedStories: <all passing story IDs>, activeWorkers: <in-flight agent IDs>, startedAt, taskDescription })`
 
-**Progress tracking** — append to `.omc/progress.txt` after each story:
-```
-## Iteration N — US-001: <title>
-- Files changed: <list>
-- What worked: <learnings>
-- What didn't: <pitfalls to avoid>
-- Patterns discovered: <codebase conventions noted>
-```
-This file persists across iterations so later stories benefit from earlier learnings.
+**Wisdom tracking** — call `addWisdom()` after each story with appropriate category:
+- `'test'` — test framework quirks, test patterns that work
+- `'build'` — build tool behavior, compilation requirements
+- `'architecture'` — structural decisions, module boundaries
+- `'pattern'` — codebase conventions, naming, error handling
+- `'debug'` — pitfalls encountered, root causes found
+- `'performance'` — optimization findings
+- `'general'` — anything that doesn't fit the above
+
+Wisdom persists across iterations so later stories benefit from earlier learnings.
 
 ```
 saveCheckpoint('atlas', { phase: 4, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
@@ -224,7 +235,7 @@ Run **simultaneously**: build, tests, linter, type checker.
 │   ├─ ALL PASS → proceed to Phase 5
 │   └─ ANY FAIL → spawn debugger:
 │       Task(subagent_type="agent-olympus:debugger", model="sonnet",
-│         prompt="Fix: <error_output>. Previous learnings: <progress.txt>")
+│         prompt="Fix: <error_output>. Previous learnings: <formatWisdomForPrompt(queryWisdom(null,10))>")
 │       If debugger fails 2x → escalate to agent-olympus:trace
 │       Re-run checks
 └── Loop (max 5 fix cycles, same error 3x = escalate)
@@ -259,12 +270,15 @@ After review approved:
 
 ### COMPLETION
 
+Prune wisdom to prevent unbounded growth:
+- Call `pruneWisdom(200)` to remove entries older than 90 days and cap at 200 most recent
+
 Clean up:
 - `clearCheckpoint('atlas')`
 - Remove `.omc/state/atlas-state.json`
 - Remove `.omc/prd.json`
 - Kill any tmux sessions: `tmux kill-session -t "atlas-*"`
-- Keep `.omc/progress.txt` (useful for future sessions)
+- Keep `.omc/wisdom.jsonl` (useful for future sessions — never delete)
 
 Report to user:
 - Strategy used (DIRECT/LITE/STANDARD/FULL)

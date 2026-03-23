@@ -67,7 +67,11 @@ Before starting any work:
 2. If found, present to user: "[formatCheckpoint output]. Resume or restart?"
    - **Resume** → skip to saved phase, restore `completedStories` and `activeWorkers` from checkpoint
    - **Restart** → `clearCheckpoint('athena')`, proceed normally
-3. If no checkpoint found, check for `.omc/progress.txt` migration (see wisdom system)
+
+#### Load Prior Wisdom
+1. Run `migrateProgressTxt()` if `.omc/progress.txt` exists (one-time migration to wisdom.jsonl)
+2. Call `queryWisdom(null, 20)` to get recent learnings
+3. Inject into analysis context via `formatWisdomForPrompt()`
 
 Analyze task and design team:
 ```
@@ -78,6 +82,7 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   3. Identify coordination points
   4. Recommend team size (max 5 Claude + 2 Codex)
   Rules: Codex for algorithms/large refactoring, Claude for standard impl/UI/tests
+  Prior learnings: <formatWisdomForPrompt()>
   Task: <user_request>")
 ```
 
@@ -177,16 +182,20 @@ saveCheckpoint('athena', { phase: 3, prdSnapshot: <prd.json>, completedStories: 
 
 After each worker completes a story: `saveCheckpoint('athena', { phase: 3, prdSnapshot: <updated prd.json>, completedStories: <all passing story IDs>, activeWorkers: <remaining in-flight workers>, startedAt, taskDescription })`
 
-### Phase 3b — PROGRESS TRACKING
+### Phase 3b — WISDOM TRACKING
 
-After each worker completes, append to `.omc/progress.txt`:
+After each worker completes, call `addWisdom()` with learnings:
 ```
-## Worker: <name> (<type>)
-- Files changed: <list>
-- What worked: <learnings>
-- Coordination notes: <what was shared with other workers>
-- Patterns discovered: <codebase conventions>
+addWisdom({ category: 'pattern',      lesson: '<codebase convention discovered>',      confidence: 'high' })
+addWisdom({ category: 'architecture', lesson: '<structural decision or boundary note>', confidence: 'high' })
+addWisdom({ category: 'debug',        lesson: '<pitfall encountered by this worker>',   confidence: 'high' })
+addWisdom({ category: 'general',      lesson: '<coordination note for future teams>',   confidence: 'medium' })
 ```
+
+Use appropriate category per learning:
+- `'test'` / `'build'` / `'architecture'` / `'pattern'` / `'debug'` / `'performance'` / `'general'`
+
+Wisdom persists across sessions so future runs benefit from team discoveries.
 
 ```
 saveCheckpoint('athena', { phase: 4, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
@@ -206,7 +215,7 @@ Run **simultaneously**: build, tests, linter.
 
 ```
 ┌─→ ALL PASS → Phase 5
-│   ANY FAIL → spawn debugger (with progress.txt learnings), fix, re-verify
+│   ANY FAIL → spawn debugger (with wisdom learnings: formatWisdomForPrompt(queryWisdom(null,10))), fix, re-verify
 │   If debugger fails 2x → escalate to agent-olympus:trace
 └── Loop (max 5 fix cycles)
 ```
@@ -239,13 +248,16 @@ After review approved:
 
 ### COMPLETION
 
+Prune wisdom to prevent unbounded growth:
+- Call `pruneWisdom(200)` to remove entries older than 90 days and cap at 200 most recent
+
 Clean up:
 - `clearCheckpoint('athena')`
 - TeamDelete("athena-<slug>")
 - Remove `.omc/teams/<slug>/`
 - Remove `.omc/state/athena-state.json`, `.omc/prd.json`
 - Kill tmux sessions: `tmux kill-session -t "athena-<slug>-*"`
-- Keep `.omc/progress.txt` (useful for future sessions)
+- Keep `.omc/wisdom.jsonl` (useful for future sessions — never delete)
 
 Report: PRD stories (N/N), per-worker summary, files changed, coordination log, verification results.
 
