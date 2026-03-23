@@ -1,0 +1,105 @@
+// agent-olympus model routing configuration
+// This file is parsed as JSONC (JSON with Comments).
+// Changes here override the built-in defaults in scripts/lib/model-router.mjs.
+//
+// Route keys match intent categories from scripts/lib/intent-patterns.mjs:
+//   visual-engineering | deep | quick | writing | artistry | planning | unknown
+//
+// Model aliases: "opus" | "sonnet" | "haiku"  (resolved at runtime by Claude Code)
+// Agent aliases: any agent available via the Skill tool  (agent-olympus:<name>)
+// teamWorkerType: "gemini" | "codex" | null
+{
+  // Schema version for forward compatibility
+  "version": "1",
+
+  // -----------------------------------------------------------------------
+  // Routing rules
+  // Each key is an intent category. Override only the fields you want to
+  // change — missing fields fall back to built-in defaults.
+  // -----------------------------------------------------------------------
+  "routes": {
+    // Visual / UI / Frontend tasks
+    // → designer agent + sonnet + Gemini team worker for multimodal visual work
+    "visual-engineering": {
+      "agent": "agent-olympus:designer",
+      "model": "sonnet",
+      "fallbackChain": ["sonnet", "haiku"],
+      "teamWorkerType": "gemini"
+    },
+
+    // Complex architectural / system-level tasks
+    // → architect agent + opus for maximum reasoning depth
+    "deep": {
+      "agent": "agent-olympus:architect",
+      "model": "opus",
+      "fallbackChain": ["opus", "sonnet"],
+      "teamWorkerType": null
+    },
+
+    // Simple / quick fixes and small changes
+    // → explore agent + haiku for speed and cost efficiency
+    "quick": {
+      "agent": "agent-olympus:explore",
+      "model": "haiku",
+      "fallbackChain": ["haiku", "sonnet"],
+      "teamWorkerType": null
+    },
+
+    // Documentation, README, comments, and prose writing
+    // → writer agent + haiku (fast, cost-effective for text generation)
+    "writing": {
+      "agent": "agent-olympus:writer",
+      "model": "haiku",
+      "fallbackChain": ["haiku", "sonnet"],
+      "teamWorkerType": null
+    },
+
+    // Creative / generative / data-visualization tasks
+    // → designer agent + sonnet + Gemini team worker for multimodal creativity
+    "artistry": {
+      "agent": "agent-olympus:designer",
+      "model": "sonnet",
+      "fallbackChain": ["sonnet"],
+      "teamWorkerType": "gemini"
+    },
+
+    // Planning, strategy, architecture decisions, and brainstorming
+    // → planner agent + opus for thorough structured planning
+    "planning": {
+      "agent": "agent-olympus:prometheus",
+      "model": "opus",
+      "fallbackChain": ["opus", "sonnet"],
+      "teamWorkerType": null
+    },
+
+    // Fallback when intent is unclear or confidence is low
+    "unknown": {
+      "agent": "agent-olympus:executor",
+      "model": "sonnet",
+      "fallbackChain": ["sonnet", "haiku"],
+      "teamWorkerType": null
+    }
+  },
+
+  // -----------------------------------------------------------------------
+  // Concurrency limits (informational — enforced by concurrency-gate.mjs)
+  // -----------------------------------------------------------------------
+  "concurrency": {
+    // Maximum parallel Task invocations before queuing
+    "maxParallelTasks": 3,
+    // Maximum parallel Gemini team workers
+    "maxGeminiWorkers": 2,
+    // Maximum parallel Codex team workers
+    "maxCodexWorkers": 2
+  },
+
+  // -----------------------------------------------------------------------
+  // Confidence thresholds
+  // -----------------------------------------------------------------------
+  "thresholds": {
+    // Intent confidence below this value → treat as "unknown"
+    "minConfidence": 0.15,
+    // Intent confidence above this value → high-confidence routing
+    "highConfidence": 0.70
+  }
+}
