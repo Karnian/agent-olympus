@@ -6,19 +6,13 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-const STATE_DIR = path.join(process.cwd(), '.omc', 'state');
+const STATE_DIR = path.join('.omc', 'state');
 const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-const PHASE_NAMES = [
-  'TRIAGE',
-  'ANALYZE',
-  'PLAN',
-  'EXECUTE',
-  'VERIFY',
-  'REVIEW',
-  'SLOP_CLEAN',
-  'COMMIT',
-];
+const PHASE_NAMES = {
+  atlas:  ['TRIAGE', 'ANALYZE', 'PLAN', 'EXECUTE', 'VERIFY', 'REVIEW', 'SLOP_CLEAN', 'COMMIT'],
+  athena: ['TRIAGE', 'PLAN', 'SPAWN_TEAM', 'MONITOR', 'INTEGRATE_VERIFY', 'REVIEW', 'SLOP_CLEAN', 'COMMIT'],
+};
 
 /**
  * Save checkpoint after each phase transition.
@@ -57,6 +51,10 @@ export async function loadCheckpoint(orchestrator) {
     const checkpoint = JSON.parse(raw);
 
     const savedAt = new Date(checkpoint.savedAt).getTime();
+    if (Number.isNaN(savedAt)) {
+      await fs.unlink(filePath).catch(() => {});
+      return null;
+    }
     const age = Date.now() - savedAt;
 
     if (age > TTL_MS) {
@@ -92,7 +90,7 @@ export async function clearCheckpoint(orchestrator) {
 export function formatCheckpoint(checkpoint) {
   try {
     const phase = checkpoint.phase ?? 0;
-    const phaseName = PHASE_NAMES[phase] ?? `PHASE_${phase}`;
+    const phaseName = PHASE_NAMES[checkpoint.orchestrator]?.[phase] ?? `Phase ${phase}`;
 
     const completedStories = checkpoint.completedStories ?? [];
     const totalStories =
