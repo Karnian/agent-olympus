@@ -120,8 +120,38 @@ tmux new-session -d -s "atlas-codex-analyze" -c "<cwd>"
 tmux send-keys -t "atlas-codex-analyze" 'codex exec "<analysis prompt>"' Enter
 ```
 
+**[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
+```
+Task(subagent_type="agent-olympus:deep-dive", model="opus",
+  prompt="Run deep-dive investigation on: <user_request>
+  Context from codebase scan: <explore_results>
+  Return path to .omc/deep-dive-report.json when complete.")
+```
+Read `.omc/deep-dive-report.json` after completion. If `pipeline_ready: false`, escalate to user before proceeding.
+Use `recommended_approaches[0]` to inform Phase 2 planning.
+
+**[OPTIONAL] External Context** — if metis identifies an external knowledge gap (unfamiliar API, library, or protocol):
+```
+Task(subagent_type="agent-olympus:external-context", model="opus",
+  prompt="Research external context needed for: <user_request>
+  Specific gap: <identified_knowledge_gap>")
+```
+Inject the returned markdown brief as `<external_context>` into the Phase 2 prompt for prometheus.
+
 ### Phase 2 — PLAN + VALIDATE (skip for trivial)
 
+**[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
+```
+Task(subagent_type="agent-olympus:consensus-plan", model="opus",
+  prompt="Run consensus planning for this task.
+  Task: <user_request>
+  Analysis: <metis_analysis>
+  Wisdom: <formatWisdomForPrompt()>
+  External context (if gathered): <external_context>")
+```
+If consensus-plan is used, skip the standard Prometheus + Momus steps below and go directly to PRD generation.
+
+**Standard path** (trivial–moderate tasks, or fewer than 3 stories):
 ```
 Task(subagent_type="agent-olympus:prometheus", model="opus",
   prompt="Create implementation plan with:
@@ -130,7 +160,8 @@ Task(subagent_type="agent-olympus:prometheus", model="opus",
   - Parallel groups (non-overlapping file scopes)
   - Concrete acceptance criteria
   - Codex assignments for algorithmic/refactoring work
-  Analysis: <analysis>. Task: <user_request>")
+  Analysis: <analysis>. Task: <user_request>
+  External context (if gathered): <external_context>")
 ```
 
 Validate:
@@ -318,6 +349,9 @@ Common examples:
 **Agent Olympus built-in skills (always available):**
 - `agent-olympus:ask` — quick Codex/Gemini single-shot query
 - `agent-olympus:deep-interview` — Socratic requirements clarification
+- `agent-olympus:deep-dive` — 2-stage investigation pipeline for complex + ambiguous tasks (Phase 1)
+- `agent-olympus:consensus-plan` — multi-perspective plan validation loop for 3+ story tasks (Phase 2)
+- `agent-olympus:external-context` — facet-decomposed parallel research; enriches agent context with external docs and best practices (Phase 1)
 - `agent-olympus:trace` — evidence-driven root-cause analysis (use when debugger fails 2x)
 - `agent-olympus:slop-cleaner` — AI bloat cleanup (use before final commit)
 - `agent-olympus:git-master` — atomic commit discipline (use as final step)
@@ -326,9 +360,11 @@ Common examples:
 
 **Recommended Atlas workflow integration:**
 ```
-Phase 1 (Analyze) → research (if external knowledge needed)
-Phase 4 (Verify) → trace (if debugger fails 2x)
-Phase 5 (Review) → slop-cleaner → git-master → DONE
+Phase 1 (Analyze) → deep-dive (if complexity=complex/architectural AND ambiguity > 40)
+Phase 1 (Analyze) → external-context (if external API/library knowledge gap detected)
+Phase 2 (Plan)    → consensus-plan (if 3+ stories; replaces standard Prometheus pass)
+Phase 4 (Verify)  → trace (if debugger fails 2x)
+Phase 5 (Review)  → slop-cleaner → git-master → DONE
 ```
 
 **If oh-my-claudecode is also installed:**

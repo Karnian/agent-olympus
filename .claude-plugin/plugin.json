@@ -1,7 +1,7 @@
 {
   "name": "agent-olympus",
-  "version": "0.2.1",
-  "description": "Agent Olympus: Standalone intelligent orchestrator — Atlas (sub-agent) + Athena (team) with Claude + Codex multi-model support",
+  "version": "0.3.0",
+  "description": "Agent Olympus: Standalone intelligent orchestrator — Atlas (sub-agent) + Athena (team) with Claude + Codex multi-model support, 13 skills",
   "author": {
     "name": "Karnian"
   },
