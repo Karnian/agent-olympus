@@ -1,0 +1,10 @@
+{
+  "name": "agent-olympus",
+  "version": "0.1.0",
+  "description": "OpenAgent features for Claude Code",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
