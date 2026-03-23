@@ -16,7 +16,7 @@ Both orchestrators autonomously loop until the task is fully complete (build pas
 agents/     → Agent persona definitions (.md files with model and role)
 skills/     → User-facing skills (SKILL.md with triggers, steps, workflow)
 scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
-scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox)
+scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 ```
@@ -50,6 +50,7 @@ hooks/      → Hook event registrations
 - `.omc/prd.json` — PRD with user stories and acceptance criteria
 - `.omc/wisdom.jsonl` — structured cross-iteration learnings in JSONL format (NEVER delete, survives /cancel)
 - `.omc/progress.txt` — legacy format, auto-migrated to wisdom.jsonl on first run
+- `.omc/state/checkpoint-{atlas|athena}.json` — session recovery checkpoints (auto-expire 24h)
 - `.omc/state/*.json` — transient state files (deleted on completion)
 - `.omc/teams/` — tmux worker inbox/outbox directories (Athena only)
 

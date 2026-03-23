@@ -65,7 +65,9 @@ agent-olympus/
 │       ├── model-router.mjs      — Routing logic with JSONC config merge
 │       ├── tmux-session.mjs      — Tmux session lifecycle management
 │       ├── inbox-outbox.mjs      — File-based message queue for Claude↔Codex
-│       └── worker-spawn.mjs      — Team worker lifecycle (spawn/monitor/collect/shutdown)
+│       ├── worker-spawn.mjs      — Team worker lifecycle (spawn/monitor/collect/shutdown)
+│       ├── checkpoint.mjs        — Session checkpoint save/restore (24h expiry)
+│       └── wisdom.mjs            — Structured learning store (JSONL read/append/migrate)
 ├── config/
 │   └── model-routing.jsonc       — Intent→model routing configuration
 └── hooks/
@@ -77,8 +79,8 @@ agent-olympus/
 ### Orchestrators (Opus)
 | Agent | Role |
 |-------|------|
-| **atlas** | Hub-and-spoke: one brain delegates to many sub-agents |
-| **athena** | Peer-to-peer: many brains collaborate via SendMessage + tmux |
+| **atlas** | Hub-and-spoke: one brain delegates to many sub-agents; supports session recovery via checkpoint |
+| **athena** | Peer-to-peer: many brains collaborate via SendMessage + tmux; supports session recovery via checkpoint |
 
 ### Analysis & Planning (Opus)
 | Agent | Role |
@@ -157,6 +159,8 @@ agent-olympus/
 | `.omc/state/athena-state.json` | Athena phase tracking | Created on start, deleted on completion |
 | `.omc/prd.json` | User stories with acceptance criteria | Created in Plan phase, deleted on completion |
 | `.omc/wisdom.jsonl` | Cross-iteration learnings (JSONL format) | Accumulated, NEVER deleted (survives cancel) |
+| `.omc/state/checkpoint-atlas.json` | Atlas session recovery checkpoint | Auto-expires after 24h |
+| `.omc/state/checkpoint-athena.json` | Athena session recovery checkpoint | Auto-expires after 24h |
 | `.omc/state/oac-intent.json` | Last classified intent | Updated per prompt |
 | `.omc/state/oac-concurrency.json` | Active task tracking | Updated per task spawn/complete |
 | `.omc/teams/<slug>/` | Inbox/outbox for Codex workers | Created by Athena, cleaned on completion |
