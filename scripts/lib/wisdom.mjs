@@ -55,7 +55,10 @@ async function writeAllEntries(entries) {
 }
 
 /**
- * Add a wisdom entry with deduplication (>80% Jaccard similarity = skip)
+ * Add a wisdom entry with best-effort deduplication.
+ * Note: Dedup is not atomic — concurrent callers may both pass the
+ * similarity check. This is acceptable since duplicates are pruned
+ * by pruneWisdom() and the append itself is POSIX-atomic for small writes.
  * @param {{ category: string, lesson: string, filePatterns?: string[], confidence?: string }} entry
  *   category: 'test' | 'build' | 'architecture' | 'pattern' | 'debug' | 'performance' | 'general'
  *   confidence: 'high' | 'medium' | 'low'
@@ -100,7 +103,7 @@ export async function queryWisdom(category, limit = 10) {
       ? entries.filter(e => e.category === category)
       : entries;
     // Most recent first
-    return filtered.reverse().slice(0, limit);
+    return filtered.toReversed().slice(0, limit);
   } catch {
     return [];
   }
