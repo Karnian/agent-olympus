@@ -232,6 +232,34 @@ tmux send-keys -t "atlas-codex-<N>" 'codex exec "<implementation prompt>"' Enter
 # Cleanup: tmux kill-session -t "atlas-codex-<N>"
 ```
 
+**Codex failure detection and Claude fallback:**
+
+After spawning each Codex worker, poll `tmux capture-pane` every 10–15 seconds and pass the output to `detectCodexError(output)` (from `scripts/lib/worker-spawn.mjs`):
+
+```javascript
+import { detectCodexError, reassignToClaude } from './scripts/lib/worker-spawn.mjs';
+
+const paneOutput = capturePane(`atlas-codex-${N}`, 200);
+const errorCheck = detectCodexError(paneOutput);
+
+if (errorCheck.failed) {
+  // Log the failure reason so it's visible in the session
+  console.error(`[atlas] Codex worker atlas-codex-${N} failed: ${errorCheck.reason} — ${errorCheck.message}`);
+
+  // Kill the tmux session and record the event in wisdom
+  const fallback = reassignToClaude('atlas', `codex-${N}`, originalPrompt, errorCheck.reason);
+
+  // Spawn a Claude executor with the same prompt
+  Task(subagent_type="agent-olympus:executor", model="sonnet",
+    prompt=`${fallback.prompt}`)
+}
+```
+
+Rules:
+- If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again in this session — use Claude for all remaining Codex stories.
+- If `errorCheck.reason` is `'crash'`, you may retry Codex once; if it crashes again, fall back to Claude.
+- Always call `reassignToClaude()` before spawning the Claude replacement — it handles tmux cleanup and wisdom recording.
+
 3. After each story completes, verify its acceptance criteria with FRESH evidence
 4. Mark `passes: true` in prd.json only when ALL criteria verified
 5. Record learnings via wisdom calls after each story:
