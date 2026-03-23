@@ -1,0 +1,14 @@
+{
+  "name": "agent-olympus",
+  "owner": {
+    "name": "Karnian"
+  },
+  "plugins": [
+    {
+      "name": "agent-olympus",
+      "source": ".",
+      "version": "0.2.0",
+      "description": "Self-driving AI orchestrator — Atlas (hub-and-spoke) + Athena (peer-to-peer), 15 agents, zero dependencies"
+    }
+  ]
+}
