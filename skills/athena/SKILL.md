@@ -60,6 +60,15 @@ Athena = many brains collaborating.
 
 ### Phase 0 — TRIAGE & TEAM DESIGN
 
+#### Checkpoint Recovery
+
+Before starting any work:
+1. Check for an interrupted session: `loadCheckpoint('athena')`
+2. If found, present to user: "[formatCheckpoint output]. Resume or restart?"
+   - **Resume** → skip to saved phase, restore `completedStories` and `activeWorkers` from checkpoint
+   - **Restart** → `clearCheckpoint('athena')`, proceed normally
+3. If no checkpoint found, check for `.omc/progress.txt` migration (see wisdom system)
+
 Analyze task and design team:
 ```
 Task(subagent_type="agent-olympus:metis", model="opus",
@@ -70,6 +79,10 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   4. Recommend team size (max 5 Claude + 2 Codex)
   Rules: Codex for algorithms/large refactoring, Claude for standard impl/UI/tests
   Task: <user_request>")
+```
+
+```
+saveCheckpoint('athena', { phase: 1, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
 ```
 
 ### Phase 1 — PLAN
@@ -114,6 +127,10 @@ Task(subagent_type="agent-olympus:momus", model="sonnet",
 - ✅ "GET /api/users returns 200 with User[] body"
 - ✅ "Test file tests/auth.test.ts exists and all cases pass"
 
+```
+saveCheckpoint('athena', { phase: 2, prdSnapshot: <prd.json contents>, completedStories: [], activeWorkers: [], startedAt, taskDescription })
+```
+
 ### Phase 2 — SPAWN TEAM
 
 **Claude workers** (native team):
@@ -142,6 +159,10 @@ tmux send-keys -t "athena-<slug>-codex-<N>" 'codex exec "<implementation prompt>
 .omc/teams/<slug>/<worker>/outbox/   — messages FROM worker
 ```
 
+```
+saveCheckpoint('athena', { phase: 3, prdSnapshot: <prd.json>, completedStories: [], activeWorkers: <spawned worker names>, startedAt, taskDescription })
+```
+
 ### Phase 3 — MONITOR & COORDINATE (loop until all complete)
 
 ```
@@ -154,6 +175,8 @@ tmux send-keys -t "athena-<slug>-codex-<N>" 'codex exec "<implementation prompt>
 └── Loop (max 10 monitor iterations)
 ```
 
+After each worker completes a story: `saveCheckpoint('athena', { phase: 3, prdSnapshot: <updated prd.json>, completedStories: <all passing story IDs>, activeWorkers: <remaining in-flight workers>, startedAt, taskDescription })`
+
 ### Phase 3b — PROGRESS TRACKING
 
 After each worker completes, append to `.omc/progress.txt`:
@@ -163,6 +186,10 @@ After each worker completes, append to `.omc/progress.txt`:
 - What worked: <learnings>
 - Coordination notes: <what was shared with other workers>
 - Patterns discovered: <codebase conventions>
+```
+
+```
+saveCheckpoint('athena', { phase: 4, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
 ```
 
 ### Phase 4 — INTEGRATE & VERIFY (loop until pass)
@@ -182,6 +209,10 @@ Run **simultaneously**: build, tests, linter.
 │   ANY FAIL → spawn debugger (with progress.txt learnings), fix, re-verify
 │   If debugger fails 2x → escalate to agent-olympus:trace
 └── Loop (max 5 fix cycles)
+```
+
+```
+saveCheckpoint('athena', { phase: 5, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
 ```
 
 ### Phase 5 — REVIEW (loop until approved)
@@ -209,6 +240,7 @@ After review approved:
 ### COMPLETION
 
 Clean up:
+- `clearCheckpoint('athena')`
 - TeamDelete("athena-<slug>")
 - Remove `.omc/teams/<slug>/`
 - Remove `.omc/state/athena-state.json`, `.omc/prd.json`

@@ -95,5 +95,6 @@ Progress is preserved in `.omc/progress.txt`. When Atlas/Athena is invoked again
 - Tmux sessions are killed gracefully (SIGTERM, not SIGKILL)
 - prd.json is deleted so a fresh plan is generated on restart
 - State files are deleted to prevent stale state corruption
+- **Checkpoint files are PRESERVED on cancel** (`.omc/state/checkpoint-atlas.json` / `.omc/state/checkpoint-athena.json`). They are NOT deleted. This enables the next Atlas/Athena invocation to detect the interrupted session and offer to resume from the exact phase where it was cancelled.
 
 </Cancel>
