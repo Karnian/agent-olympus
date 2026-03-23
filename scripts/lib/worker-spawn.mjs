@@ -1,10 +1,23 @@
-import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux } from './tmux-session.mjs';
+import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession } from './tmux-session.mjs';
 import { sendMessage, readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
+import { addWisdom } from './wisdom.mjs';
 import { writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
 const STATE_DIR = '.omc/state';
 const ARTIFACTS_DIR = '.omc/artifacts';
+
+/**
+ * Error patterns that indicate a Codex worker has failed unrecoverably.
+ * Ordered from most specific to most generic to reduce false positives.
+ * @type {Array<{ pattern: RegExp, reason: string }>}
+ */
+const CODEX_ERROR_PATTERNS = [
+  { pattern: /authentication|unauthorized|invalid.*api.*key|API key/i, reason: 'auth_failed' },
+  { pattern: /rate.?limit|429|quota.*exceeded|too many requests/i, reason: 'rate_limited' },
+  { pattern: /command not found|not found|ENOENT/i, reason: 'not_installed' },
+  { pattern: /error|fatal|exception|panic/i, reason: 'crash' },
+];
 
 function saveTeamState(teamName, state) {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
@@ -19,6 +32,83 @@ function loadTeamState(teamName) {
   const path = join(STATE_DIR, `team-${teamName}.json`);
   try { return JSON.parse(readFileSync(path, 'utf-8')); }
   catch { return null; }
+}
+
+/**
+ * Scan tmux pane output for known Codex failure signatures.
+ * Returns the first matching error, or `{ failed: false }` if none match.
+ * Only runs against 'codex'-type workers to avoid false positives on
+ * normal Claude output that may contain words like "error" contextually.
+ *
+ * @param {string} output - Raw captured pane text
+ * @returns {{ failed: boolean, reason?: string, message?: string }}
+ */
+export function detectCodexError(output) {
+  try {
+    if (!output || typeof output !== 'string') return { failed: false };
+
+    for (const { pattern, reason } of CODEX_ERROR_PATTERNS) {
+      const match = output.match(pattern);
+      if (match) {
+        return {
+          failed: true,
+          reason,
+          message: match[0].slice(0, 200),
+        };
+      }
+    }
+    return { failed: false };
+  } catch {
+    return { failed: false };
+  }
+}
+
+/**
+ * Kill a failed Codex tmux session, record the failure in wisdom, and
+ * return a descriptor that the caller can use to spawn a Claude fallback.
+ *
+ * The actual Task() call to spawn agent-olympus:executor cannot be made
+ * from a Node.js library — it must be issued by the orchestrating Claude
+ * agent. This function handles everything that CAN be done synchronously
+ * (tmux cleanup + wisdom recording) and returns the information the
+ * orchestrator needs to issue the Task() call.
+ *
+ * @param {string} teamName       - Team identifier
+ * @param {string} workerName     - Name of the failed worker
+ * @param {string} originalPrompt - The prompt the Codex worker was given
+ * @param {string} failureReason  - Reason code from detectCodexError()
+ * @returns {{ fallbackNeeded: boolean, teamName: string, workerName: string, prompt: string, reason: string }}
+ */
+export function reassignToClaude(teamName, workerName, originalPrompt, failureReason) {
+  try {
+    // Kill the failed tmux session
+    const session = sessionName(teamName, workerName);
+    try { killSession(session); } catch {}
+
+    // Record the fallback event as wisdom so future sessions avoid the same issue
+    addWisdom({
+      category: 'tool',
+      lesson: `Codex worker "${workerName}" failed (${failureReason}) — automatically reassigned to agent-olympus:executor. Avoid Codex for reason "${failureReason}" in this session.`,
+      confidence: 'high',
+    });
+
+    return {
+      fallbackNeeded: true,
+      teamName,
+      workerName,
+      prompt: originalPrompt,
+      reason: failureReason,
+    };
+  } catch {
+    // fail-safe: return minimal descriptor so caller can still attempt a fallback
+    return {
+      fallbackNeeded: true,
+      teamName,
+      workerName,
+      prompt: originalPrompt,
+      reason: failureReason,
+    };
+  }
 }
 
 export async function spawnTeam(teamName, workers, cwd) {
@@ -93,12 +183,32 @@ export function monitorTeam(teamName) {
       paneOutput.includes('Finished')
     );
 
-    status.workers.push({
+    // For Codex workers, check for unrecoverable error conditions
+    let errorDetection = { failed: false };
+    if (worker.type === 'codex' && worker.status === 'running' && paneOutput && !isDone) {
+      errorDetection = detectCodexError(paneOutput);
+    }
+
+    let resolvedStatus = worker.status;
+    if (isDone) {
+      resolvedStatus = 'completed';
+    } else if (errorDetection.failed) {
+      resolvedStatus = 'failed';
+    }
+
+    const workerEntry = {
       name: worker.name,
       type: worker.type,
-      status: isDone ? 'completed' : worker.status,
-      lastOutput: paneOutput ? paneOutput.slice(-500) : null
-    });
+      status: resolvedStatus,
+      lastOutput: paneOutput ? paneOutput.slice(-500) : null,
+    };
+
+    if (errorDetection.failed) {
+      workerEntry.errorReason = errorDetection.reason;
+      workerEntry.errorMessage = errorDetection.message;
+    }
+
+    status.workers.push(workerEntry);
   }
 
   return status;
