@@ -218,6 +218,9 @@ After review approved:
 
 ### COMPLETION
 
+Prune wisdom to prevent unbounded growth:
+- Call `pruneWisdom(200)` to remove entries older than 90 days and cap at 200 most recent
+
 Clean up:
 - TeamDelete("athena-<slug>")
 - Remove `.omc/teams/<slug>/`

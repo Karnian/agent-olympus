@@ -48,7 +48,8 @@ hooks/      → Hook event registrations
 
 ### State Management
 - `.omc/prd.json` — PRD with user stories and acceptance criteria
-- `.omc/progress.txt` — cross-iteration learnings (NEVER delete, survives /cancel)
+- `.omc/wisdom.jsonl` — structured cross-iteration learnings in JSONL format (NEVER delete, survives /cancel)
+- `.omc/progress.txt` — legacy format, auto-migrated to wisdom.jsonl on first run
 - `.omc/state/*.json` — transient state files (deleted on completion)
 - `.omc/teams/` — tmux worker inbox/outbox directories (Athena only)
 
