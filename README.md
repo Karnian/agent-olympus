@@ -4,7 +4,7 @@
 
 Agent Olympus is a standalone Claude Code plugin that transforms how you build software. Give it a task, and it orchestrates specialized AI agents to complete it autonomously — analyzing requirements, planning execution, implementing changes, verifying results, and fixing issues until everything passes.
 
-Two orchestrators, 15 specialized agents, 10 workflow skills. Zero npm dependencies.
+Two orchestrators, 15 specialized agents, 13 workflow skills. Zero npm dependencies.
 
 ## What It Does
 
@@ -21,12 +21,13 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 
 - **Two orchestrators**: Atlas (hub-and-spoke) and Athena (peer-to-peer team)
 - **15 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Executor, Designer (UI/UX), Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Atlas, Athena
-- **10 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit
+- **13 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
 - **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs
 - **Zero npm dependencies**: Node.js built-ins only
 - **Multi-model support**: Claude (Opus/Sonnet/Haiku) + Codex/Gemini via tmux
 - **Multilingual intent detection**: English, Korean, Japanese, Chinese aliases for all skills
+- **Worker Status Dashboard**: Real-time inline markdown display of all active worker states during Athena team runs
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -119,6 +120,9 @@ Reply `resume` to pick up where you left off.
 - **`/git-master`** — Atomic, well-structured commit discipline
 - **`/deepinit`** — Generate codebase map (AGENTS.md) for orientation
 - **`/cancel`** — Gracefully stop a running orchestrator and clean up state
+- **`/deep-dive`** — Exhaustive single-topic investigation with multi-angle synthesis
+- **`/consensus-plan`** — Multi-agent planning consensus (Prometheus + Momus) before execution
+- **`/external-context`** — Fetch and inject external documentation or specs into the active context
 
 ## Orchestrators
 
@@ -227,7 +231,7 @@ User Request
 | **code-reviewer** | Sonnet | Code quality reviewer (read-only) — standards, patterns, maintainability |
 | **writer** | Haiku | Documentation specialist — clear, accurate technical docs and code comments |
 
-## Skills (10 Total)
+## Skills (13 Total)
 
 | Skill | Level | Aliases | Use Case |
 |-------|-------|---------|----------|
@@ -241,6 +245,9 @@ User Request
 | **git-master** | 2 | `git-master`, `commit`, `커밋`, `atomic` | Atomic commit discipline and history |
 | **deepinit** | 2 | `deepinit`, `init`, `초기화`, `map-codebase` | Generate AGENTS.md codebase documentation |
 | **cancel** | 1 | `cancel`, `취소`, `stop`, `abort` | Graceful session shutdown and cleanup |
+| **deep-dive** | 3 | `deep-dive`, `깊게파봐`, `exhaustive` | Exhaustive single-topic investigation with synthesis |
+| **consensus-plan** | 4 | `consensus-plan`, `합의`, `consensus` | Multi-agent planning consensus before execution |
+| **external-context** | 2 | `external-context`, `외부문서`, `docs`, `inject-docs` | Fetch and inject external docs/specs into context |
 
 ## Architecture
 

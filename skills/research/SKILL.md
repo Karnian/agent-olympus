@@ -2,7 +2,7 @@
 name: research
 description: Parallel web research with facet decomposition and synthesis — for external docs, APIs, best practices
 level: 3
-aliases: [research, 조사, 리서치, external-context, lookup]
+aliases: [research, 조사, 리서치, lookup]
 ---
 
 <Research>

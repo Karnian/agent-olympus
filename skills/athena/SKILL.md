@@ -86,12 +86,42 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   Task: <user_request>")
 ```
 
+**[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
+```
+Task(subagent_type="agent-olympus:deep-dive", model="opus",
+  prompt="Run deep-dive investigation on: <user_request>
+  Context from codebase scan: <explore_results>
+  Return path to .omc/deep-dive-report.json when complete.")
+```
+Read `.omc/deep-dive-report.json` after completion. If `pipeline_ready: false`, escalate to user before proceeding.
+Use `recommended_approaches[0]` and `affected_files` to inform Phase 1 team design.
+
+**[OPTIONAL] External Context** — if metis identifies an external knowledge gap (unfamiliar API, library, or protocol):
+```
+Task(subagent_type="agent-olympus:external-context", model="opus",
+  prompt="Research external context needed for: <user_request>
+  Specific gap: <identified_knowledge_gap>")
+```
+Broadcast the returned markdown brief to all workers via team inbox before Phase 2 spawn.
+
 ```
 saveCheckpoint('athena', { phase: 1, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
 ```
 
 ### Phase 1 — PLAN
 
+**[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
+```
+Task(subagent_type="agent-olympus:consensus-plan", model="opus",
+  prompt="Run consensus planning for this task.
+  Task: <user_request>
+  Analysis: <metis_team_design>
+  Wisdom: <formatWisdomForPrompt()>
+  External context (if gathered): <external_context>")
+```
+If consensus-plan is used, skip the standard Prometheus + Momus steps below and go directly to PRD generation.
+
+**Standard path** (fewer than 3 stories or moderate complexity):
 ```
 Task(subagent_type="agent-olympus:prometheus", model="opus",
   prompt="Team execution plan:
@@ -99,7 +129,8 @@ Task(subagent_type="agent-olympus:prometheus", model="opus",
   - Define parallel vs sequential order
   - Set acceptance criteria per task
   - Define handoff protocol: when Worker A finishes X, SendMessage to Worker B
-  Team design: <design>. Task: <user_request>")
+  Team design: <design>. Task: <user_request>
+  External context (if gathered): <external_context>")
 ```
 
 Quick validate:
@@ -180,6 +211,20 @@ saveCheckpoint('athena', { phase: 3, prdSnapshot: <prd.json>, completedStories: 
 └── Loop (max 10 monitor iterations)
 ```
 
+After checking each worker's status, record it via worker-status (import from `scripts/lib/worker-status.mjs`):
+```javascript
+// After each status check — call once per worker per iteration
+reportWorkerStatus(teamName, workerName, phase, progressSummary)
+// phase: one of planning|implementing|testing|reviewing|done|blocked|failed
+// progressSummary: short free-text description of current progress
+```
+
+After the monitoring loop ends (all workers done or max iterations reached), render and output the final status table:
+```javascript
+const statusTable = formatStatusMarkdown(teamName)
+// Output statusTable to the user so they can see per-worker phase + progress
+```
+
 After each worker completes a story: `saveCheckpoint('athena', { phase: 3, prdSnapshot: <updated prd.json>, completedStories: <all passing story IDs>, activeWorkers: <remaining in-flight workers>, startedAt, taskDescription })`
 
 ### Phase 3b — WISDOM TRACKING
@@ -252,6 +297,7 @@ Prune wisdom to prevent unbounded growth:
 - Call `pruneWisdom(200)` to remove entries older than 90 days and cap at 200 most recent
 
 Clean up:
+- `clearTeamStatus(teamName)` — delete `.omc/teams/<slug>/status.jsonl` (import from `scripts/lib/worker-status.mjs`)
 - `clearCheckpoint('athena')`
 - TeamDelete("athena-<slug>")
 - Remove `.omc/teams/<slug>/`
@@ -303,6 +349,9 @@ Common examples:
 **Agent Olympus built-in skills (always available):**
 - `agent-olympus:ask` — quick Codex/Gemini single-shot query
 - `agent-olympus:deep-interview` — Socratic requirements clarification
+- `agent-olympus:deep-dive` — 2-stage investigation pipeline for complex + ambiguous tasks (Phase 0)
+- `agent-olympus:consensus-plan` — multi-perspective plan validation loop for 3+ story tasks (Phase 1)
+- `agent-olympus:external-context` — facet-decomposed parallel research; enriches team context with external docs and best practices (Phase 0)
 - `agent-olympus:trace` — evidence-driven root-cause analysis (use when debugger fails 2x)
 - `agent-olympus:slop-cleaner` — AI bloat cleanup (use before final commit)
 - `agent-olympus:git-master` — atomic commit discipline (use as final step)
@@ -310,7 +359,9 @@ Common examples:
 
 **Recommended Athena workflow integration:**
 ```
-Phase 0 (Design) → research (if external APIs involved)
+Phase 0 (Design) → deep-dive (if complexity=complex/architectural AND ambiguity > 40)
+Phase 0 (Design) → external-context (if external API/library knowledge gap detected)
+Phase 1 (Plan)   → consensus-plan (if 3+ stories; replaces standard Prometheus pass)
 Phase 4 (Verify) → trace (if integration failures persist)
 Phase 5 (Review) → slop-cleaner → git-master → DONE
 ```

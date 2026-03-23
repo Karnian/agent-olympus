@@ -16,7 +16,7 @@ Both orchestrators autonomously loop until the task is fully complete (build pas
 agents/     → Agent persona definitions (.md files with model and role)
 skills/     → User-facing skills (SKILL.md with triggers, steps, workflow)
 scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
-scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom)
+scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom, worker-status)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 ```

@@ -1,7 +1,7 @@
 # Agent Olympus
 
 Standalone multi-model orchestrator plugin for Claude Code.
-Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 15 specialized agents, 10 skills, Claude + Codex multi-model execution, and tmux-based team infrastructure.
+Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 15 specialized agents, 13 skills, Claude + Codex multi-model execution, and tmux-based team infrastructure.
 
 ## Architecture
 
@@ -25,7 +25,7 @@ User Request
 
 ```
 agent-olympus/
-├── .claude-plugin/plugin.json    — Plugin manifest (v0.2.0)
+├── .claude-plugin/plugin.json    — Plugin manifest (v0.3.0)
 ├── agents/                       — 15 agent personas (role definitions)
 │   ├── atlas.md                  — Self-driving sub-agent orchestrator (Opus)
 │   ├── athena.md                 — Self-driving team orchestrator (Opus)
@@ -42,7 +42,7 @@ agent-olympus/
 │   ├── explore.md                — Fast codebase scanner (Haiku)
 │   ├── writer.md                 — Documentation writer (Haiku)
 │   └── hephaestus.md             — Codex deep worker (Sonnet)
-├── skills/                       — 10 user-facing skills (workflow recipes)
+├── skills/                       — 13 user-facing skills (workflow recipes)
 │   ├── atlas/SKILL.md            — /atlas: autonomous sub-agent pipeline
 │   ├── athena/SKILL.md           — /athena: autonomous team pipeline
 │   ├── ask/SKILL.md              — /ask: quick Codex/Gemini query
@@ -52,7 +52,10 @@ agent-olympus/
 │   ├── trace/SKILL.md            — /trace: competing-hypothesis root-cause analysis
 │   ├── slop-cleaner/SKILL.md     — /slop-cleaner: AI bloat removal
 │   ├── git-master/SKILL.md       — /git-master: atomic commit discipline
-│   └── cancel/SKILL.md           — /cancel: graceful session shutdown
+│   ├── cancel/SKILL.md           — /cancel: graceful session shutdown
+│   ├── deep-dive/SKILL.md        — /deep-dive: exhaustive single-topic investigation
+│   ├── consensus-plan/SKILL.md   — /consensus-plan: multi-agent planning consensus
+│   └── external-context/SKILL.md — /external-context: inject external docs/specs into context
 ├── scripts/                      — Hook scripts (Node.js, zero dependencies)
 │   ├── run.cjs                   — Cross-platform hook runner with version fallback
 │   ├── intent-gate.mjs           — UserPromptSubmit: classify intent (EN/KO/JA/ZH)
@@ -67,7 +70,8 @@ agent-olympus/
 │       ├── inbox-outbox.mjs      — File-based message queue for Claude↔Codex
 │       ├── worker-spawn.mjs      — Team worker lifecycle (spawn/monitor/collect/shutdown)
 │       ├── checkpoint.mjs        — Session checkpoint save/restore (24h expiry)
-│       └── wisdom.mjs            — Structured learning store (JSONL read/append/migrate)
+│       ├── wisdom.mjs            — Structured learning store (JSONL read/append/migrate)
+│       └── worker-status.mjs     — Real-time worker status dashboard (inline markdown mode)
 ├── config/
 │   └── model-routing.jsonc       — Intent→model routing configuration
 └── hooks/
@@ -138,6 +142,13 @@ agent-olympus/
 | `/slop-cleaner` | "정리", "deslop" | Regression-safe AI bloat removal in 4 passes |
 | `/git-master` | "커밋", "commit" | Style-detected atomic commits (3+ files → 2+ commits) |
 | `/cancel` | "취소", "stop" | Graceful shutdown: kill tmux, clean state, preserve progress |
+
+### Research & Planning
+| Skill | Trigger | What It Does |
+|-------|---------|--------------|
+| `/deep-dive` | "deep-dive", "깊게파봐" | Exhaustive single-topic investigation: multiple search angles, synthesis |
+| `/consensus-plan` | "합의", "consensus" | Multi-agent planning: Prometheus + Momus reach consensus before execution |
+| `/external-context` | "외부문서", "docs" | Fetch and inject external documentation or specs into the active context |
 
 ## Hooks
 

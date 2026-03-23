@@ -1,15 +1,15 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "agent-olympus",
-  "description": "Self-driving AI orchestrator plugin for Claude Code — Atlas + Athena, 15 agents, zero dependencies",
+  "description": "Self-driving AI orchestrator plugin for Claude Code — Atlas + Athena, 15 agents, 13 skills, zero dependencies",
   "owner": {
     "name": "Karnian"
   },
   "plugins": [
     {
       "name": "agent-olympus",
-      "description": "Self-driving AI orchestrator — Atlas (hub-and-spoke) + Athena (peer-to-peer), 15 specialized agents, 10 workflow skills, zero npm dependencies",
-      "version": "0.2.1",
+      "description": "Self-driving AI orchestrator — Atlas (hub-and-spoke) + Athena (peer-to-peer), 15 specialized agents, 13 workflow skills, zero npm dependencies",
+      "version": "0.3.0",
       "author": {
         "name": "Karnian"
       },
@@ -26,5 +26,5 @@
       ]
     }
   ],
-  "version": "0.2.1"
+  "version": "0.3.0"
 }
