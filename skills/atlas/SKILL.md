@@ -69,6 +69,15 @@ Phase 5: REVIEW ←── Fix & Retry (debugger agent)
 
 ### Phase 0 — TRIAGE
 
+#### Checkpoint Recovery
+
+Before starting any work:
+1. Check for an interrupted session: `loadCheckpoint('atlas')`
+2. If found, present to user: "[formatCheckpoint output]. Resume or restart?"
+   - **Resume** → skip to saved phase, restore `completedStories` from checkpoint
+   - **Restart** → `clearCheckpoint('atlas')`, proceed normally
+3. If no checkpoint found, check for `.omc/progress.txt` migration (see wisdom system)
+
 Classify and pick strategy. Spawn **simultaneously**:
 
 ```
@@ -87,6 +96,10 @@ Agent B (deep): Task(subagent_type="agent-olympus:metis", model="opus",
 **Trivial tasks**: Skip phases 1-2, execute directly (Atlas CAN implement simple things itself).
 **Ambiguous tasks** (ambiguity > 60): Invoke `agent-olympus:deep-interview` to clarify before proceeding.
 **Moderate+**: Full pipeline.
+
+```
+saveCheckpoint('atlas', { phase: 1, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
+```
 
 ### Phase 1 — ANALYZE (skip for trivial)
 
@@ -124,6 +137,10 @@ Task(subagent_type="agent-olympus:momus", model="opus",
 
 If REJECTED → feed back to prometheus, retry (max 3 rounds).
 
+```
+saveCheckpoint('atlas', { phase: 2, completedStories: [], activeWorkers: [], startedAt, taskDescription })
+```
+
 **Generate PRD** (after plan approved):
 Write `.omc/prd.json` with user stories from the plan:
 ```json
@@ -153,6 +170,10 @@ These ARE acceptable:
 - ✅ "Function parseConfig() handles missing keys by returning defaults"
 - ✅ "Test file tests/auth.test.ts exists and all 5 cases pass"
 
+```
+saveCheckpoint('atlas', { phase: 3, prdSnapshot: <prd.json contents>, completedStories: [], activeWorkers: [], startedAt, taskDescription })
+```
+
 ### Phase 3 — EXECUTE (story-by-story)
 
 For each story in prd.json with `passes: false`, execute and verify:
@@ -178,6 +199,7 @@ tmux send-keys -t "atlas-codex-<N>" 'codex exec "<implementation prompt>"' Enter
 3. After each story completes, verify its acceptance criteria with FRESH evidence
 4. Mark `passes: true` in prd.json only when ALL criteria verified
 5. Record in `.omc/progress.txt`: what was done, files changed, learnings
+6. After each story passes: `saveCheckpoint('atlas', { phase: 3, prdSnapshot: <updated prd.json>, completedStories: <all passing story IDs>, activeWorkers: <in-flight agent IDs>, startedAt, taskDescription })`
 
 **Progress tracking** — append to `.omc/progress.txt` after each story:
 ```
@@ -188,6 +210,10 @@ tmux send-keys -t "atlas-codex-<N>" 'codex exec "<implementation prompt>"' Enter
 - Patterns discovered: <codebase conventions noted>
 ```
 This file persists across iterations so later stories benefit from earlier learnings.
+
+```
+saveCheckpoint('atlas', { phase: 4, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
+```
 
 ### Phase 4 — VERIFY (loop until pass)
 
@@ -202,6 +228,10 @@ Run **simultaneously**: build, tests, linter, type checker.
 │       If debugger fails 2x → escalate to agent-olympus:trace
 │       Re-run checks
 └── Loop (max 5 fix cycles, same error 3x = escalate)
+```
+
+```
+saveCheckpoint('atlas', { phase: 5, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
 ```
 
 ### Phase 5 — REVIEW (loop until approved)
@@ -230,6 +260,7 @@ After review approved:
 ### COMPLETION
 
 Clean up:
+- `clearCheckpoint('atlas')`
 - Remove `.omc/state/atlas-state.json`
 - Remove `.omc/prd.json`
 - Kill any tmux sessions: `tmux kill-session -t "atlas-*"`
