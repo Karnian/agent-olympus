@@ -1,11 +1,48 @@
 import { execSync } from 'child_process';
-import { mkdirSync } from 'fs';
+import { mkdirSync, existsSync } from 'fs';
 
 const SESSION_PREFIX = 'omc-team';
 
-export function validateTmux() {
+// Common binary search paths across platforms
+const SEARCH_PATHS = [
+  '/opt/homebrew/bin',   // macOS ARM (Apple Silicon)
+  '/usr/local/bin',      // macOS Intel / Linux manual installs
+  '/usr/bin',            // Linux system
+  '/usr/sbin',           // Linux system
+  '/home/linuxbrew/.linuxbrew/bin', // Linuxbrew
+];
+
+const _binCache = new Map();
+
+/**
+ * Resolve a binary name to its full path.
+ * Checks PATH first (via `which`), then falls back to common locations.
+ * Results are cached for the lifetime of the process.
+ */
+export function resolveBinary(name) {
+  if (_binCache.has(name)) return _binCache.get(name);
+
+  // Try which first (works if PATH is correct)
   try {
-    execSync('which tmux', { stdio: 'pipe' });
+    const resolved = execSync(`which ${name}`, { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    if (resolved) { _binCache.set(name, resolved); return resolved; }
+  } catch {}
+
+  // Fallback: scan known paths
+  for (const dir of SEARCH_PATHS) {
+    const candidate = `${dir}/${name}`;
+    if (existsSync(candidate)) { _binCache.set(name, candidate); return candidate; }
+  }
+
+  // Last resort: return bare name, let the OS figure it out
+  _binCache.set(name, name);
+  return name;
+}
+
+export function validateTmux() {
+  const bin = resolveBinary('tmux');
+  try {
+    execSync(`"${bin}" -V`, { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -32,10 +69,10 @@ export function createTeamSession(teamName, workers, cwd) {
 
     try {
       // Kill existing session if any
-      try { execSync(`tmux kill-session -t "${name}"`, { stdio: 'pipe' }); } catch {}
+      try { execSync(`"${resolveBinary('tmux')}" kill-session -t "${name}"`, { stdio: 'pipe' }); } catch {}
 
       // Create new detached session
-      execSync(`tmux new-session -d -s "${name}" -c "${cwd}"`, { stdio: 'pipe' });
+      execSync(`"${resolveBinary('tmux')}" new-session -d -s "${name}" -c "${cwd}"`, { stdio: 'pipe' });
 
       results.push({ name: worker.name, session: name, status: 'created' });
     } catch (err) {
@@ -54,7 +91,7 @@ export function spawnWorkerInSession(sessionName, command, env = {}) {
   const fullCommand = envStr ? `${envStr} ${command}` : command;
 
   try {
-    execSync(`tmux send-keys -t "${sessionName}" "${fullCommand}" Enter`, { stdio: 'pipe' });
+    execSync(`"${resolveBinary('tmux')}" send-keys -t "${sessionName}" "${fullCommand}" Enter`, { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -63,7 +100,7 @@ export function spawnWorkerInSession(sessionName, command, env = {}) {
 
 export function capturePane(sessionName, lines = 80) {
   try {
-    return execSync(`tmux capture-pane -pt "${sessionName}" -S -${lines}`, {
+    return execSync(`"${resolveBinary('tmux')}" capture-pane -pt "${sessionName}" -S -${lines}`, {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim();
@@ -74,7 +111,7 @@ export function capturePane(sessionName, lines = 80) {
 
 export function killSession(name) {
   try {
-    execSync(`tmux kill-session -t "${name}"`, { stdio: 'pipe' });
+    execSync(`"${resolveBinary('tmux')}" kill-session -t "${name}"`, { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -84,7 +121,7 @@ export function killSession(name) {
 export function killTeamSessions(teamName) {
   const prefix = `${SESSION_PREFIX}-${sanitizeName(teamName)}`;
   try {
-    const sessions = execSync('tmux list-sessions -F "#{session_name}"', {
+    const sessions = execSync(`"${resolveBinary('tmux')}" list-sessions -F "#{session_name}"`, {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim().split('\n');
@@ -108,7 +145,7 @@ export function listTeamSessions(teamName) {
     : SESSION_PREFIX;
 
   try {
-    const sessions = execSync('tmux list-sessions -F "#{session_name}:#{session_created}"', {
+    const sessions = execSync(`"${resolveBinary('tmux')}" list-sessions -F "#{session_name}:#{session_created}"`, {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim().split('\n');
@@ -125,13 +162,14 @@ export function listTeamSessions(teamName) {
 }
 
 export function buildWorkerCommand(worker) {
+  const prompt = worker.prompt.replace(/"/g, '\\"');
   switch (worker.type) {
     case 'codex':
-      return `codex exec "${worker.prompt.replace(/"/g, '\\"')}"`;
+      return `"${resolveBinary('codex')}" exec "${prompt}"`;
     case 'gemini':
-      return `gemini "${worker.prompt.replace(/"/g, '\\"')}"`;
+      return `"${resolveBinary('gemini')}" "${prompt}"`;
     case 'claude':
     default:
-      return `claude --print "${worker.prompt.replace(/"/g, '\\"')}"`;
+      return `"${resolveBinary('claude')}" --print "${prompt}"`;
   }
 }
