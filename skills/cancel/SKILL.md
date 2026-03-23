@@ -48,8 +48,8 @@ done
 rm -f .omc/state/atlas-state.json
 rm -f .omc/prd.json
 
-# 3. Keep progress.txt (preserves learnings)
-echo "Atlas session cancelled. Progress preserved in .omc/progress.txt"
+# 3. Keep wisdom.jsonl (preserves learnings)
+echo "Atlas session cancelled. Progress preserved in .omc/wisdom.jsonl"
 ```
 
 **For Athena:**
@@ -69,8 +69,8 @@ rm -f .omc/prd.json
 # 4. Clean up Claude native team if active
 # TeamDelete("athena-<slug>") if team exists
 
-# 5. Keep progress.txt
-echo "Athena session cancelled. Progress preserved in .omc/progress.txt"
+# 5. Keep wisdom.jsonl
+echo "Athena session cancelled. Progress preserved in .omc/wisdom.jsonl"
 ```
 
 ### 3. Report
@@ -78,20 +78,20 @@ echo "Athena session cancelled. Progress preserved in .omc/progress.txt"
 Tell user:
 - What was cancelled (Atlas/Athena)
 - What phase it was in when cancelled
-- What was preserved (.omc/progress.txt)
+- What was preserved (.omc/wisdom.jsonl)
 - How to resume: "Run /atlas or /athena again with the same task"
 
 ## Resume After Cancel
 
-Progress is preserved in `.omc/progress.txt`. When Atlas/Athena is invoked again:
-1. Check if `.omc/progress.txt` exists
+Progress is preserved in `.omc/wisdom.jsonl`. When Atlas/Athena is invoked again:
+1. Check if `.omc/wisdom.jsonl` exists
 2. Read previous learnings and completed work
 3. Skip already-completed stories
 4. Continue from where it left off
 
 ## Notes
 
-- Cancel is always safe — no data loss (progress.txt preserved)
+- Cancel is always safe — no data loss (wisdom.jsonl preserved)
 - Tmux sessions are killed gracefully (SIGTERM, not SIGKILL)
 - prd.json is deleted so a fresh plan is generated on restart
 - State files are deleted to prevent stale state corruption
