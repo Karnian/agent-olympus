@@ -99,7 +99,7 @@ Agent B (deep): Task(subagent_type="agent-olympus:metis", model="opus",
 ```
 
 **Trivial tasks**: Skip phases 1-2, execute directly (Atlas CAN implement simple things itself).
-**Ambiguous tasks** (ambiguity > 60): Invoke `agent-olympus:deep-interview` to clarify before proceeding.
+**Ambiguous tasks** (ambiguity > 60): Invoke `Skill(skill="agent-olympus:deep-interview")` to clarify before proceeding.
 **Moderate+**: Full pipeline.
 
 ```
@@ -122,8 +122,8 @@ tmux send-keys -t "atlas-codex-analyze" 'codex exec "<analysis prompt>"' Enter
 
 **[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
 ```
-Task(subagent_type="agent-olympus:deep-dive", model="opus",
-  prompt="Run deep-dive investigation on: <user_request>
+Skill(skill="agent-olympus:deep-dive",
+  args="Run deep-dive investigation on: <user_request>
   Context from codebase scan: <explore_results>
   Return path to .omc/deep-dive-report.json when complete.")
 ```
@@ -132,8 +132,8 @@ Use `recommended_approaches[0]` to inform Phase 2 planning.
 
 **[OPTIONAL] External Context** — if metis identifies an external knowledge gap (unfamiliar API, library, or protocol):
 ```
-Task(subagent_type="agent-olympus:external-context", model="opus",
-  prompt="Research external context needed for: <user_request>
+Skill(skill="agent-olympus:external-context",
+  args="Research external context needed for: <user_request>
   Specific gap: <identified_knowledge_gap>")
 ```
 Inject the returned markdown brief as `<external_context>` into the Phase 2 prompt for prometheus.
@@ -142,8 +142,8 @@ Inject the returned markdown brief as `<external_context>` into the Phase 2 prom
 
 **[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
 ```
-Task(subagent_type="agent-olympus:consensus-plan", model="opus",
-  prompt="Run consensus planning for this task.
+Skill(skill="agent-olympus:consensus-plan",
+  args="Run consensus planning for this task.
   Task: <user_request>
   Analysis: <metis_analysis>
   Wisdom: <formatWisdomForPrompt()>
@@ -267,7 +267,7 @@ Run **simultaneously**: build, tests, linter, type checker.
 │   └─ ANY FAIL → spawn debugger:
 │       Task(subagent_type="agent-olympus:debugger", model="sonnet",
 │         prompt="Fix: <error_output>. Previous learnings: <formatWisdomForPrompt(queryWisdom(null,10))>")
-│       If debugger fails 2x → escalate to agent-olympus:trace
+│       If debugger fails 2x → escalate via Skill(skill="agent-olympus:trace")
 │       Re-run checks
 └── Loop (max 5 fix cycles, same error 3x = escalate)
 ```
@@ -295,9 +295,9 @@ Task C: agent-olympus:code-reviewer (sonnet) — quality
 ### Phase 5b — SLOP CLEAN + COMMIT
 
 After review approved:
-1. Run `agent-olympus:slop-cleaner` on all changed files
+1. Run `Skill(skill="agent-olympus:slop-cleaner")` on all changed files
 2. Re-run build + tests to verify no regression from cleanup
-3. Run `agent-olympus:git-master` for atomic commits
+3. Run `Skill(skill="agent-olympus:git-master")` for atomic commits
 
 ### COMPLETION
 
@@ -347,6 +347,9 @@ Common examples:
 - `anthropic-skills:web-artifacts-builder` — complex React/Tailwind web artifacts
 - `anthropic-skills:mcp-builder` — MCP server creation
 **Agent Olympus built-in skills (always available):**
+
+> **IMPORTANT**: These are **skills**, NOT agents. Invoke them via `Skill(skill="agent-olympus:<name>")`, NOT via `Task(subagent_type=...)`. Using `Task(subagent_type=...)` will fail with "agent type not found".
+
 - `agent-olympus:ask` — quick Codex/Gemini single-shot query
 - `agent-olympus:deep-interview` — Socratic requirements clarification
 - `agent-olympus:deep-dive` — 2-stage investigation pipeline for complex + ambiguous tasks (Phase 1)
@@ -360,11 +363,11 @@ Common examples:
 
 **Recommended Atlas workflow integration:**
 ```
-Phase 1 (Analyze) → deep-dive (if complexity=complex/architectural AND ambiguity > 40)
-Phase 1 (Analyze) → external-context (if external API/library knowledge gap detected)
-Phase 2 (Plan)    → consensus-plan (if 3+ stories; replaces standard Prometheus pass)
-Phase 4 (Verify)  → trace (if debugger fails 2x)
-Phase 5 (Review)  → slop-cleaner → git-master → DONE
+Phase 1 (Analyze) → Skill(skill="agent-olympus:deep-dive") (if complexity=complex/architectural AND ambiguity > 40)
+Phase 1 (Analyze) → Skill(skill="agent-olympus:external-context") (if external API/library knowledge gap detected)
+Phase 2 (Plan)    → Skill(skill="agent-olympus:consensus-plan") (if 3+ stories; replaces standard Prometheus pass)
+Phase 4 (Verify)  → Skill(skill="agent-olympus:trace") (if debugger fails 2x)
+Phase 5 (Review)  → Skill(skill="agent-olympus:slop-cleaner") → Skill(skill="agent-olympus:git-master") → DONE
 ```
 
 **If oh-my-claudecode is also installed:**
