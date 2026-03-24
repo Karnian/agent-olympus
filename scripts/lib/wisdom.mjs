@@ -6,8 +6,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-const WISDOM_PATH = path.join(process.cwd(), '.omc', 'wisdom.jsonl');
-const PROGRESS_PATH = path.join(process.cwd(), '.omc', 'progress.txt');
+const WISDOM_PATH = path.join(process.cwd(), '.ao', 'wisdom.jsonl');
+const PROGRESS_PATH = path.join(process.cwd(), '.ao', 'progress.txt');
 const MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
 /**

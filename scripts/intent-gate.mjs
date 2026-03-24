@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * OMC Intent Gate - UserPromptSubmit hook
+ * Agent Olympus Intent Gate - UserPromptSubmit hook
  *
  * Classifies the user's intent from their prompt and injects routing context
  * as additionalContext so Claude can self-route to the appropriate agent/model.
@@ -14,8 +14,8 @@ import path from 'path';
 import { readStdin } from './lib/stdin.mjs';
 import { classifyIntent } from './lib/intent-patterns.mjs';
 
-const STATE_DIR = '.omc/state';
-const INTENT_FILE = 'oac-intent.json';
+const STATE_DIR = '.ao/state';
+const INTENT_FILE = 'ao-intent.json';
 
 /**
  * Extract prompt text from various UserPromptSubmit JSON shapes.
@@ -46,7 +46,7 @@ function extractPrompt(data) {
 }
 
 /**
- * Persist intent result to .omc/state/oac-intent.json for downstream hooks.
+ * Persist intent result to .ao/state/ao-intent.json for downstream hooks.
  * @param {string} directory - Project root (cwd)
  * @param {object} intentResult
  */
@@ -113,7 +113,7 @@ function buildAdditionalContext(category, confidence, scores) {
 
 async function main() {
   // Skip guard
-  if (process.env.DISABLE_OMC === '1') {
+  if (process.env.DISABLE_AO === '1') {
     console.log(JSON.stringify({ continue: true, suppressOutput: true }));
     return;
   }

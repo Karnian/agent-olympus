@@ -289,13 +289,13 @@ agent-olympus/
 
 | 파일 | 목적 | 생명주기 |
 |------|------|---------|
-| `.omc/state/checkpoint-atlas.json` | Atlas 페이즈 추적 | 시작 시 생성, 완료 시 삭제 |
-| `.omc/state/checkpoint-athena.json` | Athena 페이즈 추적 | 시작 시 생성, 완료 시 삭제 |
-| `.omc/prd.json` | 사용자 스토리 + 수용 기준 | Plan 페이즈에서 생성, 완료 시 삭제 |
-| `.omc/wisdom.jsonl` | 교차 반복 학습 (JSONL) | 누적, 절대 삭제 안 함 (/cancel 이후에도 보존) |
-| `.omc/state/oac-intent.json` | 마지막 분류 의도 | 매 프롬프트마다 갱신 |
-| `.omc/state/oac-concurrency.json` | 활성 작업 추적 | 작업 생성/완료 시 갱신 |
-| `.omc/teams/<slug>/` | Codex 워커 inbox/outbox | Athena가 생성, 완료 시 정리 |
+| `.ao/state/checkpoint-atlas.json` | Atlas 페이즈 추적 | 시작 시 생성, 완료 시 삭제 |
+| `.ao/state/checkpoint-athena.json` | Athena 페이즈 추적 | 시작 시 생성, 완료 시 삭제 |
+| `.ao/prd.json` | 사용자 스토리 + 수용 기준 | Plan 페이즈에서 생성, 완료 시 삭제 |
+| `.ao/wisdom.jsonl` | 교차 반복 학습 (JSONL) | 누적, 절대 삭제 안 함 (/cancel 이후에도 보존) |
+| `.ao/state/ao-intent.json` | 마지막 분류 의도 | 매 프롬프트마다 갱신 |
+| `.ao/state/ao-concurrency.json` | 활성 작업 추적 | 작업 생성/완료 시 갱신 |
+| `.ao/teams/<slug>/` | Codex 워커 inbox/outbox | Athena가 생성, 완료 시 정리 |
 
 ## 세션 복구
 
@@ -303,7 +303,7 @@ agent-olympus/
 
 Atlas나 Athena 실행 중 Claude Code가 중단되면, **checkpoint 시스템**이 자동으로 세션 상태를 저장합니다.
 
-- **저장 위치:** `.omc/state/checkpoint-{atlas|athena}.json`
+- **저장 위치:** `.ao/state/checkpoint-{atlas|athena}.json`
 - **생존 기간:** 24시간 (초과 시 자동 삭제)
 - **복구:** 다음 `/atlas` 또는 `/athena` 실행 시, 이전 checkpoint이 있으면 자동으로 해당 페이즈에서 재개
 
@@ -328,7 +328,7 @@ Athena 실행 중에는 각 tmux 세션별로 워커 상태가 추적됩니다. 
 
 **특징:**
 - **형식:** JSONL (JSON Lines) — 각 행이 하나의 학습 항목
-- **영속성:** 프로젝트 디렉토리 내 `.omc/wisdom.jsonl`에 저장
+- **영속성:** 프로젝트 디렉토리 내 `.ao/wisdom.jsonl`에 저장
 - **보존:** `/cancel` 명령 후에도 삭제되지 않음
 - **자동 정리:** 90일 이상된 항목 또는 200개 초과 항목은 자동 제거
 - **중복 제거:** 유사도 80% 이상인 항목은 자동으로 중복 제거

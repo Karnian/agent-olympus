@@ -4,8 +4,8 @@ import { addWisdom } from './wisdom.mjs';
 import { writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
-const STATE_DIR = '.omc/state';
-const ARTIFACTS_DIR = '.omc/artifacts';
+const STATE_DIR = '.ao/state';
+const ARTIFACTS_DIR = '.ao/artifacts';
 
 /**
  * Error patterns that indicate a Codex worker has failed unrecoverably.
@@ -150,9 +150,9 @@ export async function spawnTeam(teamName, workers, cwd) {
 
     const command = buildWorkerCommand(worker);
     const env = {
-      OMC_TEAM_NAME: teamName,
-      OMC_WORKER_NAME: worker.name,
-      OMC_WORKER_TYPE: worker.type
+      AO_TEAM_NAME: teamName,
+      AO_WORKER_NAME: worker.name,
+      AO_WORKER_TYPE: worker.type
     };
 
     const spawned = spawnWorkerInSession(session.session, command, env);

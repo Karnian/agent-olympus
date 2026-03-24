@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * OMC Cross-platform hook runner (run.cjs)
+ * Agent Olympus cross-platform hook runner (run.cjs)
  *
  * Uses process.execPath (the Node binary already running this script) to spawn
  * the target .mjs hook, bypassing PATH / shell discovery issues.
@@ -42,7 +42,7 @@ if (!target) {
  *      same script name and use that instead.
  *   4. If all else fails, return null (caller exits cleanly).
  *
- * See: https://github.com/Yeachan-Heo/oh-my-claudecode/issues/1007
+ * See: https://github.com/Karnian/agent-olympus/issues/1 (inherited from upstream)
  */
 function resolveTarget(targetPath) {
   // Fast path: target exists (common case)
@@ -57,13 +57,13 @@ function resolveTarget(targetPath) {
   }
 
   // Fallback: scan plugin cache for the same script in the latest version.
-  // CLAUDE_PLUGIN_ROOT is e.g. ~/.claude/plugins/cache/omc/oh-my-claudecode/4.2.14
+  // CLAUDE_PLUGIN_ROOT is e.g. ~/.claude/plugins/cache/agent-olympus/0.3.1
   // We look one level up for sibling version directories.
   try {
     const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
     if (!pluginRoot) return null;
 
-    const cacheBase = dirname(pluginRoot);          // .../oh-my-claudecode/
+    const cacheBase = dirname(pluginRoot);          // .../agent-olympus/
     const scriptRelative = targetPath.slice(pluginRoot.length); // /scripts/persistent-mode.cjs
 
     if (!scriptRelative || !existsSync(cacheBase)) return null;

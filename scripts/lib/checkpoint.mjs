@@ -6,7 +6,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
-const STATE_DIR = path.join('.omc', 'state');
+const STATE_DIR = path.join('.ao', 'state');
 const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 const PHASE_NAMES = {

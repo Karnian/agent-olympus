@@ -125,7 +125,7 @@ Task(subagent_type="agent-olympus:metis", model="opus",
 
 ### Phase 4 — DELIVER
 
-1. Write the synthesized JSON to `.omc/external-context.json`
+1. Write the synthesized JSON to `.ao/external-context.json`
 
 2. Render a markdown summary for the user or calling agent:
 
@@ -171,7 +171,7 @@ the result is broadcast to the team inbox before implementation begins.
 - Max 5 facets — more than 5 dilutes focus and wastes tokens
 - Facets must be independent — no facet should depend on another facet's result
 - All findings must carry a source URL — unsourced claims are excluded from output
-- `.omc/external-context.json` is overwritten on each run (not appended)
+- `.ao/external-context.json` is overwritten on each run (not appended)
 - explore agents run at sonnet tier (haiku lacks sufficient web reasoning depth)
 - Synthesis runs at opus tier (contradiction resolution and ranking require it)
 

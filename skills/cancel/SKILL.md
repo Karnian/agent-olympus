@@ -26,10 +26,10 @@ Check for state files to determine what's running:
 
 ```bash
 # Check for Atlas
-ls .omc/state/atlas-state.json 2>/dev/null && echo "ATLAS ACTIVE"
+ls .ao/state/atlas-state.json 2>/dev/null && echo "ATLAS ACTIVE"
 
 # Check for Athena
-ls .omc/state/athena-state.json 2>/dev/null && echo "ATHENA ACTIVE"
+ls .ao/state/athena-state.json 2>/dev/null && echo "ATHENA ACTIVE"
 
 # Check for active tmux sessions
 tmux list-sessions 2>/dev/null | grep -E "atlas-|athena-"
@@ -45,11 +45,11 @@ tmux list-sessions -F "#{session_name}" 2>/dev/null | grep "atlas-codex" | while
 done
 
 # 2. Clean state files
-rm -f .omc/state/atlas-state.json
-rm -f .omc/prd.json
+rm -f .ao/state/atlas-state.json
+rm -f .ao/prd.json
 
 # 3. Keep wisdom.jsonl (preserves learnings)
-echo "Atlas session cancelled. Progress preserved in .omc/wisdom.jsonl"
+echo "Atlas session cancelled. Progress preserved in .ao/wisdom.jsonl"
 ```
 
 **For Athena:**
@@ -60,17 +60,17 @@ tmux list-sessions -F "#{session_name}" 2>/dev/null | grep "athena-" | while rea
 done
 
 # 2. Clean team resources
-rm -rf .omc/teams/
+rm -rf .ao/teams/
 
 # 3. Clean state files
-rm -f .omc/state/athena-state.json
-rm -f .omc/prd.json
+rm -f .ao/state/athena-state.json
+rm -f .ao/prd.json
 
 # 4. Clean up Claude native team if active
 # TeamDelete("athena-<slug>") if team exists
 
 # 5. Keep wisdom.jsonl
-echo "Athena session cancelled. Progress preserved in .omc/wisdom.jsonl"
+echo "Athena session cancelled. Progress preserved in .ao/wisdom.jsonl"
 ```
 
 ### 3. Report
@@ -78,13 +78,13 @@ echo "Athena session cancelled. Progress preserved in .omc/wisdom.jsonl"
 Tell user:
 - What was cancelled (Atlas/Athena)
 - What phase it was in when cancelled
-- What was preserved (.omc/wisdom.jsonl)
+- What was preserved (.ao/wisdom.jsonl)
 - How to resume: "Run /atlas or /athena again with the same task"
 
 ## Resume After Cancel
 
-Progress is preserved in `.omc/wisdom.jsonl`. When Atlas/Athena is invoked again:
-1. Check if `.omc/wisdom.jsonl` exists
+Progress is preserved in `.ao/wisdom.jsonl`. When Atlas/Athena is invoked again:
+1. Check if `.ao/wisdom.jsonl` exists
 2. Read previous learnings and completed work
 3. Skip already-completed stories
 4. Continue from where it left off
@@ -95,6 +95,6 @@ Progress is preserved in `.omc/wisdom.jsonl`. When Atlas/Athena is invoked again
 - Tmux sessions are killed gracefully (SIGTERM, not SIGKILL)
 - prd.json is deleted so a fresh plan is generated on restart
 - State files are deleted to prevent stale state corruption
-- **Checkpoint files are PRESERVED on cancel** (`.omc/state/checkpoint-atlas.json` / `.omc/state/checkpoint-athena.json`). They are NOT deleted. This enables the next Atlas/Athena invocation to detect the interrupted session and offer to resume from the exact phase where it was cancelled.
+- **Checkpoint files are PRESERVED on cancel** (`.ao/state/checkpoint-atlas.json` / `.ao/state/checkpoint-athena.json`). They are NOT deleted. This enables the next Atlas/Athena invocation to detect the interrupted session and offer to resume from the exact phase where it was cancelled.
 
 </Cancel>

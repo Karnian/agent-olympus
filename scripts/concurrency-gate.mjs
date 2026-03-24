@@ -9,8 +9,8 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 
-const STATE_DIR = join(process.cwd(), '.omc', 'state');
-const STATE_FILE = join(STATE_DIR, 'oac-concurrency.json');
+const STATE_DIR = join(process.cwd(), '.ao', 'state');
+const STATE_FILE = join(STATE_DIR, 'ao-concurrency.json');
 
 const STALE_TASK_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -65,10 +65,10 @@ function detectProvider(toolInput) {
 
 function getLimits() {
   return {
-    global: parseInt(process.env.OMC_CONCURRENCY_GLOBAL ?? '5', 10),
-    claude: parseInt(process.env.OMC_CONCURRENCY_CLAUDE ?? '3', 10),
-    codex: parseInt(process.env.OMC_CONCURRENCY_CODEX ?? '2', 10),
-    gemini: parseInt(process.env.OMC_CONCURRENCY_GEMINI ?? '2', 10),
+    global: parseInt(process.env.AO_CONCURRENCY_GLOBAL ?? '5', 10),
+    claude: parseInt(process.env.AO_CONCURRENCY_CLAUDE ?? '3', 10),
+    codex: parseInt(process.env.AO_CONCURRENCY_CODEX ?? '2', 10),
+    gemini: parseInt(process.env.AO_CONCURRENCY_GEMINI ?? '2', 10),
   };
 }
 

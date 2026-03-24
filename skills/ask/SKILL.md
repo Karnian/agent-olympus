@@ -54,8 +54,8 @@ Model binaries:
 RESULT=$(tmux capture-pane -pt "$SESSION" -S -500 -p)
 
 # Save artifact
-mkdir -p .omc/artifacts/ask
-echo "$RESULT" > ".omc/artifacts/ask/<model>-$(date +%Y%m%d-%H%M%S).md"
+mkdir -p .ao/artifacts/ask
+echo "$RESULT" > ".ao/artifacts/ask/<model>-$(date +%Y%m%d-%H%M%S).md"
 
 # Cleanup
 tmux kill-session -t "$SESSION"
@@ -69,7 +69,7 @@ Display the result to the user and note the saved artifact path.
 
 - This is intentionally lightweight — no analysis, no review, no loop
 - For serious work, use `/atlas` or `/athena` instead
-- Artifacts persist in `.omc/artifacts/ask/` for later reference
+- Artifacts persist in `.ao/artifacts/ask/` for later reference
 - Can be used inside Atlas/Athena workflows for quick model consultations
 
 </Ask>

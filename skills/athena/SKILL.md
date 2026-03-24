@@ -52,7 +52,7 @@ Athena = many brains collaborating.
   └────┬────┘            └────┬────┘
        │                       │
   SendMessage              inbox/outbox
-  TaskList                (.omc/teams/)
+  TaskList                (.ao/teams/)
   (peer-to-peer)
 ```
 
@@ -69,7 +69,7 @@ Before starting any work:
    - **Restart** → `clearCheckpoint('athena')`, proceed normally
 
 #### Load Prior Wisdom
-1. Run `migrateProgressTxt()` if `.omc/progress.txt` exists (one-time migration to wisdom.jsonl)
+1. Run `migrateProgressTxt()` if `.ao/progress.txt` exists (one-time migration to wisdom.jsonl)
 2. Call `queryWisdom(null, 20)` to get recent learnings
 3. Inject into analysis context via `formatWisdomForPrompt()`
 
@@ -91,9 +91,9 @@ Task(subagent_type="agent-olympus:metis", model="opus",
 Skill(skill="agent-olympus:deep-dive",
   args="Run deep-dive investigation on: <user_request>
   Context from codebase scan: <explore_results>
-  Return path to .omc/deep-dive-report.json when complete.")
+  Return path to .ao/deep-dive-report.json when complete.")
 ```
-Read `.omc/deep-dive-report.json` after completion. If `pipeline_ready: false`, escalate to user before proceeding.
+Read `.ao/deep-dive-report.json` after completion. If `pipeline_ready: false`, escalate to user before proceeding.
 Use `recommended_approaches[0]` and `affected_files` to inform Phase 1 team design.
 
 **[OPTIONAL] External Context** — if metis identifies an external knowledge gap (unfamiliar API, library, or protocol):
@@ -191,8 +191,8 @@ tmux send-keys -t "athena-<slug>-codex-<N>" 'codex exec "<implementation prompt>
 
 **Bridge** (automatic):
 ```
-.omc/teams/<slug>/<worker>/inbox/    — messages TO worker
-.omc/teams/<slug>/<worker>/outbox/   — messages FROM worker
+.ao/teams/<slug>/<worker>/inbox/    — messages TO worker
+.ao/teams/<slug>/<worker>/outbox/   — messages FROM worker
 ```
 
 ```
@@ -333,13 +333,13 @@ Prune wisdom to prevent unbounded growth:
 - Call `pruneWisdom(200)` to remove entries older than 90 days and cap at 200 most recent
 
 Clean up:
-- `clearTeamStatus(teamName)` — delete `.omc/teams/<slug>/status.jsonl` (import from `scripts/lib/worker-status.mjs`)
+- `clearTeamStatus(teamName)` — delete `.ao/teams/<slug>/status.jsonl` (import from `scripts/lib/worker-status.mjs`)
 - `clearCheckpoint('athena')`
 - TeamDelete("athena-<slug>")
-- Remove `.omc/teams/<slug>/`
-- Remove `.omc/state/athena-state.json`, `.omc/prd.json`
+- Remove `.ao/teams/<slug>/`
+- Remove `.ao/state/athena-state.json`, `.ao/prd.json`
 - Kill tmux sessions: `tmux kill-session -t "athena-<slug>-*"`
-- Keep `.omc/wisdom.jsonl` (useful for future sessions — never delete)
+- Keep `.ao/wisdom.jsonl` (useful for future sessions — never delete)
 
 Report: PRD stories (N/N), per-worker summary, files changed, coordination log, verification results.
 
@@ -368,7 +368,7 @@ Report: PRD stories (N/N), per-worker summary, files changed, coordination log, 
 ## Communication_Protocol
 
 **Claude ↔ Claude**: `SendMessage(to="worker", content="...")`
-**Claude → Codex**: Write to `.omc/teams/<slug>/codex-N/inbox/<timestamp>.json`
+**Claude → Codex**: Write to `.ao/teams/<slug>/codex-N/inbox/<timestamp>.json`
 **Codex → Claude**: Lead reads tmux output, relays via SendMessage
 
 ## External_Skills

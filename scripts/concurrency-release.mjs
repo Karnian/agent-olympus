@@ -2,8 +2,8 @@ import { readStdin } from './lib/stdin.mjs';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
-const STATE_DIR = '.omc/state';
-const STATE_FILE = join(STATE_DIR, 'oac-concurrency.json');
+const STATE_DIR = '.ao/state';
+const STATE_FILE = join(STATE_DIR, 'ao-concurrency.json');
 
 function readState() {
   try { return JSON.parse(readFileSync(STATE_FILE, 'utf-8')); }

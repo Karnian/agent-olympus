@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * OMC Model Router - PreToolUse hook for Task tool
+ * Agent Olympus Model Router - PreToolUse hook for Task tool
  *
  * Reads the intent state saved by intent-gate.mjs and injects model routing
  * advice as additionalContext when Claude is about to spawn a Task (subagent).
@@ -15,11 +15,11 @@ import path from 'path';
 import { readStdin } from './lib/stdin.mjs';
 import { routeByIntent } from './lib/model-router.mjs';
 
-const STATE_DIR = '.omc/state';
-const INTENT_FILE = 'oac-intent.json';
+const STATE_DIR = '.ao/state';
+const INTENT_FILE = 'ao-intent.json';
 
 /**
- * Load the saved intent state from .omc/state/oac-intent.json.
+ * Load the saved intent state from .ao/state/ao-intent.json.
  * Returns null if file is missing, unreadable, or stale (> 10 min old).
  * @param {string} directory
  * @returns {{ category: string, confidence: number, scores: Record<string, number> }|null}
@@ -90,7 +90,7 @@ function buildModelRoutingContext(routing, subagentType) {
 
 async function main() {
   // Skip guard
-  if (process.env.DISABLE_OMC === '1') {
+  if (process.env.DISABLE_AO === '1') {
     console.log(JSON.stringify({ continue: true, suppressOutput: true }));
     return;
   }
