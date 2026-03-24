@@ -464,6 +464,15 @@ Agent Olympus embodies three core principles:
 
 The name is deliberate. Atlas carries the world. Athena leads the team. Together, they complete any task you ask.
 
+## Acknowledgements
+
+This project was inspired by and references ideas from:
+
+- [Oh My Claude Code](https://github.com/Yeachan-Heo/oh-my-claudecode) — Multi-agent orchestration plugin for Claude Code
+- [Oh My OpenAgent](https://github.com/code-yeongyu/oh-my-openagent) — Batteries-included agent harness with multi-model orchestration
+
+이 프로젝트는 위 두 프로젝트의 아이디어와 설계 철학을 참고하여 만들어졌습니다.
+
 ## License
 
 MIT
