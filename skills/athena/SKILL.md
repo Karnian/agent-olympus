@@ -228,8 +228,10 @@ if (errorCheck.failed) {
   // Update status dashboard immediately
   reportWorkerStatus(teamName, workerName, 'failed', `Codex error: ${errorCheck.reason}`);
 
-  // Kill tmux session and record wisdom
-  const fallback = reassignToClaude(teamName, workerName, originalPrompt, errorCheck.reason);
+  // Kill tmux session and record wisdom.
+  // Pass the session name explicitly to avoid the default sessionName() mismatch
+  // (athena uses 'athena-<slug>-codex-N' directly, not 'omc-team-athena-...-codex-N').
+  const fallback = await reassignToClaude(teamName, workerName, originalPrompt, errorCheck.reason, codexSession);
 
   // Report the reassignment so the status table shows the transition
   reportWorkerStatus(teamName, workerName, 'implementing', `Codex → Claude: ${errorCheck.reason}`);
@@ -243,7 +245,7 @@ if (errorCheck.failed) {
 Rules:
 - If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again for any worker in this session.
 - If `errorCheck.reason` is `'crash'`, retry Codex once; if it crashes again, fall back to Claude.
-- Always call `reassignToClaude()` before spawning the replacement — it handles tmux cleanup and wisdom recording in one step.
+- Always call `await reassignToClaude()` before spawning the replacement — it handles tmux cleanup and wisdom recording in one step.
 
 After checking each worker's status, record it via worker-status (import from `scripts/lib/worker-status.mjs`):
 ```javascript
