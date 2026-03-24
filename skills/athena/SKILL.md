@@ -206,10 +206,46 @@ saveCheckpoint('athena', { phase: 3, prdSnapshot: <prd.json>, completedStories: 
 │   Check tmux panes for Codex worker output
 │   ├─ Claude completes something Codex needs → write to inbox
 │   ├─ Codex completes something Claude needs → SendMessage to Claude worker
+│   ├─ Codex worker fails (auth/rate-limit/crash) → reassign to Claude executor
 │   ├─ Worker blocked → unblock or escalate
 │   └─ All done? → proceed to Phase 4
 └── Loop (max 10 monitor iterations)
 ```
+
+**Codex failure detection and Claude fallback:**
+
+During each monitoring iteration, for every active Codex worker, pass its pane output to `detectCodexError()` (from `scripts/lib/worker-spawn.mjs`):
+
+```javascript
+import { detectCodexError, reassignToClaude } from './scripts/lib/worker-spawn.mjs';
+import { reportWorkerStatus } from './scripts/lib/worker-status.mjs';
+
+// Inside the monitoring loop, for each Codex worker:
+const paneOutput = capturePane(codexSession, 200);
+const errorCheck = detectCodexError(paneOutput);
+
+if (errorCheck.failed) {
+  // Update status dashboard immediately
+  reportWorkerStatus(teamName, workerName, 'failed', `Codex error: ${errorCheck.reason}`);
+
+  // Kill tmux session and record wisdom.
+  // Pass the session name explicitly to avoid the default sessionName() mismatch
+  // (athena uses 'athena-<slug>-codex-N' directly, not 'omc-team-athena-...-codex-N').
+  const fallback = await reassignToClaude(teamName, workerName, originalPrompt, errorCheck.reason, codexSession);
+
+  // Report the reassignment so the status table shows the transition
+  reportWorkerStatus(teamName, workerName, 'implementing', `Codex → Claude: ${errorCheck.reason}`);
+
+  // Spawn Claude replacement with the same prompt
+  Task(subagent_type="agent-olympus:executor", model="sonnet",
+    prompt=`${fallback.prompt}`)
+}
+```
+
+Rules:
+- If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again for any worker in this session.
+- If `errorCheck.reason` is `'crash'`, retry Codex once; if it crashes again, fall back to Claude.
+- Always call `await reassignToClaude()` before spawning the replacement — it handles tmux cleanup and wisdom recording in one step.
 
 After checking each worker's status, record it via worker-status (import from `scripts/lib/worker-status.mjs`):
 ```javascript
