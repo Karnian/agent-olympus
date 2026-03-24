@@ -334,6 +334,42 @@ Write the spec in two formats:
 }
 ```
 
+### Auto-Validation (Phase 4 gate)
+
+Before writing files, validate consistency:
+
+```
+Validation checklist:
+1. Story count: spec.md user story count == prd.json userStories array length
+2. Story IDs: all IDs in spec.md appear in prd.json (no orphans)
+3. Acceptance criteria: every user story has ≥1 GIVEN/WHEN/THEN criterion
+4. Untestable words: scan for [robust, efficient, user-friendly, fast, safe,
+   accurate, effective, flexible, maintainable, reliable, adequate, quickly,
+   in a timely manner] — flag and rewrite any found
+5. Mandatory sections: Problem, Goals, User Stories, Constraints all non-empty
+6. Open questions: if openQuestions.length > 0 AND scale == L,
+   add "(⚠️ N open questions remain — stakeholder review recommended)" to summary
+
+If any check fails → fix automatically before writing.
+If untestable words found → rewrite with measurable alternatives.
+Log all auto-corrections in Review Notes section.
+```
+
+### Open Question Handling
+
+Open questions should not block execution for S/M scale:
+
+```
+S-scale: Open questions are NOT allowed. Force resolution or use sensible defaults.
+M-scale: Up to 2 open questions allowed. Each must have a recommended default.
+         Atlas/Athena use the default and log the assumption.
+L-scale: Up to 5 open questions allowed. Each must have:
+         - Recommended default (so execution CAN proceed)
+         - Impact analysis (what changes if a different answer is chosen)
+         - Stakeholder tag (who should answer: "tech lead", "product owner", "designer")
+         Mark spec status as "reviewed-with-open-questions" instead of "approved".
+```
+
 ### Present to User
 
 Format a summary table:
@@ -345,7 +381,8 @@ Format a summary table:
 |-----------|-------|
 | Scale | S / M / L |
 | User Stories | <count> |
-| Open Questions | <count> |
+| Open Questions | <count> (with defaults) |
+| Auto-Corrections | <count> |
 | Review Status | <skipped (S) / passed (M/L) / pending (if user review requested)> |
 
 ### Quick Summary
@@ -622,6 +659,24 @@ Also write `.ao/prd.json` for machine consumption by Atlas/Athena:
 This JSON is designed so Atlas/Athena can directly read improvement opportunities
 and convert them into executable user stories without human reformatting.
 
+### Reverse Auto-Validation (Phase R4 gate)
+
+Before writing reverse output files, validate consistency:
+
+```
+Validation checklist:
+1. Feature count: spec.md RF-NNN count == prd.json features array length
+2. Feature IDs: all RF-NNN IDs in spec.md appear in prd.json (no orphans)
+3. Health scores: all 5 dimensions present and in 0-100 range
+4. Overall score: matches weighted average (or is explicitly justified if not)
+5. Tech debt severity: every item has severity tag (critical/moderate/low)
+6. Source files: every RF-NNN references at least one source file path
+7. Acceptance criteria: every feature has ≥1 GIVEN/WHEN/THEN or behavioral description
+
+If any check fails → fix automatically before writing.
+Log all auto-corrections in spec footer.
+```
+
 ### Present to User (Reverse)
 
 ```markdown
@@ -681,8 +736,10 @@ Same as Atlas. Athena invokes Plan and then uses the finalized PRD to dispatch w
 ## Stop_Conditions
 
 STOP and save the spec when:
+- Auto-validation passes (all checklist items green)
 - Spec.md is written with all mandatory sections filled (Problem, Goals, User Stories, Constraints)
-- prd.json is written and verified readable
+- prd.json is written, verified readable, and story/feature count matches spec.md
+- No untestable words remain in acceptance criteria
 - User approves the spec OR explicitly says "proceed" OR scale is S (auto-approved)
 
 ESCALATE to user when:
