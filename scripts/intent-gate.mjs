@@ -76,11 +76,11 @@ function buildAdvice(category, confidence) {
 
   const adviceMap = {
     'visual-engineering': 'Consider using the designer agent or Gemini for visual/UI tasks. Sonnet-class model recommended.',
-    'deep': 'Opus-class model recommended for complex architectural analysis. Consider /metis-pipeline or architect agent.',
+    'deep': 'Opus-class model recommended for complex architectural analysis. Consider /deep-dive or architect agent.',
     'quick': 'Haiku-class model is sufficient for this task. Explore agent can handle it efficiently.',
     'writing': 'Writer agent recommended. Haiku-class model is well-suited for documentation tasks.',
     'artistry': 'Designer agent with Gemini team worker recommended for creative/generative tasks. Sonnet-class model.',
-    'planning': 'Consider /metis-pipeline or planner agent for thorough planning. Opus-class model recommended.',
+    'planning': 'Consider /plan or planner agent for thorough planning. Opus-class model recommended.',
     'unknown': 'No strong intent signal detected. Proceed with default model selection.',
   };
 
@@ -114,14 +114,14 @@ function buildAdditionalContext(category, confidence, scores) {
 async function main() {
   // Skip guard
   if (process.env.DISABLE_AO === '1') {
-    console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+    process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
     return;
   }
 
   try {
     const input = await readStdin();
     if (!input.trim()) {
-      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+      process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
@@ -130,7 +130,7 @@ async function main() {
       data = JSON.parse(input);
     } catch {
       // Malformed input — pass through silently
-      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+      process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
@@ -138,7 +138,7 @@ async function main() {
     const prompt = extractPrompt(data);
 
     if (!prompt.trim()) {
-      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+      process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
@@ -149,7 +149,7 @@ async function main() {
 
     // If intent is unknown with zero confidence, pass through without noise
     if (intentResult.category === 'unknown' && intentResult.confidence === 0) {
-      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+      process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
@@ -159,7 +159,7 @@ async function main() {
       intentResult.scores,
     );
 
-    console.log(JSON.stringify({
+    process.stdout.write(JSON.stringify({
       continue: true,
       hookSpecificOutput: {
         hookEventName: 'UserPromptSubmit',
@@ -168,7 +168,7 @@ async function main() {
     }));
   } catch {
     // Never block on any error
-    console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+    process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
   }
 }
 

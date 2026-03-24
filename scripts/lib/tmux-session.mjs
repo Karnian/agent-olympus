@@ -1,7 +1,7 @@
 import { execSync } from 'child_process';
 import { mkdirSync, existsSync } from 'fs';
 
-const SESSION_PREFIX = 'omc-team';
+const SESSION_PREFIX = 'ao-team';
 
 // Common binary search paths across platforms
 const SEARCH_PATHS = [
