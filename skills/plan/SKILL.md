@@ -53,57 +53,77 @@ and either the user approves it or explicitly skips review.
 User Request / Atlas Triage
         │
         ▼
-Phase 0: SCALE DETECTION (Hermes)
+Phase 0: TRIAGE (unified)
+    Detect MODE (forward vs reverse) and SCALE (S/M/L)
+    in a single lightweight pass
         │
-        ▼
-Phase 1: UNDERSTAND (Hermes)
-    Draft spec with problem, goals, stories, open questions
-        │
-        ├─────────────────────────────────┐
-        ▼                                  ▼
-    S-scale                          M/L-scale
-    (Skip to Phase 4)               (Continue to Phase 2)
-        │                                  │
-        └──────────────────┬───────────────┘
-                           ▼
-                    Phase 2: CLARIFY (optional)
-                    Ask user questions or invoke deep-interview
-                           │
-                           ▼
-                    Phase 3: REFINE (optional)
-                    Review with momus (M-scale) or consensus-plan (L-scale)
-                           │
-                           ▼
-                    Phase 4: FINALIZE
-                    Write .ao/spec.md and .ao/prd.json
-                           │
-                           ▼
-                    Ready for execution (Atlas/Athena)
+        ├── Forward ──────────────────────── Reverse ──┐
+        ▼                                               ▼
+Phase 1: UNDERSTAND (Hermes)              Phase R1: DISCOVERY (parallel)
+    Draft spec with problem,                  Explore + Hermes intent
+    goals, stories, open questions            extraction simultaneously
+        │                                               │
+        ├──────────────┐                                ▼
+        ▼              ▼                    Phase R2: DEEP ANALYSIS
+    S-scale      M/L-scale                    Extract features, recover
+    (Phase 4)    (Phase 2)                    acceptance criteria, map arch
+        │              │                                │
+        │              ▼                                ▼
+        │       Phase 2: CLARIFY            Phase R3: SYNTHESIS (L only)
+        │       Phase 3: REFINE               Architect review
+        │              │                                │
+        └──────┬───────┘                                │
+               ▼                                        ▼
+        Phase 4: FINALIZE              Phase R4: FINALIZE
+        Write .ao/spec.md               Write .ao/spec.md
+        + .ao/prd.json                  + .ao/prd.json (mode: reverse)
+               │                                        │
+               ▼                                        ▼
+        Ready for Atlas/Athena          "Act on improvements?"
 ```
 
 ## Steps
 
-### Phase 0 — SCALE DETECTION
+### Phase 0 — TRIAGE (mode + scale detection)
 
-Analyze the request to determine planning depth:
+Detect both MODE and SCALE in a single lightweight pass.
+This avoids spawning a sub-agent just for scale detection.
 
 ```
-Task(subagent_type="agent-olympus:hermes", model="haiku",
-  prompt="Determine the SCALE of this request. Reply with ONLY one of: S, M, or L.
+Analyze the user's request and determine two things:
 
-  S = Single file, one feature, obvious implementation
-      Examples: 'fix typo', 'add a button', 'bump version', 'rename function'
+1. MODE — Is this forward (new idea → spec) or reverse (existing code → spec)?
 
-  M = Multi-file feature, new API endpoint, component system
-      Examples: 'add user authentication', 'implement checkout flow', 'new API endpoint'
+   Reverse indicators:
+   - References an existing codebase, directory, repo, or product
+   - Uses words: "analyze", "분석", "understand", "document", "reverse", "기획분석",
+     "이 코드", "이 프로젝트", "existing", "current", "legacy"
+   - Asks to "extract spec", "understand architecture", "find gaps"
 
-  L = New system, major refactor, multi-service, architectural
-      Examples: 'build recommendation engine', 'migrate to microservices', 'redesign database'
+   Forward indicators (default):
+   - Describes something to build: "add", "create", "implement", "build", "만들어"
+   - Describes a problem to solve: "fix", "improve", "redesign"
 
-  Request: <user_request>")
+   If ambiguous, default to FORWARD.
+
+2. SCALE — How large is this?
+
+   S = Single file, one feature, obvious implementation
+       Examples: 'fix typo', 'add a button', 'bump version', 'rename function'
+
+   M = Multi-file feature, new API endpoint, component system
+       Examples: 'add user authentication', 'implement checkout flow', 'new API endpoint'
+
+   L = New system, major refactor, multi-service, architectural
+       Examples: 'build recommendation engine', 'migrate to microservices', 'redesign database'
+
+   For reverse mode: S = single module, M = multi-module project, L = large system
+
+Record: detected_mode (forward|reverse), detected_scale (S|M|L)
 ```
 
-Record the scale as `detected_scale`.
+If `detected_mode == reverse`: jump to **Phase R1**.
+If `detected_mode == forward`: continue to **Phase 1**.
 
 ### Phase 1 — UNDERSTAND
 
@@ -354,11 +374,7 @@ but extracts the spec FROM code rather than creating it FROM an idea.
 ### Reverse Architecture
 
 ```
-Existing Codebase / Product
-        │
-        ▼
-Phase R0: MODE DETECTION
-    Detect reverse mode from trigger words or context
+Phase 0 TRIAGE detects reverse mode
         │
         ▼
 Phase R1: DISCOVERY (parallel)
@@ -386,17 +402,17 @@ Phase R4: FINALIZE
     Present summary with health score
 ```
 
-### Phase R0 — MODE DETECTION
-
-Detect reverse mode from user intent:
-
-```
-If user request mentions an existing codebase, directory, repo, or product:
-  AND uses words like "analyze", "분석", "understand", "document", "reverse", "기획분석":
-  → Switch to reverse mode
-```
-
 ### Phase R1 — DISCOVERY
+
+Mode detection is handled by Phase 0 TRIAGE (unified).
+When `detected_mode == reverse`, execution jumps here.
+
+**Scope control for large codebases:**
+- S-scale: Read up to 10 key files
+- M-scale: Read up to 30 key files
+- L-scale: Read up to 60 key files, prioritize entry points and public APIs
+- Always prioritize: README, package metadata, entry points, config files, test files
+- Skip: node_modules, .git, build output, generated code, binary files, lock files
 
 Launch parallel exploration:
 
@@ -444,6 +460,10 @@ Task(subagent_type="agent-olympus:hermes", model="opus",
   Discovery context: <discovery_context>
   Target: <path_or_repo>
 
+  Scope limit: Read up to <scope_limit_by_scale> key files.
+  Prioritize: entry points, public APIs, route handlers, core business logic, test files.
+  Skip: generated code, lock files, node_modules, build output.
+
   Your task:
   1. Read the key source files, routes/endpoints, components, data models
   2. Extract each feature as a Reverse Feature (RF-001, RF-002, ...)
@@ -464,7 +484,10 @@ Record output as `reverse_analysis`.
 
 ### Phase R3 — SYNTHESIS & GAP ANALYSIS
 
-If scale is L (large project), run an additional review:
+**Always run for L-scale.** For S/M-scale, skip to Phase R4.
+
+For L-scale projects, the deep analysis alone may miss architectural nuances.
+Run an architect review to cross-check:
 
 ```
 Task(subagent_type="agent-olympus:architect", model="opus",
@@ -550,7 +573,54 @@ Write the reverse spec to `.ao/spec.md`:
 - <opportunity 2: description + expected impact>
 ```
 
-Also write `.ao/prd.json` with the same structure (using `"mode": "reverse"` and `"healthScore"` fields).
+Also write `.ao/prd.json` for machine consumption by Atlas/Athena:
+
+```json
+{
+  "mode": "reverse",
+  "projectName": "<project-slug>",
+  "analyzedAt": "<ISO timestamp>",
+  "target": "<path_or_repo>",
+  "healthScore": {
+    "testCoverage": <0-100>,
+    "documentation": <0-100>,
+    "codeQuality": <0-100>,
+    "architecture": <0-100>,
+    "security": <0-100>,
+    "overall": <0-100>
+  },
+  "features": [
+    {
+      "id": "RF-001",
+      "title": "<title>",
+      "testCoverage": "full|partial|none",
+      "asA": "<persona>",
+      "iWantTo": "<action>",
+      "soThat": "<benefit>",
+      "acceptanceCriteria": ["GIVEN ... WHEN ... THEN ..."],
+      "sourceFiles": ["path/to/file.ts"]
+    }
+  ],
+  "technicalDebt": [
+    {
+      "severity": "critical|moderate|low",
+      "description": "<issue>",
+      "file": "<path>",
+      "suggestion": "<fix>"
+    }
+  ],
+  "improvementOpportunities": [
+    {
+      "title": "<opportunity>",
+      "impact": "high|medium|low",
+      "description": "<details>"
+    }
+  ]
+}
+```
+
+This JSON is designed so Atlas/Athena can directly read improvement opportunities
+and convert them into executable user stories without human reformatting.
 
 ### Present to User (Reverse)
 
