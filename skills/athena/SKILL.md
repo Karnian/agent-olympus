@@ -88,8 +88,8 @@ Task(subagent_type="agent-olympus:metis", model="opus",
 
 **[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
 ```
-Task(subagent_type="agent-olympus:deep-dive", model="opus",
-  prompt="Run deep-dive investigation on: <user_request>
+Skill(skill="agent-olympus:deep-dive",
+  args="Run deep-dive investigation on: <user_request>
   Context from codebase scan: <explore_results>
   Return path to .omc/deep-dive-report.json when complete.")
 ```
@@ -98,8 +98,8 @@ Use `recommended_approaches[0]` and `affected_files` to inform Phase 1 team desi
 
 **[OPTIONAL] External Context** — if metis identifies an external knowledge gap (unfamiliar API, library, or protocol):
 ```
-Task(subagent_type="agent-olympus:external-context", model="opus",
-  prompt="Research external context needed for: <user_request>
+Skill(skill="agent-olympus:external-context",
+  args="Research external context needed for: <user_request>
   Specific gap: <identified_knowledge_gap>")
 ```
 Broadcast the returned markdown brief to all workers via team inbox before Phase 2 spawn.
@@ -112,8 +112,8 @@ saveCheckpoint('athena', { phase: 1, completedStories: [], activeWorkers: [], st
 
 **[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
 ```
-Task(subagent_type="agent-olympus:consensus-plan", model="opus",
-  prompt="Run consensus planning for this task.
+Skill(skill="agent-olympus:consensus-plan",
+  args="Run consensus planning for this task.
   Task: <user_request>
   Analysis: <metis_team_design>
   Wisdom: <formatWisdomForPrompt()>
@@ -261,7 +261,7 @@ Run **simultaneously**: build, tests, linter.
 ```
 ┌─→ ALL PASS → Phase 5
 │   ANY FAIL → spawn debugger (with wisdom learnings: formatWisdomForPrompt(queryWisdom(null,10))), fix, re-verify
-│   If debugger fails 2x → escalate to agent-olympus:trace
+│   If debugger fails 2x → escalate via Skill(skill="agent-olympus:trace")
 └── Loop (max 5 fix cycles)
 ```
 
@@ -287,9 +287,9 @@ agent-olympus:code-reviewer (sonnet) — quality
 ### Phase 5b — SLOP CLEAN + COMMIT
 
 After review approved:
-1. Run `agent-olympus:slop-cleaner` on all changed files
+1. Run `Skill(skill="agent-olympus:slop-cleaner")` on all changed files
 2. Re-run build + tests to verify no regression
-3. Run `agent-olympus:git-master` for atomic commits
+3. Run `Skill(skill="agent-olympus:git-master")` for atomic commits
 
 ### COMPLETION
 
@@ -347,6 +347,9 @@ Common examples:
 - `anthropic-skills:web-artifacts-builder` — complex React/Tailwind artifacts
 - `anthropic-skills:mcp-builder` — MCP server creation
 **Agent Olympus built-in skills (always available):**
+
+> **IMPORTANT**: These are **skills**, NOT agents. Invoke them via `Skill(skill="agent-olympus:<name>")`, NOT via `Task(subagent_type=...)`. Using `Task(subagent_type=...)` will fail with "agent type not found".
+
 - `agent-olympus:ask` — quick Codex/Gemini single-shot query
 - `agent-olympus:deep-interview` — Socratic requirements clarification
 - `agent-olympus:deep-dive` — 2-stage investigation pipeline for complex + ambiguous tasks (Phase 0)
@@ -359,11 +362,11 @@ Common examples:
 
 **Recommended Athena workflow integration:**
 ```
-Phase 0 (Design) → deep-dive (if complexity=complex/architectural AND ambiguity > 40)
-Phase 0 (Design) → external-context (if external API/library knowledge gap detected)
-Phase 1 (Plan)   → consensus-plan (if 3+ stories; replaces standard Prometheus pass)
-Phase 4 (Verify) → trace (if integration failures persist)
-Phase 5 (Review) → slop-cleaner → git-master → DONE
+Phase 0 (Design) → Skill(skill="agent-olympus:deep-dive") (if complexity=complex/architectural AND ambiguity > 40)
+Phase 0 (Design) → Skill(skill="agent-olympus:external-context") (if external API/library knowledge gap detected)
+Phase 1 (Plan)   → Skill(skill="agent-olympus:consensus-plan") (if 3+ stories; replaces standard Prometheus pass)
+Phase 4 (Verify) → Skill(skill="agent-olympus:trace") (if integration failures persist)
+Phase 5 (Review) → Skill(skill="agent-olympus:slop-cleaner") → Skill(skill="agent-olympus:git-master") → DONE
 ```
 
 **Rule**: If a specialized skill exists, prefer it over a generic executor.
