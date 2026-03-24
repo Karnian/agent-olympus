@@ -15,8 +15,9 @@ const ARTIFACTS_DIR = '.omc/artifacts';
 const CODEX_ERROR_PATTERNS = [
   { pattern: /authentication|unauthorized|invalid.*api.*key|API key/i, reason: 'auth_failed' },
   { pattern: /rate.?limit|429|quota.*exceeded|too many requests/i, reason: 'rate_limited' },
-  { pattern: /command not found|not found|ENOENT/i, reason: 'not_installed' },
-  { pattern: /error|fatal|exception|panic/i, reason: 'crash' },
+  { pattern: /command not found|ENOENT|codex:.*not found/i, reason: 'not_installed' },
+  { pattern: /ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up|network error/i, reason: 'network' },
+  { pattern: /fatal error|unhandled exception|panic:|SIGSEGV|SIGABRT|segmentation fault/i, reason: 'crash' },
 ];
 
 function saveTeamState(teamName, state) {
@@ -73,20 +74,22 @@ export function detectCodexError(output) {
  * (tmux cleanup + wisdom recording) and returns the information the
  * orchestrator needs to issue the Task() call.
  *
- * @param {string} teamName       - Team identifier
- * @param {string} workerName     - Name of the failed worker
- * @param {string} originalPrompt - The prompt the Codex worker was given
- * @param {string} failureReason  - Reason code from detectCodexError()
+ * @param {string} teamName        - Team identifier
+ * @param {string} workerName      - Name of the failed worker
+ * @param {string} originalPrompt  - The prompt the Codex worker was given
+ * @param {string} failureReason   - Reason code from detectCodexError()
+ * @param {string} [sessionOverride] - Optional tmux session name override (e.g. 'atlas-codex-1');
+ *                                     when omitted, the default sessionName(teamName, workerName) is used.
  * @returns {{ fallbackNeeded: boolean, teamName: string, workerName: string, prompt: string, reason: string }}
  */
-export function reassignToClaude(teamName, workerName, originalPrompt, failureReason) {
+export async function reassignToClaude(teamName, workerName, originalPrompt, failureReason, sessionOverride) {
   try {
     // Kill the failed tmux session
-    const session = sessionName(teamName, workerName);
+    const session = sessionOverride || sessionName(teamName, workerName);
     try { killSession(session); } catch {}
 
     // Record the fallback event as wisdom so future sessions avoid the same issue
-    addWisdom({
+    await addWisdom({
       category: 'tool',
       lesson: `Codex worker "${workerName}" failed (${failureReason}) — automatically reassigned to agent-olympus:executor. Avoid Codex for reason "${failureReason}" in this session.`,
       confidence: 'high',
@@ -122,7 +125,9 @@ export async function spawnTeam(teamName, workers, cwd) {
       ...w,
       status: 'pending',
       startedAt: null,
-      completedAt: null
+      completedAt: null,
+      retryCount: 0,
+      originalPrompt: w.prompt || '',  // persist for fallback recovery
     })),
     phase: 'spawning',
     startedAt: new Date().toISOString(),
@@ -172,28 +177,38 @@ export function monitorTeam(teamName) {
     outboxes: readAllOutboxes(teamName)
   };
 
-  for (const worker of state.workers) {
-    const paneOutput = worker.session ? capturePane(worker.session, 30) : null;
+  // Track whether any worker status changed so we can persist the update
+  let stateChanged = false;
 
-    // Heuristic: check if worker is done
-    const isDone = paneOutput && (
-      paneOutput.includes('$') || // back to shell prompt
+  for (let i = 0; i < state.workers.length; i++) {
+    const worker = state.workers[i];
+    const paneOutput = worker.session ? capturePane(worker.session, 200) : null;
+
+    // Check errors FIRST for codex workers — errors take priority over completion signals
+    let errorDetection = { failed: false };
+    if (worker.type === 'codex' && worker.status === 'running' && paneOutput) {
+      errorDetection = detectCodexError(paneOutput);
+    }
+
+    // Then check isDone (but error takes priority)
+    const isDone = !errorDetection.failed && paneOutput && (
+      paneOutput.includes('$') ||
       paneOutput.includes('completed') ||
       paneOutput.includes('Done') ||
       paneOutput.includes('Finished')
     );
 
-    // For Codex workers, check for unrecoverable error conditions
-    let errorDetection = { failed: false };
-    if (worker.type === 'codex' && worker.status === 'running' && paneOutput && !isDone) {
-      errorDetection = detectCodexError(paneOutput);
-    }
-
     let resolvedStatus = worker.status;
     if (isDone) {
       resolvedStatus = 'completed';
     } else if (errorDetection.failed) {
-      resolvedStatus = 'failed';
+      // For crash failures, allow one retry before marking as failed
+      if (errorDetection.reason === 'crash' && (worker.retryCount || 0) < 1) {
+        resolvedStatus = 'retry';
+        state.workers[i].retryCount = (worker.retryCount || 0) + 1;
+      } else {
+        resolvedStatus = 'failed';
+      }
     }
 
     const workerEntry = {
@@ -209,7 +224,20 @@ export function monitorTeam(teamName) {
     }
 
     status.workers.push(workerEntry);
+
+    // Persist any status changes back to the state object
+    const newStatus = workerEntry.status;
+    if (newStatus && newStatus !== state.workers[i].status) {
+      state.workers[i].status = newStatus;
+      if (workerEntry.errorReason) {
+        state.workers[i].errorReason = workerEntry.errorReason;
+      }
+      stateChanged = true;
+    }
   }
+
+  // Write state file once if anything changed
+  if (stateChanged) saveTeamState(teamName, state);
 
   return status;
 }
