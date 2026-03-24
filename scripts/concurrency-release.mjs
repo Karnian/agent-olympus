@@ -2,7 +2,7 @@ import { readStdin } from './lib/stdin.mjs';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
-const STATE_DIR = '.ao/state';
+const STATE_DIR = join(process.cwd(), '.ao', 'state');
 const STATE_FILE = join(STATE_DIR, 'ao-concurrency.json');
 
 function readState() {
@@ -13,6 +13,25 @@ function readState() {
 function writeState(state) {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o600 });
+}
+
+function detectProvider(toolInput) {
+  const subagentType = toolInput?.subagent_type ?? '';
+  const model = (toolInput?.model ?? '').toLowerCase();
+
+  if (subagentType.includes('claude') || model.includes('claude') || model.includes('anthropic')) {
+    return 'claude';
+  }
+  if (subagentType.includes('codex') || model.includes('codex') || model.includes('openai') || model.includes('gpt')) {
+    return 'codex';
+  }
+  if (subagentType.includes('gemini') || model.includes('gemini') || model.includes('google')) {
+    return 'gemini';
+  }
+  if (subagentType) {
+    return 'claude';
+  }
+  return 'claude';
 }
 
 async function main() {
@@ -26,14 +45,19 @@ async function main() {
       process.exit(0);
     }
 
-    const taskId = data.tool_input?.name || data.tool_input?.description || '';
+    const provider = detectProvider(data.tool_input ?? {});
     const state = readState();
+    const now = Date.now();
 
-    // Remove matching task
+    // Remove oldest task matching the provider, also prune stale (>10 min)
+    let released = false;
     state.activeTasks = (state.activeTasks || []).filter(t => {
-      if (t.id === taskId || t.name === taskId) return false;
-      // Also prune stale (>10 min)
-      if (Date.now() - (t.startedAt || 0) > 600000) return false;
+      const age = now - new Date(t.startedAt || 0).getTime();
+      if (age > 600000) return false; // prune stale
+      if (!released && t.provider === provider) {
+        released = true;
+        return false; // release the oldest matching task
+      }
       return true;
     });
 
