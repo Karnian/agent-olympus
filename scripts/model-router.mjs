@@ -91,14 +91,14 @@ function buildModelRoutingContext(routing, subagentType) {
 async function main() {
   // Skip guard
   if (process.env.DISABLE_AO === '1') {
-    console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+    process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
     return;
   }
 
   try {
     const input = await readStdin();
     if (!input.trim()) {
-      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+      process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
@@ -106,14 +106,14 @@ async function main() {
     try {
       data = JSON.parse(input);
     } catch {
-      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+      process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
-    // Only act on Task tool invocations
+    // Only act on Task or Agent tool invocations
     const toolName = data.tool_name || '';
-    if (toolName !== 'Task') {
-      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+    if (toolName !== 'Task' && toolName !== 'Agent') {
+      process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
@@ -124,14 +124,14 @@ async function main() {
     const intentResult = loadIntentState(directory);
     if (!intentResult || intentResult.category === 'unknown') {
       // No meaningful intent state — pass through without adding noise
-      console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+      process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
     const routing = routeByIntent(intentResult);
     const additionalContext = buildModelRoutingContext(routing, subagentType);
 
-    console.log(JSON.stringify({
+    process.stdout.write(JSON.stringify({
       continue: true,
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
@@ -140,7 +140,7 @@ async function main() {
     }));
   } catch {
     // Never block on any error
-    console.log(JSON.stringify({ continue: true, suppressOutput: true }));
+    process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
   }
 }
 
