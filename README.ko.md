@@ -377,6 +377,13 @@ Atlas/Athena가 실행될 때, 이전 학습들이 자동으로 프롬프트에 
 - **선택사항: tmux** — Codex 통합 및 Athena 팀 모드 필수
 - **선택사항: codex CLI** — 고급 모델 실행 (npm install -g @openai/codex)
 
+## 감사의 말
+
+이 프로젝트는 아래 두 프로젝트의 아이디어와 설계 철학을 참고하여 만들어졌습니다:
+
+- [Oh My Claude Code](https://github.com/Yeachan-Heo/oh-my-claudecode) — Claude Code용 멀티 에이전트 오케스트레이션 플러그인
+- [Oh My OpenAgent](https://github.com/code-yeongyu/oh-my-openagent) — 멀티 모델 오케스트레이션을 지원하는 에이전트 하네스
+
 ## 라이선스
 
 MIT
