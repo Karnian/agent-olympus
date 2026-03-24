@@ -166,15 +166,15 @@ agent-olympus/
 
 | File | Purpose | Lifecycle |
 |------|---------|-----------|
-| `.omc/state/atlas-state.json` | Atlas phase tracking | Created on start, deleted on completion |
-| `.omc/state/athena-state.json` | Athena phase tracking | Created on start, deleted on completion |
-| `.omc/prd.json` | User stories with acceptance criteria | Created in Plan phase, deleted on completion |
-| `.omc/wisdom.jsonl` | Cross-iteration learnings (JSONL format) | Accumulated, NEVER deleted (survives cancel) |
-| `.omc/state/checkpoint-atlas.json` | Atlas session recovery checkpoint | Auto-expires after 24h |
-| `.omc/state/checkpoint-athena.json` | Athena session recovery checkpoint | Auto-expires after 24h |
-| `.omc/state/oac-intent.json` | Last classified intent | Updated per prompt |
-| `.omc/state/oac-concurrency.json` | Active task tracking | Updated per task spawn/complete |
-| `.omc/teams/<slug>/` | Inbox/outbox for Codex workers | Created by Athena, cleaned on completion |
+| `.ao/state/atlas-state.json` | Atlas phase tracking | Created on start, deleted on completion |
+| `.ao/state/athena-state.json` | Athena phase tracking | Created on start, deleted on completion |
+| `.ao/prd.json` | User stories with acceptance criteria | Created in Plan phase, deleted on completion |
+| `.ao/wisdom.jsonl` | Cross-iteration learnings (JSONL format) | Accumulated, NEVER deleted (survives cancel) |
+| `.ao/state/checkpoint-atlas.json` | Atlas session recovery checkpoint | Auto-expires after 24h |
+| `.ao/state/checkpoint-athena.json` | Athena session recovery checkpoint | Auto-expires after 24h |
+| `.ao/state/ao-intent.json` | Last classified intent | Updated per prompt |
+| `.ao/state/ao-concurrency.json` | Active task tracking | Updated per task spawn/complete |
+| `.ao/teams/<slug>/` | Inbox/outbox for Codex workers | Created by Athena, cleaned on completion |
 
 ## Multi-Model Support
 
@@ -189,7 +189,7 @@ agent-olympus/
 
 1. **Self-driving loop** — Atlas/Athena never stop early. They loop until all PRD stories pass, build succeeds, tests pass, and reviews approve. Max 15 iterations before escalating.
 2. **PRD quality enforcement** — Generic acceptance criteria ("works correctly") are forbidden. Every criterion must be specific and testable.
-3. **Progress persistence** — `.omc/wisdom.jsonl` accumulates learnings across iterations and survives cancellation, so future sessions start smarter.
+3. **Progress persistence** — `.ao/wisdom.jsonl` accumulates learnings across iterations and survives cancellation, so future sessions start smarter.
 4. **Codex via tmux** — No omc dependency. Codex is spawned directly as tmux sessions, monitored via `capture-pane`, and cleaned up on completion.
 5. **External skill awareness** — Atlas/Athena can invoke any installed plugin skill (anthropic-skills, ui-ux-pro-max, etc.) when it fits better than a generic executor.
 6. **Zero runtime dependencies** — All scripts use Node.js built-ins only. No npm packages.

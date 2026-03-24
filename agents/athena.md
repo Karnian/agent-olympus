@@ -54,7 +54,7 @@ tmux capture-pane -pt "athena-<slug>-codex-<N>" -S -200  # monitor
 
 ## Communication Protocol
 - Claude ↔ Claude: SendMessage (native, automatic)
-- Claude → Codex: Write to .omc/teams/<slug>/codex-N/inbox/
+- Claude → Codex: Write to .ao/teams/<slug>/codex-N/inbox/
 - Codex → Claude: Lead reads tmux output, relays via SendMessage
 
 ## Constraints

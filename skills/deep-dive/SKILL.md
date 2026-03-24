@@ -184,7 +184,7 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   Set pipeline_ready: true only if confidence >= 70 and recommended_approaches is non-empty.")
 ```
 
-Save the JSON report to `.omc/deep-dive-report.json`.
+Save the JSON report to `.ao/deep-dive-report.json`.
 
 ### Output to user
 
@@ -221,7 +221,7 @@ Tradeoffs: <tradeoffs>
 <affected_files and affected_components combined as bullet list>
 
 ---
-_Full report saved to `.omc/deep-dive-report.json`_
+_Full report saved to `.ao/deep-dive-report.json`_
 ```
 
 Then ask: "Should I hand this off to Atlas for execution, or would you like to review first?"
@@ -231,7 +231,7 @@ Then ask: "Should I hand this off to Atlas for execution, or would you like to r
 When called from Atlas or Athena as a pipeline stage (not directly by the user):
 
 - Skip the final user-facing question
-- Return `.omc/deep-dive-report.json` path and `pipeline_ready` flag as the stage result
+- Return `.ao/deep-dive-report.json` path and `pipeline_ready` flag as the stage result
 - The calling orchestrator reads `recommended_approaches[0]` as the execution target
 - If `pipeline_ready: false`, the orchestrator must escalate to the user before proceeding
 
@@ -240,7 +240,7 @@ Atlas invocation pattern:
 Task(subagent_type="agent-olympus:deep-dive", model="opus",
   prompt="Run deep-dive investigation on: <task_description>
   Context from codebase scan: <explore_results>
-  Return path to .omc/deep-dive-report.json when complete.")
+  Return path to .ao/deep-dive-report.json when complete.")
 ```
 
 ## Integration_With_Atlas_Athena

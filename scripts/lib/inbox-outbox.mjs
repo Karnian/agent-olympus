@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlink
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 
-const TEAMS_DIR = '.omc/teams';
+const TEAMS_DIR = '.ao/teams';
 
 function teamDir(teamName, workerName) {
   return join(TEAMS_DIR, teamName, workerName);

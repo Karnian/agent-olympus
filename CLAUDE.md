@@ -26,7 +26,7 @@ hooks/      → Hook event registrations
 ### Naming
 - **Agents**: Greek mythology names (atlas, athena, metis, prometheus, momus, hephaestus)
 - **Namespace**: `agent-olympus:` prefix for all subagent_type references
-- **State files**: `.omc/state/` directory with `oac-` prefix per hook
+- **State files**: `.ao/state/` directory with `ao-` prefix per hook
 
 ### Code Style (scripts/)
 - All scripts are ESM (.mjs), except `run.cjs` (CJS for cross-platform compatibility)
@@ -47,12 +47,12 @@ hooks/      → Hook event registrations
 - Not every agent has a matching skill. executor, debugger, designer etc. are internal-only
 
 ### State Management
-- `.omc/prd.json` — PRD with user stories and acceptance criteria
-- `.omc/wisdom.jsonl` — structured cross-iteration learnings in JSONL format (NEVER delete, survives /cancel)
-- `.omc/progress.txt` — legacy format, auto-migrated to wisdom.jsonl on first run
-- `.omc/state/checkpoint-{atlas|athena}.json` — session recovery checkpoints (auto-expire 24h)
-- `.omc/state/*.json` — transient state files (deleted on completion)
-- `.omc/teams/` — tmux worker inbox/outbox directories (Athena only)
+- `.ao/prd.json` — PRD with user stories and acceptance criteria
+- `.ao/wisdom.jsonl` — structured cross-iteration learnings in JSONL format (NEVER delete, survives /cancel)
+- `.ao/progress.txt` — legacy format, auto-migrated to wisdom.jsonl on first run
+- `.ao/state/checkpoint-{atlas|athena}.json` — session recovery checkpoints (auto-expire 24h)
+- `.ao/state/*.json` — transient state files (deleted on completion)
+- `.ao/teams/` — tmux worker inbox/outbox directories (Athena only)
 
 ## How to Add a New Agent
 
@@ -122,7 +122,8 @@ for f in scripts/*.mjs scripts/lib/*.mjs; do node --check "$f" && echo "OK: $f";
 
 # Check for stale namespace references
 grep -r "oh-my-claude:" agents/ skills/ scripts/ config/   # should return nothing
-grep -r "oh-my-claudecode:" skills/ agents/                 # should return nothing (except run.cjs comments)
+grep -r "oh-my-claudecode:" skills/ agents/                 # should return nothing
+grep -r '\.omc/' scripts/ skills/ agents/                   # should return nothing
 ```
 
 ## Dependencies

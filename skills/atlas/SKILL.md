@@ -78,7 +78,7 @@ Before starting any work:
    - **Restart** → `clearCheckpoint('atlas')`, proceed normally
 
 #### Load Prior Wisdom
-1. Run `migrateProgressTxt()` if `.omc/progress.txt` exists (one-time migration to wisdom.jsonl)
+1. Run `migrateProgressTxt()` if `.ao/progress.txt` exists (one-time migration to wisdom.jsonl)
 2. Call `queryWisdom(null, 20)` to get recent learnings
 3. Inject into analysis context via `formatWisdomForPrompt()`
 
@@ -125,9 +125,9 @@ tmux send-keys -t "atlas-codex-analyze" 'codex exec "<analysis prompt>"' Enter
 Skill(skill="agent-olympus:deep-dive",
   args="Run deep-dive investigation on: <user_request>
   Context from codebase scan: <explore_results>
-  Return path to .omc/deep-dive-report.json when complete.")
+  Return path to .ao/deep-dive-report.json when complete.")
 ```
-Read `.omc/deep-dive-report.json` after completion. If `pipeline_ready: false`, escalate to user before proceeding.
+Read `.ao/deep-dive-report.json` after completion. If `pipeline_ready: false`, escalate to user before proceeding.
 Use `recommended_approaches[0]` to inform Phase 2 planning.
 
 **[OPTIONAL] External Context** — if metis identifies an external knowledge gap (unfamiliar API, library, or protocol):
@@ -178,7 +178,7 @@ saveCheckpoint('atlas', { phase: 2, completedStories: [], activeWorkers: [], sta
 ```
 
 **Generate PRD** (after plan approved):
-Write `.omc/prd.json` with user stories from the plan:
+Write `.ao/prd.json` with user stories from the plan:
 ```json
 {
   "projectName": "atlas-<task-slug>",
@@ -336,10 +336,10 @@ Prune wisdom to prevent unbounded growth:
 
 Clean up:
 - `clearCheckpoint('atlas')`
-- Remove `.omc/state/atlas-state.json`
-- Remove `.omc/prd.json`
+- Remove `.ao/state/atlas-state.json`
+- Remove `.ao/prd.json`
 - Kill any tmux sessions: `tmux kill-session -t "atlas-*"`
-- Keep `.omc/wisdom.jsonl` (useful for future sessions — never delete)
+- Keep `.ao/wisdom.jsonl` (useful for future sessions — never delete)
 
 Report to user:
 - Strategy used (DIRECT/LITE/STANDARD/FULL)
@@ -399,10 +399,6 @@ Phase 2 (Plan)    → Skill(skill="agent-olympus:consensus-plan") (if 3+ stories
 Phase 4 (Verify)  → Skill(skill="agent-olympus:trace") (if debugger fails 2x)
 Phase 5 (Review)  → Skill(skill="agent-olympus:slop-cleaner") → Skill(skill="agent-olympus:git-master") → DONE
 ```
-
-**If oh-my-claudecode is also installed:**
-- `oh-my-claudecode:ralph` — alternative persistence loop
-- `oh-my-claudecode:ccg` — tri-model orchestration
 
 **Rule**: If a specialized skill exists for the task, prefer it over a generic executor.
 For example, use `anthropic-skills:xlsx` for spreadsheets instead of writing xlsx code manually.

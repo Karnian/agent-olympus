@@ -1,7 +1,7 @@
 import { readFileSync, appendFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 
-const TEAMS_DIR = '.omc/teams';
+const TEAMS_DIR = '.ao/teams';
 
 /** Valid phase values and their display indicators. */
 const PHASE_INDICATORS = {

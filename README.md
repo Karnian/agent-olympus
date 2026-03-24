@@ -267,33 +267,33 @@ hooks/               Hook event registrations (hooks.json)
 ### Key Design Principles
 
 1. **Fail-Safe Hooks**: Every hook catches errors and outputs JSON, never throws
-2. **State Isolation**: Per-orchestrator checkpoint, transient state files in `.omc/state/`
-3. **Wisdom Persistence**: Cross-session learnings in `.omc/wisdom.jsonl` (JSONL format)
+2. **State Isolation**: Per-orchestrator checkpoint, transient state files in `.ao/state/`
+3. **Wisdom Persistence**: Cross-session learnings in `.ao/wisdom.jsonl` (JSONL format)
 4. **Checkpoint Recovery**: 24-hour TTL; resume from any phase after interruption
 5. **Zero Dependencies**: Node.js ≥ 20.0 only; no npm packages at runtime
 
 ### Session State Management
 
-**Checkpoints** (`.omc/state/checkpoint-<orchestrator>.json`):
+**Checkpoints** (`.ao/state/checkpoint-<orchestrator>.json`):
 - Saved after each phase transition
 - Contains: orchestrator, phase, prdSnapshot, completedStories, activeWorkers, taskDescription
 - TTL: 24 hours (auto-cleared if stale)
 - Purpose: Resume interrupted sessions
 
-**PRD** (`.omc/prd.json`):
+**PRD** (`.ao/prd.json`):
 - User stories with acceptance criteria
 - Story status: `passes: true/false`
 - Story assignment: `assignTo`, `model`, `parallelGroup`
 - Purpose: Track execution progress against requirements
 
-**Wisdom** (`.omc/wisdom.jsonl`):
+**Wisdom** (`.ao/wisdom.jsonl`):
 - JSONL format (one entry per line)
 - Categories: test, build, architecture, pattern, debug, performance, general
 - Entries survive across sessions (never auto-delete)
 - Automatically pruned to 200 most recent entries after completion
 - Purpose: Cross-session learnings reduce friction in future runs
 
-**Teams** (`.omc/teams/<slug>/`) — Athena only:
+**Teams** (`.ao/teams/<slug>/`) — Athena only:
 - Per-worker inbox/outbox directories for Codex communication
 - Cleaned up after team completion
 
@@ -337,7 +337,7 @@ addWisdom({
 - `general` — Everything else
 
 **Persistence:**
-- Stored in `.omc/wisdom.jsonl` (JSONL format)
+- Stored in `.ao/wisdom.jsonl` (JSONL format)
 - Survives across sessions indefinitely
 - Automatically pruned to 200 most recent entries + auto-cleanup of entries older than 90 days
 - Never auto-deleted (you choose when to clear)
@@ -442,6 +442,7 @@ Check for stale namespace references:
 ```bash
 grep -r "oh-my-claude:" agents/ skills/ scripts/ config/
 grep -r "oh-my-claudecode:" skills/ agents/
+grep -r '\.omc/' scripts/ skills/ agents/
 ```
 
 ## Testing Notes
@@ -451,7 +452,7 @@ No formal test framework is configured yet. To verify the plugin:
 1. Syntax check all scripts (see above)
 2. Run a trivial `/atlas` task in Claude Code
 3. Run an `/athena` task if tmux is available
-4. Check `.omc/wisdom.jsonl` is populated after completion
+4. Check `.ao/wisdom.jsonl` is populated after completion
 5. Verify checkpoints can be resumed after interruption
 
 ## Philosophy

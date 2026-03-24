@@ -51,7 +51,7 @@ Phase 3: CONSENSUS
         │
         ▼
 Phase 4: FINALIZE
-    - Write .omc/prd.json
+    - Write .ao/prd.json
     - Return markdown summary
 ```
 
@@ -187,7 +187,7 @@ On user confirmation, reset `revision_count = 0` and return to Phase 1 with the 
 
 ### Phase 4 — FINALIZE
 
-Write the approved plan to `.omc/prd.json`:
+Write the approved plan to `.ao/prd.json`:
 
 ```json
 {
@@ -246,7 +246,7 @@ Output a markdown summary to the user (or pipeline caller):
 ### Critic Notes
 <one short paragraph>
 
-PRD saved to `.omc/prd.json`. Ready for execution.
+PRD saved to `.ao/prd.json`. Ready for execution.
 ```
 
 ## Pipeline_Integration
@@ -254,7 +254,7 @@ PRD saved to `.omc/prd.json`. Ready for execution.
 When called from Atlas or Athena, this skill acts as a drop-in replacement for the Phase 2 PLAN step:
 
 - **Input**: same `user_request` and `analysis_results` Atlas passes to Prometheus
-- **Output**: finalized `.omc/prd.json` + markdown summary returned to the caller
+- **Output**: finalized `.ao/prd.json` + markdown summary returned to the caller
 - Atlas can then skip its own momus validation pass and proceed directly to Phase 3 EXECUTE
 
 Caller pattern (Atlas Phase 2):
@@ -279,7 +279,7 @@ Task(subagent_type="agent-olympus:consensus-plan", model="opus",
 
 STOP and return the finalized PRD when:
 - Both reviewers issue APPROVE (or user overrides)
-- `.omc/prd.json` is written and verified readable
+- `.ao/prd.json` is written and verified readable
 
 ESCALATE to user when:
 - Either reviewer issues REJECT
