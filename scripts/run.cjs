@@ -57,7 +57,7 @@ function resolveTarget(targetPath) {
   }
 
   // Fallback: scan plugin cache for the same script in the latest version.
-  // CLAUDE_PLUGIN_ROOT is e.g. ~/.claude/plugins/cache/agent-olympus/0.3.2
+  // CLAUDE_PLUGIN_ROOT is e.g. ~/.claude/plugins/cache/agent-olympus/0.5.0
   // We look one level up for sibling version directories.
   try {
     const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;

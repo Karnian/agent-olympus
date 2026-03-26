@@ -25,7 +25,7 @@ User Request
 
 ```
 agent-olympus/
-├── .claude-plugin/plugin.json    — Plugin manifest (v0.3.2)
+├── .claude-plugin/plugin.json    — Plugin manifest (v0.5.0)
 ├── agents/                       — 15 agent personas (role definitions)
 │   ├── atlas.md                  — Self-driving sub-agent orchestrator (Opus)
 │   ├── athena.md                 — Self-driving team orchestrator (Opus)
