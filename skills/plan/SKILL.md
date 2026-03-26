@@ -82,6 +82,57 @@ Phase 1: UNDERSTAND (Hermes)              Phase R1: DISCOVERY (parallel)
         Ready for Atlas/Athena          "Act on improvements?"
 ```
 
+## Spec_Persistence
+
+Finalized specs are written to TWO locations:
+
+1. **`docs/plans/<project-slug>/`** — Git-tracked permanent storage. Survives sessions, shared with team.
+2. **`.ao/spec.md` + `.ao/prd.json`** — Ephemeral working copy for Atlas/Athena execution.
+
+### Slug Derivation
+
+Derive `<project-slug>` from `prd.json.projectName`:
+- Lowercase the entire string
+- Replace spaces, underscores, and non-alphanumeric characters (except hyphens) with hyphens
+- Collapse consecutive hyphens into one
+- Strip leading/trailing hyphens
+- Truncate to 50 characters
+- Example: "User Authentication System" → "user-authentication-system"
+
+### Directory Layout
+
+```
+docs/plans/
+├── README.md                    ← auto-generated index of all plans
+├── <project-slug>/
+│   ├── spec.md                  ← human-readable specification
+│   ├── prd.json                 ← machine-readable PRD
+│   ├── CHANGELOG.md             ← change history (auto-appended)
+│   └── features/                ← M/L scale only (4+ user stories)
+│       └── <feature-slug>.md    ← per-feature detail
+```
+
+### Existing Spec Detection
+
+Before writing to `docs/plans/<slug>/`:
+1. Check if `docs/plans/<slug>/prd.json` exists
+2. If YES → this is an **UPDATE**. Overwrite files (git preserves history). CHANGELOG entry: "Updated"
+3. If NO → this is a **CREATE**. Create directory. CHANGELOG entry: "Created"
+4. If slug already exists for a DIFFERENT project → append `-2`, `-3` suffix
+
+### What Gets Stored Where
+
+| Content | `.ao/` (ephemeral) | `docs/plans/` (permanent) |
+|---------|-------------------|---------------------|
+| spec.md | ✅ | ✅ (identical copy) |
+| prd.json | ✅ | ✅ (identical copy) |
+| features/ | ❌ | ✅ (M/L only) |
+| CHANGELOG.md | ❌ | ✅ |
+| README.md index | ❌ | ✅ |
+
+Atlas/Athena read exclusively from `.ao/prd.json`. The `docs/plans/` copy is the permanent record
+that Atlas's execution-time mutations do NOT affect.
+
 ## Steps
 
 ### Phase 0 — TRIAGE (mode + scale detection)
@@ -334,6 +385,67 @@ Write the spec in two formats:
 }
 ```
 
+#### Persistent storage: docs/plans/\<slug\>/
+
+After writing to `.ao/`, persist to the git-tracked `docs/plans/` directory:
+
+1. **Derive slug** from `prd.json.projectName` using the Slug Derivation rules in Spec_Persistence.
+
+2. **Detect create vs update**:
+   ```
+   If docs/plans/<slug>/prd.json exists → action = "Updated"
+   Else → action = "Created", create docs/plans/<slug>/ directory
+   If docs/plans/ directory doesn't exist → create it
+   ```
+
+3. **Write spec.md**: Copy `.ao/spec.md` content to `docs/plans/<slug>/spec.md`.
+
+4. **Write prd.json**: Copy `.ao/prd.json` content to `docs/plans/<slug>/prd.json`.
+
+5. **Write features/ (M/L scale with 4+ user stories only)**:
+   ```
+   Group user stories by logical feature area (infer from story titles and context).
+   Each group becomes: docs/plans/<slug>/features/<feature-slug>.md
+
+   Feature file format:
+   # <Feature Name>
+
+   ## User Stories
+
+   ### <US-ID>: <title>
+   **As a** <persona>, **I want to** <action>, **so that** <benefit>
+
+   **Acceptance Criteria:**
+   - GIVEN <context> WHEN <action> THEN <result>
+
+   (repeat for each story in this feature group)
+   ```
+
+   S-scale specs do NOT get a features/ directory.
+
+6. **Append to CHANGELOG.md** (create if new):
+   ```markdown
+   ## <YYYY-MM-DD> — <Created|Updated>
+
+   - **Scale:** <S/M/L>
+   - **Mode:** Forward
+   - **Stories:** <count> user stories
+   - **Status:** <draft/reviewed/approved>
+   - **Summary:** <one-line problem statement>
+   ```
+
+7. **Regenerate docs/plans/README.md** by scanning all `docs/plans/*/prd.json` files:
+   ```markdown
+   # Specifications Index
+
+   Auto-generated index of all project specifications.
+
+   | Project | Scale | Mode | Stories | Status | Last Updated |
+   |---------|-------|------|---------|--------|-------------|
+   | [<projectName>](./<slug>/spec.md) | S/M/L | forward | <count> | <status> | <date> |
+   ```
+   Sort by last updated date, most recent first.
+
 ### Auto-Validation (Phase 4 gate)
 
 Before writing files, validate consistency:
@@ -395,7 +507,9 @@ Format a summary table:
 | US-002 | <title> |
 ...
 
-Spec saved to `.ao/spec.md` (human-readable) and `.ao/prd.json` (machine-readable).
+Spec saved to:
+- `docs/plans/<slug>/` (git-tracked permanent copy)
+- `.ao/` (working copy for Atlas/Athena)
 ```
 
 If scale is M or L, ask: "Ready to proceed to execution? Say `/atlas` or `/athena`, or ask questions first."
@@ -659,6 +773,35 @@ Also write `.ao/prd.json` for machine consumption by Atlas/Athena:
 This JSON is designed so Atlas/Athena can directly read improvement opportunities
 and convert them into executable user stories without human reformatting.
 
+#### Persistent storage: docs/plans/\<slug\>/ (Reverse)
+
+After writing to `.ao/`, persist to the git-tracked `docs/plans/` directory:
+
+1. **Derive slug** from `prd.json.projectName` using the Slug Derivation rules in Spec_Persistence.
+
+2. **Detect create vs update**: Same as forward mode.
+
+3. **Write spec.md**: Copy reverse spec content to `docs/plans/<slug>/spec.md`.
+
+4. **Write prd.json**: Copy reverse prd.json to `docs/plans/<slug>/prd.json`.
+
+5. **Write features/ (M/L scale only)**:
+   Same logic as forward mode, but group by RF-NNN features instead of US-NNN stories.
+   Feature file names derived from feature group titles.
+
+6. **Append to CHANGELOG.md** (create if new):
+   ```markdown
+   ## <YYYY-MM-DD> — <Created|Updated>
+
+   - **Scale:** <S/M/L>
+   - **Mode:** Reverse
+   - **Health Score:** <overall>/100
+   - **Features Found:** <count>
+   - **Summary:** <one-line product summary>
+   ```
+
+7. **Regenerate docs/plans/README.md**: Same as forward mode.
+
 ### Reverse Auto-Validation (Phase R4 gate)
 
 Before writing reverse output files, validate consistency:
@@ -697,7 +840,9 @@ Log all auto-corrections in spec footer.
 2. <opportunity>
 3. <opportunity>
 
-Spec saved to `.ao/spec.md` and `.ao/prd.json`.
+Spec saved to:
+- `docs/plans/<slug>/` (git-tracked permanent copy)
+- `.ao/` (working copy for Atlas/Athena)
 ```
 
 Ask: "Want to act on any of these improvements? Say `/atlas` or `/athena` to start, or pick specific items to plan."

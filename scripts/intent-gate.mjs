@@ -80,7 +80,7 @@ function buildAdvice(category, confidence) {
     'quick': 'Haiku-class model is sufficient for this task. Explore agent can handle it efficiently.',
     'writing': 'Writer agent recommended. Haiku-class model is well-suited for documentation tasks.',
     'artistry': 'Designer agent with Gemini team worker recommended for creative/generative tasks. Sonnet-class model.',
-    'planning': 'Consider /plan or planner agent for thorough planning. Opus-class model recommended.',
+    'planning': 'For product planning (new features, systems, specs): use /plan skill which invokes Hermes for structured spec generation. For implementation planning (how to refactor, approach a bug fix): EnterPlanMode is fine. Opus-class model recommended.',
     'unknown': 'No strong intent signal detected. Proceed with default model selection.',
   };
 

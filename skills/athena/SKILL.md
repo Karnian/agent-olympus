@@ -108,6 +108,74 @@ Broadcast the returned markdown brief to all workers via team inbox before Phase
 saveCheckpoint('athena', { phase: 1, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
 ```
 
+### Phase 0.5 — SPEC GATE (Hermes validation/creation)
+
+Before team planning, ensure a structured spec exists. Hermes acts as the quality gate between triage and execution planning.
+
+**Check for existing spec:**
+```
+Does .ao/prd.json exist AND is it non-empty?
+```
+
+#### Case A: .ao/prd.json exists (user ran /plan beforehand)
+
+Hermes validates the existing spec against the current task:
+```
+Task(subagent_type="agent-olympus:hermes", model="opus",
+  prompt="VALIDATE this existing specification against the task and team design.
+
+  Existing spec: <contents of .ao/prd.json>
+  Task: <user_request>
+  Team design: <metis_team_design>
+
+  Check:
+  1. Does the spec's problem statement match the actual task?
+  2. Are user stories complete with GIVEN/WHEN/THEN acceptance criteria?
+  3. Are there untestable words (robust, fast, user-friendly, seamless, efficient)?
+  4. Are scope boundaries clear (goals vs non-goals)?
+  5. Can stories be cleanly assigned to independent workers?
+
+  If spec is SUFFICIENT: respond with 'VERDICT: PASS' and a one-line summary.
+  If spec needs updates: respond with 'VERDICT: UPDATE' and the corrected spec
+    in the same JSON format, preserving existing fields that are still valid.
+  If spec is fundamentally mismatched: respond with 'VERDICT: RECREATE' and
+    produce a new spec from scratch.")
+```
+
+If VERDICT is UPDATE or RECREATE → overwrite `.ao/prd.json` and `.ao/spec.md` with Hermes output.
+
+#### Case B: .ao/prd.json does NOT exist (user skipped /plan)
+
+Hermes creates a spec from the team design:
+```
+Task(subagent_type="agent-olympus:hermes", model="opus",
+  prompt="Create a product specification for this task.
+
+  Task: <user_request>
+  Team design: <metis_team_design>
+  External context (if gathered): <external_context>
+
+  Produce a structured spec with:
+  1. Problem Statement — WHO has this problem, WHAT is the pain, WHY now
+  2. Target Users — specific personas
+  3. Goals — specific, measurable objectives
+  4. Non-Goals — explicitly out of scope
+  5. User Stories — each with ID (US-001), JTBD format, GIVEN/WHEN/THEN acceptance criteria
+  6. Success Metrics — measurable outcomes with target values
+  7. Constraints — from team design analysis
+  8. Risks & Unknowns — areas needing caution
+
+  IMPORTANT: Replace untestable words (robust, fast, user-friendly, seamless,
+  efficient, intuitive) with measurable alternatives.
+  Ensure stories have clear boundaries so they can be assigned to independent workers.")
+```
+
+Write Hermes output to `.ao/spec.md` and `.ao/prd.json`.
+
+#### After Spec Gate
+
+Proceed to Phase 1 with a guaranteed spec. Prometheus now receives structured requirements, not raw user intent.
+
 ### Phase 1 — PLAN
 
 **[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
@@ -116,6 +184,7 @@ Skill(skill="agent-olympus:consensus-plan",
   args="Run consensus planning for this task.
   Task: <user_request>
   Analysis: <metis_team_design>
+  Spec: <contents of .ao/prd.json>
   Wisdom: <formatWisdomForPrompt()>
   External context (if gathered): <external_context>")
 ```
@@ -129,6 +198,7 @@ Task(subagent_type="agent-olympus:prometheus", model="opus",
   - Define parallel vs sequential order
   - Set acceptance criteria per task
   - Define handoff protocol: when Worker A finishes X, SendMessage to Worker B
+  Spec: <contents of .ao/prd.json>
   Team design: <design>. Task: <user_request>
   External context (if gathered): <external_context>")
 ```
