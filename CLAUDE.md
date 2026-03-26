@@ -19,6 +19,7 @@ scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
 scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom, worker-status)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
+docs/plans/ → Finalized specifications (git-tracked, permanent)
 ```
 
 ## Key Conventions
@@ -47,12 +48,16 @@ hooks/      → Hook event registrations
 - Not every agent has a matching skill. executor, debugger, designer etc. are internal-only
 
 ### State Management
-- `.ao/prd.json` — PRD with user stories and acceptance criteria
+- `.ao/prd.json` — PRD with user stories and acceptance criteria (ephemeral working copy)
+- `.ao/spec.md` — human-readable spec (ephemeral working copy)
 - `.ao/wisdom.jsonl` — structured cross-iteration learnings in JSONL format (NEVER delete, survives /cancel)
 - `.ao/progress.txt` — legacy format, auto-migrated to wisdom.jsonl on first run
 - `.ao/state/checkpoint-{atlas|athena}.json` — session recovery checkpoints (auto-expire 24h)
 - `.ao/state/*.json` — transient state files (deleted on completion)
 - `.ao/teams/` — tmux worker inbox/outbox directories (Athena only)
+- `docs/plans/` — git-tracked permanent plan storage (survives sessions, shared with team)
+- `docs/plans/README.md` — auto-generated index of all plans
+- `docs/plans/<slug>/CHANGELOG.md` — per-plan change history
 
 ## How to Add a New Agent
 

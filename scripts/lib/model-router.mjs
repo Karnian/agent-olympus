@@ -135,7 +135,7 @@ function buildRoutingAdvice(category, entry, confidence) {
     'quick': 'Simple/quick task detected. Explore agent with Haiku-class model is efficient and cost-effective.',
     'writing': 'Documentation/writing task detected. Writer agent with Haiku-class model is well-suited.',
     'artistry': 'Creative/generative task detected. Designer agent with Gemini team worker for visual artistry.',
-    'planning': 'Planning/strategy task detected. Consider /metis-pipeline for structured planning with Opus-class model.',
+    'planning': 'Planning/strategy task detected. For product planning (new features, specs, PRD): use /plan skill (Hermes). For implementation planning (refactoring approach, bug fix strategy): EnterPlanMode is fine. Opus-class model recommended.',
     'unknown': 'Intent unclear. Proceeding with default Sonnet model and executor agent.',
   };
 
