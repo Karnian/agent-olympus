@@ -45,6 +45,10 @@ Phase 0: TRIAGE ──→ trivial? ──→ EXECUTE DIRECTLY (no sub-agents nee
 Phase 1: ANALYZE (metis agent)
     │
     ▼
+Phase 1.5: SPEC GATE (hermes agent)
+    │   ├── .ao/prd.json exists → validate spec
+    │   └── .ao/prd.json missing → create spec
+    ▼
 Phase 2: PLAN (prometheus agent) ←──┐
     │                                │ REJECTED
     ▼                                │
@@ -138,6 +142,80 @@ Skill(skill="agent-olympus:external-context",
 ```
 Inject the returned markdown brief as `<external_context>` into the Phase 2 prompt for prometheus.
 
+### Phase 1.5 — SPEC GATE (Hermes validation/creation)
+
+Before implementation planning, ensure a structured spec exists. Hermes acts as the quality gate between analysis and execution planning.
+
+**Check for existing spec:**
+```
+Does .ao/prd.json exist AND is it non-empty?
+```
+
+#### Case A: .ao/prd.json exists (user ran /plan beforehand)
+
+Hermes validates the existing spec against the current task:
+```
+Task(subagent_type="agent-olympus:hermes", model="opus",
+  prompt="VALIDATE this existing specification against the task and analysis.
+
+  Existing spec: <contents of .ao/prd.json>
+  Task: <user_request>
+  Analysis: <metis_analysis>
+
+  Check:
+  1. Does the spec's problem statement match the actual task?
+  2. Are user stories complete with GIVEN/WHEN/THEN acceptance criteria?
+  3. Are there untestable words (robust, fast, user-friendly, seamless, efficient)?
+  4. Are scope boundaries clear (goals vs non-goals)?
+  5. Do constraints and risks reflect what metis found in the codebase?
+
+  If spec is SUFFICIENT: respond with 'VERDICT: PASS' and a one-line summary.
+  If spec needs updates: respond with 'VERDICT: UPDATE' and the corrected spec
+    in the same JSON format, preserving existing fields that are still valid.
+  If spec is fundamentally mismatched: respond with 'VERDICT: RECREATE' and
+    produce a new spec from scratch.")
+```
+
+If VERDICT is UPDATE or RECREATE → overwrite `.ao/prd.json` and `.ao/spec.md` with Hermes output.
+
+#### Case B: .ao/prd.json does NOT exist (user skipped /plan)
+
+Hermes creates a spec from the analysis results:
+```
+Task(subagent_type="agent-olympus:hermes", model="opus",
+  prompt="Create a product specification for this task.
+
+  Task: <user_request>
+  Analysis: <metis_analysis>
+  Codebase context: <explore_results>
+  External context (if gathered): <external_context>
+
+  Scale assessment: <detected_scale from Phase 0>
+
+  Produce a structured spec with:
+  1. Problem Statement — WHO has this problem, WHAT is the pain, WHY now
+  2. Target Users — specific personas
+  3. Goals — specific, measurable objectives
+  4. Non-Goals — explicitly out of scope
+  5. User Stories — each with ID (US-001), JTBD format, GIVEN/WHEN/THEN acceptance criteria
+  6. Success Metrics — measurable outcomes with target values
+  7. Constraints — from codebase analysis
+  8. Risks & Unknowns — areas needing caution
+
+  IMPORTANT: Replace untestable words (robust, fast, user-friendly, seamless,
+  efficient, intuitive) with measurable alternatives.
+
+  For S-scale: concise, 1 page max. No open questions — use sensible defaults.
+  For M-scale: standard depth. Up to 2 open questions with recommended defaults.
+  For L-scale: comprehensive. Up to 5 open questions with defaults + impact analysis.")
+```
+
+Write Hermes output to `.ao/spec.md` and `.ao/prd.json`.
+
+#### After Spec Gate
+
+Proceed to Phase 2 with a guaranteed spec. Prometheus now receives structured requirements, not raw user intent.
+
 ### Phase 2 — PLAN + VALIDATE (skip for trivial)
 
 **[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
@@ -146,6 +224,7 @@ Skill(skill="agent-olympus:consensus-plan",
   args="Run consensus planning for this task.
   Task: <user_request>
   Analysis: <metis_analysis>
+  Spec: <contents of .ao/prd.json>
   Wisdom: <formatWisdomForPrompt()>
   External context (if gathered): <external_context>")
 ```
@@ -160,6 +239,7 @@ Task(subagent_type="agent-olympus:prometheus", model="opus",
   - Parallel groups (non-overlapping file scopes)
   - Concrete acceptance criteria
   - Codex assignments for algorithmic/refactoring work
+  Spec: <contents of .ao/prd.json>
   Analysis: <analysis>. Task: <user_request>
   External context (if gathered): <external_context>")
 ```
