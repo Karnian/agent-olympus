@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.7] - 2026-03-28
+
+### Added
+- **Test coverage expansion**: Unit tests for all previously untested lib modules
+  - `scripts/test/config-validator.test.mjs` — 24 tests for `validateRoutingConfig()` and `DEFAULT_ROUTING_CONFIG`
+  - `scripts/test/stdin.test.mjs` — 6 tests for `readStdin()` including child-process behavioral tests
+  - `scripts/test/worker-status.test.mjs` — 10 tests for `reportWorkerStatus`, `readTeamStatus`, `formatStatusMarkdown`, `clearTeamStatus`
+  - `scripts/test/worktree.test.mjs` — 14 tests for full worktree lifecycle (create, remove, list, merge, cleanup)
+- Total test suite: **182 tests across 13 files** (was 128 across 9)
+
+### Changed
+- Corrected skill count from 14 → 15 in `README.md`, `plugin.json`, `marketplace.json`, `CHANGELOG.md`
+
 ## [0.6.5] - 2026-03-27
 
 ### Added
