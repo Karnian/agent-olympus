@@ -1,4 +1,5 @@
 import { readStdin } from './lib/stdin.mjs';
+import { detectProvider } from './lib/provider-detect.mjs';
 import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
@@ -13,25 +14,6 @@ function readState() {
 function writeState(state) {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o600 });
-}
-
-function detectProvider(toolInput) {
-  const subagentType = toolInput?.subagent_type ?? '';
-  const model = (toolInput?.model ?? '').toLowerCase();
-
-  if (subagentType.includes('claude') || model.includes('claude') || model.includes('anthropic')) {
-    return 'claude';
-  }
-  if (subagentType.includes('codex') || model.includes('codex') || model.includes('openai') || model.includes('gpt')) {
-    return 'codex';
-  }
-  if (subagentType.includes('gemini') || model.includes('gemini') || model.includes('google')) {
-    return 'gemini';
-  }
-  if (subagentType) {
-    return 'claude';
-  }
-  return 'claude';
 }
 
 async function main() {
