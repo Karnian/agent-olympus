@@ -6,5 +6,9 @@
   "license": "MIT",
   "engines": {
     "node": ">=20.0.0"
+  },
+  "scripts": {
+    "test": "node --test scripts/test/**/*.test.mjs",
+    "check": "for f in scripts/*.mjs scripts/lib/*.mjs; do node --check \"$f\" && echo \"OK: $f\"; done"
   }
 }
