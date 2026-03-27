@@ -5,6 +5,7 @@
  */
 
 import { readStdin } from './lib/stdin.mjs';
+import { detectProvider } from './lib/provider-detect.mjs';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
@@ -41,26 +42,6 @@ function pruneStale(activeTasks) {
     if (!task.startedAt) return false;
     return now - new Date(task.startedAt).getTime() < STALE_TASK_MS;
   });
-}
-
-function detectProvider(toolInput) {
-  const subagentType = toolInput?.subagent_type ?? '';
-  const model = (toolInput?.model ?? '').toLowerCase();
-
-  if (subagentType.includes('claude') || model.includes('claude') || model.includes('anthropic')) {
-    return 'claude';
-  }
-  if (subagentType.includes('codex') || model.includes('codex') || model.includes('openai') || model.includes('gpt')) {
-    return 'codex';
-  }
-  if (subagentType.includes('gemini') || model.includes('gemini') || model.includes('google')) {
-    return 'gemini';
-  }
-  // Default: treat as claude if subagent_type contains 'agent-olympus' or similar
-  if (subagentType) {
-    return 'claude';
-  }
-  return 'claude';
 }
 
 function getLimits() {
