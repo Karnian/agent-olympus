@@ -27,7 +27,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 ## Key Conventions
 
 ### Naming
-- **Agents**: Greek mythology names (atlas, athena, metis, prometheus, momus, hephaestus)
+- **Agents**: Greek mythology names (atlas, athena, metis, prometheus, momus, hermes, hephaestus)
 - **Namespace**: `agent-olympus:` prefix for all subagent_type references
 - **State files**: `.ao/state/` directory with `ao-` prefix per hook
 

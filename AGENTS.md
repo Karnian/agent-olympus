@@ -1,7 +1,7 @@
 # Agent Olympus
 
 Standalone multi-model orchestrator plugin for Claude Code.
-Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 15 specialized agents, 13 skills, Claude + Codex multi-model execution, and tmux-based team infrastructure.
+Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 16 specialized agents, 15 skills, Claude + Codex multi-model execution, and tmux-based team infrastructure.
 
 ## Architecture
 
@@ -10,6 +10,7 @@ User Request
     │
     ├─ "해줘" / "do it" ──→ /atlas (sub-agent orchestrator)
     ├─ "팀으로 해" / "team" ──→ /athena (team orchestrator)
+    ├─ "기획" / "plan" ──→ /plan (forward/reverse PRD)
     ├─ "물어봐" ──→ /ask (quick Codex/Gemini query)
     └─ "명확하게" ──→ /deep-interview (requirements clarification)
          │
@@ -25,13 +26,14 @@ User Request
 
 ```
 agent-olympus/
-├── .claude-plugin/plugin.json    — Plugin manifest (v0.6.5)
-├── agents/                       — 15 agent personas (role definitions)
+├── .claude-plugin/plugin.json    — Plugin manifest (v0.6.7)
+├── agents/                       — 16 agent personas (role definitions)
 │   ├── atlas.md                  — Self-driving sub-agent orchestrator (Opus)
 │   ├── athena.md                 — Self-driving team orchestrator (Opus)
 │   ├── metis.md                  — Pre-planning analyst (Opus)
 │   ├── prometheus.md             — Strategic planner (Opus)
 │   ├── momus.md                  — Plan validator / critic (Opus)
+│   ├── hermes.md                 — Product planning specialist, forward & reverse PRD (Opus)
 │   ├── executor.md               — Implementation worker (Sonnet)
 │   ├── designer.md               — UI/UX specialist (Sonnet)
 │   ├── test-engineer.md          — Test strategy & TDD (Sonnet)
@@ -42,9 +44,10 @@ agent-olympus/
 │   ├── explore.md                — Fast codebase scanner (Haiku)
 │   ├── writer.md                 — Documentation writer (Haiku)
 │   └── hephaestus.md             — Codex deep worker (Sonnet)
-├── skills/                       — 13 user-facing skills (workflow recipes)
+├── skills/                       — 15 user-facing skills (workflow recipes)
 │   ├── atlas/SKILL.md            — /atlas: autonomous sub-agent pipeline
 │   ├── athena/SKILL.md           — /athena: autonomous team pipeline
+│   ├── plan/SKILL.md             — /plan: forward/reverse product planning
 │   ├── ask/SKILL.md              — /ask: quick Codex/Gemini query
 │   ├── deep-interview/SKILL.md   — /deep-interview: Socratic clarification
 │   ├── deepinit/SKILL.md         — /deepinit: codebase AGENTS.md generation
@@ -55,23 +58,31 @@ agent-olympus/
 │   ├── cancel/SKILL.md           — /cancel: graceful session shutdown
 │   ├── deep-dive/SKILL.md        — /deep-dive: exhaustive single-topic investigation
 │   ├── consensus-plan/SKILL.md   — /consensus-plan: multi-agent planning consensus
-│   └── external-context/SKILL.md — /external-context: inject external docs/specs into context
-├── scripts/                      — Hook scripts (Node.js, zero dependencies)
+│   ├── external-context/SKILL.md — /external-context: inject external docs/specs into context
+│   └── verify-coverage/SKILL.md  — /verify-coverage: detect test coverage gaps for changed files
+├── scripts/                      — Hook scripts (Node.js ESM, zero dependencies)
 │   ├── run.cjs                   — Cross-platform hook runner with version fallback
 │   ├── intent-gate.mjs           — UserPromptSubmit: classify intent (EN/KO/JA/ZH)
 │   ├── model-router.mjs          — PreToolUse: inject model routing advice
 │   ├── concurrency-gate.mjs      — PreToolUse: enforce parallel task limits
 │   ├── concurrency-release.mjs   — PostToolUse: release task from concurrency pool
+│   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
+│   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
+│   ├── test/                     — node:test unit tests (182 tests, 13 files)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (7 categories, multilingual)
 │       ├── model-router.mjs      — Routing logic with JSONC config merge
-│       ├── tmux-session.mjs      — Tmux session lifecycle management
+│       ├── tmux-session.mjs      — Tmux session lifecycle + sanitizeForShellArg()
 │       ├── inbox-outbox.mjs      — File-based message queue for Claude↔Codex
 │       ├── worker-spawn.mjs      — Team worker lifecycle (spawn/monitor/collect/shutdown)
 │       ├── checkpoint.mjs        — Session checkpoint save/restore (24h expiry)
-│       ├── wisdom.mjs            — Structured learning store (JSONL read/append/migrate)
-│       └── worker-status.mjs     — Real-time worker status dashboard (inline markdown mode)
+│       ├── wisdom.mjs            — Structured learning store (JSONL, intent-aware query)
+│       ├── worker-status.mjs     — Real-time worker status dashboard (inline markdown)
+│       ├── worktree.mjs          — Git worktree isolation for Athena parallel workers
+│       ├── fs-atomic.mjs         — Atomic write helpers (tmp+rename pattern)
+│       ├── provider-detect.mjs   — Shared detectProvider() for concurrency hooks
+│       └── config-validator.mjs  — Schema validation for model-routing.jsonc
 ├── config/
 │   └── model-routing.jsonc       — Intent→model routing configuration
 └── hooks/
@@ -86,12 +97,13 @@ agent-olympus/
 | **atlas** | Hub-and-spoke: one brain delegates to many sub-agents; supports session recovery via checkpoint |
 | **athena** | Peer-to-peer: many brains collaborate via SendMessage + tmux; supports session recovery via checkpoint |
 
-### Analysis & Planning (Opus)
+### Planning & Specification (Opus)
 | Agent | Role |
 |-------|------|
 | **metis** | Deep analysis: scope, risks, unknowns, dependencies |
 | **prometheus** | Strategic planning: work items, parallel groups, acceptance criteria |
 | **momus** | Plan validation: 4-criteria gate (Clarity/Verification/Context/BigPicture ≥70) |
+| **hermes** | Product planning specialist: forward (idea→spec) and reverse (code→spec) PRD generation |
 
 ### Execution (Sonnet)
 | Agent | Role |
@@ -121,7 +133,8 @@ agent-olympus/
 | Skill | Trigger | What It Does |
 |-------|---------|--------------|
 | `/atlas` | "해줘", "do it" | Full autonomous pipeline: triage → analyze → plan → execute → verify → review → commit |
-| `/athena` | "팀으로 해", "team" | Same pipeline but with native Claude team + Codex tmux workers |
+| `/athena` | "팀으로 해", "team" | Same pipeline but with native Claude team (each in git worktree) + Codex tmux workers |
+| `/plan` | "기획", "spec", "역기획" | Adaptive product planner — forward (idea→spec) and reverse (code→spec) |
 
 ### Pre-Processing
 | Skill | Trigger | What It Does |
@@ -141,7 +154,7 @@ agent-olympus/
 |-------|---------|--------------|
 | `/slop-cleaner` | "정리", "deslop" | Regression-safe AI bloat removal in 4 passes |
 | `/git-master` | "커밋", "commit" | Style-detected atomic commits (3+ files → 2+ commits) |
-| `/cancel` | "취소", "stop" | Graceful shutdown: kill tmux, clean state, preserve progress |
+| `/cancel` | "취소", "stop" | Graceful shutdown: kill tmux, clean state, clean worktrees, preserve progress |
 
 ### Research & Planning
 | Skill | Trigger | What It Does |
@@ -150,10 +163,16 @@ agent-olympus/
 | `/consensus-plan` | "합의", "consensus" | Multi-agent planning: Prometheus + Momus reach consensus before execution |
 | `/external-context` | "외부문서", "docs" | Fetch and inject external documentation or specs into the active context |
 
+### Quality Assurance
+| Skill | Trigger | What It Does |
+|-------|---------|--------------|
+| `/verify-coverage` | "coverage", "커버리지" | Detect test coverage gaps for recently changed files; generate missing tests |
+
 ## Hooks
 
 | Event | Hook | Purpose |
 |-------|------|---------|
+| SessionStart | session-start | Inject prior wisdom + interrupted checkpoint context at session start |
 | UserPromptSubmit | intent-gate | Classify user intent into 7 categories (multilingual) |
 | PreToolUse:Task | concurrency-gate | Enforce parallel task limits |
 | PreToolUse:Task | model-router | Inject model routing advice based on intent |
@@ -161,6 +180,7 @@ agent-olympus/
 | PreToolUse:Agent | model-router | Same routing for Agent tool |
 | PostToolUse:Task | concurrency-release | Release task from concurrency pool |
 | PostToolUse:Agent | concurrency-release | Same release for Agent tool |
+| Stop | stop-hook | Auto-commit uncommitted work as WIP commit on session end |
 
 ## State Files
 
@@ -175,14 +195,15 @@ agent-olympus/
 | `.ao/state/ao-intent.json` | Last classified intent | Updated per prompt |
 | `.ao/state/ao-concurrency.json` | Active task tracking | Updated per task spawn/complete |
 | `.ao/teams/<slug>/` | Inbox/outbox for Codex workers | Created by Athena, cleaned on completion |
+| `.ao/worktrees/<slug>/<worker>/` | Isolated git worktrees for Athena workers | Created per worker, merged + cleaned on completion |
 
 ## Multi-Model Support
 
 | Model | Agent Tier | When Used |
 |-------|-----------|-----------|
 | Claude Haiku | explore, writer | Fast scans, documentation |
-| Claude Sonnet | executor, designer, debugger, reviewers | Standard implementation and review |
-| Claude Opus | atlas, athena, metis, prometheus, momus, architect | Orchestration, analysis, planning |
+| Claude Sonnet | executor, designer, debugger, reviewers, hephaestus | Standard implementation and review |
+| Claude Opus | atlas, athena, metis, prometheus, momus, hermes, architect | Orchestration, analysis, planning |
 | OpenAI Codex | hephaestus (via tmux) | Algorithms, large refactoring, deep exploration |
 
 ## Key Design Decisions
@@ -193,3 +214,7 @@ agent-olympus/
 4. **Codex via tmux** — No omc dependency. Codex is spawned directly as tmux sessions, monitored via `capture-pane`, and cleaned up on completion.
 5. **External skill awareness** — Atlas/Athena can invoke any installed plugin skill (anthropic-skills, ui-ux-pro-max, etc.) when it fits better than a generic executor.
 6. **Zero runtime dependencies** — All scripts use Node.js built-ins only. No npm packages.
+7. **Athena worktree isolation** — Each parallel Athena worker runs in a dedicated git worktree (`.ao/worktrees/<slug>/<worker>/`), preventing silent file overwrites and merge conflicts between concurrent workers.
+8. **Fail-safe hooks** — Every hook catches all errors and outputs `{}` to stdout, so Claude Code is never blocked by a hook failure.
+9. **Atomic state writes** — All state file mutations use tmp+rename via `lib/fs-atomic.mjs`, preventing data corruption from concurrent writes or crashes mid-write.
+10. **tmux injection prevention** — `sanitizeForShellArg()` in `lib/tmux-session.mjs` escapes shell special characters before any `send-keys` call.
