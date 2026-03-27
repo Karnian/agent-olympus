@@ -4,7 +4,7 @@
 
 Agent Olympus is a standalone Claude Code plugin that transforms how you build software. Give it a task, and it orchestrates specialized AI agents to complete it autonomously — analyzing requirements, planning execution, implementing changes, verifying results, and fixing issues until everything passes.
 
-Two orchestrators, 15 specialized agents, 13 workflow skills. Zero npm dependencies.
+Two orchestrators, 16 specialized agents, 14 workflow skills. Zero npm dependencies.
 
 ## What It Does
 
@@ -20,14 +20,19 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 ## Features
 
 - **Two orchestrators**: Atlas (hub-and-spoke) and Athena (peer-to-peer team)
-- **15 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Executor, Designer (UI/UX), Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Atlas, Athena
-- **13 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context
+- **16 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Executor, Designer (UI/UX), Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Atlas, Athena, and more
+- **14 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
-- **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs
+- **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs; intent-aware query expansion
 - **Zero npm dependencies**: Node.js built-ins only
 - **Multi-model support**: Claude (Opus/Sonnet/Haiku) + Codex/Gemini via tmux
 - **Multilingual intent detection**: English, Korean, Japanese, Chinese aliases for all skills
 - **Worker Status Dashboard**: Real-time inline markdown display of all active worker states during Athena team runs
+- **Athena worktree isolation**: Each parallel worker runs in an isolated git worktree, preventing silent file overwrites between concurrent workers
+- **SessionStart hook**: Automatically injects prior wisdom and interrupted checkpoint context at session start
+- **Stop hook WIP commit**: Auto-saves uncommitted work as a WIP commit on session end
+- **Atomic writes**: All state files use tmp+rename pattern for crash-safe writes
+- **128 unit tests**: Comprehensive test suite using `node:test` across 9 test files
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -123,6 +128,7 @@ Reply `resume` to pick up where you left off.
 - **`/deep-dive`** — Exhaustive single-topic investigation with multi-angle synthesis
 - **`/consensus-plan`** — Multi-agent planning consensus (Prometheus + Momus) before execution
 - **`/external-context`** — Fetch and inject external documentation or specs into the active context
+- **`/verify-coverage`** — Detect test coverage gaps for recently changed files and generate missing tests
 
 ## Orchestrators
 
@@ -231,7 +237,7 @@ User Request
 | **code-reviewer** | Sonnet | Code quality reviewer (read-only) — standards, patterns, maintainability |
 | **writer** | Haiku | Documentation specialist — clear, accurate technical docs and code comments |
 
-## Skills (13 Total)
+## Skills (14 Total)
 
 | Skill | Level | Aliases | Use Case |
 |-------|-------|---------|----------|
@@ -248,6 +254,7 @@ User Request
 | **deep-dive** | 3 | `deep-dive`, `깊게파봐`, `exhaustive` | Exhaustive single-topic investigation with synthesis |
 | **consensus-plan** | 4 | `consensus-plan`, `합의`, `consensus` | Multi-agent planning consensus before execution |
 | **external-context** | 2 | `external-context`, `외부문서`, `docs`, `inject-docs` | Fetch and inject external docs/specs into context |
+| **verify-coverage** | 3 | `verify-coverage`, `coverage`, `커버리지`, `test-gaps` | Detect test coverage gaps for recently changed files |
 
 ## Architecture
 
@@ -447,7 +454,15 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-No formal test framework is configured yet. To verify the plugin:
+A `node:test` based test suite (128 tests across 9 files) covers the core hook libraries. To run:
+
+```bash
+node --test 'scripts/test/**/*.test.mjs'
+# or
+npm test
+```
+
+Additional integration verification:
 
 1. Syntax check all scripts (see above)
 2. Run a trivial `/atlas` task in Claude Code
@@ -471,6 +486,7 @@ This project was inspired by and references ideas from:
 
 - [Oh My Claude Code](https://github.com/Yeachan-Heo/oh-my-claudecode) — Multi-agent orchestration plugin for Claude Code
 - [Oh My OpenAgent](https://github.com/code-yeongyu/oh-my-openagent) — Batteries-included agent harness with multi-model orchestration
+- [Kimoring AI Skills](https://github.com/codefactory-co/kimoring-ai-skills) — SessionStart/Stop hook patterns, coverage gap detection concept
 
 ## License
 
