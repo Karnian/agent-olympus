@@ -1,7 +1,7 @@
 import { readFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, rmdirSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
-import { atomicWriteFileSync } from './fs-atomic.mjs';
+import { atomicWriteFileSync, atomicMoveSync } from './fs-atomic.mjs';
 
 const TEAMS_DIR = '.ao/teams';
 
@@ -50,15 +50,14 @@ export function readInbox(teamName, workerName, opts = {}) {
   // Auto-cleanup if requested
   if (opts.consume) {
     const processedDir = join(teamDir(teamName, workerName), 'processed');
-    ensureDir(processedDir);
+    // ensureDir not needed here — atomicMoveSync creates the directory if absent
     for (const msg of messages) {
       try {
-        // Move to processed
-        atomicWriteFileSync(
-          join(processedDir, msg._file),
-          readFileSync(join(dir, msg._file), 'utf-8')
+        // Atomic rename: crash between read and move cannot cause double-processing
+        atomicMoveSync(
+          join(dir, msg._file),
+          join(processedDir, msg._file)
         );
-        unlinkSync(join(dir, msg._file));
       } catch {}
     }
   }

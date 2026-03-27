@@ -10,6 +10,23 @@ import { dirname, join } from 'path';
 import { randomUUID } from 'crypto';
 
 /**
+ * Atomically move a file from srcPath to destPath using rename (sync).
+ * rename(2) is atomic on the same filesystem, so this is safe for
+ * "mark-as-processed" patterns where a crash between read and delete
+ * would otherwise cause duplicate processing.
+ *
+ * Creates destPath's parent directory if it does not exist.
+ *
+ * @param {string} srcPath  - Source file path
+ * @param {string} destPath - Destination file path
+ */
+export function atomicMoveSync(srcPath, destPath) {
+  const destDir = dirname(destPath);
+  if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true, mode: 0o700 });
+  renameSync(srcPath, destPath);
+}
+
+/**
  * Atomically write content to filePath using a temp file + rename (sync).
  * Safe for use inside hooks where async is not available or desirable.
  *
