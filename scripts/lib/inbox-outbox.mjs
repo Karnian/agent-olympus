@@ -1,6 +1,7 @@
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, rmdirSync } from 'fs';
+import { readFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, rmdirSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
+import { atomicWriteFileSync } from './fs-atomic.mjs';
 
 const TEAMS_DIR = '.ao/teams';
 
@@ -25,9 +26,7 @@ export function sendMessage(teamName, fromWorker, toWorker, body) {
   };
 
   const filename = `${Date.now()}-${msg.id.slice(0, 8)}.json`;
-  writeFileSync(join(dir, filename), JSON.stringify(msg, null, 2), {
-    encoding: 'utf-8', mode: 0o600
-  });
+  atomicWriteFileSync(join(dir, filename), JSON.stringify(msg, null, 2));
 
   return msg.id;
 }
@@ -55,10 +54,9 @@ export function readInbox(teamName, workerName, opts = {}) {
     for (const msg of messages) {
       try {
         // Move to processed
-        writeFileSync(
+        atomicWriteFileSync(
           join(processedDir, msg._file),
-          readFileSync(join(dir, msg._file)),
-          { mode: 0o600 }
+          readFileSync(join(dir, msg._file), 'utf-8')
         );
         unlinkSync(join(dir, msg._file));
       } catch {}
@@ -80,9 +78,7 @@ export function writeOutbox(teamName, workerName, body) {
   };
 
   const filename = `${Date.now()}-${msg.id.slice(0, 8)}.json`;
-  writeFileSync(join(dir, filename), JSON.stringify(msg, null, 2), {
-    encoding: 'utf-8', mode: 0o600
-  });
+  atomicWriteFileSync(join(dir, filename), JSON.stringify(msg, null, 2));
 
   return msg.id;
 }

@@ -13,6 +13,7 @@ import fs from 'fs';
 import path from 'path';
 import { readStdin } from './lib/stdin.mjs';
 import { classifyIntent } from './lib/intent-patterns.mjs';
+import { atomicWriteFileSync } from './lib/fs-atomic.mjs';
 
 const STATE_DIR = '.ao/state';
 const INTENT_FILE = 'ao-intent.json';
@@ -52,13 +53,11 @@ function extractPrompt(data) {
  */
 function saveIntentState(directory, intentResult) {
   try {
-    const stateDir = path.join(directory, STATE_DIR);
-    fs.mkdirSync(stateDir, { recursive: true });
-    const dest = path.join(stateDir, INTENT_FILE);
-    fs.writeFileSync(dest, JSON.stringify({
+    const dest = path.join(directory, STATE_DIR, INTENT_FILE);
+    atomicWriteFileSync(dest, JSON.stringify({
       ...intentResult,
       savedAt: new Date().toISOString(),
-    }, null, 2), { mode: 0o600 });
+    }, null, 2));
   } catch {
     // Non-fatal: downstream hooks will handle missing state gracefully
   }

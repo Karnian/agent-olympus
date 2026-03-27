@@ -6,9 +6,10 @@
 
 import { readStdin } from './lib/stdin.mjs';
 import { detectProvider } from './lib/provider-detect.mjs';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
+import { atomicWriteFileSync } from './lib/fs-atomic.mjs';
 
 const STATE_DIR = join(process.cwd(), '.ao', 'state');
 const STATE_FILE = join(STATE_DIR, 'ao-concurrency.json');
@@ -33,7 +34,7 @@ function readState() {
 
 function writeState(state) {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-  writeFileSync(STATE_FILE, JSON.stringify(state, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  atomicWriteFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
 function pruneStale(activeTasks) {
