@@ -21,7 +21,7 @@
 - `hooks/hooks.json` — SessionStart and Stop events registered
 - `skills/athena/SKILL.md` — worktree isolation added to Phase 2, Phase 4, and COMPLETION
 - `skills/cancel/SKILL.md` — worktree cleanup step added
-- `.claude-plugin/marketplace.json` — updated to 16 agents, 14 skills
+- `.claude-plugin/marketplace.json` — updated to 16 agents, 15 skills
 
 ### Inspired By
 - [Kimoring AI Skills](https://github.com/codefactory-co/kimoring-ai-skills) — SessionStart/Stop hook patterns, coverage gap detection concept

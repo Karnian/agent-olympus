@@ -4,7 +4,7 @@
 
 Agent Olympus is a standalone Claude Code plugin that transforms how you build software. Give it a task, and it orchestrates specialized AI agents to complete it autonomously — analyzing requirements, planning execution, implementing changes, verifying results, and fixing issues until everything passes.
 
-Two orchestrators, 16 specialized agents, 14 workflow skills. Zero npm dependencies.
+Two orchestrators, 16 specialized agents, 15 workflow skills. Zero npm dependencies.
 
 ## What It Does
 
@@ -21,7 +21,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 
 - **Two orchestrators**: Atlas (hub-and-spoke) and Athena (peer-to-peer team)
 - **16 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Executor, Designer (UI/UX), Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Atlas, Athena, and more
-- **14 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage
+- **15 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
 - **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs; intent-aware query expansion
 - **Zero npm dependencies**: Node.js built-ins only
