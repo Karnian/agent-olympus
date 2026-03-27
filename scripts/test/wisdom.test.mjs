@@ -125,10 +125,10 @@ test('queryWisdom: returns entries in most-recent-first order', async () => {
   try {
     const { addWisdom, queryWisdom } = await importWisdomIn(tmpDir);
 
-    await addWisdom({ category: 'general', lesson: 'First lesson added to the wisdom store' });
+    await addWisdom({ category: 'general', lesson: 'Validate all external inputs at the service boundary before processing' });
     // Small delay to ensure different timestamps
     await new Promise(r => setTimeout(r, 10));
-    await addWisdom({ category: 'general', lesson: 'Second lesson added to the wisdom store' });
+    await addWisdom({ category: 'general', lesson: 'Second ordering check: prefer immutable data structures for shared state' });
 
     const results = await queryWisdom('general');
     assert.equal(results.length, 2);
@@ -294,6 +294,217 @@ test('queryWisdom: limit parameter caps the number of results', async () => {
 
     const limited = await queryWisdom('performance', 2);
     assert.equal(limited.length, 2, 'limit of 2 should return only 2 entries');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test: addWisdom stores optional intent field
+// ---------------------------------------------------------------------------
+
+test('addWisdom: optional intent field is persisted', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { addWisdom, queryWisdom } = await importWisdomIn(tmpDir);
+
+    await addWisdom({
+      category: 'architecture',
+      lesson: 'Prefer event-driven design for loosely coupled services',
+      confidence: 'high',
+      intent: 'deep',
+    });
+
+    const results = await queryWisdom('architecture');
+    assert.equal(results.length, 1);
+    assert.equal(results[0].intent, 'deep', 'intent field should be persisted');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test: addWisdom without intent does not store intent field
+// ---------------------------------------------------------------------------
+
+test('addWisdom: intent field absent when not provided', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { addWisdom, queryWisdom } = await importWisdomIn(tmpDir);
+
+    await addWisdom({ category: 'general', lesson: 'Keep modules small and focused on a single responsibility' });
+
+    const results = await queryWisdom('general');
+    assert.equal(results.length, 1);
+    assert.ok(!('intent' in results[0]), 'intent field should be absent when not provided');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test: queryWisdom options object — filter by intent
+// ---------------------------------------------------------------------------
+
+test('queryWisdom: options object filters by intent', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { addWisdom, queryWisdom } = await importWisdomIn(tmpDir);
+
+    await addWisdom({ category: 'architecture', lesson: 'Use CQRS to separate read and write models in complex domains', intent: 'deep' });
+    await addWisdom({ category: 'general', lesson: 'Prefer inline documentation for critical business logic', intent: 'writing' });
+    await addWisdom({ category: 'pattern', lesson: 'Apply adapter pattern to isolate third-party library boundaries' });
+
+    const deepResults = await queryWisdom({ intent: 'deep' });
+    assert.equal(deepResults.length, 1, 'expected 1 entry with intent=deep');
+    assert.equal(deepResults[0].intent, 'deep');
+
+    const writingResults = await queryWisdom({ intent: 'writing' });
+    assert.equal(writingResults.length, 1, 'expected 1 entry with intent=writing');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test: queryWisdom options object — minConfidence filter
+// ---------------------------------------------------------------------------
+
+test('queryWisdom: minConfidence=high returns only high-confidence entries', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { addWisdom, queryWisdom } = await importWisdomIn(tmpDir);
+
+    await addWisdom({ category: 'build', lesson: 'Pin all transitive dependencies for deterministic builds', confidence: 'high' });
+    await addWisdom({ category: 'build', lesson: 'Consider lock file auditing as part of the release checklist', confidence: 'medium' });
+    await addWisdom({ category: 'build', lesson: 'Investigate whether a build cache would speed up CI further', confidence: 'low' });
+
+    const highOnly = await queryWisdom({ minConfidence: 'high' });
+    assert.equal(highOnly.length, 1, 'expected only 1 high-confidence entry');
+    assert.equal(highOnly[0].confidence, 'high');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('queryWisdom: minConfidence=medium returns medium and high entries', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { addWisdom, queryWisdom } = await importWisdomIn(tmpDir);
+
+    await addWisdom({ category: 'test', lesson: 'Always isolate unit tests from the file system using temp directories', confidence: 'high' });
+    await addWisdom({ category: 'test', lesson: 'Integration tests should be tagged so they can be skipped in fast mode', confidence: 'medium' });
+    await addWisdom({ category: 'test', lesson: 'Explore whether snapshot testing would reduce assertion verbosity', confidence: 'low' });
+
+    const mediumAndAbove = await queryWisdom({ minConfidence: 'medium' });
+    assert.equal(mediumAndAbove.length, 2, 'expected 2 entries with confidence medium or above');
+    for (const entry of mediumAndAbove) {
+      assert.ok(
+        entry.confidence === 'medium' || entry.confidence === 'high',
+        `unexpected confidence: ${entry.confidence}`,
+      );
+    }
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('queryWisdom: minConfidence=low returns all entries', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { addWisdom, queryWisdom } = await importWisdomIn(tmpDir);
+
+    await addWisdom({ category: 'debug', lesson: 'Add request correlation IDs to all outbound service calls', confidence: 'high' });
+    await addWisdom({ category: 'debug', lesson: 'Centralise structured logging configuration in a single module', confidence: 'medium' });
+    await addWisdom({ category: 'debug', lesson: 'Experiment with distributed tracing for latency analysis', confidence: 'low' });
+
+    const all = await queryWisdom({ minConfidence: 'low' });
+    assert.equal(all.length, 3, 'expected all 3 entries with minConfidence=low');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test: queryWisdom options object — combined category + minConfidence
+// ---------------------------------------------------------------------------
+
+test('queryWisdom: options object combines category and minConfidence filters', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { addWisdom, queryWisdom } = await importWisdomIn(tmpDir);
+
+    await addWisdom({ category: 'pattern', lesson: 'Use the repository pattern to abstract data access from business logic', confidence: 'high' });
+    await addWisdom({ category: 'pattern', lesson: 'Factory functions improve testability compared to direct constructors', confidence: 'low' });
+    await addWisdom({ category: 'general', lesson: 'Keep dependencies minimal to reduce supply-chain attack surface', confidence: 'high' });
+
+    const results = await queryWisdom({ category: 'pattern', minConfidence: 'high' });
+    assert.equal(results.length, 1, 'expected 1 pattern entry with high confidence');
+    assert.equal(results[0].category, 'pattern');
+    assert.equal(results[0].confidence, 'high');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test: queryWisdom options object — limit field inside options
+// ---------------------------------------------------------------------------
+
+test('queryWisdom: options object limit field caps results', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { addWisdom, queryWisdom } = await importWisdomIn(tmpDir);
+
+    const lessons = [
+      'Automate dependency updates with Dependabot or Renovate for security patches',
+      'Use semantic versioning strictly to signal breaking changes to consumers',
+      'Publish a changelog with every release to aid downstream upgrade decisions',
+    ];
+    for (const lesson of lessons) {
+      await addWisdom({ category: 'general', lesson });
+      await new Promise(r => setTimeout(r, 5));
+    }
+
+    const limited = await queryWisdom({ limit: 2 });
+    assert.equal(limited.length, 2, 'options.limit should cap the result to 2');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test: queryWisdom options object — filePattern filter
+// ---------------------------------------------------------------------------
+
+test('queryWisdom: options object filters by filePattern substring', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { addWisdom, queryWisdom } = await importWisdomIn(tmpDir);
+
+    await addWisdom({
+      category: 'build',
+      lesson: 'Always run linting as a pre-commit hook to catch issues early',
+      filePatterns: ['scripts/*.mjs', '.eslintrc.json'],
+    });
+    await addWisdom({
+      category: 'test',
+      lesson: 'Use isolated temp dirs for each test to prevent cross-test pollution',
+      filePatterns: ['scripts/test/**/*.test.mjs'],
+    });
+    await addWisdom({
+      category: 'general',
+      lesson: 'Document module boundaries clearly in the project CLAUDE.md file',
+    });
+
+    const scriptResults = await queryWisdom({ filePattern: 'scripts/' });
+    assert.equal(scriptResults.length, 2, 'expected 2 entries with filePattern matching "scripts/"');
+
+    const testResults = await queryWisdom({ filePattern: '.test.mjs' });
+    assert.equal(testResults.length, 1, 'expected 1 entry with filePattern matching ".test.mjs"');
+
+    const noResults = await queryWisdom({ filePattern: 'nonexistent/' });
+    assert.equal(noResults.length, 0, 'expected 0 entries for non-matching filePattern');
   } finally {
     await removeTmpDir(tmpDir);
   }
