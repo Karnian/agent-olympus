@@ -1,5 +1,7 @@
 # Agent Olympus
 
+**Language / 언어:** [English](README.md) | [한국어](README.ko.md)
+
 > Self-driving AI orchestrator plugin for Claude Code — zero dependencies, maximum autonomy.
 
 Agent Olympus is a standalone Claude Code plugin that transforms how you build software. Give it a task, and it orchestrates specialized AI agents to complete it autonomously — analyzing requirements, planning execution, implementing changes, verifying results, and fixing issues until everything passes.
@@ -32,7 +34,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **SessionStart hook**: Automatically injects prior wisdom and interrupted checkpoint context at session start
 - **Stop hook WIP commit**: Auto-saves uncommitted work as a WIP commit on session end
 - **Atomic writes**: All state files use tmp+rename pattern for crash-safe writes
-- **128 unit tests**: Comprehensive test suite using `node:test` across 9 test files
+- **182 unit tests**: Comprehensive test suite using `node:test` across 13 test files
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -217,7 +219,7 @@ User Request
 | Best for | Independent tasks | Interdependent tasks |
 | Overhead | Lower | Higher but more collaborative |
 
-## Agents (15 Total)
+## Agents (16 Total)
 
 | Agent | Model | Role |
 |-------|-------|------|
@@ -226,6 +228,7 @@ User Request
 | **metis** | Opus | Deep analysis — affected files, hidden requirements, risks, unknowns, recommendations |
 | **prometheus** | Opus | Strategic planner — work breakdown, parallelization, acceptance criteria, file ownership |
 | **momus** | Opus | Plan validator — catches blocking issues before execution begins (clarity, verification, context) |
+| **hermes** | Opus | Product planning specialist — transforms vague ideas into executable specs (forward & reverse PRD) |
 | **explore** | Haiku | Fast codebase scanner — architecture, file structure, tech stack, test framework |
 | **executor** | Sonnet/Opus | Implementation specialist — handles standard coding tasks, focused execution |
 | **designer** | Sonnet | UI/UX specialist — builds accessible, responsive, beautiful interfaces |
@@ -237,12 +240,13 @@ User Request
 | **code-reviewer** | Sonnet | Code quality reviewer (read-only) — standards, patterns, maintainability |
 | **writer** | Haiku | Documentation specialist — clear, accurate technical docs and code comments |
 
-## Skills (14 Total)
+## Skills (15 Total)
 
 | Skill | Level | Aliases | Use Case |
 |-------|-------|---------|----------|
 | **atlas** | 5 | `atlas`, `아틀라스`, `do-it`, `해줘`, `just-do-it` | Autonomous hub-and-spoke orchestration |
 | **athena** | 5 | `athena`, `아테나`, `team-do-it`, `팀으로해`, `collaborate` | Autonomous peer-to-peer team orchestration |
+| **plan** | 4 | `plan`, `계획`, `spec`, `기획`, `prd`, `역기획` | Adaptive product planner — forward (idea→spec) and reverse (code→spec) |
 | **ask** | 2 | `ask`, `물어봐`, `codex`, `gemini`, `quick-ask` | Quick single-shot query to Codex/Gemini |
 | **deep-interview** | 4 | `deep-interview`, `인터뷰`, `clarify`, `명확하게` | Socratic requirements clarification |
 | **research** | 3 | `research`, `조사`, `외부정보`, `lookup` | Parallel web research for external knowledge |

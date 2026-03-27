@@ -1,398 +1,509 @@
 # Agent Olympus
 
+**Language / 언어:** [English](README.md) | [한국어](README.ko.md)
+
 > Claude Code용 자율 주행 AI 오케스트레이터 플러그인 — 의존성 제로, 최대 자율성.
 
-## Agent Olympus란?
+Agent Olympus는 Claude Code를 위한 독립형 플러그인으로, 소프트웨어 개발 전 과정을 자동화합니다. 작업을 요청하면 전문화된 AI 에이전트들이 요구사항 분석부터 구현, 검증, 코드 리뷰, 최종 커밋까지 자율적으로 처리합니다. 빌드가 성공하고 테스트가 통과하고 모든 검토가 승인될 때까지 자동으로 반복합니다.
 
-Agent Olympus는 Claude Code를 위한 독립형 플러그인으로, 두 가지 자율 주행 AI 오케스트레이터를 제공합니다. 이 플러그인을 통해 복잡한 개발 작업을 15개의 전문화된 에이전트, 13개의 워크플로우 스킬, Claude + Codex 멀티 모델 실행, tmux 기반 팀 인프라를 활용하여 완전히 자동화된 방식으로 처리할 수 있습니다.
+2개의 오케스트레이터, 16개의 전문 에이전트, 15개의 워크플로우 스킬. npm 의존성 제로.
 
-사용자가 작업을 요청하면 Atlas 또는 Athena가 자동으로 선택되어, 요구사항 분석부터 구현, 검증, 코드 리뷰, 최종 커밋까지 전 과정을 자율적으로 진행합니다. 빌드가 성공하고, 테스트가 통과하고, 모든 검토가 승인될 때까지 자동으로 반복 실행됩니다. npm 패키지 의존성이 전혀 없으므로 설치와 관리가 간단합니다.
+## 무엇을 하는가
 
-이 플러그인은 소프트웨어 개발 전 과정을 자동화하는 것을 목표로 설계되었으며, 에이전트들이 협력하여 고품질의 결과물을 만들어낼 수 있도록 구축되었습니다.
+Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시하는 대신, 목표만 설명하면 오케스트레이터가 모든 복잡성을 처리합니다. 계획 수립, 전문 에이전트에게 작업 분배, 결과 통합, 실패 처리, 모든 기준이 충족될 때까지 반복.
+
+두 가지 모드:
+
+- **Atlas** — 허브-앤-스포크 오케스트레이션. 하나의 두뇌가 작업을 분석하고, 계획을 세우고, 전문 에이전트를 병렬로 실행하고, 결과를 검증하고, 문제를 자율적으로 수정. 독립적이고 병렬화 가능한 작업에 최적.
+- **Athena** — 피어-투-피어 팀 오케스트레이션. 여러 에이전트가 SendMessage로 서로 직접 협력하고, Codex 워커는 tmux를 통해 실행. 실시간 조율이 필요한 상호의존적 작업에 최적.
+
+두 모드 모두 수용 기준 충족, 빌드 통과, 테스트 통과, 코드 리뷰 승인될 때까지 루프하거나 해결 불가 시 증거와 함께 에스컬레이션합니다.
 
 ## 주요 기능
 
-- **Atlas 오케스트레이터** — 허브-앤-스포크(hub-and-spoke) 구조의 자율 주행 파이프라인: 분류 → 분석 → 계획 → 실행 → 검증 → 리뷰 → 정리 → 커밋
-- **Athena 오케스트레이터** — 피어-투-피어(peer-to-peer) 팀 협력: Claude와 Codex 워커가 tmux를 통해 동시에 작업, **git worktree 격리**로 병렬 워커 간 파일 충돌 방지
-- **16개 전문화된 에이전트** — 각각의 역할: 분석가(metis), 전략가(prometheus), 비판가(momus), 개발자(executor), 디자이너(designer), 테스트 엔지니어, 보안 검수자, 코드 리뷰어 등
-- **14개 워크플로우 스킬** — /atlas, /athena, /ask, /deep-interview, /deepinit, /research, /trace, /slop-cleaner, /git-master, /cancel, /deep-dive, /consensus-plan, /external-context, **/verify-coverage**
-- **SessionStart hook** — 세션 시작 시 이전 wisdom과 중단된 checkpoint 컨텍스트를 자동 주입
-- **Stop hook WIP 커밋** — 세션 종료 시 미커밋 작업을 WIP 커밋으로 자동 저장
-- **워커 상태 대시보드** — Athena 팀 실행 중 모든 워커의 실시간 상태를 인라인 마크다운으로 표시
-- **세션 복구** — checkpoint 시스템으로 24시간 이내에 중단된 세션을 자동 복구
-- **학습 누적** — wisdom.jsonl 형식의 구조화된 학습 데이터베이스로 반복마다 더 스마트한 처리 가능. Intent-aware 쿼리 확장 지원
-- **멀티 모델 라우팅** — Claude Haiku/Sonnet/Opus와 OpenAI Codex를 작업 유형에 맞게 자동 할당. 설정 스키마 검증 내장
-- **원자적 파일 쓰기** — 모든 상태 파일이 tmp+rename 패턴으로 기록되어 충돌 방지
-- **128개 단위 테스트** — `node:test` 기반 9개 파일의 종합 테스트 스위트
-- **의존성 제로** — Node.js 표준 라이브러리만 사용, npm 패키지 불필요
+- **2개의 오케스트레이터**: Atlas (허브-앤-스포크)와 Athena (피어-투-피어 팀)
+- **16개 전문 에이전트**: 분석가(Metis), 전략가(Prometheus), 검증자(Momus), 기획자(Hermes), 개발자(Executor), 디자이너, 테스트 엔지니어, 디버거, 아키텍트, 보안 검수자, 코드 리뷰어, 작가(Writer), 탐색가(Explore), Hephaestus, Atlas, Athena
+- **15개 워크플로우 스킬**: atlas, athena, plan, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage
+- **세션 복구**: 체크포인트 시스템으로 중단 후 어느 단계에서든 재개
+- **구조화된 Wisdom**: JSONL 형식의 세션 간 학습 데이터베이스; Intent-aware 쿼리 확장 지원
+- **npm 의존성 제로**: Node.js 내장 모듈만 사용
+- **멀티 모델 지원**: Claude (Opus/Sonnet/Haiku) + tmux 통한 Codex/Gemini
+- **다국어 의도 감지**: 모든 스킬에 영어, 한국어, 일본어, 중국어 별칭 지원
+- **워커 상태 대시보드**: Athena 팀 실행 중 실시간 인라인 마크다운 상태 표시
+- **Athena 워크트리 격리**: 각 병렬 워커가 독립된 git worktree에서 실행, 파일 충돌 방지
+- **SessionStart 훅**: 세션 시작 시 이전 wisdom과 중단된 체크포인트 컨텍스트 자동 주입
+- **Stop 훅 WIP 커밋**: 세션 종료 시 미커밋 작업을 WIP 커밋으로 자동 저장
+- **원자적 파일 쓰기**: 모든 상태 파일이 tmp+rename 패턴으로 기록 (충돌 방지)
+- **182개 단위 테스트**: `node:test` 기반 13개 파일의 종합 테스트 스위트
+- **페일-세이프 아키텍처**: 훅이 Claude Code를 절대 차단하지 않음; 에러 시 우아한 저하
 
 ## 설치
 
-### Marketplace에서 추가
+### Marketplace에서 설치 (권장)
 
-Claude Code의 Marketplace에서 "Agent Olympus"를 검색하고 설치합니다.
+1. Claude Code 실행
+2. **Marketplace** → **Productivity** 이동
+3. Karnian의 **Agent Olympus** 검색
+4. **Install** 클릭
 
-### 플러그인 수동 설치
+### 수동 설치
+
+저장소를 클론하여 Claude Code 플러그인 디렉토리에 배치:
 
 ```bash
-# 플러그인 디렉토리에 복제
-git clone https://github.com/Karnian/agent-olympus ~/.claude/plugins/agent-olympus
-
-# Claude Code 재시작
+git clone https://github.com/Karnian/agent-olympus.git ~/.claude/plugins/agent-olympus
 ```
-
-플러그인이 활성화되면 `/atlas`, `/athena`, `/ask` 등의 스킬을 사용할 수 있습니다.
 
 ## 빠른 시작
 
-### 간단한 작업은 Atlas로
+### Atlas (허브-앤-스포크)
 
-어떤 작업을 자동으로 처리하려면 `/atlas`를 사용합니다.
+자율 작업 시작:
 
 ```
-/atlas 커스텀 버튼 컴포넌트 만들어줘. Button 태그에 variant와 size prop을 지원해야 해.
+/atlas 로그인과 회원가입이 포함된 사용자 인증 시스템을 구축해줘
+```
+
+다국어 별칭도 사용 가능:
+
+```
+/아틀라스 사용자 로그인 시스템을 구현해줘
+/해줘 결제 처리 파이프라인을 재구축해줘
 ```
 
 Atlas가 자동으로:
-1. 요구사항 분석 (triage)
-2. 깊이 있는 분석 (analyze)
-3. 실행 계획 수립 (plan) + PRD 생성
-4. 구현 (execute)
-5. 검증 (verify)
-6. 코드 리뷰 (review)
-7. 불필요한 코드 정리 (slop clean)
-8. 원자적 커밋 (commit)
 
-를 수행하고, 모든 조건이 통과될 때까지 자동 반복합니다.
-
-### 팀 협력이 필요하면 Athena로
-
-대규모 리팩토링이나 복잡한 기능 개발에는 `/athena`를 사용합니다.
-
-```
-/athena 기존 REST API를 GraphQL로 마이그레이션해. 기존 엔드포인트는 유지하되, GraphQL 스키마를 새로 구성해야 해.
-```
-
-Athena가 자동으로:
-1. 요구사항 분석
-2. 실행 계획 수립
-3. 팀 워커 생성 (tmux 세션)
-4. 팀 멤버들의 병렬 작업 모니터링
-5. 결과물 통합 및 검증
-6. 코드 리뷰
-7. 최종 커밋
-
-을 처리합니다.
-
-### 빠른 쿼리는 /ask로
-
-Codex나 Gemini에게 빠르게 질문하려면:
-
-```
-/ask React의 useCallback과 useMemo의 차이점을 설명해줄 수 있어?
-```
-
-### 요구사항 명확히 하기
-
-뭔가 모호한 작업이면 먼저 `/deep-interview`를 사용합니다.
-
-```
-/deep-interview 우리 프로젝트의 인증 시스템을 개선하고 싶은데, 어떻게 접근해야 할까?
-```
-
-시스템이 소크라테스식 대화를 통해 요구사항을 명확히 한 후, Atlas나 Athena에게 자동으로 넘깁니다.
-
-## 오케스트레이터
-
-### Atlas (허브-앤-스포크)
-
-하나의 두뇌(Atlas)가 여러 전문가를 조율합니다.
-
-**8단계 파이프라인:**
-
-| 단계 | 역할 | 담당 에이전트 |
-|------|------|--------------|
-| **Triage** | 요청 분류 및 초기 평가 | atlas |
-| **Analyze** | 깊이 있는 분석 (범위, 위험, 미지의 것) | metis (분석가) |
-| **Plan** | 전략적 계획 + PRD 생성 | prometheus (전략가) + momus (비판가) |
-| **Execute** | 실제 코드 작성 | executor (개발자), designer (디자이너), test-engineer (테스터) 등 |
-| **Verify** | 기능 검증 및 테스트 | debugger (디버거) |
-| **Review** | 코드 및 보안 리뷰 | architect, code-reviewer, security-reviewer |
-| **Slop Clean** | AI 생성 코드의 불필요한 부분 제거 | atlas |
-| **Commit** | 원자적 커밋 생성 및 푸시 | atlas |
-
-각 단계가 완료되면 다음 단계로 자동 진행합니다. 테스트 실패나 리뷰 불통과 시 자동 반복합니다. 최대 15회 반복까지 시도합니다.
+1. **Triage** — 작업 분류 (단순 vs 복잡)
+2. **Analyze** — 영향 받는 파일과 의존성 분석
+3. **Plan** — 수용 기준이 포함된 구조화된 작업 분해 계획 수립
+4. **Validate** — 계획 검증 (조기에 블로킹 이슈 발견)
+5. **Execute** — 전문 에이전트를 병렬로 실행
+6. **Verify** — 빌드, 테스트, 린팅 실행
+7. **Review** — 아키텍처, 보안, 코드 품질 검토
+8. **Loop** — 실패 시 디버그하고 모든 기준 통과까지 반복
 
 ### Athena (피어-투-피어 팀)
 
-여러 에이전트(각각 tmux 세션)가 협력하여 병렬로 작업합니다.
+협력 팀 소환:
 
-**8단계 파이프라인:**
+```
+/athena API, 프론트엔드, 테스트, 문서를 포함한 풀스택 기능을 구축해줘
+```
 
-| 단계 | 역할 | 설명 |
-|------|------|------|
-| **Triage** | 요청 분류 | 팀 편성의 기초 |
-| **Plan** | 실행 계획 수립 | 병렬화 가능한 작업 그룹화 |
-| **Spawn Team** | 팀 워커 생성 | 각 그룹마다 tmux 세션 + Claude 워커 시작 |
-| **Monitor** | 진행 상황 모니터링 | inbox/outbox 파일로 통신 |
-| **Integrate & Verify** | 결과물 통합 및 검증 | 모든 워커의 산출물 병합 |
-| **Review** | 코드 리뷰 | 아키텍처, 보안, 품질 검증 |
-| **Slop Clean** | 코드 정리 | 반복되거나 불필요한 부분 제거 |
-| **Commit** | 커밋 | 각 기능 그룹별로 원자적 커밋 |
+Athena가 자동으로:
 
-Athena는 대규모 작업에 적합하며, 여러 팀 멤버가 동시에 다른 부분을 작업할 수 있습니다.
+1. **Team Design** — Claude 워커 + Codex 워커 팀 설계
+2. **Plan** — 작업 배정 및 핸드오프 포인트 정의
+3. **Spawn** — 모든 워커를 동시에 실행 (각각 독립 git worktree)
+4. **Monitor** — Claude↔Codex 통신 중계, 워커 블로킹 해소
+5. **Integrate** — 결과물 병합 및 빌드+테스트 실행
+6. **Review** — 전체 리뷰어 실행, 반려 시 수정
+7. **Loop** — 모든 워커 출력이 테스트되고 승인될 때까지 반복
 
-## 에이전트
+### 중단된 작업 재개
 
-총 15개의 전문화된 에이전트가 협력합니다.
+세션이 중단되었다면:
 
-### 오케스트레이터 (Opus)
+```
+/atlas [이전 작업]
+```
 
-| 에이전트 | 역할 |
-|---------|------|
-| **atlas** | 허브-앤-스포크 구조: 한 가지 두뇌가 여러 전문가를 조율 |
-| **athena** | 피어-투-피어 팀: 여러 워커가 tmux를 통해 협력 |
+오케스트레이터가 체크포인트를 감지하고 재개 여부를 제안합니다:
 
-### 분석 & 계획 (Opus)
+```
+[이전 세션 발견: Phase 3/EXECUTE. 완료: 2/5 스토리.
+Phase 3에서 재개하시겠습니까, 아니면 새로 시작하시겠습니까?]
+```
 
-| 에이전트 | 역할 |
-|---------|------|
-| **metis** | 심화 분석: 범위, 위험, 미지의 것, 의존성 파악 |
-| **prometheus** | 전략적 계획: 작업 항목, 병렬화 그룹, 수용 기준 정의 |
-| **momus** | 계획 검증: 4개 기준(명확성/검증/컨텍스트/완성도) 각 70점 이상 확인 |
+`resume`로 답하면 중단된 곳에서 이어집니다.
 
-### 구현 (Sonnet)
+### 기타 스킬
 
-| 에이전트 | 역할 |
-|---------|------|
-| **executor** | 표준 구현 작업자 |
-| **designer** | UI/UX 전문가 |
-| **test-engineer** | 테스트 전략, TDD, 커버리지 |
-| **debugger** | 근본 원인 분석 및 수정 |
-| **hephaestus** | Codex 고급 워커 (대규모 리팩토링, 알고리즘) |
+- **`/plan`** — 전방향(아이디어→스펙) 및 역방향(코드→스펙) 제품 기획
+- **`/ask`** — Codex 또는 Gemini에 빠른 단일 쿼리
+- **`/research`** — 외부 문서와 API를 위한 병렬 웹 조사
+- **`/deep-interview`** — 모호한 요구사항을 위한 소크라테스식 명확화
+- **`/trace`** — 디버거가 막혔을 때 증거 기반 근본 원인 분석
+- **`/slop-cleaner`** — 최종 커밋 전 AI 생성 bloat 정리
+- **`/git-master`** — 원자적이고 잘 구조화된 커밋 관리
+- **`/deepinit`** — 코드베이스 맵 (AGENTS.md) 생성으로 방향 잡기
+- **`/cancel`** — 실행 중인 오케스트레이터 중지 및 상태 정리
+- **`/deep-dive`** — 다각도 종합을 통한 단일 주제 심층 조사
+- **`/consensus-plan`** — 실행 전 다중 에이전트 계획 합의 (Prometheus + Momus)
+- **`/external-context`** — 외부 문서나 스펙을 활성 컨텍스트에 주입
+- **`/verify-coverage`** — 최근 변경 파일의 테스트 커버리지 갭 감지
 
-### 검수 (읽기 전용)
+## 오케스트레이터
 
-| 에이전트 | 역할 |
-|---------|------|
-| **architect** (Opus) | 기능 완성도, 아키텍처 정렬성 검증 |
-| **security-reviewer** (Sonnet) | OWASP Top 10, 시크릿 노출, 인젝션 공격 검증 |
-| **code-reviewer** (Sonnet) | 논리 결함, SOLID 원칙, DRY, AI 생성 코드 검증 |
+### Atlas: 허브-앤-스포크
 
-### 유틸리티
+**언제 사용:**
+- 독립적이고 병렬화 가능한 컴포넌트가 있는 작업
+- 하나의 오케스트레이터 두뇌가 모든 라우팅 결정을 내리길 원할 때
+- 표준 구현, 테스트, 리뷰 워크플로우
 
-| 에이전트 | 역할 |
-|---------|------|
-| **explore** (Haiku) | 빠른 코드베이스 스캔 (Glob/Grep/Read 활용) |
-| **writer** (Haiku) | 기술 문서 작성 |
+**아키텍처:**
 
-## 스킬
+```
+사용자 요청
+    ↓
+[Triage] → 단순? → 직접 실행
+    ↓ 보통+
+[Analyze] (Metis: 심층 요구사항, 위험, 미지)
+    ↓
+[Plan] (Prometheus: 구조화된 작업 분해)
+    ↓
+[Validate] (Momus: 블로킹 이슈 조기 발견)
+    ↓
+[Execute] (병렬 에이전트: executor, designer, test-engineer, debugger 등)
+    ↓
+[Verify] (빌드 + 테스트 + 린트)
+    ↓ 실패?
+[Debug] (Debugger가 수정하고 루프백)
+    ↓
+[Review] (Architect + Security + Code Quality 리뷰어)
+    ↓ 반려?
+[Fix & Re-review] (승인될 때까지 루프)
+    ↓
+[Done] (정리, wisdom 저장)
+```
 
-총 13개의 사용자 대면 스킬이 제공됩니다.
+**단계:**
 
-### 핵심 오케스트레이션
+1. **Triage** — 복잡도 분류, 전략 결정
+2. **Analyze** — 요구사항, 위험, 의존성
+3. **Plan + Validate** — 수용 기준이 포함된 작업 분해
+4. **Execute** — 병렬 에이전트 작업
+5. **Verify** — 빌드, 테스트, 린트
+6. **Review** — 아키텍처, 보안, 코드 품질
+7. **Slop Clean + Commit** — 정리 및 원자적 커밋
 
-| 스킬 | 트리거 | 설명 |
-|------|--------|------|
-| **/atlas** | "해줘", "do it" | 전체 자율 파이프라인: 분류 → 분석 → 계획 → 실행 → 검증 → 리뷰 → 정리 → 커밋 |
-| **/athena** | "팀으로 해", "team" | 동일 파이프라인이지만 tmux 팀 워커 사용 |
+### Athena: 피어-투-피어 팀
 
-### 전처리
+**언제 사용:**
+- 상호의존적인 파트가 있는 작업 (API + 프론트엔드 동시 개발)
+- 워커들이 발견 사항을 실시간으로 공유해야 할 때
+- 여러 파일과 전문 분야에 걸친 대규모 작업
 
-| 스킬 | 트리거 | 설명 |
-|------|--------|------|
-| **/deep-interview** | "명확하게", "clarify" | 소크라테스식 대화로 요구사항 명확화 → atlas/athena로 자동 이관 |
-| **/deepinit** | "초기화", "map codebase" | 코드베이스 분석 후 AGENTS.md 계층구조 생성 |
+**아키텍처:**
 
-### 중간 파이프라인 도구
+```
+[Athena Lead] ← 오케스트레이터 (구현 절대 안 함, 조율만)
+    ↓
+    ├─→ Claude 네이티브 팀 (SendMessage, 각자 독립 worktree)
+    │   ├─ API 워커 (executor)
+    │   ├─ 프론트엔드 워커 (designer)
+    │   ├─ 테스트 워커 (test-engineer)
+    │   └─ 문서 워커 (writer)
+    │
+    └─→ Codex 워커 (tmux 경유, inbox/outbox)
+        ├─ 알고리즘 워커
+        └─ 리팩토링 워커
+```
 
-| 스킬 | 트리거 | 설명 |
-|------|--------|------|
-| **/ask** | "물어봐", "codex" | 빠른 단일 Codex/Gemini 쿼리 (tmux 경유) |
-| **/research** | "조사해", "리서치" | 병렬 웹 조사: 분해 → 페치 → 종합 |
-| **/trace** | "추적", "원인분석" | 3개 가설을 경쟁시키는 근본 원인 분석 (반박 라운드 포함) |
+**단계:**
 
-### 후처리
+1. **Triage & Team Design** — 작업을 독립 범위로 분해
+2. **Plan** — 작업 배정, 의존성, 핸드오프 프로토콜
+3. **Spawn Team** — 모든 워커 동시 실행 (각각 git worktree 격리)
+4. **Monitor & Coordinate** — 통신 중계, 워커 블로킹 해소
+5. **Integrate & Verify** — 출력 병합, 빌드+테스트 실행
+6. **Review** — 전체 리뷰어, 반려 수정
+7. **Slop Clean + Commit** — 최종 정리 및 커밋
 
-| 스킬 | 트리거 | 설명 |
-|------|--------|------|
-| **/slop-cleaner** | "정리", "deslop" | 회귀 안전 AI 생성 코드 제거 (4 패스) |
-| **/git-master** | "커밋", "commit" | 스타일 감지 원자적 커밋 (3+ 파일 → 2+ 커밋) |
-| **/cancel** | "취소", "stop" | 우아한 종료: tmux 종료, 상태 정리, 진행도 보존 |
+**Atlas vs Athena 비교:**
 
-### 리서치 & 계획
+| 항목 | Atlas | Athena |
+|------|-------|--------|
+| 통신 | 허브-앤-스포크 (리드가 전체 제어) | 피어-투-피어 (워커들이 직접 대화) |
+| 발견 공유 | 리드가 인사이트 중계 | 워커들이 직접 발견 공유 |
+| 최적 용도 | 독립적 작업 | 상호의존적 작업 |
+| 오버헤드 | 낮음 | 높지만 더 협력적 |
 
-| 스킬 | 트리거 | 설명 |
-|------|--------|------|
-| **/deep-dive** | "깊게파봐", "deep-dive" | 단일 주제 심층 조사: 다각도 검색 후 종합 |
-| **/consensus-plan** | "합의", "consensus" | 다중 에이전트 계획 합의 (Prometheus + Momus 합의 후 실행) |
-| **/external-context** | "외부문서", "docs" | 외부 문서/스펙을 가져와 활성 컨텍스트에 주입 |
+## 에이전트 (16개)
+
+| 에이전트 | 모델 | 역할 |
+|---------|------|------|
+| **atlas** | Opus 4.6 | 허브-앤-스포크 오케스트레이터 — triage, 분석, 계획, 실행, 검증, 리뷰, 루프 |
+| **athena** | Opus 4.6 | 피어-투-피어 팀 오케스트레이터 — 팀 설계, 워커 실행, 조율, 중계, 통합 |
+| **metis** | Opus | 심층 분석 — 영향 파일, 숨겨진 요구사항, 위험, 미지, 권장사항 |
+| **prometheus** | Opus | 전략적 기획자 — 작업 분해, 병렬화, 수용 기준, 파일 소유권 |
+| **momus** | Opus | 계획 검증자 — 실행 전 블로킹 이슈 발견 (명확성, 검증, 컨텍스트) |
+| **hermes** | Opus | 제품 기획 전문가 — 모호한 아이디어를 실행 가능한 스펙으로 변환 (순방향/역방향 PRD) |
+| **explore** | Haiku | 빠른 코드베이스 스캐너 — 아키텍처, 파일 구조, 기술 스택, 테스트 프레임워크 |
+| **executor** | Sonnet/Opus | 구현 전문가 — 표준 코딩 작업 처리, 집중 실행 |
+| **designer** | Sonnet | UI/UX 전문가 — 접근성 있고 반응형인 인터페이스 구현 |
+| **test-engineer** | Sonnet | 테스트 전문가 — 포괄적 테스트 전략 설계, 강건한 테스트 작성 |
+| **debugger** | Sonnet | 근본 원인 분석가 — 체계적으로 버그 진단 및 수정 |
+| **hephaestus** | Sonnet | 심층 자율 코더 — 탐색적 엔드-투-엔드 다중 파일 작업 |
+| **architect** | Opus | 아키텍처 리뷰어 (읽기 전용) — 구조적 무결성, 모듈 경계 |
+| **security-reviewer** | Sonnet | 보안 리뷰어 (읽기 전용) — OWASP Top 10, 일반 취약점 |
+| **code-reviewer** | Sonnet | 코드 품질 리뷰어 (읽기 전용) — 표준, 패턴, 유지보수성 |
+| **writer** | Haiku | 문서 전문가 — 명확하고 정확한 기술 문서 및 코드 주석 |
+
+## 스킬 (15개)
+
+| 스킬 | 레벨 | 별칭 | 용도 |
+|------|------|------|------|
+| **atlas** | 5 | `atlas`, `아틀라스`, `do-it`, `해줘`, `just-do-it` | 자율 허브-앤-스포크 오케스트레이션 |
+| **athena** | 5 | `athena`, `아테나`, `team-do-it`, `팀으로해`, `collaborate` | 자율 피어-투-피어 팀 오케스트레이션 |
+| **plan** | 4 | `plan`, `계획`, `spec`, `기획`, `prd`, `역기획` | 제품 기획 — 순방향(아이디어→스펙), 역방향(코드→스펙) |
+| **ask** | 2 | `ask`, `물어봐`, `codex`, `gemini`, `quick-ask` | Codex/Gemini에 빠른 단일 쿼리 |
+| **deep-interview** | 4 | `deep-interview`, `인터뷰`, `clarify`, `명확하게` | 소크라테스식 요구사항 명확화 |
+| **research** | 3 | `research`, `조사`, `외부정보`, `lookup` | 외부 지식을 위한 병렬 웹 조사 |
+| **trace** | 3 | `trace`, `추적`, `root-cause`, `원인분석` | 증거 기반 근본 원인 분석 |
+| **slop-cleaner** | 3 | `slop-cleaner`, `deslop`, `슬롭`, `cleanup` | 회귀 안전한 AI bloat 제거 |
+| **git-master** | 2 | `git-master`, `commit`, `커밋`, `atomic` | 원자적 커밋 관리 및 히스토리 정리 |
+| **deepinit** | 2 | `deepinit`, `init`, `초기화`, `map-codebase` | AGENTS.md 코드베이스 문서 생성 |
+| **cancel** | 1 | `cancel`, `취소`, `stop`, `abort` | 세션 중지 및 리소스 정리 |
+| **deep-dive** | 3 | `deep-dive`, `깊게파봐`, `exhaustive` | 다각도 종합을 통한 단일 주제 심층 조사 |
+| **consensus-plan** | 4 | `consensus-plan`, `합의`, `consensus` | 실행 전 다중 에이전트 계획 합의 |
+| **external-context** | 2 | `external-context`, `외부문서`, `docs`, `inject-docs` | 외부 문서/스펙을 컨텍스트에 주입 |
+| **verify-coverage** | 3 | `verify-coverage`, `coverage`, `커버리지`, `test-gaps` | 최근 변경 파일의 테스트 커버리지 갭 감지 |
 
 ## 아키텍처
 
 ### 디렉토리 구조
 
 ```
-agent-olympus/
-├── .claude-plugin/
-│   ├── plugin.json          — 플러그인 manifest (v0.6.5)
-│   └── marketplace.json     — Marketplace 메타데이터 (v0.6.5)
-├── agents/                  — 16개 에이전트 페르소나 (.md)
-│   ├── atlas.md
-│   ├── athena.md
-│   ├── metis.md
-│   ├── prometheus.md
-│   ├── momus.md
-│   ├── executor.md
-│   ├── designer.md
-│   ├── test-engineer.md
-│   ├── debugger.md
-│   ├── architect.md
-│   ├── security-reviewer.md
-│   ├── code-reviewer.md
-│   ├── explore.md
-│   ├── writer.md
-│   └── hephaestus.md
-├── skills/                  — 13개 사용자 대면 스킬 (workflow)
-│   ├── atlas/SKILL.md
-│   ├── athena/SKILL.md
-│   ├── ask/SKILL.md
-│   ├── deep-interview/SKILL.md
-│   ├── deepinit/SKILL.md
-│   ├── research/SKILL.md
-│   ├── trace/SKILL.md
-│   ├── slop-cleaner/SKILL.md
-│   ├── git-master/SKILL.md
-│   ├── cancel/SKILL.md
-│   ├── deep-dive/SKILL.md
-│   ├── consensus-plan/SKILL.md
-│   └── external-context/SKILL.md
-├── scripts/                 — Hook 스크립트 (Node.js ESM)
-│   ├── run.cjs              — 범용 hook runner (버전 fallback)
-│   ├── intent-gate.mjs      — 사용자 의도 분류 (EN/KO/JA/ZH)
-│   ├── model-router.mjs     — 모델 라우팅 조언 주입
-│   ├── concurrency-gate.mjs — 병렬 작업 제한 (진입)
-│   ├── concurrency-release.mjs — 병렬 작업 해제 (퇴출)
-│   └── lib/
-│       ├── stdin.mjs        — 타임아웃 포함 stdin 리더
-│       ├── intent-patterns.mjs — 의도 분류 (7개 범주, 다국어)
-│       ├── model-router.mjs — 라우팅 로직 + JSONC 설정 병합
-│       ├── tmux-session.mjs — tmux 세션 생명주기
-│       ├── inbox-outbox.mjs — Claude↔Codex 파일 기반 메시지 큐
-│       ├── worker-spawn.mjs — 팀 워커 생명주기 (시작/모니터/수집/종료)
-│       ├── checkpoint.mjs   — 세션 복구 checkpoint 시스템
-│       ├── wisdom.mjs       — 구조화된 학습 데이터베이스
-│       └── worker-status.mjs — 실시간 워커 상태 대시보드 (인라인 마크다운)
-├── config/
-│   └── model-routing.jsonc  — 의도 → 모델 라우팅 설정
-└── hooks/
-    └── hooks.json           — Hook 이벤트 등록
+agents/              에이전트 페르소나 정의 (모델 + 역할이 있는 .md 파일)
+skills/              사용자 대면 워크플로우 스킬 (트리거, 단계가 있는 SKILL.md)
+scripts/             훅 스크립트 (Node.js ESM, 의존성 없음)
+  lib/               공유 라이브러리 (stdin, intent, tmux, wisdom, checkpoint, worktree 등)
+  run.cjs            버전 폴백이 있는 범용 훅 진입점
+config/              모델 라우팅 설정 (JSONC)
+hooks/               훅 이벤트 등록 (hooks.json)
+.claude-plugin/      플러그인 메타데이터 (plugin.json, marketplace.json)
 ```
 
-### 상태 관리
+### 핵심 설계 원칙
 
-| 파일 | 목적 | 생명주기 |
-|------|------|---------|
-| `.ao/state/checkpoint-atlas.json` | Atlas 페이즈 추적 | 시작 시 생성, 완료 시 삭제 |
-| `.ao/state/checkpoint-athena.json` | Athena 페이즈 추적 | 시작 시 생성, 완료 시 삭제 |
-| `.ao/prd.json` | 사용자 스토리 + 수용 기준 | Plan 페이즈에서 생성, 완료 시 삭제 |
-| `.ao/wisdom.jsonl` | 교차 반복 학습 (JSONL) | 누적, 절대 삭제 안 함 (/cancel 이후에도 보존) |
-| `.ao/state/ao-intent.json` | 마지막 분류 의도 | 매 프롬프트마다 갱신 |
-| `.ao/state/ao-concurrency.json` | 활성 작업 추적 | 작업 생성/완료 시 갱신 |
-| `.ao/teams/<slug>/` | Codex 워커 inbox/outbox | Athena가 생성, 완료 시 정리 |
+1. **페일-세이프 훅**: 모든 훅은 에러를 잡고 JSON을 출력하며, 절대 throw하지 않음
+2. **상태 격리**: 오케스트레이터별 체크포인트, `.ao/state/`의 임시 상태 파일
+3. **Wisdom 지속성**: `.ao/wisdom.jsonl`의 세션 간 학습 (JSONL 형식)
+4. **체크포인트 복구**: 24시간 TTL; 중단 후 어느 단계에서든 재개
+5. **의존성 없음**: Node.js ≥ 20.0만 필요; 런타임에 npm 패키지 없음
+
+### 세션 상태 관리
+
+**체크포인트** (`.ao/state/checkpoint-<orchestrator>.json`):
+- 각 단계 전환 후 저장
+- 포함 내용: 오케스트레이터, 단계, prdSnapshot, 완료된 스토리, 활성 워커, 작업 설명
+- TTL: 24시간 (만료 시 자동 삭제)
+- 목적: 중단된 세션 재개
+
+**PRD** (`.ao/prd.json`):
+- 수용 기준이 있는 사용자 스토리
+- 스토리 상태: `passes: true/false`
+- 스토리 배정: `assignTo`, `model`, `parallelGroup`
+- 목적: 요구사항에 대한 실행 진행 추적
+
+**Wisdom** (`.ao/wisdom.jsonl`):
+- JSONL 형식 (한 줄에 하나의 항목)
+- 카테고리: test, build, architecture, pattern, debug, performance, general
+- 세션 간 지속 (절대 자동 삭제 안 함)
+- 완료 후 자동으로 최근 200개 항목으로 정리, 90일 이상 된 항목 제거
+- 유사도 70% 이상 항목 자동 중복 제거
+- 목적: 세션 간 학습으로 향후 실행 가속화
+
+**Teams** (`.ao/teams/<slug>/`) — Athena 전용:
+- Codex 통신을 위한 워커별 inbox/outbox 디렉토리
+- 팀 완료 후 자동 정리
+
+**Worktrees** (`.ao/worktrees/<slug>/<worker>/`) — Athena 전용:
+- 각 병렬 워커를 위한 격리된 git worktree
+- 워커 간 파일 충돌 방지
+- 팀 완료 후 병합 및 정리
 
 ## 세션 복구
 
-### Checkpoint 시스템
+Claude Code가 오케스트레이션 중 충돌하거나 닫히면:
 
-Atlas나 Athena 실행 중 Claude Code가 중단되면, **checkpoint 시스템**이 자동으로 세션 상태를 저장합니다.
+1. `/atlas [이전 작업]` 또는 `/athena [이전 작업]` 실행
+2. 오케스트레이터가 오래된 체크포인트 감지 (24시간 미만)
+3. 옵션 제시: **재개** 또는 **재시작**
+   - **재개** → 완료된 단계 건너뛰고, 스토리 상태 복원, 중단된 곳에서 계속
+   - **재시작** → 체크포인트 삭제, 처음부터 시작
 
-- **저장 위치:** `.ao/state/checkpoint-{atlas|athena}.json`
-- **생존 기간:** 24시간 (초과 시 자동 삭제)
-- **복구:** 다음 `/atlas` 또는 `/athena` 실행 시, 이전 checkpoint이 있으면 자동으로 해당 페이즈에서 재개
+각 단계 전환 후 체크포인트가 저장되고 PRD 스냅샷이 포함되므로 작동합니다.
 
-예를 들어, Execute 페이즈 중에 중단되었다면, 다시 실행할 때 Execute 페이즈부터 시작합니다.
+## Wisdom 시스템
 
-**Checkpoint에 저장되는 정보:**
-- 현재 페이즈 (단계)
-- 완료된 사용자 스토리
-- Athena의 경우, 활성 워커 목록
-- PRD 스냅샷
-- 시작 시간
+Agent Olympus는 모든 실행에서 학습합니다. 각 스토리 완료 후 에이전트들이 학습 내용을 기여합니다:
 
-### 활성 워커 목록
+```javascript
+addWisdom({
+  category: 'pattern',
+  lesson: '코드베이스는 API 응답 키에 snake_case를 사용',
+  confidence: 'high'
+})
 
-Athena 실행 중에는 각 tmux 세션별로 워커 상태가 추적됩니다. 중단된 경우, 복구 시에도 같은 워커들이 재개됩니다.
-
-## 학습 시스템 (Wisdom)
-
-### wisdom.jsonl이란?
-
-`wisdom.jsonl`은 구조화된 학습 데이터베이스입니다. Atlas/Athena가 반복할 때마다, 발견한 버그, 설계 패턴, 테스트 전략 등을 자동으로 기록합니다.
-
-**특징:**
-- **형식:** JSONL (JSON Lines) — 각 행이 하나의 학습 항목
-- **영속성:** 프로젝트 디렉토리 내 `.ao/wisdom.jsonl`에 저장
-- **보존:** `/cancel` 명령 후에도 삭제되지 않음
-- **자동 정리:** 90일 이상된 항목 또는 200개 초과 항목은 자동 제거
-- **중복 제거:** 유사도 80% 이상인 항목은 자동으로 중복 제거
-
-### Wisdom 항목 구조
-
-```json
-{
-  "timestamp": "2026-03-23T14:30:00.000Z",
-  "project": "my-app",
-  "category": "test",
-  "lesson": "useCallback 의존성 배열에 이벤트 핸들러를 포함하지 않으면 무한 루프 발생",
-  "filePatterns": ["src/hooks/*.js"],
-  "confidence": "high"
-}
+addWisdom({
+  category: 'debug',
+  lesson: 'TypeScript strict 모드는 async 함수에 명시적 반환 타입 필요',
+  confidence: 'high'
+})
 ```
 
-**category 값들:**
-- `test` — 테스트 관련 학습
-- `build` — 빌드/번들 관련
-- `architecture` — 아키텍처 설계
-- `pattern` — 코드 패턴
-- `debug` — 디버깅 기법
-- `performance` — 성능 최적화
+**카테고리:**
+- `test` — 테스트 프레임워크 특이사항, 작동하는 패턴
+- `build` — 빌드 도구 동작, 컴파일 요구사항
+- `architecture` — 구조적 결정, 모듈 경계
+- `pattern` — 코드베이스 규칙, 네이밍, 에러 처리
+- `debug` — 함정, 근본 원인, 안티패턴
+- `performance` — 최적화 발견
 - `general` — 기타
 
-### Wisdom 쿼리
+이후 세션들은 wisdom을 쿼리하여 분석 가속화, 실수 반복 방지, 코드베이스 지식 활용.
 
-Atlas/Athena가 실행될 때, 이전 학습들이 자동으로 프롬프트에 주입됩니다. 예를 들어:
+## 멀티 모델 지원
 
+### Claude 모델
+
+- **Haiku** — 빠른 탐색 작업 (코드베이스 스캔, 문서)
+- **Sonnet** — 표준 구현 (대부분의 executor, designer, test 작업)
+- **Opus** — 복잡한 추론 (분석, 계획, 아키텍처, 보안 리뷰)
+
+### Codex / Gemini (tmux 경유)
+
+알고리즘 작업, 대규모 리팩토링, 탐색적 코딩을 위해 오케스트레이터가 tmux를 통해 Codex 워커를 실행:
+
+```bash
+tmux new-session -d -s "atlas-codex-<N>" -c "<cwd>"
+tmux send-keys -t "atlas-codex-<N>" 'codex exec "<prompt>"' Enter
+tmux capture-pane -pt "atlas-codex-<N>" -S -200  # 출력 모니터링
+tmux kill-session -t "atlas-codex-<N>"            # 정리
 ```
-## Prior Learnings
-- [test] useCallback 의존성 배열에 이벤트 핸들러를 포함하지 않으면 무한 루프 발생
-- [build] webpack 5에서 dynamic import가 작동하려면 output.chunkLoading을 설정해야 함
-- [architecture] 전역 상태는 Context API보다는 Zustand를 사용하면 리렌더링 감소
+
+세션 명명 규칙:
+- Atlas: `atlas-codex-<N>`
+- Athena: `athena-<slug>-codex-<N>`
+
+## 요구사항
+
+- **Node.js** ≥ 20.0.0 (ESM 지원용)
+- **선택사항**: tmux (Codex/Gemini 통합 및 Athena 팀 모드에 필요)
+- **선택사항**: codex CLI 또는 동등한 것 (Codex를 직접 사용하는 경우)
+- **npm 패키지**: 없음 (런타임 의존성 제로)
+
+## 기여자를 위한 프로젝트 구조
+
+### 새 에이전트 추가
+
+1. frontmatter가 있는 `agents/<name>.md` 생성:
+
+```yaml
+---
+model: sonnet  # haiku | sonnet | opus
+description: 한 줄 설명
+---
 ```
 
-### 마이그레이션 (progress.txt → wisdom.jsonl)
+2. frontmatter 아래에 페르소나 프롬프트 작성
+3. 스킬/SKILL.md에서 `agent-olympus:<name>`으로 참조
 
-이전 버전에서 사용하던 `progress.txt`가 있다면, 첫 실행 시 자동으로 `wisdom.jsonl`로 마이그레이션됩니다. 기존 파일은 `progress.txt.bak`으로 백업됩니다.
+### 새 스킬 추가
 
-## 요구 사항
+1. frontmatter가 있는 `skills/<name>/SKILL.md` 생성:
 
-- **Node.js ≥ 20.0.0** — ESM 지원 필수
-- **Claude Code** — 최신 버전
-- **선택사항: tmux** — Codex 통합 및 Athena 팀 모드 필수
-- **선택사항: codex CLI** — 고급 모델 실행 (npm install -g @openai/codex)
+```yaml
+---
+name: <name>
+description: 한 줄 설명
+level: 1-5
+aliases: [trigger, words, 한국어도가능]
+---
+```
+
+2. 워크플로우 단계 작성
+3. `Task(subagent_type="agent-olympus:<agent>", model="<tier>", prompt="...")`로 에이전트 참조
+
+### 새 훅 추가
+
+1. 페일-세이프 패턴으로 `scripts/<hook-name>.mjs` 생성:
+
+```javascript
+import { readStdin } from './lib/stdin.mjs';
+async function main() {
+  try {
+    const raw = await readStdin(3000);
+    const data = JSON.parse(raw);
+    // ... 훅 로직 ...
+    process.stdout.write(JSON.stringify({ /* 출력 */ }));
+  } catch {
+    process.stdout.write('{}');
+  }
+  process.exit(0);
+}
+main();
+```
+
+2. 적절한 이벤트 아래 `hooks/hooks.json`에 등록
+3. 버전 안전 해결을 위해 `run.cjs`를 명령 래퍼로 사용
+
+### 문법 검사
+
+모든 스크립트가 유효한지 확인:
+
+```bash
+for f in scripts/*.mjs scripts/lib/*.mjs; do node --check "$f" && echo "OK: $f"; done
+```
+
+오래된 네임스페이스 참조 확인:
+
+```bash
+grep -r "oh-my-claude:" agents/ skills/ scripts/ config/
+grep -r "oh-my-claudecode:" skills/ agents/
+grep -r '\.omc/' scripts/ skills/ agents/
+```
+
+## 테스트
+
+`node:test` 기반 테스트 스위트 (13개 파일, 182개 테스트)가 핵심 훅 라이브러리를 커버합니다:
+
+```bash
+node --test 'scripts/test/**/*.test.mjs'
+# 또는
+npm test
+```
+
+**커버된 모듈:** checkpoint, concurrency-gate, config-validator, fs-atomic, inbox-outbox, intent-patterns, provider-detect, stdin, tmux-session, wisdom, worker-spawn, worker-status, worktree
+
+추가 통합 검증:
+
+1. 모든 스크립트 문법 검사 (위 참조)
+2. Claude Code에서 간단한 `/atlas` 작업 실행
+3. tmux가 사용 가능하면 `/athena` 작업 실행
+4. 완료 후 `.ao/wisdom.jsonl`이 채워졌는지 확인
+5. 중단 후 체크포인트 재개 가능 여부 검증
+
+## 철학
+
+Agent Olympus는 세 가지 핵심 원칙을 구현합니다:
+
+1. **자율성**: 목표를 설명하면 오케스트레이터가 세부사항을 처리합니다. AI를 감독할 필요 없음.
+2. **검증**: 모든 기준이 충족될 때까지 루프합니다. 실패는 수정되며, 무시되지 않습니다.
+3. **학습**: Wisdom이 세션 간에 지속됩니다. 각 실행이 다음 실행을 더 빠르게 만듭니다.
+
+이름은 의도적입니다. Atlas는 세상을 짊어집니다. Athena는 팀을 이끕니다. 함께, 당신이 요청하는 모든 작업을 완료합니다.
 
 ## 감사의 말
 
-이 프로젝트는 아래 프로젝트들의 아이디어와 설계 철학을 참고하여 만들어졌습니다:
+이 프로젝트는 아래 프로젝트들의 아이디어를 참고하였습니다:
 
 - [Oh My Claude Code](https://github.com/Yeachan-Heo/oh-my-claudecode) — Claude Code용 멀티 에이전트 오케스트레이션 플러그인
 - [Oh My OpenAgent](https://github.com/code-yeongyu/oh-my-openagent) — 멀티 모델 오케스트레이션을 지원하는 에이전트 하네스
-- [Kimoring AI Skills](https://github.com/codefactory-co/kimoring-ai-skills) — SessionStart/Stop hook 패턴, 커버리지 갭 탐지 아이디어
+- [Kimoring AI Skills](https://github.com/codefactory-co/kimoring-ai-skills) — SessionStart/Stop 훅 패턴, 커버리지 갭 탐지 아이디어
 
 ## 라이선스
 
 MIT
 
----
+## 작성자
 
-**더 알아보기:** [Agent Olympus GitHub Repository](https://github.com/Karnian/agent-olympus)
+Karnian
+
+## 링크
+
+- **저장소**: [https://github.com/Karnian/agent-olympus](https://github.com/Karnian/agent-olympus)
+- **이슈**: [https://github.com/Karnian/agent-olympus/issues](https://github.com/Karnian/agent-olympus/issues)
