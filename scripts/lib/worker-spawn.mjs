@@ -1,6 +1,7 @@
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession } from './tmux-session.mjs';
 import { sendMessage, readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
 import { addWisdom } from './wisdom.mjs';
+import { cleanupTeamWorktrees } from './worktree.mjs';
 import { mkdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
@@ -134,7 +135,7 @@ export async function spawnTeam(teamName, workers, cwd) {
     cwd
   };
 
-  // Create tmux sessions
+  // Create tmux sessions (each session gets its own git worktree)
   const sessions = createTeamSession(teamName, workers, cwd);
 
   // Spawn workers
@@ -145,6 +146,10 @@ export async function spawnTeam(teamName, workers, cwd) {
     if (session.status !== 'created') {
       state.workers[i].status = 'failed';
       state.workers[i].error = session.error;
+      // Still record worktree info even for failed sessions (for cleanup)
+      state.workers[i].worktreePath = session.worktreePath || null;
+      state.workers[i].branchName = session.branchName || null;
+      state.workers[i].worktreeCreated = session.worktreeCreated || false;
       continue;
     }
 
@@ -159,6 +164,10 @@ export async function spawnTeam(teamName, workers, cwd) {
     state.workers[i].status = spawned ? 'running' : 'failed';
     state.workers[i].startedAt = new Date().toISOString();
     state.workers[i].session = session.session;
+    // Record worktree info for merge/cleanup later
+    state.workers[i].worktreePath = session.worktreePath || null;
+    state.workers[i].branchName = session.branchName || null;
+    state.workers[i].worktreeCreated = session.worktreeCreated || false;
   }
 
   state.phase = 'running';
@@ -277,9 +286,14 @@ export function collectResults(teamName) {
   return results;
 }
 
-export function shutdownTeam(teamName) {
+export function shutdownTeam(teamName, cwd) {
   const killed = killTeamSessions(teamName);
   cleanupTeam(teamName);
+
+  // Clean up git worktrees for this team (fail-safe)
+  if (cwd) {
+    try { cleanupTeamWorktrees(cwd, teamName); } catch {}
+  }
 
   // Clean state file
   const statePath = join(STATE_DIR, `team-${teamName}.json`);

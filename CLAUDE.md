@@ -16,7 +16,9 @@ Both orchestrators autonomously loop until the task is fully complete (build pas
 agents/     → Agent persona definitions (.md files with model and role)
 skills/     → User-facing skills (SKILL.md with triggers, steps, workflow)
 scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
-scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom, worker-status)
+scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom, worker-status,
+              worktree, fs-atomic, provider-detect, config-validator)
+scripts/test → node:test based unit tests (128 tests, 9 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -41,6 +43,8 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - All hooks receive JSON on stdin and output JSON on stdout
 - Hooks must complete within their timeout (3s for most, 10s for Stop)
 - Hooks never block Claude Code — they fail open on any error
+- **SessionStart** (`scripts/session-start.mjs`) — fires at session start; injects prior wisdom and any interrupted checkpoint context into the conversation
+- **Stop** (`scripts/stop-hook.mjs`) — fires at session end; auto-commits any uncommitted work as a WIP commit so nothing is lost
 
 ### Skill vs Agent
 - **Skill** (`skills/*/SKILL.md`) = workflow recipe with steps. User-facing, triggered by `/command` or keyword matching
@@ -55,6 +59,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/state/checkpoint-{atlas|athena}.json` — session recovery checkpoints (auto-expire 24h)
 - `.ao/state/*.json` — transient state files (deleted on completion)
 - `.ao/teams/` — tmux worker inbox/outbox directories (Athena only)
+- `.ao/worktrees/<teamSlug>/<workerName>/` — isolated git worktrees for Athena parallel workers (Athena only; cleaned up after team completion)
 - `docs/plans/` — git-tracked permanent plan storage (survives sessions, shared with team)
 - `docs/plans/README.md` — auto-generated index of all plans
 - `docs/plans/<slug>/CHANGELOG.md` — per-plan change history
@@ -120,8 +125,13 @@ Session naming convention: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
 
 ## Testing
 
-No test framework is configured yet. To verify:
 ```bash
+# Run unit tests (128 tests, 9 files)
+node --test 'scripts/test/**/*.test.mjs'
+
+# Or via npm script
+npm test
+
 # Syntax check all scripts
 for f in scripts/*.mjs scripts/lib/*.mjs; do node --check "$f" && echo "OK: $f"; done
 

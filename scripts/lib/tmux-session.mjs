@@ -1,6 +1,7 @@
 import { execSync } from 'child_process';
 import { mkdirSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
+import { createWorkerWorktree } from './worktree.mjs';
 
 const SESSION_PREFIX = 'ao-team';
 
@@ -108,16 +109,35 @@ export function createTeamSession(teamName, workers, cwd) {
   for (const worker of workers) {
     const name = sessionName(teamName, worker.name);
 
+    // Create an isolated git worktree for this worker (fail-safe: falls back to cwd)
+    const worktreeInfo = createWorkerWorktree(cwd, teamName, worker.name);
+    const sessionCwd = worktreeInfo.created ? worktreeInfo.worktreePath : cwd;
+
     try {
       // Kill existing session if any
       try { execSync(`"${resolveBinary('tmux')}" kill-session -t "${name}"`, { stdio: 'pipe' }); } catch {}
 
-      // Create new detached session
-      execSync(`"${resolveBinary('tmux')}" new-session -d -s "${name}" -c "${cwd}"`, { stdio: 'pipe' });
+      // Create new detached session rooted at the worker's worktree (or cwd on fallback)
+      execSync(`"${resolveBinary('tmux')}" new-session -d -s "${name}" -c "${sessionCwd}"`, { stdio: 'pipe' });
 
-      results.push({ name: worker.name, session: name, status: 'created' });
+      results.push({
+        name: worker.name,
+        session: name,
+        status: 'created',
+        worktreePath: worktreeInfo.worktreePath,
+        branchName: worktreeInfo.branchName,
+        worktreeCreated: worktreeInfo.created,
+      });
     } catch (err) {
-      results.push({ name: worker.name, session: name, status: 'failed', error: err.message });
+      results.push({
+        name: worker.name,
+        session: name,
+        status: 'failed',
+        error: err.message,
+        worktreePath: worktreeInfo.worktreePath,
+        branchName: worktreeInfo.branchName,
+        worktreeCreated: worktreeInfo.created,
+      });
     }
   }
 

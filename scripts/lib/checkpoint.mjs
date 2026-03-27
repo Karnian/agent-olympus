@@ -18,7 +18,7 @@ const PHASE_NAMES = {
 /**
  * Save checkpoint after each phase transition.
  * @param {'atlas'|'athena'} orchestrator
- * @param {{ phase: number, prdSnapshot?: object, completedStories?: string[], activeWorkers?: string[], startedAt?: string, taskDescription?: string }} data
+ * @param {{ phase: number, prdSnapshot?: object, completedStories?: string[], activeWorkers?: string[], worktrees?: Object.<string, {path: string, branch: string}>, startedAt?: string, taskDescription?: string }} data
  */
 export async function saveCheckpoint(orchestrator, data) {
   try {

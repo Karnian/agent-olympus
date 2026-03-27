@@ -59,17 +59,20 @@ async function writeAllEntries(entries) {
  * Note: Dedup is not atomic — concurrent callers may both pass the
  * similarity check. This is acceptable since duplicates are pruned
  * by pruneWisdom() and the append itself is POSIX-atomic for small writes.
- * @param {{ category: string, lesson: string, filePatterns?: string[], confidence?: string }} entry
+ * @param {{ category: string, lesson: string, filePatterns?: string[], confidence?: string, intent?: string }} entry
  *   category: 'test' | 'build' | 'architecture' | 'pattern' | 'debug' | 'performance' | 'general'
  *   confidence: 'high' | 'medium' | 'low'
+ *   intent: 'visual-engineering' | 'deep' | 'quick' | 'writing' | 'planning' | 'unknown' (optional)
  */
 export async function addWisdom(entry) {
   try {
     const existing = await readAllEntries();
 
-    // Deduplication: skip if >80% Jaccard similarity with any existing lesson
+    // Deduplication: skip if ≥70% Jaccard similarity with any existing lesson.
+    // Threshold lowered from 0.8 → 0.7 to catch more near-duplicates that
+    // can slip through when concurrent callers both pass the check simultaneously.
     for (const e of existing) {
-      if (jaccardSimilarity(entry.lesson, e.lesson) > 0.8) {
+      if (jaccardSimilarity(entry.lesson, e.lesson) >= 0.7) {
         return;
       }
     }
@@ -81,6 +84,7 @@ export async function addWisdom(entry) {
       lesson: entry.lesson,
       ...(entry.filePatterns ? { filePatterns: entry.filePatterns } : {}),
       confidence: entry.confidence || 'medium',
+      ...(entry.intent ? { intent: entry.intent } : {}),
     };
 
     await fs.mkdir(path.dirname(WISDOM_PATH), { recursive: true, mode: 0o700 });
@@ -91,40 +95,116 @@ export async function addWisdom(entry) {
 }
 
 /**
- * Query wisdom entries by category, most recent first
- * @param {string|null} category - category to filter, or null for all
- * @param {number} limit - max entries to return
+ * Confidence level ordering for minConfidence filter.
+ * @param {string} level
+ * @returns {number}
+ */
+const CONFIDENCE_RANK = { low: 0, medium: 1, high: 2 };
+
+/**
+ * Query wisdom entries with flexible filtering, most recent first.
+ *
+ * Backwards-compatible overloads:
+ *   queryWisdom(category, limit)            — legacy string-based call
+ *   queryWisdom({ category, intent, minConfidence, filePattern, limit })
+ *
+ * @param {string|null|object} categoryOrOptions
+ *   string|null  → filter by category (legacy)
+ *   object       → { category?, intent?, minConfidence?, filePattern?, limit? }
+ *     category       - category to filter, or omit/null for all
+ *     intent         - 'visual-engineering'|'deep'|'quick'|'writing'|'planning'|'unknown'
+ *     minConfidence  - 'high'|'medium'|'low' (inclusive lower bound)
+ *     filePattern    - substring match against any element of entry.filePatterns[]
+ *     limit          - max entries to return (overrides second argument)
+ * @param {number} limit - max entries (used only in legacy string-based call)
  * @returns {Promise<Array>}
  */
-export async function queryWisdom(category, limit = 10) {
+export async function queryWisdom(categoryOrOptions, limit = 10) {
   try {
     const entries = await readAllEntries();
-    const filtered = category
-      ? entries.filter(e => e.category === category)
-      : entries;
+
+    let category = null;
+    let intent = null;
+    let minConfidence = null;
+    let filePattern = null;
+    let effectiveLimit = limit;
+
+    if (categoryOrOptions !== null && typeof categoryOrOptions === 'object') {
+      // New options-object form
+      category = categoryOrOptions.category ?? null;
+      intent = categoryOrOptions.intent ?? null;
+      minConfidence = categoryOrOptions.minConfidence ?? null;
+      filePattern = categoryOrOptions.filePattern ?? null;
+      effectiveLimit = categoryOrOptions.limit ?? limit;
+    } else {
+      // Legacy string (or null) form
+      category = categoryOrOptions;
+    }
+
+    const minRank = minConfidence != null ? (CONFIDENCE_RANK[minConfidence] ?? 0) : null;
+
+    const filtered = entries.filter(e => {
+      if (category && e.category !== category) return false;
+      if (intent && e.intent !== intent) return false;
+      if (minRank !== null) {
+        const eRank = CONFIDENCE_RANK[e.confidence] ?? 0;
+        if (eRank < minRank) return false;
+      }
+      if (filePattern) {
+        const patterns = e.filePatterns ?? [];
+        if (!patterns.some(p => p.includes(filePattern))) return false;
+      }
+      return true;
+    });
+
     // Most recent first
-    return filtered.toReversed().slice(0, limit);
+    return filtered.toReversed().slice(0, effectiveLimit);
   } catch {
     return [];
   }
 }
 
 /**
- * Prune entries older than 90 days and keep at most maxEntries (most recent)
+ * Prune entries older than 90 days, remove duplicates (Jaccard ≥ 0.7),
+ * and keep at most maxEntries (most recent).
+ *
+ * Deduplication runs over the full set so any duplicates that slipped
+ * through concurrent addWisdom() calls are cleaned up here.
+ * When duplicates are found the LATER entry (higher index) is kept so
+ * that the most-recently appended version survives.
+ *
  * @param {number} maxEntries
  */
 export async function pruneWisdom(maxEntries = 200) {
   try {
     const entries = await readAllEntries();
     const cutoff = Date.now() - MAX_AGE_MS;
+
+    // 1. Remove stale entries
     const fresh = entries.filter(e => {
       try { return new Date(e.timestamp).getTime() >= cutoff; }
       catch { return true; } // keep entries with unparseable timestamps
     });
-    // Keep most recent maxEntries
-    const pruned = fresh.length > maxEntries
-      ? fresh.slice(fresh.length - maxEntries)
-      : fresh;
+
+    // 2. Deduplicate: iterate oldest→newest; mark an entry for removal when a
+    //    later entry is sufficiently similar (≥ 0.7 Jaccard), keeping the newer one.
+    const kept = [];
+    for (let i = 0; i < fresh.length; i++) {
+      let isDuplicate = false;
+      for (let j = i + 1; j < fresh.length; j++) {
+        if (jaccardSimilarity(fresh[i].lesson, fresh[j].lesson) >= 0.7) {
+          isDuplicate = true;
+          break;
+        }
+      }
+      if (!isDuplicate) kept.push(fresh[i]);
+    }
+
+    // 3. Keep most recent maxEntries
+    const pruned = kept.length > maxEntries
+      ? kept.slice(kept.length - maxEntries)
+      : kept;
+
     await writeAllEntries(pruned);
   } catch {
     // fail-safe
