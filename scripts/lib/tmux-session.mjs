@@ -1,5 +1,6 @@
 import { execSync } from 'child_process';
-import { mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, writeFileSync, unlinkSync } from 'fs';
+import { randomUUID } from 'crypto';
 
 const SESSION_PREFIX = 'ao-team';
 
@@ -57,6 +58,46 @@ export function sanitizeName(name) {
   return String(name).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 50);
 }
 
+/**
+ * Escape a string for safe embedding inside a double-quoted shell argument
+ * that will be passed via tmux send-keys.
+ *
+ * tmux send-keys forwards the string literally to the terminal, which means
+ * the shell running inside the pane interprets it.  We must escape every
+ * character that has special meaning to the shell:
+ *   "  →  \"   (closes the surrounding double-quote)
+ *   \  →  \\   (escape character — must come first)
+ *   $  →  \$   (variable expansion)
+ *   `  →  \`   (command substitution)
+ *   !  →  \!   (history expansion in bash)
+ */
+export function sanitizeForShellArg(str) {
+  return String(str)
+    .replace(/\\/g, '\\\\')   // backslash first
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$')
+    .replace(/`/g, '\\`')
+    .replace(/!/g, '\\!');
+}
+
+/**
+ * Write a prompt to a unique temp file and return the file path.
+ * The caller is responsible for deleting the file after the command runs.
+ * File is created with mode 0o600 (owner read/write only).
+ */
+export function writePromptFile(prompt) {
+  const filePath = `/tmp/ao-prompt-${randomUUID()}.txt`;
+  writeFileSync(filePath, String(prompt), { encoding: 'utf-8', mode: 0o600 });
+  return filePath;
+}
+
+/**
+ * Delete a temp prompt file, ignoring errors (best-effort cleanup).
+ */
+export function removePromptFile(filePath) {
+  try { unlinkSync(filePath); } catch {}
+}
+
 export function sessionName(teamName, workerName) {
   return `${SESSION_PREFIX}-${sanitizeName(teamName)}-${sanitizeName(workerName)}`;
 }
@@ -85,13 +126,19 @@ export function createTeamSession(teamName, workers, cwd) {
 
 export function spawnWorkerInSession(sessionName, command, env = {}) {
   const envStr = Object.entries(env)
-    .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+    // Env values are sanitized so they can be embedded inside double-quotes.
+    .map(([k, v]) => `${k}="${sanitizeForShellArg(v)}"`)
     .join(' ');
 
   const fullCommand = envStr ? `${envStr} ${command}` : command;
 
+  // `tmux send-keys` passes the argument string directly to the terminal.
+  // Wrap in double-quotes and escape the content so that special shell
+  // characters inside `fullCommand` cannot break out of the argument.
+  const safeCommand = sanitizeForShellArg(fullCommand);
+
   try {
-    execSync(`"${resolveBinary('tmux')}" send-keys -t "${sessionName}" "${fullCommand}" Enter`, { stdio: 'pipe' });
+    execSync(`"${resolveBinary('tmux')}" send-keys -t "${sessionName}" "${safeCommand}" Enter`, { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -162,14 +209,21 @@ export function listTeamSessions(teamName) {
 }
 
 export function buildWorkerCommand(worker) {
-  const prompt = worker.prompt.replace(/"/g, '\\"');
+  // Write the prompt to a temp file to avoid shell injection via inline quoting.
+  // The command reads the file contents and passes them to the CLI via stdin
+  // where possible, or via a subshell cat when the CLI only accepts a positional
+  // argument.  The temp file is cleaned up by a trailing `; rm -f <path>`.
+  const promptFile = writePromptFile(worker.prompt);
+  const safeFile = sanitizeForShellArg(promptFile);
+
   switch (worker.type) {
     case 'codex':
-      return `"${resolveBinary('codex')}" exec "${prompt}"`;
+      // `codex exec` reads the prompt as a positional argument; pipe via stdin.
+      return `"${resolveBinary('codex')}" exec "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
     case 'gemini':
-      return `"${resolveBinary('gemini')}" "${prompt}"`;
+      return `"${resolveBinary('gemini')}" "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
     case 'claude':
     default:
-      return `"${resolveBinary('claude')}" --print "${prompt}"`;
+      return `"${resolveBinary('claude')}" --print "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
   }
 }
