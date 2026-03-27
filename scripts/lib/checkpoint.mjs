@@ -5,6 +5,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { atomicWriteFile } from './fs-atomic.mjs';
 
 const STATE_DIR = path.join('.ao', 'state');
 const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -30,10 +31,7 @@ export async function saveCheckpoint(orchestrator, data) {
     };
 
     const filePath = path.join(STATE_DIR, `checkpoint-${orchestrator}.json`);
-    await fs.writeFile(filePath, JSON.stringify(checkpoint, null, 2), {
-      encoding: 'utf-8',
-      mode: 0o600,
-    });
+    await atomicWriteFile(filePath, JSON.stringify(checkpoint, null, 2));
   } catch {
     // fail-safe: never throw
   }

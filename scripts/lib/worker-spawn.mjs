@@ -1,8 +1,9 @@
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession } from './tmux-session.mjs';
 import { sendMessage, readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
 import { addWisdom } from './wisdom.mjs';
-import { writeFileSync, mkdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
+import { mkdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
+import { atomicWriteFileSync } from './fs-atomic.mjs';
 
 const STATE_DIR = '.ao/state';
 const ARTIFACTS_DIR = '.ao/artifacts';
@@ -22,10 +23,9 @@ const CODEX_ERROR_PATTERNS = [
 
 function saveTeamState(teamName, state) {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-  writeFileSync(
+  atomicWriteFileSync(
     join(STATE_DIR, `team-${teamName}.json`),
-    JSON.stringify(state, null, 2),
-    { encoding: 'utf-8', mode: 0o600 }
+    JSON.stringify(state, null, 2)
   );
 }
 
@@ -268,10 +268,9 @@ export function collectResults(teamName) {
   mkdirSync(artifactsDir, { recursive: true, mode: 0o700 });
 
   for (const [worker, result] of Object.entries(results)) {
-    writeFileSync(
+    atomicWriteFileSync(
       join(artifactsDir, `${worker}.md`),
-      `# ${worker} Output\n\n${result}`,
-      { encoding: 'utf-8', mode: 0o600 }
+      `# ${worker} Output\n\n${result}`
     );
   }
 

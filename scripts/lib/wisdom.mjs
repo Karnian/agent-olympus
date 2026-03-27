@@ -5,6 +5,7 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { atomicWriteFile } from './fs-atomic.mjs';
 
 const WISDOM_PATH = path.join(process.cwd(), '.ao', 'wisdom.jsonl');
 const PROGRESS_PATH = path.join(process.cwd(), '.ao', 'progress.txt');
@@ -49,9 +50,8 @@ async function readAllEntries() {
  * @param {Array} entries
  */
 async function writeAllEntries(entries) {
-  await fs.mkdir(path.dirname(WISDOM_PATH), { recursive: true, mode: 0o700 });
   const content = entries.map(e => JSON.stringify(e)).join('\n') + (entries.length ? '\n' : '');
-  await fs.writeFile(WISDOM_PATH, content, { encoding: 'utf-8', mode: 0o600 });
+  await atomicWriteFile(WISDOM_PATH, content);
 }
 
 /**
