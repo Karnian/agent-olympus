@@ -69,7 +69,14 @@ rm -f .ao/prd.json
 # 4. Clean up Claude native team if active
 # TeamDelete("athena-<slug>") if team exists
 
-# 5. Keep wisdom.jsonl
+# 5. Clean up git worktrees (fail-safe — skip if no worktrees exist)
+```javascript
+import { cleanupTeamWorktrees } from './scripts/lib/worktree.mjs';
+// Read team slug from checkpoint or state before clearing them
+cleanupTeamWorktrees(cwd, teamSlug);  // removes .ao/worktrees/<slug>/ and worker branches
+```
+
+# 6. Keep wisdom.jsonl
 echo "Athena session cancelled. Progress preserved in .ao/wisdom.jsonl"
 ```
 

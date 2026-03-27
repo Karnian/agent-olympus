@@ -239,25 +239,52 @@ saveCheckpoint('athena', { phase: 2, prdSnapshot: <prd.json contents>, completed
 
 ### Phase 2 — SPAWN TEAM
 
+**Worktree isolation** (before spawning any worker):
+
+Each worker operates in its own git worktree so parallel file changes never collide.
+```javascript
+import { createWorkerWorktree } from './scripts/lib/worktree.mjs';
+
+// For each worker (Claude and Codex alike):
+const { worktreePath, branchName, created } = createWorkerWorktree(cwd, teamSlug, workerName);
+// worktreePath → .ao/worktrees/<slug>/<workerName>/
+// branchName   → ao-worker-<slug>-<workerName>
+// created: false means git worktree unavailable — fall back to cwd (still safe)
+```
+
+Track all created worktrees in the checkpoint:
+```javascript
+// Build the worktrees map as you spawn each worker
+const worktrees = {
+  "<workerName>": { path: worktreePath, branch: branchName }
+};
+```
+
 **Claude workers** (native team):
 ```
 TeamCreate("athena-<slug>")
 
 For each Claude worker:
-  Task(team_name="athena-<slug>", name="<worker>",
-    subagent_type="agent-olympus:<agentType>", model="<model>",
-    prompt="You are <worker> on team athena.
-    YOUR SCOPE: <files>
-    YOUR TASK: <stories>
-    PROTOCOL: SendMessage to <workers> when done.
-    CONSTRAINT: Do NOT edit files outside your scope.")
+  1. createWorkerWorktree(cwd, "<slug>", "<worker>") → { worktreePath, branchName }
+  2. Task(team_name="athena-<slug>", name="<worker>",
+       subagent_type="agent-olympus:<agentType>", model="<model>",
+       prompt="You are <worker> on team athena.
+       YOUR SCOPE: <files>
+       YOUR TASK: <stories>
+       YOUR WORKTREE: <worktreePath>  (work only inside this directory)
+       PROTOCOL: Commit your progress to branch <branchName> before signalling done.
+                 SendMessage to <workers> when done.
+       CONSTRAINT: Do NOT edit files outside your scope or worktree.")
 ```
 
 **Codex workers** (via tmux, simultaneously):
 ```bash
-tmux new-session -d -s "athena-<slug>-codex-<N>" -c "<cwd>"
+# Start session rooted at the worker's worktree path
+tmux new-session -d -s "athena-<slug>-codex-<N>" -c "<worktreePath>"
 tmux send-keys -t "athena-<slug>-codex-<N>" 'codex exec "<implementation prompt>"' Enter
 ```
+
+Workers must commit their changes to their branch before signalling completion.
 
 **Bridge** (automatic):
 ```
@@ -266,7 +293,15 @@ tmux send-keys -t "athena-<slug>-codex-<N>" 'codex exec "<implementation prompt>
 ```
 
 ```
-saveCheckpoint('athena', { phase: 3, prdSnapshot: <prd.json>, completedStories: [], activeWorkers: <spawned worker names>, startedAt, taskDescription })
+saveCheckpoint('athena', {
+  phase: 3,
+  prdSnapshot: <prd.json>,
+  completedStories: [],
+  activeWorkers: <spawned worker names>,
+  worktrees: { "<workerName>": { path: worktreePath, branch: branchName }, ... },
+  startedAt,
+  taskDescription
+})
 ```
 
 ### Phase 3 — MONITOR & COORDINATE (loop until all complete)
@@ -354,7 +389,33 @@ saveCheckpoint('athena', { phase: 4, prdSnapshot: <prd.json>, completedStories, 
 
 ### Phase 4 — INTEGRATE & VERIFY (loop until pass)
 
-Apply Codex outputs if needed:
+**Merge worker branches** (sequential, dependency order first):
+```javascript
+import { mergeWorkerBranch, removeWorkerWorktree } from './scripts/lib/worktree.mjs';
+
+// Sort workers by dependency order (dependents last)
+const orderedWorkers = sortByDependency(completedWorkers);
+
+for (const worker of orderedWorkers) {
+  const { branch, path } = checkpoint.worktrees[worker.name] ?? {};
+  if (!branch) continue;  // worktree was not created (fallback mode)
+
+  const result = mergeWorkerBranch(cwd, branch, worker.name);
+  if (!result.success) {
+    // Conflict detected — spawn executor to resolve
+    Task(subagent_type="agent-olympus:executor", model="sonnet",
+      prompt="Resolve merge conflicts for worker <worker.name>.
+      Conflicting files: <result.conflicts.join(', ')>
+      Worker branch: <branch>
+      Resolve all conflicts and commit the resolution.")
+  }
+
+  // After successful merge, remove the worktree
+  removeWorkerWorktree(cwd, path, branch);
+}
+```
+
+Apply any remaining Codex outputs if needed:
 ```
 Task(subagent_type="agent-olympus:executor", model="sonnet",
   prompt="Integrate Codex output: <codex_result>. Target files: <scope>")
@@ -409,6 +470,11 @@ Clean up:
 - Remove `.ao/teams/<slug>/`
 - Remove `.ao/state/athena-state.json`, `.ao/prd.json`
 - Kill tmux sessions: `tmux kill-session -t "athena-<slug>-*"`
+- Clean up any remaining worktrees:
+  ```javascript
+  import { cleanupTeamWorktrees } from './scripts/lib/worktree.mjs';
+  cleanupTeamWorktrees(cwd, teamSlug);  // removes .ao/worktrees/<slug>/ and branches
+  ```
 - Keep `.ao/wisdom.jsonl` (useful for future sessions — never delete)
 
 Report: PRD stories (N/N), per-worker summary, files changed, coordination log, verification results.
