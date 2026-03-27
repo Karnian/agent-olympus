@@ -7,62 +7,10 @@
 
 import fs from 'fs';
 import path from 'path';
+import { validateRoutingConfig, DEFAULT_ROUTING_CONFIG } from './config-validator.mjs';
 
-/**
- * Default routing table when config file is absent or unreadable.
- * Keys are intent categories from intent-patterns.mjs.
- *
- * @type {Record<string, {
- *   agent: string,
- *   model: string,
- *   fallbackChain: string[],
- *   teamWorkerType: string|null,
- * }>}
- */
-const DEFAULT_ROUTING_TABLE = {
-  'visual-engineering': {
-    agent: 'agent-olympus:designer',
-    model: 'sonnet',
-    fallbackChain: ['sonnet', 'haiku'],
-    teamWorkerType: 'gemini',
-  },
-  'deep': {
-    agent: 'agent-olympus:architect',
-    model: 'opus',
-    fallbackChain: ['opus', 'sonnet'],
-    teamWorkerType: null,
-  },
-  'quick': {
-    agent: 'agent-olympus:explore',
-    model: 'haiku',
-    fallbackChain: ['haiku', 'sonnet'],
-    teamWorkerType: null,
-  },
-  'writing': {
-    agent: 'agent-olympus:writer',
-    model: 'haiku',
-    fallbackChain: ['haiku', 'sonnet'],
-    teamWorkerType: null,
-  },
-  'artistry': {
-    agent: 'agent-olympus:designer',
-    model: 'sonnet',
-    fallbackChain: ['sonnet'],
-    teamWorkerType: 'gemini',
-  },
-  'planning': {
-    agent: 'agent-olympus:prometheus',
-    model: 'opus',
-    fallbackChain: ['opus', 'sonnet'],
-    teamWorkerType: null,
-  },
-  'unknown': {
-    agent: 'agent-olympus:executor',
-    model: 'sonnet',
-    fallbackChain: ['sonnet', 'haiku'],
-    teamWorkerType: null,
-  },
-};
+// Re-export default config for external callers that may need it
+export { DEFAULT_ROUTING_CONFIG };
 
 /**
  * Strip JSONC-style comments from a string so it can be parsed by JSON.parse.
@@ -79,40 +27,69 @@ function stripJsoncComments(source) {
 }
 
 /**
- * Load routing config from CLAUDE_PLUGIN_ROOT/config/model-routing.jsonc.
- * Returns null on any error so callers fall back to defaults.
- * @returns {Record<string, unknown>|null}
+ * Attempt to record a warning in .ao/wisdom.jsonl.
+ * Fully fail-safe — never throws, never blocks.
+ * @param {string} lesson
+ */
+async function recordValidationWarning(lesson) {
+  try {
+    // Dynamic import so the wisdom module is only loaded when needed
+    const { addWisdom } = await import('./wisdom.mjs');
+    await addWisdom({ category: 'general', lesson, confidence: 'low' });
+  } catch {
+    // fail-safe: ignore any error
+  }
+}
+
+/**
+ * Load and validate routing config from CLAUDE_PLUGIN_ROOT/config/model-routing.jsonc.
+ * Returns a validated config object, or DEFAULT_ROUTING_CONFIG on any error/invalid schema.
+ * @returns {typeof DEFAULT_ROUTING_CONFIG}
  */
 function loadRoutingConfig() {
   try {
     const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-    if (!pluginRoot) return null;
+    if (!pluginRoot) return DEFAULT_ROUTING_CONFIG;
 
     const configPath = path.join(pluginRoot, 'config', 'model-routing.jsonc');
     const raw = fs.readFileSync(configPath, 'utf-8');
     const stripped = stripJsoncComments(raw);
-    return JSON.parse(stripped);
+    const parsed = JSON.parse(stripped);
+
+    const { valid, errors, config } = validateRoutingConfig(parsed);
+    if (!valid) {
+      // Log each validation problem to wisdom asynchronously (fire-and-forget)
+      const lesson =
+        'model-routing.jsonc schema validation failed — falling back to defaults. Issues: ' +
+        errors.join('; ');
+      recordValidationWarning(lesson);
+      return config; // config === DEFAULT_ROUTING_CONFIG when invalid
+    }
+
+    return config;
   } catch {
-    return null;
+    return DEFAULT_ROUTING_CONFIG;
   }
 }
 
 /**
  * Merge user-supplied routing config over defaults.
  * Only overrides properties that are explicitly present in the config.
- * @param {Record<string, unknown>|null} config
+ * @param {typeof DEFAULT_ROUTING_CONFIG} config - already validated config
  * @returns {Record<string, { agent: string, model: string, fallbackChain: string[], teamWorkerType: string|null }>}
  */
 function buildRoutingTable(config) {
+  const defaultRoutes = DEFAULT_ROUTING_CONFIG.routes;
+
   if (!config?.routes || typeof config.routes !== 'object') {
-    return { ...DEFAULT_ROUTING_TABLE };
+    return { ...defaultRoutes };
   }
 
-  const table = { ...DEFAULT_ROUTING_TABLE };
+  const table = { ...defaultRoutes };
   for (const [category, override] of Object.entries(config.routes)) {
     if (typeof override !== 'object' || !override) continue;
     table[category] = {
-      ...DEFAULT_ROUTING_TABLE[category],
+      ...defaultRoutes[category],
       ...override,
     };
   }
@@ -163,9 +140,18 @@ export function routeByIntent(intentResult) {
   const category = intentResult?.category || 'unknown';
   const confidence = intentResult?.confidence ?? 0;
 
+  // Use minConfidence threshold from validated config (falls back to default 0.15)
+  const minConfidence =
+    typeof config.thresholds?.minConfidence === 'number'
+      ? config.thresholds.minConfidence
+      : DEFAULT_ROUTING_CONFIG.thresholds.minConfidence;
+
   // Low-confidence results fall back to 'unknown' routing
-  const effectiveCategory = confidence < 0.15 ? 'unknown' : category;
-  const entry = table[effectiveCategory] || table['unknown'] || DEFAULT_ROUTING_TABLE['unknown'];
+  const effectiveCategory = confidence < minConfidence ? 'unknown' : category;
+  const entry =
+    table[effectiveCategory] ||
+    table['unknown'] ||
+    DEFAULT_ROUTING_CONFIG.routes['unknown'];
 
   return {
     recommendedAgent: entry.agent,
