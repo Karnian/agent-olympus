@@ -386,6 +386,18 @@ Run **simultaneously**: build, tests, linter, type checker.
 saveCheckpoint('atlas', { phase: 5, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
 ```
 
+### Phase 4.5 — QUALITY GATE [OPTIONAL]
+
+If `agent-olympus:quality-gate` agent is available:
+```
+Task(subagent_type="agent-olympus:quality-gate", model="sonnet",
+  prompt="Run quality gate checks on all changed files.")
+```
+- If verdict is FAIL → return to Phase 3 with specific failure reasons
+- If verdict is CONDITIONAL → log warnings, proceed to Phase 5
+- If verdict is PASS → proceed to Phase 5
+Note: This phase is OPTIONAL. If quality-gate agent is absent, skip and proceed.
+
 ### Phase 5 — REVIEW (loop until approved)
 
 Spawn ALL reviewers **simultaneously**:

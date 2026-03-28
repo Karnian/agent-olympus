@@ -1,0 +1,365 @@
+{
+  "projectName": "superpowers-methodology-integration",
+  "scale": "L",
+  "createdAt": "2026-03-29T00:00:00.000Z",
+  "status": "draft",
+  "problemStatement": "Agent Olympus orchestrates work effectively but lacks disciplinary guardrails that prevent common AI-agent failure modes: writing code before design validation, skipping tests, declaring done without verification evidence, and applying fixes before understanding root causes. The Superpowers plugin encodes these disciplines but lacks AO's orchestration power. Merging methodologies creates a single plugin with both discipline AND orchestration.",
+  "targetUsers": "Solo AI developers using Claude Code with Agent Olympus for autonomous task completion; team leads running Athena multi-agent teams; developers debugging failures during Atlas/Athena execution.",
+  "goals": [
+    "Embed TDD (RED-GREEN-REFACTOR) as non-skippable gate in Atlas Phase 3 and Athena Phase 2",
+    "Add brainstorm-first gate for complex/architectural tasks",
+    "Replace trial-and-error debugging with systematic root-cause investigation",
+    "Enforce verification-before-completion iron law with machine-verifiable evidence",
+    "Implement two-stage code review (spec compliance + code quality)",
+    "Deliver 4 new skills and 1 new agent",
+    "All 182 existing tests continue to pass",
+    "Standalone operation without Superpowers installed"
+  ],
+  "nonGoals": [
+    "Port Superpowers executing-plans skill",
+    "Port Superpowers dispatching-parallel-agents",
+    "Port Superpowers using-git-worktrees",
+    "Port Superpowers meta-skills",
+    "Copy files from Superpowers repo",
+    "Add npm dependencies",
+    "Modify hook scripts",
+    "Change plugin hook registration or run.cjs"
+  ],
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "TDD Skill -- RED-GREEN-REFACTOR Workflow",
+      "asA": "solo AI developer",
+      "iWantTo": "invoke /tdd to implement a feature using strict RED-GREEN-REFACTOR discipline",
+      "soThat": "every feature ships with tests written before production code",
+      "acceptanceCriteria": [
+        "GIVEN a user invokes /tdd with a feature description WHEN the skill starts THEN it enters RED phase: writes a failing test first, runs it, confirms the test fails with the expected assertion error",
+        "GIVEN the RED phase completes WHEN GREEN phase begins THEN it writes minimum production code, runs tests, confirms previously-failing test now passes",
+        "GIVEN GREEN phase completes WHEN REFACTOR phase begins THEN it reviews for duplication, applies refactoring, re-runs full test suite, confirms zero regressions",
+        "GIVEN any phase fails WHEN error is detected THEN the skill diagnoses and fixes within that phase before advancing",
+        "GIVEN REFACTOR phase passes WHEN cycle completes THEN outputs summary: test file path, production file path, test count before/after, phase durations"
+      ],
+      "requiresTDD": false,
+      "complexity": "M",
+      "parallelGroup": "B"
+    },
+    {
+      "id": "US-002",
+      "title": "TDD Gate in Atlas Phase 3 Execution",
+      "asA": "solo AI developer running /atlas",
+      "iWantTo": "Atlas to enforce TDD discipline on every implementation story",
+      "soThat": "no story is marked passes:true without a test written and passing first",
+      "acceptanceCriteria": [
+        "GIVEN Atlas Phase 3 executes a claude story WHEN executor is prompted THEN prompt includes TDD instruction",
+        "GIVEN a story executor completes WHEN Atlas verifies THEN checks at least one NEW test exists via git diff",
+        "GIVEN executor produces code but zero new tests WHEN detected THEN Atlas rejects story, spawns test-engineer, marks passes:true only after both pass",
+        "GIVEN a Codex worker completes WHEN Atlas verifies THEN same test-existence check applies"
+      ],
+      "requiresTDD": false,
+      "complexity": "M",
+      "parallelGroup": "D"
+    },
+    {
+      "id": "US-003",
+      "title": "TDD Gate in Athena Phase 2 Worker Prompts",
+      "asA": "team lead running /athena",
+      "iWantTo": "every Athena worker to receive TDD instructions in spawn prompt",
+      "soThat": "parallel workers independently follow test-first discipline",
+      "acceptanceCriteria": [
+        "GIVEN Athena spawns a Claude worker WHEN prompt is constructed THEN includes TDD instruction",
+        "GIVEN Athena spawns a Codex worker WHEN tmux prompt is constructed THEN includes TDD instruction",
+        "GIVEN a worker completes and Phase 4 integrates WHEN merge verification runs THEN checks each branch contains test file changes",
+        "GIVEN a worker branch contains zero test changes WHEN detected THEN spawns test-engineer to backfill"
+      ],
+      "requiresTDD": false,
+      "complexity": "M",
+      "parallelGroup": "D"
+    },
+    {
+      "id": "US-004",
+      "title": "Brainstorm Skill -- Design-Before-Code Gate",
+      "asA": "solo AI developer",
+      "iWantTo": "invoke /brainstorm to explore design alternatives before implementation",
+      "soThat": "complex features have a validated design before any code is written",
+      "acceptanceCriteria": [
+        "GIVEN user invokes /brainstorm WHEN skill starts THEN generates 3 distinct design alternatives with pros, cons, effort, risk",
+        "GIVEN 3 alternatives generated WHEN presented THEN highlights trade-offs in comparison table and recommends one",
+        "GIVEN user selects approach WHEN finalized THEN writes design brief to .ao/brainstorm-<slug>.md",
+        "GIVEN user invokes /brainstorm then /atlas or /athena WHEN orchestrator starts THEN detects brainstorm artifact and injects into planning"
+      ],
+      "requiresTDD": false,
+      "complexity": "M",
+      "parallelGroup": "B"
+    },
+    {
+      "id": "US-005",
+      "title": "Brainstorm Gate in Atlas/Athena for Complex Tasks",
+      "asA": "solo AI developer",
+      "iWantTo": "Atlas and Athena to auto-invoke brainstorm for complex/architectural tasks",
+      "soThat": "the system never jumps to code on hard problems without exploring alternatives",
+      "acceptanceCriteria": [
+        "GIVEN Atlas classifies task as complex/architectural WHEN no brainstorm artifact exists THEN invokes brainstorm skill",
+        "GIVEN Athena classifies task as complex/architectural WHEN no brainstorm artifact exists THEN invokes brainstorm skill",
+        "GIVEN brainstorm completes WHEN orchestrator resumes THEN chosen design passed as design_context to planning",
+        "GIVEN task is trivial/moderate WHEN triage completes THEN brainstorm NOT invoked"
+      ],
+      "requiresTDD": false,
+      "complexity": "S",
+      "parallelGroup": "D"
+    },
+    {
+      "id": "US-006",
+      "title": "Systematic Debug Skill",
+      "asA": "developer debugging a failure",
+      "iWantTo": "invoke /systematic-debug to follow structured investigation protocol",
+      "soThat": "root causes are identified before any fix is attempted",
+      "acceptanceCriteria": [
+        "GIVEN user invokes /systematic-debug WHEN skill starts THEN enters INVESTIGATE phase: reproduces error, collects stack trace, identifies file:line",
+        "GIVEN INVESTIGATE completes WHEN HYPOTHESIZE phase begins THEN generates 3 ranked hypotheses with predicted evidence",
+        "GIVEN hypotheses ranked WHEN PROBE phase begins THEN executes top hypothesis confirmation check, reports confirmed/denied with evidence",
+        "GIVEN root cause confirmed WHEN FIX phase begins THEN applies minimal fix, re-runs failing test, confirms pass",
+        "GIVEN fix passes WHEN VERIFY phase begins THEN runs full test suite, confirms zero regressions",
+        "GIVEN user invokes without error description WHEN skill starts THEN reads last 50 lines of terminal to auto-detect error"
+      ],
+      "requiresTDD": false,
+      "complexity": "M",
+      "parallelGroup": "B"
+    },
+    {
+      "id": "US-007",
+      "title": "Systematic Debug Integration in Debugger Agent",
+      "asA": "developer",
+      "iWantTo": "debugger agent to follow systematic investigation protocol",
+      "soThat": "it stops trial-and-error and finds root causes first",
+      "acceptanceCriteria": [
+        "GIVEN debugger agent receives fix request WHEN it starts THEN persona mandates root-cause-first protocol",
+        "GIVEN debugger invoked by Atlas/Athena Phase 4 WHEN error output provided THEN response includes: confirmed root cause, evidence, minimal fix, full test result",
+        "GIVEN debugger cannot confirm root cause after 3 hypotheses WHEN all denied THEN escalates to trace skill"
+      ],
+      "requiresTDD": false,
+      "complexity": "S",
+      "parallelGroup": "A"
+    },
+    {
+      "id": "US-008",
+      "title": "Trace Skill Enhancement -- Systematic Debug Protocol",
+      "asA": "developer",
+      "iWantTo": "trace skill to use systematic debug methodology in investigation lanes",
+      "soThat": "each lane follows evidence-based investigation",
+      "acceptanceCriteria": [
+        "GIVEN trace Phase 2 spawns lanes WHEN debugger prompted THEN includes systematic debug protocol instruction",
+        "GIVEN trace Phase 3 rebuttal completes WHEN probe identified THEN spec includes exact command, expected output if correct, expected output if wrong",
+        "GIVEN trace Phase 4 probe confirms cause WHEN Phase 5 fix begins THEN fix agent receives full evidence chain"
+      ],
+      "requiresTDD": false,
+      "complexity": "S",
+      "parallelGroup": "C"
+    },
+    {
+      "id": "US-009",
+      "title": "Verification-Before-Completion Iron Law",
+      "asA": "solo AI developer",
+      "iWantTo": "Atlas and Athena to enforce no-done-without-evidence rule",
+      "soThat": "I never encounter done tasks that are actually broken",
+      "acceptanceCriteria": [
+        "GIVEN Atlas Phase 4 VERIFY passes WHEN checkpoint saved THEN includes verificationEvidence with buildLog, testOutput, lintResult",
+        "GIVEN Athena Phase 4 INTEGRATE passes WHEN checkpoint saved THEN includes same verificationEvidence",
+        "GIVEN Phase 5 REVIEW approved WHEN completion report generated THEN includes verificationEvidence block",
+        "GIVEN ambiguous verification output WHEN evaluated THEN treated as FAILED, re-runs with explicit count extraction",
+        "GIVEN story about to be marked passes:true WHEN verification runs THEN requires: test file exists, 0 failures, build exit code 0"
+      ],
+      "requiresTDD": false,
+      "complexity": "M",
+      "parallelGroup": "D"
+    },
+    {
+      "id": "US-010",
+      "title": "Finish-Branch Skill -- Pre-Merge Checklist",
+      "asA": "developer working on a feature branch",
+      "iWantTo": "invoke /finish-branch to run complete pre-merge checklist",
+      "soThat": "I never merge with failing tests, missing verification, or incomplete reviews",
+      "acceptanceCriteria": [
+        "GIVEN user invokes /finish-branch WHEN skill starts THEN runs: test suite, build, lint, verify-coverage, two-stage review",
+        "GIVEN all 5 checks pass WHEN skill completes THEN outputs summary: branch, commits, files changed, test results, coverage gaps, review verdict, GO/NO-GO",
+        "GIVEN any check fails WHEN detected THEN stops at that check with actionable detail, does NOT proceed (fail-fast)",
+        "GIVEN user on main branch WHEN detected THEN warns and requires explicit confirmation",
+        "GIVEN GO recommendation and user confirms WHEN proceeding THEN offers to create merge commit or PR"
+      ],
+      "requiresTDD": false,
+      "complexity": "M",
+      "parallelGroup": "B"
+    },
+    {
+      "id": "US-011",
+      "title": "Two-Stage Code Review in Atlas/Athena Phase 5",
+      "asA": "solo AI developer",
+      "iWantTo": "two-stage review: spec compliance first, code quality second",
+      "soThat": "reviews catch both wrong-feature and bad-code problems",
+      "acceptanceCriteria": [
+        "GIVEN Atlas Phase 5 begins WHEN reviewers spawned THEN Stage 1 runs first: spec-compliance check per story",
+        "GIVEN Stage 1 all COMPLIANT WHEN Stage 2 begins THEN existing reviewers run in parallel (current behavior preserved)",
+        "GIVEN Stage 1 finds NON-COMPLIANT WHEN verdict returned THEN executor fixes non-compliance BEFORE Stage 2",
+        "GIVEN Athena Phase 5 begins WHEN same protocol applies THEN behavior matches Atlas"
+      ],
+      "requiresTDD": false,
+      "complexity": "M",
+      "parallelGroup": "D"
+    },
+    {
+      "id": "US-012",
+      "title": "Quality-Gate Agent",
+      "asA": "orchestrator (Atlas/Athena)",
+      "iWantTo": "a quality-gate agent that verifies story completion with machine evidence",
+      "soThat": "verification is consistent and not dependent on individual agent interpretation",
+      "acceptanceCriteria": [
+        "GIVEN agents/quality-gate.md created WHEN receives story ID and criteria THEN runs each criterion as specific check with PASS/FAIL and evidence",
+        "GIVEN quality-gate reports FAIL WHEN returned to orchestrator THEN knows exactly which criterion failed for targeted fix",
+        "GIVEN unverifiable criterion encountered WHEN detected THEN flags as MANUAL_REVIEW_NEEDED, does not block pipeline",
+        "GIVEN model tier assigned WHEN frontmatter set THEN model is sonnet"
+      ],
+      "requiresTDD": true,
+      "complexity": "M",
+      "parallelGroup": "A"
+    },
+    {
+      "id": "US-013",
+      "title": "Code-Reviewer Agent Enrichment",
+      "asA": "orchestrator",
+      "iWantTo": "code-reviewer to be aware of spec compliance context",
+      "soThat": "it distinguishes spec-mismatch from quality issues",
+      "acceptanceCriteria": [
+        "GIVEN code-reviewer receives prompt with specContext WHEN reviewing THEN prioritizes spec-noncompliance findings as CRITICAL",
+        "GIVEN code-reviewer receives prompt WITHOUT specContext WHEN reviewing THEN falls back to current behavior",
+        "GIVEN checklist updated WHEN read THEN includes 'Spec alignment' item"
+      ],
+      "requiresTDD": false,
+      "complexity": "S",
+      "parallelGroup": "A"
+    },
+    {
+      "id": "US-014",
+      "title": "Debugger Agent Enrichment -- Mandatory Root-Cause Protocol",
+      "asA": "orchestrator",
+      "iWantTo": "debugger agent to have explicit ban on trial-and-error",
+      "soThat": "every debug session produces root-cause analysis before code change",
+      "acceptanceCriteria": [
+        "GIVEN agents/debugger.md updated WHEN read THEN contains IRON RULE: must confirm root cause BEFORE writing any fix",
+        "GIVEN process section updated WHEN read THEN follows 5-step: Reproduce, Hypothesize(3), Probe, Fix, Verify",
+        "GIVEN process section updated WHEN read THEN includes escalation to trace if all 3 hypotheses denied"
+      ],
+      "requiresTDD": false,
+      "complexity": "S",
+      "parallelGroup": "A"
+    },
+    {
+      "id": "US-015",
+      "title": "Verify-Coverage Enhancement -- Shallow Coverage Detection",
+      "asA": "developer",
+      "iWantTo": "verify-coverage to report shallow coverage, not just missing tests",
+      "soThat": "coverage gaps include insufficient test depth",
+      "acceptanceCriteria": [
+        "GIVEN test file exists but has <2 test cases for file with 3+ exports WHEN mapped THEN flagged as SHALLOW COVERAGE",
+        "GIVEN gap report generated WHEN rendered THEN includes Shallow Coverage section",
+        "GIVEN skill completes WHEN summary rendered THEN includes: total files, fully covered, shallow, missing, percentage"
+      ],
+      "requiresTDD": false,
+      "complexity": "S",
+      "parallelGroup": "C"
+    },
+    {
+      "id": "US-016",
+      "title": "Plan Skill Enhancement -- Brainstorm Integration",
+      "asA": "developer using /plan",
+      "iWantTo": "plan to invoke brainstorm automatically for L-scale tasks",
+      "soThat": "large plans have a validated design foundation",
+      "acceptanceCriteria": [
+        "GIVEN L-scale detected WHEN no brainstorm artifact exists THEN invokes brainstorm between Phase 0 and Phase 1",
+        "GIVEN brainstorm completes WHEN Phase 1 begins THEN output passed as design_context to Hermes",
+        "GIVEN S or M scale WHEN Phase 0 completes THEN brainstorm NOT invoked"
+      ],
+      "requiresTDD": false,
+      "complexity": "S",
+      "parallelGroup": "C"
+    },
+    {
+      "id": "US-017",
+      "title": "Consensus-Plan TDD Story Tagging",
+      "asA": "orchestrator",
+      "iWantTo": "consensus-plan to tag stories with requiresTDD",
+      "soThat": "executors know which stories need test-first discipline",
+      "acceptanceCriteria": [
+        "GIVEN Phase 1 DRAFT runs WHEN stories generated THEN each includes requiresTDD boolean",
+        "GIVEN PRD written WHEN requiresTDD present THEN Atlas/Athena include TDD instructions only for requiresTDD:true stories",
+        "GIVEN story has requiresTDD:true WHEN completes THEN quality-gate verifies new test exists"
+      ],
+      "requiresTDD": false,
+      "complexity": "S",
+      "parallelGroup": "C"
+    },
+    {
+      "id": "US-018",
+      "title": "Superpowers Coexistence Detection",
+      "asA": "plugin system",
+      "iWantTo": "AO to detect whether Superpowers is also installed",
+      "soThat": "it can optionally delegate to Superpowers skills when both present",
+      "acceptanceCriteria": [
+        "GIVEN AO starts session WHEN initialization runs THEN checks for Superpowers skill names in Skill registry",
+        "GIVEN Superpowers NOT installed WHEN AO operates THEN all methodology is self-contained (standalone, no errors)",
+        "GIVEN Superpowers IS installed WHEN TDD skill invoked THEN MAY invoke superpowers:tdd, falling back to own implementation on failure",
+        "GIVEN detection runs WHEN result cached THEN runs at most once per session"
+      ],
+      "requiresTDD": false,
+      "complexity": "S",
+      "parallelGroup": "E"
+    }
+  ],
+  "successMetrics": [
+    { "metric": "Existing test pass rate", "target": "182/182 (100%)" },
+    { "metric": "New skill files created", "target": "4" },
+    { "metric": "New agent files created", "target": "1" },
+    { "metric": "Modified skill files", "target": "6" },
+    { "metric": "Modified agent files", "target": "2" },
+    { "metric": "npm dependencies", "target": "0" },
+    { "metric": "New unit tests", "target": "20+" },
+    { "metric": "Standalone operation", "target": "No errors without Superpowers" }
+  ],
+  "constraints": [
+    "Zero npm dependencies -- Node.js built-ins only",
+    "ESM only (.mjs) for all new scripts",
+    "182 existing tests must pass after integration",
+    "Superpowers repo is read-only reference",
+    "AO must work standalone without Superpowers",
+    "File permissions: 0o600 for state, 0o700 for dirs",
+    "Greek mythology naming convention for agents"
+  ],
+  "openQuestions": [
+    {
+      "id": "Q1",
+      "question": "Should brainstorm auto-select in autonomous mode or always be interactive?",
+      "recommendedDefault": "Auto-select in autonomous mode, interactive on direct invocation",
+      "impactAnalysis": "If always interactive: blocks autonomous execution. If always auto: user loses design input.",
+      "stakeholder": "product owner"
+    },
+    {
+      "id": "Q2",
+      "question": "Should TDD gate apply to Codex workers or only Claude?",
+      "recommendedDefault": "Apply to both, verify after completion for Codex",
+      "impactAnalysis": "Codex-only skip: inconsistent. Strict enforcement: may cause Codex failures.",
+      "stakeholder": "tech lead"
+    },
+    {
+      "id": "Q3",
+      "question": "Should quality-gate be a standalone skill or internal-only agent?",
+      "recommendedDefault": "Internal-only agent",
+      "impactAnalysis": "If also a skill: useful for manual verification but adds maintenance.",
+      "stakeholder": "tech lead"
+    },
+    {
+      "id": "Q4",
+      "question": "Minimum test count per story for TDD gate?",
+      "recommendedDefault": "1 new test case minimum per requiresTDD:true story",
+      "impactAnalysis": "Higher minimum: more thorough but may over-constrain small stories.",
+      "stakeholder": "tech lead"
+    }
+  ]
+}

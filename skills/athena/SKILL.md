@@ -274,7 +274,8 @@ For each Claude worker:
        YOUR WORKTREE: <worktreePath>  (work only inside this directory)
        PROTOCOL: Commit your progress to branch <branchName> before signalling done.
                  SendMessage to <workers> when done.
-       CONSTRAINT: Do NOT edit files outside your scope or worktree.")
+       CONSTRAINT: Do NOT edit files outside your scope or worktree.
+       [OPTIONAL] For new functionality: follow /tdd discipline when implementing testable features.")
 ```
 
 **Codex workers** (via tmux, simultaneously):
@@ -424,6 +425,17 @@ Task(subagent_type="agent-olympus:executor", model="sonnet",
 Mark stories `passes: true` in prd.json after verifying each worker's acceptance criteria.
 
 Run **simultaneously**: build, tests, linter.
+
+**[OPTIONAL] Quality Gate Checkpoint** — after all workers complete and before final review:
+If `agent-olympus:quality-gate` agent is available:
+```
+Task(subagent_type="agent-olympus:quality-gate", model="sonnet",
+  prompt="Run quality gate checks on integration output.")
+```
+- FAIL → debug and retry (max 2x)
+- CONDITIONAL → log, proceed
+- PASS → proceed to Phase 5
+Note: Skip this checkpoint if quality-gate agent is absent.
 
 ```
 ┌─→ ALL PASS → Phase 5

@@ -21,3 +21,9 @@ Use Glob, Grep, Read extensively. You are READ-ONLY — never use Edit or Write.
 - 🟠 HIGH: Significant quality concern
 - 🟡 MEDIUM: Should fix but not blocking
 - 🟢 LOW: Nitpick / style preference
+
+## Two-Stage Review Protocol (Superpowers)
+
+Stage 1 — Spec Compliance: Does implementation match spec/acceptance criteria?
+Stage 2 — Code Quality: Patterns, maintainability, forbidden anti-patterns
+Both stages must pass. Report stage-by-stage.

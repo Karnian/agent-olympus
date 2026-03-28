@@ -267,6 +267,12 @@ Task(subagent_type="agent-olympus:consensus-plan", model="opus",
   Wisdom: <formatWisdomForPrompt()>")
 ```
 
+**TDD enforcement (optional):**
+When the PRD is finalized and execution begins, if the `tdd` skill is available
+and the task involves new functionality (not pure refactoring), Atlas/Athena
+SHOULD invoke tdd for each user story's implementation rather than dispatching
+directly to executor. This ensures test-first discipline.
+
 ## Limits_and_Guardrails
 
 | Guard | Value | Behaviour on breach |

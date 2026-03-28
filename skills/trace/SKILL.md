@@ -115,4 +115,10 @@ Atlas/Athena escalate to Trace when:
 - Same error appears in different forms across iterations
 - Error message is ambiguous or misleading
 
+**Boundary with systematic-debug:**
+- Use `systematic-debug` when the bug is known and reproducible (single-bug focus).
+- Use `trace` when the failure is ambiguous, involves multiple possible causes,
+  or the debugger agent has already failed twice.
+- systematic-debug is the first-line tool; trace is the escalation path.
+
 </Trace>

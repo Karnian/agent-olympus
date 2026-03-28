@@ -65,3 +65,9 @@ If user approves ("yes", "create stubs", "스텁 만들어"):
 - Create minimal stub test files for each gap
 - Each stub: `test('TODO: <function>', () => { assert.ok(true, 'not implemented') })`
 - Add TODO comments pointing to the source function
+
+## Integration
+
+- `finish-branch` skill invokes verify-coverage as Step 3 of its pre-merge checklist.
+- verify-coverage remains fully usable as a standalone skill.
+- Atlas Phase 4 (VERIFY) may invoke verify-coverage for coverage gap awareness.
