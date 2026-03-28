@@ -6,7 +6,7 @@
 
 Agent Olympus is a standalone Claude Code plugin that transforms how you build software. Give it a task, and it orchestrates specialized AI agents to complete it autonomously — analyzing requirements, planning execution, implementing changes, verifying results, and fixing issues until everything passes.
 
-Two orchestrators, 16 specialized agents, 15 workflow skills. Zero npm dependencies.
+Two orchestrators, 17 specialized agents, 19 workflow skills. Zero npm dependencies.
 
 ## What It Does
 
@@ -22,8 +22,8 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 ## Features
 
 - **Two orchestrators**: Atlas (hub-and-spoke) and Athena (peer-to-peer team)
-- **16 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Executor, Designer (UI/UX), Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Atlas, Athena, and more
-- **15 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan
+- **17 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Hermes (spec), Executor, Designer (UI/UX), Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), **Themis (quality gate)**, Atlas, Athena
+- **19 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, **tdd, systematic-debug, brainstorm, finish-branch**
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
 - **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs; intent-aware query expansion
 - **Zero npm dependencies**: Node.js built-ins only
@@ -34,7 +34,8 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **SessionStart hook**: Automatically injects prior wisdom and interrupted checkpoint context at session start
 - **Stop hook WIP commit**: Auto-saves uncommitted work as a WIP commit on session end
 - **Atomic writes**: All state files use tmp+rename pattern for crash-safe writes
-- **182 unit tests**: Comprehensive test suite using `node:test` across 13 test files
+- **Superpowers methodology**: TDD discipline, systematic debugging, brainstorm-first gate, two-stage code review — embedded as native skills (standalone; no Superpowers install required)
+- **182+ unit tests**: Comprehensive test suite using `node:test` across 13 test files
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -116,6 +117,13 @@ Resume from Phase 3 or restart?]
 ```
 
 Reply `resume` to pick up where you left off.
+
+### Methodology Skills (New in v0.7.0)
+
+- **`/tdd`** — Test-driven development: write failing test first, then minimum code to pass, then refactor
+- **`/brainstorm`** — Design-before-code: diverge (many options) → converge (filter) → refine (approve) before any implementation
+- **`/systematic-debug`** — Root-cause-first debugging: reproduce consistently → isolate to component → understand cause → minimal fix → verify
+- **`/finish-branch`** — Structured branch completion: tests → lint → coverage → review → present merge options
 
 ### Other Skills
 
@@ -219,7 +227,7 @@ User Request
 | Best for | Independent tasks | Interdependent tasks |
 | Overhead | Lower | Higher but more collaborative |
 
-## Agents (16 Total)
+## Agents (17 Total)
 
 | Agent | Model | Role |
 |-------|-------|------|
@@ -238,15 +246,20 @@ User Request
 | **architect** | Opus | Architecture reviewer (read-only) — structural integrity, module boundaries |
 | **security-reviewer** | Sonnet | Security reviewer (read-only) — OWASP Top 10, common vulnerabilities |
 | **code-reviewer** | Sonnet | Code quality reviewer (read-only) — standards, patterns, maintainability |
+| **themis** | Sonnet | Quality gate enforcer (read-only) — tests, syntax, namespace hygiene; PASS/FAIL/CONDITIONAL verdict |
 | **writer** | Haiku | Documentation specialist — clear, accurate technical docs and code comments |
 
-## Skills (15 Total)
+## Skills (19 Total)
 
 | Skill | Level | Aliases | Use Case |
 |-------|-------|---------|----------|
 | **atlas** | 5 | `atlas`, `아틀라스`, `do-it`, `해줘`, `just-do-it` | Autonomous hub-and-spoke orchestration |
 | **athena** | 5 | `athena`, `아테나`, `team-do-it`, `팀으로해`, `collaborate` | Autonomous peer-to-peer team orchestration |
 | **plan** | 4 | `plan`, `계획`, `spec`, `기획`, `prd`, `역기획` | Adaptive product planner — forward (idea→spec) and reverse (code→spec) |
+| **tdd** | 3 | `tdd`, `test-driven`, `테스트주도개발`, `red-green-refactor` | Test-driven development — RED→GREEN→REFACTOR discipline |
+| **brainstorm** | 3 | `brainstorm`, `브레인스토밍`, `design-first`, `설계먼저` | Design-before-code — diverge→converge→refine with approval gate |
+| **systematic-debug** | 3 | `systematic-debug`, `체계적디버깅`, `root-cause-debug`, `디버그` | Root-cause-first debugging — reproduce→isolate→understand→fix→verify |
+| **finish-branch** | 2 | `finish-branch`, `브랜치완료`, `finish`, `완료` | Structured branch completion with verified checklist before merge |
 | **ask** | 2 | `ask`, `물어봐`, `codex`, `gemini`, `quick-ask` | Quick single-shot query to Codex/Gemini |
 | **deep-interview** | 4 | `deep-interview`, `인터뷰`, `clarify`, `명확하게` | Socratic requirements clarification |
 | **research** | 3 | `research`, `조사`, `외부정보`, `lookup` | Parallel web research for external knowledge |
@@ -458,7 +471,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (182 tests across 13 files) covers the core hook libraries. To run:
+A `node:test` based test suite (182+ tests across 13 files) covers the core hook libraries. To run:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'
@@ -491,6 +504,7 @@ This project was inspired by and references ideas from:
 - [Oh My Claude Code](https://github.com/Yeachan-Heo/oh-my-claudecode) — Multi-agent orchestration plugin for Claude Code
 - [Oh My OpenAgent](https://github.com/code-yeongyu/oh-my-openagent) — Batteries-included agent harness with multi-model orchestration
 - [Kimoring AI Skills](https://github.com/codefactory-co/kimoring-ai-skills) — SessionStart/Stop hook patterns, coverage gap detection concept
+- [Superpowers](https://github.com/obra/superpowers) — TDD discipline, systematic debugging methodology, brainstorm-first gate, verification-before-completion iron law, two-stage code review protocol (v0.7.0)
 
 ## License
 
