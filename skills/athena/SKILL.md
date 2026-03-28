@@ -275,6 +275,9 @@ For each Claude worker:
        PROTOCOL: Commit your progress to branch <branchName> before signalling done.
                  SendMessage to <workers> when done.
        CONSTRAINT: Do NOT edit files outside your scope or worktree.
+       TDD_INSTRUCTION: If your story has testable acceptance criteria, follow TDD discipline:
+         write a failing test first (RED), then minimum code to pass (GREEN), then refactor.
+         Do not write production code before tests.
        [OPTIONAL] For new functionality: follow /tdd discipline when implementing testable features.")
 ```
 
@@ -432,7 +435,7 @@ If `agent-olympus:themis` agent is available:
 Task(subagent_type="agent-olympus:themis", model="sonnet",
   prompt="Run quality gate checks on integration output.")
 ```
-- FAIL → debug and retry (max 2x)
+- FAIL → debug and retry (max 2 retry cycles); debug path follows the 4-step escalation chain above
 - CONDITIONAL → log, proceed
 - PASS → proceed to Phase 5
 Note: Skip this checkpoint if quality-gate agent is absent.
@@ -440,7 +443,13 @@ Note: Skip this checkpoint if quality-gate agent is absent.
 ```
 ┌─→ ALL PASS → Phase 5
 │   ANY FAIL → spawn debugger (with wisdom learnings: formatWisdomForPrompt(queryWisdom(null,10))), fix, re-verify
-│   If debugger fails 2x → escalate via Skill(skill="agent-olympus:trace")
+│   Debug escalation chain:
+│     1. First attempt: spawn debugger agent
+│     2. Debugger fails once: spawn debugger again with additional context from wisdom
+│     3. Debugger fails twice: invoke Skill(skill="agent-olympus:systematic-debug")
+│        for root-cause-first investigation
+│     4. systematic-debug fails: escalate via Skill(skill="agent-olympus:trace")
+│        for evidence-driven hypothesis analysis
 └── Loop (max 5 fix cycles)
 ```
 
@@ -469,6 +478,9 @@ After review approved:
 1. Run `Skill(skill="agent-olympus:slop-cleaner")` on all changed files
 2. Re-run build + tests to verify no regression
 3. Run `Skill(skill="agent-olympus:git-master")` for atomic commits
+4. **Optional branch completion**: invoke `Skill(skill="agent-olympus:finish-branch")` for a full
+   pre-merge checklist (tests re-run, lint, coverage, code review, merge option presentation).
+   Use when the task represents a complete feature branch ready for integration.
 
 ### COMPLETION
 
@@ -539,7 +551,8 @@ Common examples:
 - `agent-olympus:deep-dive` — 2-stage investigation pipeline for complex + ambiguous tasks (Phase 0)
 - `agent-olympus:consensus-plan` — multi-perspective plan validation loop for 3+ story tasks (Phase 1)
 - `agent-olympus:external-context` — facet-decomposed parallel research; enriches team context with external docs and best practices (Phase 0)
-- `agent-olympus:trace` — evidence-driven root-cause analysis (use when debugger fails 2x)
+- `agent-olympus:systematic-debug` — root-cause-first debugging (use when debugger fails 2x)
+- `agent-olympus:trace` — evidence-driven hypothesis analysis (use when systematic-debug also fails)
 - `agent-olympus:slop-cleaner` — AI bloat cleanup (use before final commit)
 - `agent-olympus:git-master` — atomic commit discipline (use as final step)
 - `agent-olympus:research` — parallel web research for external docs/APIs
@@ -549,7 +562,7 @@ Common examples:
 Phase 0 (Design) → Skill(skill="agent-olympus:deep-dive") (if complexity=complex/architectural AND ambiguity > 40)
 Phase 0 (Design) → Skill(skill="agent-olympus:external-context") (if external API/library knowledge gap detected)
 Phase 1 (Plan)   → Skill(skill="agent-olympus:consensus-plan") (if 3+ stories; replaces standard Prometheus pass)
-Phase 4 (Verify) → Skill(skill="agent-olympus:trace") (if integration failures persist)
+Phase 4 (Verify) → Skill(skill="agent-olympus:systematic-debug") (if debugger fails 2x); Skill(skill="agent-olympus:trace") (if systematic-debug also fails)
 Phase 5 (Review) → Skill(skill="agent-olympus:slop-cleaner") → Skill(skill="agent-olympus:git-master") → DONE
 ```
 

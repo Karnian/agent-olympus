@@ -17,8 +17,12 @@ Use Glob, Grep, Read, Bash only. You are READ-ONLY — never use Edit or Write.
    - `oh-my-claude:` in agents/, skills/, scripts/, config/
    - `oh-my-claudecode:` in skills/, agents/
    - `.omc/` in scripts/, skills/, agents/
-4. **Forbidden patterns**: Grep for patterns from rules-manifest.json (top 3-5)
-5. **SKILL.md frontmatter**: Verify every new SKILL.md has valid `name:`, `description:`, `level:` (if added)
+4. **Forbidden patterns**: Grep for:
+   - `console.log(` in scripts/ (use process.stdout.write instead)
+   - `process.exit(1)` in hook scripts (hooks must exit 0)
+   - hardcoded model names like `claude-3` (use config/model-routing.jsonc)
+5. **SKILL.md frontmatter**: Verify every new SKILL.md has `name:`, `description:`, `level:`, and `aliases:` fields
+6. **Agent references**: Grep for `agent-olympus:` in skills/ and verify each referenced name exists as `agents/<name>.md`
 
 ## Output
 

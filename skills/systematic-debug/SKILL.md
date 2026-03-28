@@ -175,6 +175,10 @@ Record the fix. Manually verify reproduction steps no longer trigger the bug.
 
 **Gate**: Reproduction steps executed 1+ time after fix; bug no longer reproduces.
 
+Note: Phase 4 requires only 1 successful run (not 3/3) because Phase 1 already
+established consistent reproduction. The fix verification confirms resolution,
+not consistency.
+
 ### Phase 5 — VERIFY
 
 Write a regression test and verify no regressions:
@@ -262,7 +266,7 @@ All tests passing. Bug fixed.
 - **trace**: Failure is ambiguous, involves multiple possible causes, or debugger has failed twice
 
 **In debugger.md Hard Gates:**
-The debugger agent will enforce systematic-debug discipline through mandatory gates in Phase 1, 3, and 5.
+The debugger agent enforces systematic-debug discipline through mandatory gates at Phase 1 (REPRODUCE), Phase 4 (FIX), and Phase 5 (VERIFY).
 
 **Post-fix integration:**
 After systematic-debug completes, regression test is integrated into the main test suite for ongoing protection.

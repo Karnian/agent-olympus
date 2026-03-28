@@ -342,6 +342,13 @@ Rules:
 - If `errorCheck.reason` is `'crash'`, you may retry Codex once; if it crashes again, fall back to Claude.
 - Always call `await reassignToClaude()` before spawning the Claude replacement — it handles tmux cleanup and wisdom recording.
 
+**TDD Routing** (per story, before spawning executor):
+If story has `requiresTDD: true` OR `acceptanceCriteria` contains testable/behavioral conditions:
+  → Instruct the executor: "Implement this story using TDD: write a failing test first (RED),
+    then minimum code to pass (GREEN), then refactor. Do not write production code before tests."
+If story is a pure refactor / docs / config change (no runtime behavior change):
+  → Standard executor dispatch (no TDD gate required)
+
 3. After each story completes, verify its acceptance criteria with FRESH evidence
 4. Mark `passes: true` in prd.json only when ALL criteria verified
 5. Record learnings via wisdom calls after each story:
@@ -377,7 +384,13 @@ Run **simultaneously**: build, tests, linter, type checker.
 │   └─ ANY FAIL → spawn debugger:
 │       Task(subagent_type="agent-olympus:debugger", model="sonnet",
 │         prompt="Fix: <error_output>. Previous learnings: <formatWisdomForPrompt(queryWisdom(null,10))>")
-│       If debugger fails 2x → escalate via Skill(skill="agent-olympus:trace")
+│       Debug escalation chain:
+│         1. First attempt: spawn debugger agent
+│         2. Debugger fails once: spawn debugger again with additional context from wisdom
+│         3. Debugger fails twice: invoke Skill(skill="agent-olympus:systematic-debug")
+│            for root-cause-first investigation
+│         4. systematic-debug fails: escalate via Skill(skill="agent-olympus:trace")
+│            for evidence-driven hypothesis analysis
 │       Re-run checks
 └── Loop (max 5 fix cycles, same error 3x = escalate)
 ```
@@ -393,7 +406,7 @@ If `agent-olympus:themis` agent is available:
 Task(subagent_type="agent-olympus:themis", model="sonnet",
   prompt="Run quality gate checks on all changed files.")
 ```
-- If verdict is FAIL → return to Phase 3 with specific failure reasons
+- If verdict is FAIL → return to Phase 3 with specific failure reasons (max 2 retry cycles before escalating to user)
 - If verdict is CONDITIONAL → log warnings, proceed to Phase 5
 - If verdict is PASS → proceed to Phase 5
 Note: This phase is OPTIONAL. If quality-gate agent is absent, skip and proceed.
@@ -420,6 +433,9 @@ After review approved:
 1. Run `Skill(skill="agent-olympus:slop-cleaner")` on all changed files
 2. Re-run build + tests to verify no regression from cleanup
 3. Run `Skill(skill="agent-olympus:git-master")` for atomic commits
+4. **Optional branch completion**: invoke `Skill(skill="agent-olympus:finish-branch")` for a full
+   pre-merge checklist (tests re-run, lint, coverage, code review, merge option presentation).
+   Use when the task represents a complete feature branch ready for integration.
 
 ### COMPLETION
 
@@ -477,7 +493,8 @@ Common examples:
 - `agent-olympus:deep-dive` — 2-stage investigation pipeline for complex + ambiguous tasks (Phase 1)
 - `agent-olympus:consensus-plan` — multi-perspective plan validation loop for 3+ story tasks (Phase 2)
 - `agent-olympus:external-context` — facet-decomposed parallel research; enriches agent context with external docs and best practices (Phase 1)
-- `agent-olympus:trace` — evidence-driven root-cause analysis (use when debugger fails 2x)
+- `agent-olympus:systematic-debug` — root-cause-first debugging (use when debugger fails 2x)
+- `agent-olympus:trace` — evidence-driven hypothesis analysis (use when systematic-debug also fails)
 - `agent-olympus:slop-cleaner` — AI bloat cleanup (use before final commit)
 - `agent-olympus:git-master` — atomic commit discipline (use as final step)
 - `agent-olympus:deepinit` — generate AGENTS.md codebase map (use on unfamiliar projects)
@@ -488,7 +505,7 @@ Common examples:
 Phase 1 (Analyze) → Skill(skill="agent-olympus:deep-dive") (if complexity=complex/architectural AND ambiguity > 40)
 Phase 1 (Analyze) → Skill(skill="agent-olympus:external-context") (if external API/library knowledge gap detected)
 Phase 2 (Plan)    → Skill(skill="agent-olympus:consensus-plan") (if 3+ stories; replaces standard Prometheus pass)
-Phase 4 (Verify)  → Skill(skill="agent-olympus:trace") (if debugger fails 2x)
+Phase 4 (Verify)  → Skill(skill="agent-olympus:systematic-debug") (if debugger fails 2x); Skill(skill="agent-olympus:trace") (if systematic-debug also fails)
 Phase 5 (Review)  → Skill(skill="agent-olympus:slop-cleaner") → Skill(skill="agent-olympus:git-master") → DONE
 ```
 

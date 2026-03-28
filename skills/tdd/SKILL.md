@@ -2,7 +2,7 @@
 name: tdd
 description: Test-driven development with strict RED-GREEN-REFACTOR discipline
 level: 3
-aliases: [tdd, test-driven, 테스트주도개발, tdd개발, red-green-refactor]
+aliases: [tdd, test-driven, 테스트주도개발, tdd개발, red-green-refactor, 리팩터]
 ---
 
 <TDD_Skill>
@@ -223,10 +223,7 @@ Ready for integration.
 **Atlas Phase 3 (EXECUTE):**
 If the story involves new functionality (not pure refactoring) and has testable acceptance criteria:
 
-```
-Skill(skill="agent-olympus:tdd",
-  args="Implement US-<ID> using RED/GREEN/REFACTOR: <story details>")
-```
+invoke /tdd or describe the feature to implement with TDD discipline
 
 This replaces standard executor dispatch for that story.
 

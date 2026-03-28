@@ -872,8 +872,7 @@ Same as Atlas. Athena invokes Plan and then uses the finalized PRD to dispatch w
 **Pattern for brainstorm pre-processing:**
 If the task is classified as `architectural` or `complex` by triage AND the user
 has not explicitly skipped design:
-  Skill(skill="agent-olympus:brainstorm",
-    args="Design-before-code for: <user_request>")
+  invoke /brainstorm first, or ask the user to run /brainstorm before /plan for this task
 After brainstorm completes, read `.ao/brainstorm-<slug>.md` and use it as
 additional input to the Plan skill's Phase 1 UNDERSTAND step.
 

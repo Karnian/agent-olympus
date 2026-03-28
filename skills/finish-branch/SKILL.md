@@ -90,13 +90,13 @@ If any test fails:
 
 ### Step 2 — LINT
 
-Run linter and syntax checker:
+Run the project's lint/syntax check:
+
+- If `package.json` has a `lint` script → `npm run lint`
+- If `.mjs` files present → `node --check` on each script file
+- If other linter config found (`.eslintrc`, `pyproject.toml`, etc.) → use project linter
 
 ```
-Commands:
-  npm run lint  (if configured)
-  for f in scripts/*.mjs; do node --check "$f"; done  (AO-specific)
-
 Record:
 - Lint errors: <count>
 - Lint warnings: <count>
@@ -114,8 +114,7 @@ If lint errors exist:
 Invoke verify-coverage to detect gaps:
 
 ```
-Skill(skill="agent-olympus:verify-coverage",
-  args="Check coverage gaps for this branch")
+invoke /verify-coverage
 
 Collect output:
 - Covered files: <list>
@@ -133,14 +132,16 @@ Present gap report to user.
 Run code-reviewer on all changed files:
 
 ```
-git diff origin/main --name-only > changed_files.txt
+# Detect base branch
+BASE=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+CHANGED=$(git diff origin/$BASE --name-only)
 
 Task(subagent_type="agent-olympus:code-reviewer", model="sonnet",
   prompt="Review all changes in this branch for code quality.
 
   Changed files: <list from git diff>
   Branch: <current_branch>
-  Base branch: origin/main
+  Base branch: origin/$BASE
 
   Requirements:
   - Read each changed file
@@ -191,6 +192,8 @@ Choose one:
 
 Which option?
 ```
+
+For structured commit history: invoke /git-master for atomic commit discipline.
 
 **User chooses action. Execute chosen action only after explicit confirmation.**
 
@@ -252,6 +255,7 @@ finish-branch calls code-reviewer as Step 4 of the pre-merge checklist.
 | Lint failure | STOP | Do not proceed to Step 3 |
 | CRITICAL review finding | STOP | Do not proceed to Step 5 |
 | User confirmation required | Yes | Do not execute merge/discard without confirmation |
+| Discard branch | User confirms twice (type "DELETE" to confirm) | Abort if not confirmed |
 
 ## Stop_Conditions
 

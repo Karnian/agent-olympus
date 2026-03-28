@@ -22,7 +22,9 @@ Use Glob, Grep, Read extensively. You are READ-ONLY — never use Edit or Write.
 - 🟡 MEDIUM: Should fix but not blocking
 - 🟢 LOW: Nitpick / style preference
 
-## Two-Stage Review Protocol (Superpowers)
+## Two-Stage Review Protocol
+
+Spec source: check .ao/spec.md, .ao/prd.json, or the task's acceptance criteria from the calling orchestrator.
 
 Stage 1 — Spec Compliance: Does implementation match spec/acceptance criteria?
 Stage 2 — Code Quality: Patterns, maintainability, forbidden anti-patterns

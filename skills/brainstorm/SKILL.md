@@ -2,7 +2,7 @@
 name: brainstorm
 description: Design-before-code with diverge-converge-refine methodology
 level: 3
-aliases: [brainstorm, 브레인스톰, 설계, design-first, ideate, 아이디어]
+aliases: [brainstorm, 브레인스톰, 설계, design-first, ideate, 아이디어, 설계검토]
 ---
 
 <Brainstorm_Skill>
@@ -124,8 +124,11 @@ Task(subagent_type="agent-olympus:momus", model="opus",
   Output: score table + risk analysis")
 ```
 
-**Gate**: At least one option scores >=70 on ALL four dimensions (feasibility, alignment, cost, risk).
-If no option qualifies: return to Phase 1 with constraints (max 2 cycles).
+**CONVERGE Gate:**
+- Architect must mark at least one option as `feasible: true` (feasibility ≥ 70, alignment ≥ 70)
+- Momus must mark the same option as `acceptable: true` (cost ≥ 70, risk ≥ 70)
+- Both must agree on the SAME option before proceeding to REFINE
+- If no option passes both evaluators → loop back to DIVERGE with the failure reasons
 
 ### Phase 3 — REFINE
 
@@ -151,6 +154,8 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   Output: complete design document ready for approval")
 ```
 
+# slug = kebab-case of first 5 words of the task description
+# Example: "implement user auth system" → "implement-user-auth-system"
 Record the design document to `.ao/brainstorm-<slug>.md`.
 
 **Gate**: Design document produced with all required sections.
@@ -181,6 +186,11 @@ Wait for user approval:
 - "approve" / "looks good" → proceed to execution
 - "changes needed" → surface specific feedback, refine Phase 3 output
 - "ask questions" → clarify via AskUserQuestion, update design doc
+
+**Partial change request** (user approves concept but requests modifications):
+- If change affects only Phase 3 refinements → update the design doc and re-present
+- If change requires a different option from Phase 2 → return to CONVERGE with the new constraint
+- If change requires entirely new options → return to DIVERGE
 
 ## Output Format
 
@@ -234,10 +244,7 @@ Ready for implementation.
 **Atlas Phase 1-2 (TRIAGE + PLAN):**
 If task is marked `architectural` or `complex`:
 
-```
-Skill(skill="agent-olympus:brainstorm",
-  args="Design-before-code for: <user_request>")
-```
+invoke /brainstorm or describe the design challenge
 
 After brainstorm completes, read `.ao/brainstorm-<slug>.md` and use it as input to consensus-plan Phase 1 UNDERSTAND step.
 
@@ -257,7 +264,7 @@ Brainstorm can be invoked as a pre-processor to plan for architectural tasks.
 
 STOP and hand off to execution when:
 - >=3 distinct options generated in Phase 1
-- At least one option scores >=70 on all four evaluation dimensions (Phase 2)
+- At least one option: Architect marks `feasible: true` AND Momus marks `acceptable: true` on the same option (Phase 2)
 - Design document written with all required sections (Phase 3)
 - User explicitly approves design OR deadline reached and user confirms override
 

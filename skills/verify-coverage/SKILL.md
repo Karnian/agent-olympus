@@ -26,6 +26,12 @@ For each changed file `scripts/lib/foo.mjs`:
 For each changed `scripts/bar.mjs`:
 - Check if `scripts/test/bar.test.mjs` exists
 
+File type mappings:
+- src/foo.mjs → scripts/test/foo.test.mjs
+- src/foo.ts  → src/__tests__/foo.test.ts OR src/foo.test.ts
+- src/foo.tsx → src/__tests__/foo.test.tsx OR src/foo.test.tsx
+- *.py        → test_*.py OR *_test.py
+
 ### Step 3 — Check Hook Registration
 
 For any new hook script added:
@@ -63,7 +69,12 @@ Output a markdown report:
 
 If user approves ("yes", "create stubs", "스텁 만들어"):
 - Create minimal stub test files for each gap
-- Each stub: `test('TODO: <function>', () => { assert.ok(true, 'not implemented') })`
+- Each stub:
+  ```javascript
+  // Generated stub — this test intentionally fails until implemented
+  assert.fail('TEST NOT IMPLEMENTED: describe expected behavior here');
+  ```
+  # Failing stubs are intentional — they appear in test output as reminders
 - Add TODO comments pointing to the source function
 
 ## Integration
