@@ -409,7 +409,7 @@ Task(subagent_type="agent-olympus:themis", model="sonnet",
 - If verdict is FAIL → return to Phase 3 with specific failure reasons (max 2 retry cycles before escalating to user)
 - If verdict is CONDITIONAL → log warnings, proceed to Phase 5
 - If verdict is PASS → proceed to Phase 5
-Note: This phase is OPTIONAL. If quality-gate agent is absent, skip and proceed.
+Note: This phase is OPTIONAL. If Themis agent is absent, skip and proceed.
 
 ### Phase 5 — REVIEW (loop until approved)
 

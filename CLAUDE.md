@@ -27,7 +27,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 ## Key Conventions
 
 ### Naming
-- **Agents**: Greek mythology names (atlas, athena, metis, prometheus, momus, hermes, hephaestus); also role-based agents (quality-gate, test-engineer, code-reviewer, etc.)
+- **Agents**: Greek mythology names (atlas, athena, metis, prometheus, momus, hermes, hephaestus, themis); also role-based agents (test-engineer, code-reviewer, etc.)
 - **Namespace**: `agent-olympus:` prefix for all subagent_type references
 - **State files**: `.ao/state/` directory with `ao-` prefix per hook
 
@@ -50,7 +50,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - **Skill** (`skills/*/SKILL.md`) = workflow recipe with steps. User-facing, triggered by `/command` or keyword matching
 - **Agent** (`agents/*.md`) = role persona with model assignment. Called internally via `Task(subagent_type="agent-olympus:<name>")`
 - Not every agent has a matching skill. executor, debugger, designer etc. are internal-only
-- **Available agents** (agents/): atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hermes, metis, momus, prometheus, quality-gate, test-engineer, writer
+- **Available agents** (agents/): atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hermes, metis, momus, prometheus, themis, test-engineer, writer
 - **Available skills** (skills/): ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, external-context, finish-branch, git-master, plan, research, slop-cleaner, systematic-debug, tdd, trace, verify-coverage
 
 ### State Management

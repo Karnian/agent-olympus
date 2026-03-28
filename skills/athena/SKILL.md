@@ -438,7 +438,7 @@ Task(subagent_type="agent-olympus:themis", model="sonnet",
 - FAIL → debug and retry (max 2 retry cycles); debug path follows the 4-step escalation chain above
 - CONDITIONAL → log, proceed
 - PASS → proceed to Phase 5
-Note: Skip this checkpoint if quality-gate agent is absent.
+Note: Skip this checkpoint if Themis agent is absent.
 
 ```
 ┌─→ ALL PASS → Phase 5
