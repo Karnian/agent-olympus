@@ -427,9 +427,9 @@ Mark stories `passes: true` in prd.json after verifying each worker's acceptance
 Run **simultaneously**: build, tests, linter.
 
 **[OPTIONAL] Quality Gate Checkpoint** — after all workers complete and before final review:
-If `agent-olympus:quality-gate` agent is available:
+If `agent-olympus:themis` agent is available:
 ```
-Task(subagent_type="agent-olympus:quality-gate", model="sonnet",
+Task(subagent_type="agent-olympus:themis", model="sonnet",
   prompt="Run quality gate checks on integration output.")
 ```
 - FAIL → debug and retry (max 2x)

@@ -388,9 +388,9 @@ saveCheckpoint('atlas', { phase: 5, prdSnapshot: <prd.json>, completedStories, a
 
 ### Phase 4.5 — QUALITY GATE [OPTIONAL]
 
-If `agent-olympus:quality-gate` agent is available:
+If `agent-olympus:themis` agent is available:
 ```
-Task(subagent_type="agent-olympus:quality-gate", model="sonnet",
+Task(subagent_type="agent-olympus:themis", model="sonnet",
   prompt="Run quality gate checks on all changed files.")
 ```
 - If verdict is FAIL → return to Phase 3 with specific failure reasons
