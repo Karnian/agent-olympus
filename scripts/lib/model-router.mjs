@@ -62,7 +62,7 @@ function loadRoutingConfig() {
       const lesson =
         'model-routing.jsonc schema validation failed — falling back to defaults. Issues: ' +
         errors.join('; ');
-      recordValidationWarning(lesson);
+      recordValidationWarning(lesson).catch(() => {});
       return config; // config === DEFAULT_ROUTING_CONFIG when invalid
     }
 

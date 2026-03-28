@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.2] - 2026-03-29
+
+### Security
+- **`scripts/stop-hook.mjs`** — Replaced `execSync(git commit -m "${message}")` with `execFileSync('git', ['commit', '-m', message])` to eliminate shell injection vector (P0)
+- **`scripts/lib/worktree.mjs`** — Converted ALL `execSync` git calls to `execFileSync` with array arguments throughout the entire file (12 call sites), eliminating shell injection via `cwd`, `worktreePath`, and `branchName`
+
+### Added
+- **Activity-based liveness detection** (`scripts/lib/worker-spawn.mjs`) — Tracks output changes via MD5 hash comparison; reports `stalled` status when output is unchanged for 5+ minutes. Informational only — never auto-kills workers; the orchestrator decides how to respond
+- **Persistent worktree registry** (`scripts/lib/worktree.mjs`) — New `.ao/state/worktree-registry.json` tracks created worktrees for orphan cleanup. Failed-to-remove entries are retained for retry on next session
+- **Extended config validation** (`scripts/lib/config-validator.mjs`) — Now validates `fallbackChain` arrays (must contain valid model names), `teamWorkerType` values (`"gemini"`, `"codex"`, or `null`), `highConfidence` threshold, and `minConfidence < highConfidence` consistency
+- **6 new test files** (113 tests): `intent-gate.test.mjs`, `session-start.test.mjs`, `stop-hook.test.mjs`, `model-router-hook.test.mjs`, `model-router.test.mjs` (lib), `concurrency-release.test.mjs`
+- Total test suite: **295 tests across 19 files** (was 182 across 13)
+
+### Fixed
+- **`scripts/concurrency-gate.mjs`** — `parseInt` of env vars now guards against NaN; invalid values like `AO_CONCURRENCY_GLOBAL=abc` safely fall back to defaults instead of silently disabling concurrency limits
+- **`scripts/lib/worker-spawn.mjs`** — Improved `isDone` detection: now checks only the last 5 lines of pane output for shell prompt (`$`), reducing false positives from inline `$` in code output. Removed duplicate if/else branch. Fixed `stateChanged` flag to cover activity/stall metadata updates
+- **`scripts/lib/model-router.mjs`** — Added `.catch(() => {})` to fire-and-forget `recordValidationWarning()` call to prevent unhandled promise rejections
+- **`scripts/lib/inbox-outbox.mjs`** — Failed `atomicMoveSync` during message consume now logs to `failed-moves.log` instead of silently swallowing errors
+- **`scripts/lib/wisdom.mjs`** — Auto-prunes every 50 entries via `pruneWisdom()` to prevent unbounded JSONL growth
+- **`CLAUDE.md`** — Added `hephaestus` to Available agents list (was missing); updated test count to 295+/19 files
+
 ## [0.7.1] - 2026-03-29
 
 ### Fixed

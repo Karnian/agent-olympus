@@ -113,6 +113,40 @@ export function validateRoutingConfig(config) {
       }
     }
 
+    // --- route-level optional fields ---
+    if (config.routes && typeof config.routes === 'object' && !Array.isArray(config.routes)) {
+      const VALID_WORKER_TYPES = ['gemini', 'codex', null];
+      const VALID_MODELS = ['opus', 'sonnet', 'haiku'];
+
+      for (const [routeKey, route] of Object.entries(config.routes)) {
+        if (!route || typeof route !== 'object') continue;
+
+        // Validate fallbackChain if present
+        if (route.fallbackChain !== undefined) {
+          if (!Array.isArray(route.fallbackChain)) {
+            errors.push(
+              `config.routes["${routeKey}"].fallbackChain must be an array; received: ${typeof route.fallbackChain}`
+            );
+          } else {
+            for (const model of route.fallbackChain) {
+              if (typeof model !== 'string' || !VALID_MODELS.includes(model)) {
+                errors.push(
+                  `config.routes["${routeKey}"].fallbackChain contains invalid model "${model}"; allowed: ${VALID_MODELS.join(', ')}`
+                );
+              }
+            }
+          }
+        }
+
+        // Validate teamWorkerType if present
+        if (route.teamWorkerType !== undefined && !VALID_WORKER_TYPES.includes(route.teamWorkerType)) {
+          errors.push(
+            `config.routes["${routeKey}"].teamWorkerType must be "gemini", "codex", or null; received: ${JSON.stringify(route.teamWorkerType)}`
+          );
+        }
+      }
+    }
+
     // --- thresholds.minConfidence ---
     const minConfidence = config.thresholds?.minConfidence;
     if (minConfidence !== undefined) {
@@ -126,6 +160,32 @@ export function validateRoutingConfig(config) {
           JSON.stringify(minConfidence)
         );
       }
+    }
+
+    // --- thresholds.highConfidence ---
+    const highConfidence = config.thresholds?.highConfidence;
+    if (highConfidence !== undefined) {
+      if (
+        typeof highConfidence !== 'number' ||
+        highConfidence < 0 ||
+        highConfidence > 1
+      ) {
+        errors.push(
+          'config.thresholds.highConfidence must be a number between 0 and 1; received: ' +
+          JSON.stringify(highConfidence)
+        );
+      }
+    }
+
+    // --- consistency: minConfidence < highConfidence ---
+    if (
+      typeof minConfidence === 'number' &&
+      typeof highConfidence === 'number' &&
+      minConfidence >= highConfidence
+    ) {
+      errors.push(
+        `config.thresholds.minConfidence (${minConfidence}) must be less than highConfidence (${highConfidence})`
+      );
     }
 
     if (errors.length > 0) {

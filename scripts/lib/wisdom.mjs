@@ -89,6 +89,11 @@ export async function addWisdom(entry) {
 
     await fs.mkdir(path.dirname(WISDOM_PATH), { recursive: true, mode: 0o700 });
     await fs.appendFile(WISDOM_PATH, JSON.stringify(record) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    // Auto-prune when file grows beyond threshold (every ~50 entries check)
+    if (existing.length > 0 && existing.length % 50 === 0) {
+      await pruneWisdom().catch(() => {});
+    }
   } catch {
     // fail-safe: never throw
   }

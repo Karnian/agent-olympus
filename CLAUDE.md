@@ -18,7 +18,7 @@ skills/     → User-facing skills (SKILL.md with triggers, steps, workflow)
 scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
 scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom, worker-status,
               worktree, fs-atomic, provider-detect, config-validator)
-scripts/test → node:test based unit tests (182+ tests, 13 files)
+scripts/test → node:test based unit tests (295+ tests, 19 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -50,7 +50,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - **Skill** (`skills/*/SKILL.md`) = workflow recipe with steps. User-facing, triggered by `/command` or keyword matching
 - **Agent** (`agents/*.md`) = role persona with model assignment. Called internally via `Task(subagent_type="agent-olympus:<name>")`
 - Not every agent has a matching skill. executor, debugger, designer etc. are internal-only
-- **Available agents** (agents/): atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hermes, metis, momus, prometheus, themis, test-engineer, writer
+- **Available agents** (agents/): atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hephaestus, hermes, metis, momus, prometheus, themis, test-engineer, writer
 - **Available skills** (skills/): ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, external-context, finish-branch, git-master, plan, research, slop-cleaner, systematic-debug, tdd, trace, verify-coverage
 
 ### State Management
