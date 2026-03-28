@@ -45,12 +45,19 @@ function pruneStale(activeTasks) {
   });
 }
 
+function parseIntSafe(envVar, defaultVal) {
+  const raw = process.env[envVar];
+  if (raw === undefined || raw === '') return defaultVal;
+  const num = parseInt(raw, 10);
+  return Number.isInteger(num) && num > 0 ? num : defaultVal;
+}
+
 function getLimits() {
   return {
-    global: parseInt(process.env.AO_CONCURRENCY_GLOBAL ?? '5', 10),
-    claude: parseInt(process.env.AO_CONCURRENCY_CLAUDE ?? '3', 10),
-    codex: parseInt(process.env.AO_CONCURRENCY_CODEX ?? '2', 10),
-    gemini: parseInt(process.env.AO_CONCURRENCY_GEMINI ?? '2', 10),
+    global: parseIntSafe('AO_CONCURRENCY_GLOBAL', 5),
+    claude: parseIntSafe('AO_CONCURRENCY_CLAUDE', 3),
+    codex: parseIntSafe('AO_CONCURRENCY_CODEX', 2),
+    gemini: parseIntSafe('AO_CONCURRENCY_GEMINI', 2),
   };
 }
 

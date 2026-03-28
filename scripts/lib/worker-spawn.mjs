@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession } from './tmux-session.mjs';
 import { sendMessage, readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
 import { addWisdom } from './wisdom.mjs';
@@ -8,6 +9,18 @@ import { atomicWriteFileSync } from './fs-atomic.mjs';
 
 const STATE_DIR = '.ao/state';
 const ARTIFACTS_DIR = '.ao/artifacts';
+
+/** Default stall threshold in milliseconds (5 minutes of zero output change) */
+const STALL_THRESHOLD_MS = 5 * 60 * 1000;
+
+/**
+ * Compute a short hash of a string for cheap equality comparison.
+ * @param {string} str
+ * @returns {string}
+ */
+function quickHash(str) {
+  return createHash('md5').update(str || '').digest('hex');
+}
 
 /**
  * Error patterns that indicate a Codex worker has failed unrecoverably.
@@ -199,13 +212,42 @@ export function monitorTeam(teamName) {
       errorDetection = detectCodexError(paneOutput);
     }
 
-    // Then check isDone (but error takes priority)
-    const isDone = !errorDetection.failed && paneOutput && (
-      paneOutput.includes('$') ||
-      paneOutput.includes('completed') ||
-      paneOutput.includes('Done') ||
-      paneOutput.includes('Finished')
-    );
+    // Improved isDone detection:
+    // Check the last few lines for a shell prompt ('$ ' at end of output),
+    // rather than scanning the entire pane, to avoid false positives from
+    // inline '$' in code output. Both Codex and Claude workers run in tmux
+    // shells, so the completion signal is the same: the shell prompt returns.
+    let isDone = false;
+    if (!errorDetection.failed && paneOutput && worker.status === 'running') {
+      const lastLines = paneOutput.split('\n').slice(-5).join('\n');
+      isDone = /\$\s*$/.test(lastLines.trim());
+    }
+
+    // Activity-based liveness detection: track output changes over time
+    const currentHash = quickHash(paneOutput);
+    const prevHash = worker.lastOutputHash || null;
+    const now = Date.now();
+
+    if (currentHash !== prevHash) {
+      // Output changed — worker is active
+      state.workers[i].lastOutputHash = currentHash;
+      state.workers[i].lastActivityAt = new Date(now).toISOString();
+      stateChanged = true;
+    } else if (worker.status === 'running' && worker.lastActivityAt) {
+      // Output unchanged — check for stall
+      const stalledMs = now - new Date(worker.lastActivityAt).getTime();
+      if (stalledMs > STALL_THRESHOLD_MS && !worker.stalled) {
+        state.workers[i].stalled = true;
+        state.workers[i].stalledMs = stalledMs;
+        stateChanged = true;
+      }
+    }
+    // Initialize lastActivityAt on first monitor cycle
+    if (!state.workers[i].lastActivityAt && worker.status === 'running') {
+      state.workers[i].lastActivityAt = new Date(now).toISOString();
+      state.workers[i].lastOutputHash = currentHash;
+      stateChanged = true;
+    }
 
     let resolvedStatus = worker.status;
     if (isDone) {
@@ -230,6 +272,12 @@ export function monitorTeam(teamName) {
     if (errorDetection.failed) {
       workerEntry.errorReason = errorDetection.reason;
       workerEntry.errorMessage = errorDetection.message;
+    }
+
+    // Report stall state to the orchestrator (informational, not a kill)
+    if (state.workers[i].stalled) {
+      workerEntry.stalled = true;
+      workerEntry.stalledMs = state.workers[i].stalledMs;
     }
 
     status.workers.push(workerEntry);

@@ -1,4 +1,4 @@
-import { readFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, rmdirSync } from 'fs';
+import { readFileSync, appendFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, rmdirSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { atomicWriteFileSync, atomicMoveSync } from './fs-atomic.mjs';
@@ -50,7 +50,6 @@ export function readInbox(teamName, workerName, opts = {}) {
   // Auto-cleanup if requested
   if (opts.consume) {
     const processedDir = join(teamDir(teamName, workerName), 'processed');
-    // ensureDir not needed here — atomicMoveSync creates the directory if absent
     for (const msg of messages) {
       try {
         // Atomic rename: crash between read and move cannot cause double-processing
@@ -58,7 +57,16 @@ export function readInbox(teamName, workerName, opts = {}) {
           join(dir, msg._file),
           join(processedDir, msg._file)
         );
-      } catch {}
+      } catch (err) {
+        // Log failed moves so orchestrator can detect message processing issues
+        try {
+          const errFile = join(teamDir(teamName, workerName), 'failed-moves.log');
+          const line = `${new Date().toISOString()} FAILED ${msg._file}: ${err?.message || 'unknown'}\n`;
+          appendFileSync(errFile, line, { encoding: 'utf-8', mode: 0o600 });
+        } catch {
+          // fail-safe: don't break consume loop on logging failure
+        }
+      }
     }
   }
 

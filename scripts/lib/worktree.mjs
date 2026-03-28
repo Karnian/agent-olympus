@@ -2,13 +2,89 @@
  * Git worktree isolation for Athena parallel workers.
  * Each worker gets an independent worktree so file changes never collide.
  * All functions are fail-safe: errors are caught and handled gracefully.
+ *
+ * Security: All git commands use execFileSync (no shell) to prevent injection.
  */
 
-import { execSync } from 'child_process';
-import { existsSync, mkdirSync, rmSync } from 'fs';
+import { execFileSync } from 'child_process';
+import { existsSync, mkdirSync, rmSync, readFileSync } from 'fs';
 import { join } from 'path';
+import { atomicWriteFileSync } from './fs-atomic.mjs';
 
 const WORKTREE_BASE = '.ao/worktrees';
+const WORKTREE_REGISTRY = '.ao/state/worktree-registry.json';
+
+/**
+ * Read the persistent worktree registry.
+ * @returns {Array<{ teamName: string, workerName: string, worktreePath: string, branchName: string, createdAt: string }>}
+ */
+function readRegistry() {
+  try {
+    return JSON.parse(readFileSync(WORKTREE_REGISTRY, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Write the worktree registry atomically.
+ * @param {Array} entries
+ */
+function writeRegistry(entries) {
+  try {
+    mkdirSync(join('.ao', 'state'), { recursive: true, mode: 0o700 });
+    atomicWriteFileSync(WORKTREE_REGISTRY, JSON.stringify(entries, null, 2));
+  } catch {
+    // fail-safe
+  }
+}
+
+/**
+ * Register a worktree in the persistent registry for orphan tracking.
+ */
+function registerWorktree(teamName, workerName, worktreePath, branchName) {
+  const entries = readRegistry();
+  entries.push({ teamName, workerName, worktreePath, branchName, createdAt: new Date().toISOString() });
+  writeRegistry(entries);
+}
+
+/**
+ * Unregister a worktree from the persistent registry.
+ */
+function unregisterWorktree(worktreePath) {
+  const entries = readRegistry().filter(e => e.worktreePath !== worktreePath);
+  writeRegistry(entries);
+}
+
+/**
+ * Clean up any orphaned worktrees found in the registry.
+ * Only removes entries that were successfully cleaned; failed entries remain for retry.
+ * @param {string} cwd - Project root
+ * @returns {{ cleaned: number, errors: number }}
+ */
+export function cleanupOrphanWorktrees(cwd) {
+  let cleaned = 0;
+  let errors = 0;
+
+  try {
+    const entries = readRegistry();
+    if (entries.length === 0) return { cleaned: 0, errors: 0 };
+
+    const remaining = [];
+    for (const entry of entries) {
+      const result = removeWorkerWorktree(cwd, entry.worktreePath, entry.branchName);
+      if (result.removed) cleaned++;
+      else { errors++; remaining.push(entry); }
+    }
+
+    // Only clear successfully removed entries; keep failed ones for next attempt
+    writeRegistry(remaining);
+  } catch {
+    errors++;
+  }
+
+  return { cleaned, errors };
+}
 
 /**
  * Sanitize a name for use in branch names and directory paths.
@@ -43,30 +119,27 @@ export function createWorkerWorktree(cwd, teamName, workerName) {
     // Remove stale worktree if it exists (e.g. from a previous cancelled run)
     if (existsSync(worktreePath)) {
       try {
-        execSync(`git -C "${cwd}" worktree remove "${worktreePath}" --force`, { stdio: 'pipe' });
+        execFileSync('git', ['-C', cwd, 'worktree', 'remove', worktreePath, '--force'], { stdio: 'pipe' });
       } catch {
-        // Directory may exist but not be registered — try rmSync as fallback
         try { rmSync(worktreePath, { recursive: true, force: true }); } catch {}
       }
     }
 
     // Delete branch if it already exists from a previous run
     try {
-      execSync(`git -C "${cwd}" branch -D "${branchName}"`, { stdio: 'pipe' });
+      execFileSync('git', ['-C', cwd, 'branch', '-D', branchName], { stdio: 'pipe' });
     } catch {
       // Branch does not exist — that is fine
     }
 
     // Create the worktree on a new branch based on HEAD
-    execSync(
-      `git -C "${cwd}" worktree add "${worktreePath}" -b "${branchName}"`,
-      { stdio: 'pipe' }
-    );
+    execFileSync('git', ['-C', cwd, 'worktree', 'add', worktreePath, '-b', branchName], { stdio: 'pipe' });
+
+    // Register in persistent registry for orphan tracking
+    registerWorktree(teamName, workerName, worktreePath, branchName);
 
     return { worktreePath, branchName, created: true };
   } catch (err) {
-    // Fail-safe: return a descriptor that signals creation failed
-    // The caller must handle created:false and fall back to cwd
     const slug = sanitizeName(teamName);
     const worker = sanitizeName(workerName);
     return {
@@ -88,27 +161,25 @@ export function createWorkerWorktree(cwd, teamName, workerName) {
  */
 export function removeWorkerWorktree(cwd, worktreePath, branchName) {
   try {
-    // Remove registered worktree entry (prune if needed)
     try {
-      execSync(`git -C "${cwd}" worktree remove "${worktreePath}" --force`, { stdio: 'pipe' });
+      execFileSync('git', ['-C', cwd, 'worktree', 'remove', worktreePath, '--force'], { stdio: 'pipe' });
     } catch {
-      // If unregistered, remove directory directly
       if (existsSync(worktreePath)) {
         try { rmSync(worktreePath, { recursive: true, force: true }); } catch {}
       }
     }
 
-    // Prune stale worktree references
     try {
-      execSync(`git -C "${cwd}" worktree prune`, { stdio: 'pipe' });
+      execFileSync('git', ['-C', cwd, 'worktree', 'prune'], { stdio: 'pipe' });
     } catch {}
 
-    // Delete the branch
     if (branchName) {
       try {
-        execSync(`git -C "${cwd}" branch -D "${branchName}"`, { stdio: 'pipe' });
+        execFileSync('git', ['-C', cwd, 'branch', '-D', branchName], { stdio: 'pipe' });
       } catch {}
     }
+
+    unregisterWorktree(worktreePath);
 
     return { removed: true };
   } catch {
@@ -129,14 +200,13 @@ export function listTeamWorktrees(cwd, teamName) {
     const slug = sanitizeName(teamName);
     const prefix = `ao-worker-${slug}-`;
 
-    const raw = execSync(`git -C "${cwd}" worktree list --porcelain`, {
+    const raw = execFileSync('git', ['-C', cwd, 'worktree', 'list', '--porcelain'], {
       stdio: 'pipe',
       encoding: 'utf-8',
     }).trim();
 
     if (!raw) return [];
 
-    // Each worktree block is separated by a blank line
     const blocks = raw.split(/\n\n+/);
     const results = [];
 
@@ -172,20 +242,19 @@ export function mergeWorkerBranch(cwd, branchName, workerName) {
   try {
     const message = `integrate: ${sanitizeName(workerName)} changes`;
 
-    const mergeOutput = execSync(
-      `git -C "${cwd}" merge "${branchName}" --no-ff -m "${message}"`,
-      { stdio: 'pipe', encoding: 'utf-8' }
-    ).trim();
+    const mergeOutput = execFileSync('git', ['-C', cwd, 'merge', branchName, '--no-ff', '-m', message], {
+      stdio: 'pipe',
+      encoding: 'utf-8',
+    }).trim();
 
     return { success: true, conflicts: [], mergeOutput };
   } catch (err) {
-    // Merge failed — likely a conflict; collect conflicting files
     let conflicts = [];
     try {
-      const conflictOutput = execSync(
-        `git -C "${cwd}" diff --name-only --diff-filter=U`,
-        { stdio: 'pipe', encoding: 'utf-8' }
-      ).trim();
+      const conflictOutput = execFileSync('git', ['-C', cwd, 'diff', '--name-only', '--diff-filter=U'], {
+        stdio: 'pipe',
+        encoding: 'utf-8',
+      }).trim();
       conflicts = conflictOutput ? conflictOutput.split('\n').filter(Boolean) : [];
     } catch {}
 
@@ -218,7 +287,6 @@ export function cleanupTeamWorktrees(cwd, teamName) {
       else errors++;
     }
 
-    // Also prune the base directory if it is empty
     try {
       const slug = sanitizeName(teamName);
       const baseDir = join(cwd, WORKTREE_BASE, slug);
@@ -227,9 +295,8 @@ export function cleanupTeamWorktrees(cwd, teamName) {
       }
     } catch {}
 
-    // Final prune to clear git's internal references
     try {
-      execSync(`git -C "${cwd}" worktree prune`, { stdio: 'pipe' });
+      execFileSync('git', ['-C', cwd, 'worktree', 'prune'], { stdio: 'pipe' });
     } catch {}
   } catch {
     errors++;

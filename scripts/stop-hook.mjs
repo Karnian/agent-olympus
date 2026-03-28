@@ -15,7 +15,7 @@
 
 import { readStdin } from './lib/stdin.mjs';
 import { loadCheckpoint } from './lib/checkpoint.mjs';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 
 async function main() {
   try {
@@ -72,9 +72,9 @@ async function main() {
       process.exit(0);
     }
 
-    // 5. Create the WIP commit
+    // 5. Create the WIP commit (use execFileSync to avoid shell injection)
     const message = `ao-wip(${phase}): auto-save ${fileCount} file(s) before session end`;
-    execSync(`git commit -m "${message}"`, { stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', message], { stdio: 'pipe' });
 
   } catch {
     // Fail-safe: never block session termination under any circumstances

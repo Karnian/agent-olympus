@@ -35,7 +35,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Stop hook WIP commit**: Auto-saves uncommitted work as a WIP commit on session end
 - **Atomic writes**: All state files use tmp+rename pattern for crash-safe writes
 - **Superpowers methodology**: TDD discipline, systematic debugging, brainstorm-first gate, two-stage code review — embedded as native skills (standalone; no Superpowers install required)
-- **182+ unit tests**: Comprehensive test suite using `node:test` across 13 test files
+- **295+ unit tests**: Comprehensive test suite using `node:test` across 19 test files
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
