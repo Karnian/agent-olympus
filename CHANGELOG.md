@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.1] - 2026-03-29
+
+### Fixed
+- **`skills/athena/SKILL.md`** — Updated skills list and recommended workflow table to reflect 4-step debug escalation chain (debugger → debugger+wisdom → systematic-debug → trace); was stale "use when debugger fails 2x"
+- **`skills/atlas/SKILL.md`** — Same stale trace description fixed in recommended workflow table
+- **`skills/brainstorm/SKILL.md`** — Fixed CONVERGE gate to require two-evaluator consensus (Architect marks `feasible: true` AND Momus marks `acceptable: true` on same option); was incorrectly referencing single combined score. Fixed Stop_Conditions to match. Added partial change request re-approval flow.
+- **`skills/systematic-debug/SKILL.md`** — Fixed phase gate reference from "Phase 1, 3, and 5" to "Phase 1 (REPRODUCE), Phase 4 (FIX), Phase 5 (VERIFY)"; Phase 3 (UNDERSTAND) has no gate
+- **`skills/finish-branch/SKILL.md`** — Replaced AO-hardcoded lint path (`scripts/*.mjs`) with project-aware detection; replaced temp file with inline variable for changed files list
+- **`agents/code-reviewer.md`** — Removed internal "Superpowers" methodology branding from agent definition
+- **`skills/tdd/SKILL.md`**, **`skills/brainstorm/SKILL.md`**, **`skills/plan/SKILL.md`** — Replaced `Skill()` primitive invocations with inline prose (`invoke /X`); `Skill()` is only valid inside atlas/athena orchestrators
+- **`agents/themis.md`** — Replaced non-existent `.ao/teams/superpowers/rules-manifest.json` reference with concrete grep patterns
+
 ## [0.7.0] - 2026-03-29
 
 ### Added
