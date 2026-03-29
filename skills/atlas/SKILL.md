@@ -86,6 +86,14 @@ Before starting any work:
 2. Call `queryWisdom(null, 20)` to get recent learnings
 3. Inject into analysis context via `formatWisdomForPrompt()`
 
+#### Auto Project Onboarding
+If AGENTS.md does not exist in the project root, auto-generate it:
+```
+Skill(skill="agent-olympus:deepinit")
+```
+This runs once per project — subsequent runs skip when AGENTS.md is present.
+Feed the generated AGENTS.md context into metis analysis.
+
 Classify and pick strategy. Spawn **simultaneously**:
 
 ```
@@ -276,6 +284,16 @@ Write `.ao/prd.json` with user stories from the plan:
 }
 ```
 
+**Cost Estimation** — before execution, estimate and display projected cost:
+```
+node -e "import('./scripts/lib/cost-estimate.mjs').then(m => {
+  const tiers = prd.userStories.map(s => ({ model: s.model || 'sonnet', count: 1 }));
+  const est = m.estimateCost({ stories: tiers.length, modelTiers: tiers });
+  console.log('Estimated cost: $' + est.estimatedCostUSD.toFixed(2));
+})"
+```
+Display cost breakdown per model tier to user. If `.ao/autonomy.json` has `budget.warnThresholdUsd` set and estimate exceeds it, warn (but do not block — unattended mode must not be interrupted).
+
 **PRD QUALITY RULE**: Generic criteria are FORBIDDEN. These are NOT acceptable:
 - ❌ "Implementation is complete"
 - ❌ "Code compiles without errors"
@@ -437,6 +455,68 @@ After review approved:
    pre-merge checklist (tests re-run, lint, coverage, code review, merge option presentation).
    Use when the task represents a complete feature branch ready for integration.
 
+### Phase 5c — CHANGELOG UPDATE
+
+Generate a CHANGELOG entry from the completed PRD:
+```bash
+node -e "
+  import { generateChangelogEntry, prependToChangelog } from './scripts/lib/changelog.mjs';
+  import { readFileSync } from 'fs';
+  const prd = JSON.parse(readFileSync('.ao/prd.json', 'utf8'));
+  const entry = generateChangelogEntry({ prd, version: '<detected or specified>', date: new Date().toISOString().slice(0,10) });
+  prependToChangelog('CHANGELOG.md', entry);
+"
+```
+If no CHANGELOG.md exists, one is created. Include in the next commit.
+
+### Phase 6 — SHIP (PR Creation + Issue Linking)
+
+Load autonomy config to determine shipping behavior:
+```javascript
+import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
+const config = loadAutonomyConfig(cwd);
+```
+
+#### Preflight
+```bash
+node -e "import('./scripts/lib/pr-create.mjs').then(m => console.log(JSON.stringify(m.preflightCheck())))"
+```
+If preflight fails (no gh, no remote, on main branch) → skip shipping, report to user.
+
+#### Push & Create PR
+If `config.ship.autoPush` is true OR user approves:
+1. `git push -u origin HEAD`
+2. Check for existing PR: `findExistingPR(branch)`
+3. If existing PR found → update it. If not → create draft PR:
+   ```javascript
+   const body = buildPRBody({ prd, diffStat: execSync('git diff --stat main...HEAD'), verifyResults });
+   const issues = extractIssueRefs(commitMessages + branchName);
+   createPR({ title: prd.projectName, body: body + (issues.length ? '\n\nCloses ' + issues.map(i => '#'+i).join(', ') : ''), draft: config.ship.draftPR, baseBranch: 'main' });
+   ```
+4. Report PR URL to user.
+
+If `config.ship.autoPush` is false (default) → ask user: "Push and create PR? [y/n]"
+
+### Phase 6b — CI WATCH (Monitor + Auto-Fix)
+
+If `config.ci.watchEnabled` is true AND a PR was created:
+```javascript
+import { watchCI, getFailedLogs } from './scripts/lib/ci-watch.mjs';
+
+const result = await watchCI({ branch, maxCycles: config.ci.maxCycles, pollIntervalMs: config.ci.pollIntervalMs });
+
+if (result.status === 'passed') {
+  notifyOrchestrator({ event: 'ci_passed', orchestrator: 'atlas', summary: 'All CI checks passed.' });
+} else if (result.status === 'failed') {
+  notifyOrchestrator({ event: 'ci_failed', orchestrator: 'atlas', summary: 'CI failed.' });
+  const logs = getFailedLogs(result.runId);
+  // Feed logs into debugger → systematic-debug → trace escalation chain
+  // After fix: git push, re-poll (max config.ci.maxCycles total attempts)
+}
+```
+
+If CI passes → DONE. If CI fails after max cycles → escalate to user.
+
 ### COMPLETION
 
 Prune wisdom to prevent unbounded growth:
@@ -448,6 +528,11 @@ Clean up:
 - Remove `.ao/prd.json`
 - Kill any tmux sessions: `tmux kill-session -t "atlas-*"`
 - Keep `.ao/wisdom.jsonl` (useful for future sessions — never delete)
+
+Notify user of completion:
+```bash
+node scripts/notify-cli.mjs --event complete --orchestrator atlas --body "N/N stories passed. PR: <url>"
+```
 
 Report to user:
 - Strategy used (DIRECT/LITE/STANDARD/FULL)
@@ -517,7 +602,13 @@ For example, use `anthropic-skills:xlsx` for spreadsheets instead of writing xls
 STOP only when:
 - ✅ All acceptance criteria met AND build passes AND tests pass AND reviews approved
 - ❌ Same error 3 times (escalate to user)
+  ```
+  node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "Same error 3 times: <error summary>"
+  ```
 - ❌ 15 total iterations exceeded (escalate to user)
+  ```
+  node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "15 iteration limit exceeded"
+  ```
 - ❌ Critical security vulnerability found (escalate to user)
 
 **NEVER stop because "it seems done" — verify EVERYTHING.**

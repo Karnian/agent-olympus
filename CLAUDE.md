@@ -17,8 +17,9 @@ agents/     → Agent persona definitions (.md files with model and role)
 skills/     → User-facing skills (SKILL.md with triggers, steps, workflow)
 scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
 scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom, worker-status,
-              worktree, fs-atomic, provider-detect, config-validator)
-scripts/test → node:test based unit tests (295+ tests, 19 files)
+              worktree, fs-atomic, provider-detect, config-validator, autonomy, cost-estimate,
+              changelog, pr-create, ci-watch, notify)
+scripts/test → node:test based unit tests (363+ tests, 25 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
