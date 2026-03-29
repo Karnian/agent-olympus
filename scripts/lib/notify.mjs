@@ -98,6 +98,11 @@ export function notifyOrchestrator({ event, orchestrator, summary, completed, to
         : summary || 'Task completed successfully.',
       sound: true,
     },
+    done: {
+      title: `${name} Complete`,
+      body: summary || 'Task completed successfully.',
+      sound: true,
+    },
     blocked: {
       title: `${name} Blocked`,
       body: summary || 'User input required.',
@@ -118,8 +123,22 @@ export function notifyOrchestrator({ event, orchestrator, summary, completed, to
       body: summary || 'All CI checks passed.',
       sound: true,
     },
+    started: {
+      title: `${name} Started`,
+      body: summary || 'Orchestrator started.',
+      sound: false,
+    },
+    progress: {
+      title: `${name} Progress`,
+      body: summary || 'Work in progress.',
+      sound: false,
+    },
   };
 
-  const tmpl = templates[event] || { title: name, body: summary || event, sound: false };
+  const tmpl = templates[event] || {
+    title: `${name} — ${String(event || 'Notification').replace(/_/g, ' ')}`,
+    body: summary || 'Task update.',
+    sound: false,
+  };
   return notify(tmpl);
 }
