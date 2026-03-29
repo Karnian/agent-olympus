@@ -80,8 +80,8 @@ async function main() {
 
   try {
     const toolName = data?.tool_name ?? '';
-    // Only gate Task tool invocations
-    if (toolName !== 'Task') {
+    // Only gate Task and Agent tool invocations
+    if (toolName !== 'Task' && toolName !== 'Agent') {
       process.stdout.write('{}');
       process.exit(0);
     }

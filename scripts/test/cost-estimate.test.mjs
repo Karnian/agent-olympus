@@ -50,7 +50,7 @@ test('estimateCost: mixed tiers (2 opus, 3 sonnet, 1 haiku) → breakdown has 3 
   const result = estimateCost({
     stories: 5,
     modelTiers: [
-      { tier: 'opus', count: 2 },
+      { model: 'opus', count: 2 },
       { model: 'sonnet', count: 3 },
       { model: 'haiku', count: 1 },
     ],

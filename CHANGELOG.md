@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.1] - 2026-03-30
+
+### Fixed
+- **`hooks/hooks.json`** — Hook timeout values corrected from `3` (3ms) to `3000` (3s). All `PreToolUse` and `UserPromptSubmit` hooks were silently killed before completing, effectively disabling intent gate, concurrency gate, and model router
+- **`scripts/concurrency-gate.mjs`** — Now gates both `Task` and `Agent` tool invocations. Previously only checked `toolName === 'Task'`, allowing `Agent`-spawned sub-agents to bypass concurrency limits entirely
+- **`.claude-plugin/marketplace.json`** — Version bumped from stale `0.7.2` to `0.8.1` (was out of sync with `plugin.json` and `package.json` since v0.8.0 release)
+- **`CHANGELOG.md`** + **`README.md`** + **`README.ko.md`** — Removed incorrect claim of Windows PowerShell toast notification support; `notify.mjs` only supports macOS (`osascript`), Linux (`notify-send`), and terminal bell fallback
+- **`scripts/test/cost-estimate.test.mjs`** — Fixed `tier: 'opus'` → `model: 'opus'` key mismatch; the wrong key caused opus pricing to silently compute as $0 in the test assertion
+- **`CLAUDE.md`** — Added missing `security-reviewer` to available agents list (17 agents, was listing only 16)
+
 ## [0.8.0] - 2026-03-30
 
 ### Added — Post-Code Automation (A1–A4)
@@ -11,7 +21,7 @@
 - **`skills/atlas/SKILL.md`** + **`skills/athena/SKILL.md`** — Phase 6b CI WATCH: full auto-fix loop — poll CI → fetch failed logs → spawn debugger → systematic-debug → trace → verify locally → push → re-poll (max 3 cycles)
 
 ### Added — User Communication (B1–B3)
-- **`scripts/lib/notify.mjs`** — OS-aware notifications: macOS via `osascript`, Linux via `notify-send`, Windows via PowerShell toast. Fires on task complete, blocked, and CI events
+- **`scripts/lib/notify.mjs`** — OS-aware notifications: macOS via `osascript`, Linux via `notify-send`, terminal bell fallback on other platforms. Fires on task complete, blocked, and CI events
 - **`scripts/notify-cli.mjs`** — CLI entry: `node scripts/notify-cli.mjs --event done --orchestrator atlas --summary "3 stories"`
 - **`scripts/lib/cost-estimate.mjs`** — Token cost estimator with `PRICING` table (opus/sonnet/haiku rates). Shown before long runs when `costAwareness: true`
 - **`skills/atlas/SKILL.md`** + **`skills/athena/SKILL.md`** — Phase 0: cost estimate display + periodic progress briefing (B2+B3)

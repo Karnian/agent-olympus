@@ -51,7 +51,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - **Skill** (`skills/*/SKILL.md`) = workflow recipe with steps. User-facing, triggered by `/command` or keyword matching
 - **Agent** (`agents/*.md`) = role persona with model assignment. Called internally via `Task(subagent_type="agent-olympus:<name>")`
 - Not every agent has a matching skill. executor, debugger, designer etc. are internal-only
-- **Available agents** (agents/): atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hephaestus, hermes, metis, momus, prometheus, themis, test-engineer, writer
+- **Available agents** (agents/): atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hephaestus, hermes, metis, momus, prometheus, security-reviewer, test-engineer, themis, writer
 - **Available skills** (skills/): ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, external-context, finish-branch, git-master, plan, research, slop-cleaner, systematic-debug, tdd, trace, verify-coverage
 
 ### State Management

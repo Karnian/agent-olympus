@@ -37,7 +37,7 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **Superpowers 방법론 통합**: TDD 규율, 체계적 디버깅, 브레인스토밍 우선 게이트, 2단계 코드 리뷰 — 네이티브 스킬로 내장 (Superpowers 별도 설치 불필요)
 - **코드 후 자동화** *(v0.8)*: 커밋 후 — PR 자동 생성, 이슈 참조 파싱, CI 감시, 실패 자동 수정, CHANGELOG 업데이트
 - **Ship 정책 설정** *(v0.8)*: `.ao/autonomy.json`으로 `autoPush`, `draftPR`, `ci.maxCycles`, `notify.*`, `costAwareness` 제어
-- **OS 알림** *(v0.8)*: 작업 완료/차단/CI 이벤트 시 데스크탑 알림 — macOS, Linux, Windows 지원
+- **OS 알림** *(v0.8)*: 작업 완료/차단/CI 이벤트 시 데스크탑 알림 — macOS, Linux, 터미널 벨 폴백
 - **비용 인식** *(v0.8)*: 장시간 실행 전 토큰 비용 추정 표시
 - **자동 온보딩** *(v0.8)*: `AGENTS.md` 없으면 `deepinit` 자동 실행
 - **비주얼 검증** *(v0.8)*: UI 변경 감지 시 Claude Preview MCP 스크린샷으로 선택적 검증

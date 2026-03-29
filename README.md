@@ -37,7 +37,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Superpowers methodology**: TDD discipline, systematic debugging, brainstorm-first gate, two-stage code review — embedded as native skills (standalone; no Superpowers install required)
 - **Post-code automation** *(v0.8)*: After commit — auto-create PR, parse issue refs, watch CI, auto-fix failures, update CHANGELOG
 - **Ship policy config** *(v0.8)*: `.ao/autonomy.json` controls `autoPush`, `draftPR`, `ci.maxCycles`, `notify.*`, `costAwareness`
-- **OS notifications** *(v0.8)*: Desktop notifications on task complete/blocked/CI events — macOS, Linux, Windows
+- **OS notifications** *(v0.8)*: Desktop notifications on task complete/blocked/CI events — macOS, Linux, terminal bell fallback
 - **Cost awareness** *(v0.8)*: Token cost estimate before long runs; configurable per orchestrator
 - **Auto-onboarding** *(v0.8)*: Runs `deepinit` automatically if no `AGENTS.md` found
 - **Visual verification** *(v0.8)*: Optional Claude Preview MCP screenshot after UI changes
