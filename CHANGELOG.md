@@ -9,6 +9,7 @@
 - **`CHANGELOG.md`** + **`README.md`** + **`README.ko.md`** — Removed incorrect claim of Windows PowerShell toast notification support; `notify.mjs` only supports macOS (`osascript`), Linux (`notify-send`), and terminal bell fallback
 - **`scripts/test/cost-estimate.test.mjs`** — Fixed `tier: 'opus'` → `model: 'opus'` key mismatch; the wrong key caused opus pricing to silently compute as $0 in the test assertion
 - **`CLAUDE.md`** — Added missing `security-reviewer` to available agents list (17 agents, was listing only 16)
+- **`scripts/lib/notify.mjs`** — Improved fallback for unknown notification events: added `done`, `started`, `progress` aliases; unregistered events now show humanized title instead of raw event string
 
 ## [0.8.0] - 2026-03-30
 
