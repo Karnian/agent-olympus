@@ -328,6 +328,22 @@ saveCheckpoint('athena', {
 
 ### Phase 3 — MONITOR & COORDINATE (loop until all complete)
 
+**Progress Briefing** — output periodic status during monitoring:
+- After each monitoring iteration, output a compact team status:
+  ```
+  ┌ Athena Progress ────────────────────────────────
+  │ Workers: 3/5 done │ Stories: 4/6 │ Elapsed: 8m
+  │ ✓ api-worker (done)    ✓ test-writer (done)
+  │ ✓ ui-worker (done)     ▶ codex-1 (implementing)
+  │ ◎ integrator (waiting for codex-1)
+  └─────────────────────────────────────────────────
+  ```
+- Log each worker state transition:
+  `[athena] api-worker: implementing → testing`
+  `[athena] codex-1: ✓ done (3m 42s)`
+- If any worker is in the same state for 3+ iterations, flag it:
+  `[athena] ⚠ ui-worker stuck in 'implementing' for 3 iterations`
+
 ```
 ┌─→ Check TaskList for Claude worker status
 │   Check tmux panes for Codex worker output
@@ -447,6 +463,17 @@ Mark stories `passes: true` in prd.json after verifying each worker's acceptance
 
 Run **simultaneously**: build, tests, linter.
 
+**[OPTIONAL] Visual Verification** — if any worker's branch includes frontend file changes (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`):
+
+1. Detect frontend changes: `git diff --name-only main...HEAD | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'`
+2. If found AND `.claude/launch.json` exists:
+   - `preview_start(name="<dev-server>")` → `preview_screenshot()` → evaluate for blank pages, layout breakage, console errors
+   - `preview_console_logs(level="error")` to detect runtime errors
+   - If issues found → `Task(subagent_type="agent-olympus:designer", model="sonnet", prompt="Fix visual regression: <issue>")` → re-verify (max 2 cycles)
+   - `preview_stop()` after verification
+3. If no frontend changes or no preview server → skip silently
+Note: This phase is OPT-IN. Requires Claude Preview MCP.
+
 **[OPTIONAL] Quality Gate Checkpoint** — after all workers complete and before final review:
 If `agent-olympus:themis` agent is available:
 ```
@@ -545,22 +572,38 @@ If `config.ship.autoPush` is false (default) → ask user: "Push and create PR? 
 ### Phase 6b — CI WATCH (Monitor + Auto-Fix)
 
 If `config.ci.watchEnabled` is true AND a PR was created:
-```javascript
-import { watchCI, getFailedLogs } from './scripts/lib/ci-watch.mjs';
 
-const result = await watchCI({ branch, maxCycles: config.ci.maxCycles, pollIntervalMs: config.ci.pollIntervalMs });
-
-if (result.status === 'passed') {
-  notifyOrchestrator({ event: 'ci_passed', orchestrator: 'athena', summary: 'All CI checks passed.' });
-} else if (result.status === 'failed') {
-  notifyOrchestrator({ event: 'ci_failed', orchestrator: 'athena', summary: 'CI failed.' });
-  const logs = getFailedLogs(result.runId);
-  // Feed logs into debugger → systematic-debug → trace escalation chain
-  // After fix: git push, re-poll (max config.ci.maxCycles total attempts)
-}
+```
+┌─→ Poll CI status:
+│     node -e "import('./scripts/lib/ci-watch.mjs').then(m =>
+│       m.watchCI({ branch, maxCycles: 1, pollIntervalMs: config.ci.pollIntervalMs })
+│       .then(r => console.log(JSON.stringify(r))))"
+│
+│   ├─ status: 'passed' →
+│   │   node scripts/notify-cli.mjs --event ci_passed --orchestrator athena --body "All CI checks passed."
+│   │   → DONE ✓
+│   │
+│   ├─ status: 'failed' →
+│   │   1. Notify: node scripts/notify-cli.mjs --event ci_failed --orchestrator athena --body "CI failed"
+│   │   2. Fetch logs:
+│   │      node -e "import('./scripts/lib/ci-watch.mjs').then(m => console.log(m.getFailedLogs('<runId>')))"
+│   │   3. Diagnose and fix (same escalation chain as Phase 4):
+│   │      Task(subagent_type="agent-olympus:debugger", model="sonnet",
+│   │        prompt="CI failed after PR push. Fix the issue.
+│   │        CI failure logs: <failed_logs>
+│   │        Previous learnings: <formatWisdomForPrompt(queryWisdom(null,10))>")
+│   │   4. If debugger fails → Skill(skill="agent-olympus:systematic-debug")
+│   │   5. If systematic-debug fails → Skill(skill="agent-olympus:trace")
+│   │   6. After fix: re-run local verify (build + test), then:
+│   │      git add -A && git commit -m "fix: resolve CI failure" && git push
+│   │   7. Re-poll CI (back to top of loop)
+│   │
+│   └─ status: 'timeout' | 'skipped' → report to user, proceed
+│
+└── Loop (max config.ci.maxCycles attempts, default 2)
 ```
 
-If CI passes → DONE. If CI fails after max cycles → escalate to user.
+If CI passes → DONE. If CI fails after max cycles → escalate to user with failure logs.
 
 ### COMPLETION
 

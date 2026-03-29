@@ -310,6 +310,21 @@ saveCheckpoint('atlas', { phase: 3, prdSnapshot: <prd.json contents>, completedS
 
 ### Phase 3 — EXECUTE (story-by-story)
 
+**Progress Briefing** — during execution, output periodic status updates:
+- After each parallel group completes, output a compact summary:
+  ```
+  ┌ Atlas Progress ─────────────────────────────────
+  │ Stories: 3/6 passed │ Phase: Execute │ Elapsed: 4m
+  │ ✓ US-001 (sonnet)  ✓ US-002 (sonnet)  ✓ US-003 (haiku)
+  │ ▶ US-004 (opus)    ◎ US-005 (pending)  ◎ US-006 (pending)
+  └─────────────────────────────────────────────────
+  ```
+- Also output a brief line when each individual story starts and finishes:
+  `[atlas] US-001 "Add auth endpoint" → executor (sonnet) started`
+  `[atlas] US-001 ✓ passed (2m 15s)`
+- If any story takes longer than 5 minutes, output a reminder:
+  `[atlas] US-004 still in progress (7m elapsed)...`
+
 For each story in prd.json with `passes: false`, execute and verify:
 
 1. Group independent stories by `parallelGroup` — fire simultaneously
@@ -417,6 +432,50 @@ Run **simultaneously**: build, tests, linter, type checker.
 saveCheckpoint('atlas', { phase: 5, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
 ```
 
+### Phase 4.2 — VISUAL VERIFICATION [OPTIONAL]
+
+If changed files include frontend code (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`):
+
+1. **Detect frontend changes**:
+   ```bash
+   git diff --name-only HEAD~1 | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'
+   ```
+   If no frontend files changed → skip this phase entirely.
+
+2. **Start preview server** (requires `.claude/launch.json`):
+   ```
+   preview_start(name="<dev-server-name>")
+   ```
+   If `.claude/launch.json` doesn't exist or preview server fails to start → skip with warning:
+   `[atlas] Visual verification skipped: no preview server configured.`
+
+3. **Capture screenshots** of affected pages:
+   ```
+   preview_screenshot(serverId="<id>")
+   ```
+   Take screenshots of key routes/pages that were likely affected by the changes.
+
+4. **Evaluate visual correctness**:
+   - Check for: blank pages, layout breakage, missing elements, error boundaries, console errors
+   - Use `preview_console_logs(serverId="<id>", level="error")` to detect runtime errors
+   - Use `preview_snapshot(serverId="<id>")` to check element presence via accessibility tree
+
+5. **If visual issues found**:
+   ```
+   Task(subagent_type="agent-olympus:designer", model="sonnet",
+     prompt="Fix visual regression: <description of issue>
+     Screenshot shows: <issue>. Console errors: <errors>.
+     Affected files: <files>")
+   ```
+   After fix → re-capture screenshot → verify again (max 2 fix cycles).
+
+6. **Stop preview server**:
+   ```
+   preview_stop(serverId="<id>")
+   ```
+
+**Note**: This phase is OPT-IN. It requires Claude Preview MCP and a configured dev server. Skip silently if unavailable.
+
 ### Phase 4.5 — QUALITY GATE [OPTIONAL]
 
 If `agent-olympus:themis` agent is available:
@@ -500,22 +559,38 @@ If `config.ship.autoPush` is false (default) → ask user: "Push and create PR? 
 ### Phase 6b — CI WATCH (Monitor + Auto-Fix)
 
 If `config.ci.watchEnabled` is true AND a PR was created:
-```javascript
-import { watchCI, getFailedLogs } from './scripts/lib/ci-watch.mjs';
 
-const result = await watchCI({ branch, maxCycles: config.ci.maxCycles, pollIntervalMs: config.ci.pollIntervalMs });
-
-if (result.status === 'passed') {
-  notifyOrchestrator({ event: 'ci_passed', orchestrator: 'atlas', summary: 'All CI checks passed.' });
-} else if (result.status === 'failed') {
-  notifyOrchestrator({ event: 'ci_failed', orchestrator: 'atlas', summary: 'CI failed.' });
-  const logs = getFailedLogs(result.runId);
-  // Feed logs into debugger → systematic-debug → trace escalation chain
-  // After fix: git push, re-poll (max config.ci.maxCycles total attempts)
-}
+```
+┌─→ Poll CI status:
+│     node -e "import('./scripts/lib/ci-watch.mjs').then(m =>
+│       m.watchCI({ branch, maxCycles: 1, pollIntervalMs: config.ci.pollIntervalMs })
+│       .then(r => console.log(JSON.stringify(r))))"
+│
+│   ├─ status: 'passed' →
+│   │   node scripts/notify-cli.mjs --event ci_passed --orchestrator atlas --body "All CI checks passed."
+│   │   → DONE ✓
+│   │
+│   ├─ status: 'failed' →
+│   │   1. Notify: node scripts/notify-cli.mjs --event ci_failed --orchestrator atlas --body "CI failed"
+│   │   2. Fetch logs:
+│   │      node -e "import('./scripts/lib/ci-watch.mjs').then(m => console.log(m.getFailedLogs('<runId>')))"
+│   │   3. Diagnose and fix (same escalation chain as Phase 4):
+│   │      Task(subagent_type="agent-olympus:debugger", model="sonnet",
+│   │        prompt="CI failed after PR push. Fix the issue.
+│   │        CI failure logs: <failed_logs>
+│   │        Previous learnings: <formatWisdomForPrompt(queryWisdom(null,10))>")
+│   │   4. If debugger fails → Skill(skill="agent-olympus:systematic-debug")
+│   │   5. If systematic-debug fails → Skill(skill="agent-olympus:trace")
+│   │   6. After fix: re-run local verify (build + test), then:
+│   │      git add -A && git commit -m "fix: resolve CI failure" && git push
+│   │   7. Re-poll CI (back to top of loop)
+│   │
+│   └─ status: 'timeout' | 'skipped' → report to user, proceed
+│
+└── Loop (max config.ci.maxCycles attempts, default 2)
 ```
 
-If CI passes → DONE. If CI fails after max cycles → escalate to user.
+If CI passes → DONE. If CI fails after max cycles → escalate to user with failure logs.
 
 ### COMPLETION
 
