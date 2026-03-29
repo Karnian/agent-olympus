@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.8.0] - 2026-03-30
+
+### Added — Post-Code Automation (A1–A4)
+- **`scripts/lib/pr-create.mjs`** — PR automation library: `preflightCheck()`, `extractIssueRefs()`, `buildPRBody()`, `findExistingPR()`, `createPR()`. Atlas/Athena auto-create PRs after commit with issue references parsed from branch names and commit messages
+- **`scripts/lib/ci-watch.mjs`** — CI monitoring: async `watchCI({branch, maxCycles, pollIntervalMs})` polls `gh run list` until completion; `getFailedLogs(runId)` fetches failure logs for auto-fix loop
+- **`scripts/lib/changelog.mjs`** — CHANGELOG automation: `generateChangelogEntry({prd, version, date})` builds entries from passing PRD stories; `prependToChangelog(filePath, entry)` atomically prepends to existing file
+- **`skills/atlas/SKILL.md`** + **`skills/athena/SKILL.md`** — Phase 5c: auto-generate CHANGELOG entry from PRD stories after review approval
+- **`skills/atlas/SKILL.md`** + **`skills/athena/SKILL.md`** — Phase 6 SHIP: reads `.ao/autonomy.json`, auto-pushes branch and creates PR (A1+A3), auto-closes referenced issues
+- **`skills/atlas/SKILL.md`** + **`skills/athena/SKILL.md`** — Phase 6b CI WATCH: full auto-fix loop — poll CI → fetch failed logs → spawn debugger → systematic-debug → trace → verify locally → push → re-poll (max 3 cycles)
+
+### Added — User Communication (B1–B3)
+- **`scripts/lib/notify.mjs`** — OS-aware notifications: macOS via `osascript`, Linux via `notify-send`, Windows via PowerShell toast. Fires on task complete, blocked, and CI events
+- **`scripts/notify-cli.mjs`** — CLI entry: `node scripts/notify-cli.mjs --event done --orchestrator atlas --summary "3 stories"`
+- **`scripts/lib/cost-estimate.mjs`** — Token cost estimator with `PRICING` table (opus/sonnet/haiku rates). Shown before long runs when `costAwareness: true`
+- **`skills/atlas/SKILL.md`** + **`skills/athena/SKILL.md`** — Phase 0: cost estimate display + periodic progress briefing (B2+B3)
+
+### Added — Context Intelligence (C1–C2)
+- **`skills/atlas/SKILL.md`** + **`skills/athena/SKILL.md`** — Phase 0 auto-onboarding: runs `deepinit` automatically if `AGENTS.md` missing (C1)
+- **`skills/atlas/SKILL.md`** + **`skills/athena/SKILL.md`** — Phase 4: optional visual verification via Claude Preview MCP after UI changes detected (C2)
+
+### Added — Ship Policy Config
+- **`scripts/lib/autonomy.mjs`** — Ship policy loader/validator. Controls `autoPush`, `draftPR`, `ci.maxCycles`, `notify.*`, `costAwareness`, `progressBriefing` via `.ao/autonomy.json`
+- **`skills/finish-branch/SKILL.md`** — Auto-Ship option respects `autonomy.json` for non-interactive workflows
+
+### Added — Tests
+- 6 new test files: `autonomy.test.mjs` (24), `cost-estimate.test.mjs` (7), `changelog.test.mjs` (7), `pr-create.test.mjs` (14), `ci-watch.test.mjs` (7), `notify-cli.test.mjs` (9)
+- Total test suite: **363+ tests across 25 files** (was 295 across 19)
+
 ## [0.7.2] - 2026-03-29
 
 ### Security

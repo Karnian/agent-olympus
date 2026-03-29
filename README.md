@@ -35,7 +35,13 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Stop hook WIP commit**: Auto-saves uncommitted work as a WIP commit on session end
 - **Atomic writes**: All state files use tmp+rename pattern for crash-safe writes
 - **Superpowers methodology**: TDD discipline, systematic debugging, brainstorm-first gate, two-stage code review — embedded as native skills (standalone; no Superpowers install required)
-- **295+ unit tests**: Comprehensive test suite using `node:test` across 19 test files
+- **Post-code automation** *(v0.8)*: After commit — auto-create PR, parse issue refs, watch CI, auto-fix failures, update CHANGELOG
+- **Ship policy config** *(v0.8)*: `.ao/autonomy.json` controls `autoPush`, `draftPR`, `ci.maxCycles`, `notify.*`, `costAwareness`
+- **OS notifications** *(v0.8)*: Desktop notifications on task complete/blocked/CI events — macOS, Linux, Windows
+- **Cost awareness** *(v0.8)*: Token cost estimate before long runs; configurable per orchestrator
+- **Auto-onboarding** *(v0.8)*: Runs `deepinit` automatically if no `AGENTS.md` found
+- **Visual verification** *(v0.8)*: Optional Claude Preview MCP screenshot after UI changes
+- **363+ unit tests**: Comprehensive test suite using `node:test` across 25 test files
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -117,6 +123,29 @@ Resume from Phase 3 or restart?]
 ```
 
 Reply `resume` to pick up where you left off.
+
+### Post-Code Automation (New in v0.8.0)
+
+After `/atlas` or `/athena` completes and commits, the SHIP phase runs automatically:
+
+1. Reads `.ao/autonomy.json` for ship policy (`autoPush`, `draftPR`, `ci.maxCycles`)
+2. Pushes branch and creates PR (with parsed issue refs from branch/commits)
+3. Monitors CI via `gh run list` until pass or fail
+4. On CI failure: fetches failed logs → spawns debugger → fixes → pushes → re-polls (max 3 cycles)
+5. Sends desktop notification on completion or block
+
+Configure by creating `.ao/autonomy.json` in your project:
+
+```json
+{
+  "autoPush": true,
+  "draftPR": false,
+  "ci": { "maxCycles": 3, "pollIntervalMs": 10000 },
+  "notify": { "onDone": true, "onBlocked": true, "onCIFail": true },
+  "costAwareness": true,
+  "progressBriefing": true
+}
+```
 
 ### Methodology Skills (New in v0.7.0)
 
@@ -471,7 +500,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (182+ tests across 13 files) covers the core hook libraries. To run:
+A `node:test` based test suite (363+ tests across 25 files) covers the core hook libraries. To run:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'
