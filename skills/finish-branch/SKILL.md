@@ -193,6 +193,19 @@ Choose one:
 Which option?
 ```
 
+#### Option: Auto-Ship (if autonomy.json configured)
+
+If `.ao/autonomy.json` exists with `ship.autoPush: true`:
+1. Run preflight: `preflightCheck()`
+2. If passes: push branch, create/reuse PR, link issues
+3. Report PR URL
+
+If `ship.autoPush` is false (default):
+Present "Create PR" as an additional option alongside existing merge/keep/discard options:
+- **Create PR** — push branch and create a draft PR via `gh pr create`
+  - Extracts issue refs from commits and branch name
+  - Builds PR body from test results and file changes
+
 For structured commit history: invoke /git-master for atomic commit discipline.
 
 **User chooses action. Execute chosen action only after explicit confirmation.**

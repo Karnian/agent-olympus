@@ -86,6 +86,14 @@ Before starting any work:
 2. Call `queryWisdom(null, 20)` to get recent learnings
 3. Inject into analysis context via `formatWisdomForPrompt()`
 
+#### Auto Project Onboarding
+If AGENTS.md does not exist in the project root, auto-generate it:
+```
+Skill(skill="agent-olympus:deepinit")
+```
+This runs once per project — subsequent runs skip when AGENTS.md is present.
+Feed the generated AGENTS.md context into metis analysis.
+
 Classify and pick strategy. Spawn **simultaneously**:
 
 ```
@@ -276,6 +284,16 @@ Write `.ao/prd.json` with user stories from the plan:
 }
 ```
 
+**Cost Estimation** — before execution, estimate and display projected cost:
+```
+node -e "import('./scripts/lib/cost-estimate.mjs').then(m => {
+  const tiers = prd.userStories.map(s => ({ model: s.model || 'sonnet', count: 1 }));
+  const est = m.estimateCost({ stories: tiers.length, modelTiers: tiers });
+  console.log('Estimated cost: $' + est.estimatedCostUSD.toFixed(2));
+})"
+```
+Display cost breakdown per model tier to user. If `.ao/autonomy.json` has `budget.warnThresholdUsd` set and estimate exceeds it, warn (but do not block — unattended mode must not be interrupted).
+
 **PRD QUALITY RULE**: Generic criteria are FORBIDDEN. These are NOT acceptable:
 - ❌ "Implementation is complete"
 - ❌ "Code compiles without errors"
@@ -291,6 +309,21 @@ saveCheckpoint('atlas', { phase: 3, prdSnapshot: <prd.json contents>, completedS
 ```
 
 ### Phase 3 — EXECUTE (story-by-story)
+
+**Progress Briefing** — during execution, output periodic status updates:
+- After each parallel group completes, output a compact summary:
+  ```
+  ┌ Atlas Progress ─────────────────────────────────
+  │ Stories: 3/6 passed │ Phase: Execute │ Elapsed: 4m
+  │ ✓ US-001 (sonnet)  ✓ US-002 (sonnet)  ✓ US-003 (haiku)
+  │ ▶ US-004 (opus)    ◎ US-005 (pending)  ◎ US-006 (pending)
+  └─────────────────────────────────────────────────
+  ```
+- Also output a brief line when each individual story starts and finishes:
+  `[atlas] US-001 "Add auth endpoint" → executor (sonnet) started`
+  `[atlas] US-001 ✓ passed (2m 15s)`
+- If any story takes longer than 5 minutes, output a reminder:
+  `[atlas] US-004 still in progress (7m elapsed)...`
 
 For each story in prd.json with `passes: false`, execute and verify:
 
@@ -399,6 +432,50 @@ Run **simultaneously**: build, tests, linter, type checker.
 saveCheckpoint('atlas', { phase: 5, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
 ```
 
+### Phase 4.2 — VISUAL VERIFICATION [OPTIONAL]
+
+If changed files include frontend code (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`):
+
+1. **Detect frontend changes**:
+   ```bash
+   git diff --name-only HEAD~1 | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'
+   ```
+   If no frontend files changed → skip this phase entirely.
+
+2. **Start preview server** (requires `.claude/launch.json`):
+   ```
+   preview_start(name="<dev-server-name>")
+   ```
+   If `.claude/launch.json` doesn't exist or preview server fails to start → skip with warning:
+   `[atlas] Visual verification skipped: no preview server configured.`
+
+3. **Capture screenshots** of affected pages:
+   ```
+   preview_screenshot(serverId="<id>")
+   ```
+   Take screenshots of key routes/pages that were likely affected by the changes.
+
+4. **Evaluate visual correctness**:
+   - Check for: blank pages, layout breakage, missing elements, error boundaries, console errors
+   - Use `preview_console_logs(serverId="<id>", level="error")` to detect runtime errors
+   - Use `preview_snapshot(serverId="<id>")` to check element presence via accessibility tree
+
+5. **If visual issues found**:
+   ```
+   Task(subagent_type="agent-olympus:designer", model="sonnet",
+     prompt="Fix visual regression: <description of issue>
+     Screenshot shows: <issue>. Console errors: <errors>.
+     Affected files: <files>")
+   ```
+   After fix → re-capture screenshot → verify again (max 2 fix cycles).
+
+6. **Stop preview server**:
+   ```
+   preview_stop(serverId="<id>")
+   ```
+
+**Note**: This phase is OPT-IN. It requires Claude Preview MCP and a configured dev server. Skip silently if unavailable.
+
 ### Phase 4.5 — QUALITY GATE [OPTIONAL]
 
 If `agent-olympus:themis` agent is available:
@@ -437,6 +514,84 @@ After review approved:
    pre-merge checklist (tests re-run, lint, coverage, code review, merge option presentation).
    Use when the task represents a complete feature branch ready for integration.
 
+### Phase 5c — CHANGELOG UPDATE
+
+Generate a CHANGELOG entry from the completed PRD:
+```bash
+node -e "
+  import { generateChangelogEntry, prependToChangelog } from './scripts/lib/changelog.mjs';
+  import { readFileSync } from 'fs';
+  const prd = JSON.parse(readFileSync('.ao/prd.json', 'utf8'));
+  const entry = generateChangelogEntry({ prd, version: '<detected or specified>', date: new Date().toISOString().slice(0,10) });
+  prependToChangelog('CHANGELOG.md', entry);
+"
+```
+If no CHANGELOG.md exists, one is created. Include in the next commit.
+
+### Phase 6 — SHIP (PR Creation + Issue Linking)
+
+Load autonomy config to determine shipping behavior:
+```javascript
+import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
+const config = loadAutonomyConfig(cwd);
+```
+
+#### Preflight
+```bash
+node -e "import('./scripts/lib/pr-create.mjs').then(m => console.log(JSON.stringify(m.preflightCheck())))"
+```
+If preflight fails (no gh, no remote, on main branch) → skip shipping, report to user.
+
+#### Push & Create PR
+If `config.ship.autoPush` is true OR user approves:
+1. `git push -u origin HEAD`
+2. Check for existing PR: `findExistingPR(branch)`
+3. If existing PR found → update it. If not → create draft PR:
+   ```javascript
+   const body = buildPRBody({ prd, diffStat: execSync('git diff --stat main...HEAD'), verifyResults });
+   const issues = extractIssueRefs(commitMessages + branchName);
+   createPR({ title: prd.projectName, body: body + (issues.length ? '\n\nCloses ' + issues.map(i => '#'+i).join(', ') : ''), draft: config.ship.draftPR, baseBranch: 'main' });
+   ```
+4. Report PR URL to user.
+
+If `config.ship.autoPush` is false (default) → ask user: "Push and create PR? [y/n]"
+
+### Phase 6b — CI WATCH (Monitor + Auto-Fix)
+
+If `config.ci.watchEnabled` is true AND a PR was created:
+
+```
+┌─→ Poll CI status:
+│     node -e "import('./scripts/lib/ci-watch.mjs').then(m =>
+│       m.watchCI({ branch, maxCycles: 1, pollIntervalMs: config.ci.pollIntervalMs })
+│       .then(r => console.log(JSON.stringify(r))))"
+│
+│   ├─ status: 'passed' →
+│   │   node scripts/notify-cli.mjs --event ci_passed --orchestrator atlas --body "All CI checks passed."
+│   │   → DONE ✓
+│   │
+│   ├─ status: 'failed' →
+│   │   1. Notify: node scripts/notify-cli.mjs --event ci_failed --orchestrator atlas --body "CI failed"
+│   │   2. Fetch logs:
+│   │      node -e "import('./scripts/lib/ci-watch.mjs').then(m => console.log(m.getFailedLogs('<runId>')))"
+│   │   3. Diagnose and fix (same escalation chain as Phase 4):
+│   │      Task(subagent_type="agent-olympus:debugger", model="sonnet",
+│   │        prompt="CI failed after PR push. Fix the issue.
+│   │        CI failure logs: <failed_logs>
+│   │        Previous learnings: <formatWisdomForPrompt(queryWisdom(null,10))>")
+│   │   4. If debugger fails → Skill(skill="agent-olympus:systematic-debug")
+│   │   5. If systematic-debug fails → Skill(skill="agent-olympus:trace")
+│   │   6. After fix: re-run local verify (build + test), then:
+│   │      git add -A && git commit -m "fix: resolve CI failure" && git push
+│   │   7. Re-poll CI (back to top of loop)
+│   │
+│   └─ status: 'timeout' | 'skipped' → report to user, proceed
+│
+└── Loop (max config.ci.maxCycles attempts, default 2)
+```
+
+If CI passes → DONE. If CI fails after max cycles → escalate to user with failure logs.
+
 ### COMPLETION
 
 Prune wisdom to prevent unbounded growth:
@@ -448,6 +603,11 @@ Clean up:
 - Remove `.ao/prd.json`
 - Kill any tmux sessions: `tmux kill-session -t "atlas-*"`
 - Keep `.ao/wisdom.jsonl` (useful for future sessions — never delete)
+
+Notify user of completion:
+```bash
+node scripts/notify-cli.mjs --event complete --orchestrator atlas --body "N/N stories passed. PR: <url>"
+```
 
 Report to user:
 - Strategy used (DIRECT/LITE/STANDARD/FULL)
@@ -517,7 +677,13 @@ For example, use `anthropic-skills:xlsx` for spreadsheets instead of writing xls
 STOP only when:
 - ✅ All acceptance criteria met AND build passes AND tests pass AND reviews approved
 - ❌ Same error 3 times (escalate to user)
+  ```
+  node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "Same error 3 times: <error summary>"
+  ```
 - ❌ 15 total iterations exceeded (escalate to user)
+  ```
+  node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "15 iteration limit exceeded"
+  ```
 - ❌ Critical security vulnerability found (escalate to user)
 
 **NEVER stop because "it seems done" — verify EVERYTHING.**

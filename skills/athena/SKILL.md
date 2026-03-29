@@ -73,6 +73,14 @@ Before starting any work:
 2. Call `queryWisdom(null, 20)` to get recent learnings
 3. Inject into analysis context via `formatWisdomForPrompt()`
 
+#### Auto Project Onboarding
+If AGENTS.md does not exist in the project root, auto-generate it:
+```
+Skill(skill="agent-olympus:deepinit")
+```
+This runs once per project — subsequent runs skip when AGENTS.md is present.
+Feed the generated AGENTS.md context into metis analysis.
+
 Analyze task and design team:
 ```
 Task(subagent_type="agent-olympus:metis", model="opus",
@@ -228,6 +236,16 @@ Task(subagent_type="agent-olympus:momus", model="sonnet",
 }
 ```
 
+**Cost Estimation** — before execution, estimate and display projected cost:
+```
+node -e "import('./scripts/lib/cost-estimate.mjs').then(m => {
+  const tiers = prd.userStories.map(s => ({ model: s.model || 'sonnet', count: 1 }));
+  const est = m.estimateCost({ stories: tiers.length, modelTiers: tiers });
+  console.log('Estimated cost: $' + est.estimatedCostUSD.toFixed(2));
+})"
+```
+Display cost breakdown per model tier to user. If `.ao/autonomy.json` has `budget.warnThresholdUsd` set and estimate exceeds it, warn (but do not block — unattended mode must not be interrupted).
+
 **PRD QUALITY RULE**: Generic criteria are FORBIDDEN.
 - ❌ "Implementation is complete" / "Works correctly"
 - ✅ "GET /api/users returns 200 with User[] body"
@@ -309,6 +327,22 @@ saveCheckpoint('athena', {
 ```
 
 ### Phase 3 — MONITOR & COORDINATE (loop until all complete)
+
+**Progress Briefing** — output periodic status during monitoring:
+- After each monitoring iteration, output a compact team status:
+  ```
+  ┌ Athena Progress ────────────────────────────────
+  │ Workers: 3/5 done │ Stories: 4/6 │ Elapsed: 8m
+  │ ✓ api-worker (done)    ✓ test-writer (done)
+  │ ✓ ui-worker (done)     ▶ codex-1 (implementing)
+  │ ◎ integrator (waiting for codex-1)
+  └─────────────────────────────────────────────────
+  ```
+- Log each worker state transition:
+  `[athena] api-worker: implementing → testing`
+  `[athena] codex-1: ✓ done (3m 42s)`
+- If any worker is in the same state for 3+ iterations, flag it:
+  `[athena] ⚠ ui-worker stuck in 'implementing' for 3 iterations`
 
 ```
 ┌─→ Check TaskList for Claude worker status
@@ -429,6 +463,17 @@ Mark stories `passes: true` in prd.json after verifying each worker's acceptance
 
 Run **simultaneously**: build, tests, linter.
 
+**[OPTIONAL] Visual Verification** — if any worker's branch includes frontend file changes (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`):
+
+1. Detect frontend changes: `git diff --name-only main...HEAD | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'`
+2. If found AND `.claude/launch.json` exists:
+   - `preview_start(name="<dev-server>")` → `preview_screenshot()` → evaluate for blank pages, layout breakage, console errors
+   - `preview_console_logs(level="error")` to detect runtime errors
+   - If issues found → `Task(subagent_type="agent-olympus:designer", model="sonnet", prompt="Fix visual regression: <issue>")` → re-verify (max 2 cycles)
+   - `preview_stop()` after verification
+3. If no frontend changes or no preview server → skip silently
+Note: This phase is OPT-IN. Requires Claude Preview MCP.
+
 **[OPTIONAL] Quality Gate Checkpoint** — after all workers complete and before final review:
 If `agent-olympus:themis` agent is available:
 ```
@@ -482,6 +527,84 @@ After review approved:
    pre-merge checklist (tests re-run, lint, coverage, code review, merge option presentation).
    Use when the task represents a complete feature branch ready for integration.
 
+### Phase 5c — CHANGELOG UPDATE
+
+Generate a CHANGELOG entry from the completed PRD:
+```bash
+node -e "
+  import { generateChangelogEntry, prependToChangelog } from './scripts/lib/changelog.mjs';
+  import { readFileSync } from 'fs';
+  const prd = JSON.parse(readFileSync('.ao/prd.json', 'utf8'));
+  const entry = generateChangelogEntry({ prd, version: '<detected or specified>', date: new Date().toISOString().slice(0,10) });
+  prependToChangelog('CHANGELOG.md', entry);
+"
+```
+If no CHANGELOG.md exists, one is created. Include in the next commit.
+
+### Phase 6 — SHIP (PR Creation + Issue Linking)
+
+Load autonomy config to determine shipping behavior:
+```javascript
+import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
+const config = loadAutonomyConfig(cwd);
+```
+
+#### Preflight
+```bash
+node -e "import('./scripts/lib/pr-create.mjs').then(m => console.log(JSON.stringify(m.preflightCheck())))"
+```
+If preflight fails (no gh, no remote, on main branch) → skip shipping, report to user.
+
+#### Push & Create PR
+If `config.ship.autoPush` is true OR user approves:
+1. `git push -u origin HEAD`
+2. Check for existing PR: `findExistingPR(branch)`
+3. If existing PR found → update it. If not → create draft PR:
+   ```javascript
+   const body = buildPRBody({ prd, diffStat: execSync('git diff --stat main...HEAD'), verifyResults });
+   const issues = extractIssueRefs(commitMessages + branchName);
+   createPR({ title: prd.projectName, body: body + (issues.length ? '\n\nCloses ' + issues.map(i => '#'+i).join(', ') : ''), draft: config.ship.draftPR, baseBranch: 'main' });
+   ```
+4. Report PR URL to user.
+
+If `config.ship.autoPush` is false (default) → ask user: "Push and create PR? [y/n]"
+
+### Phase 6b — CI WATCH (Monitor + Auto-Fix)
+
+If `config.ci.watchEnabled` is true AND a PR was created:
+
+```
+┌─→ Poll CI status:
+│     node -e "import('./scripts/lib/ci-watch.mjs').then(m =>
+│       m.watchCI({ branch, maxCycles: 1, pollIntervalMs: config.ci.pollIntervalMs })
+│       .then(r => console.log(JSON.stringify(r))))"
+│
+│   ├─ status: 'passed' →
+│   │   node scripts/notify-cli.mjs --event ci_passed --orchestrator athena --body "All CI checks passed."
+│   │   → DONE ✓
+│   │
+│   ├─ status: 'failed' →
+│   │   1. Notify: node scripts/notify-cli.mjs --event ci_failed --orchestrator athena --body "CI failed"
+│   │   2. Fetch logs:
+│   │      node -e "import('./scripts/lib/ci-watch.mjs').then(m => console.log(m.getFailedLogs('<runId>')))"
+│   │   3. Diagnose and fix (same escalation chain as Phase 4):
+│   │      Task(subagent_type="agent-olympus:debugger", model="sonnet",
+│   │        prompt="CI failed after PR push. Fix the issue.
+│   │        CI failure logs: <failed_logs>
+│   │        Previous learnings: <formatWisdomForPrompt(queryWisdom(null,10))>")
+│   │   4. If debugger fails → Skill(skill="agent-olympus:systematic-debug")
+│   │   5. If systematic-debug fails → Skill(skill="agent-olympus:trace")
+│   │   6. After fix: re-run local verify (build + test), then:
+│   │      git add -A && git commit -m "fix: resolve CI failure" && git push
+│   │   7. Re-poll CI (back to top of loop)
+│   │
+│   └─ status: 'timeout' | 'skipped' → report to user, proceed
+│
+└── Loop (max config.ci.maxCycles attempts, default 2)
+```
+
+If CI passes → DONE. If CI fails after max cycles → escalate to user with failure logs.
+
 ### COMPLETION
 
 Prune wisdom to prevent unbounded growth:
@@ -500,6 +623,11 @@ Clean up:
   cleanupTeamWorktrees(cwd, teamSlug);  // removes .ao/worktrees/<slug>/ and branches
   ```
 - Keep `.ao/wisdom.jsonl` (useful for future sessions — never delete)
+
+Notify user of completion:
+```bash
+node scripts/notify-cli.mjs --event complete --orchestrator athena --body "N/N stories passed. PR: <url>"
+```
 
 Report: PRD stories (N/N), per-worker summary, files changed, coordination log, verification results.
 
@@ -573,7 +701,13 @@ Phase 5 (Review) → Skill(skill="agent-olympus:slop-cleaner") → Skill(skill="
 STOP only when:
 - ✅ All workers complete + integrated + build passes + tests pass + reviews approved
 - ❌ Same error 3 times (escalate)
+  ```
+  node scripts/notify-cli.mjs --event escalated --orchestrator athena --body "Same error 3 times: <error summary>"
+  ```
 - ❌ 15 iterations exceeded (escalate)
+  ```
+  node scripts/notify-cli.mjs --event escalated --orchestrator athena --body "15 iteration limit exceeded"
+  ```
 - ❌ Critical security issue (escalate)
 - ❌ Workers in circular deadlock (escalate)
 
