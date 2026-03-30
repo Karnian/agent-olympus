@@ -7,7 +7,7 @@
  * start of each Claude Code session. Never blocks the hook chain: always exits 0.
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { readStdin } from './lib/stdin.mjs';
 import { queryWisdom } from './lib/wisdom.mjs';
 import { loadCheckpoint, formatCheckpoint } from './lib/checkpoint.mjs';
@@ -47,7 +47,7 @@ async function main() {
 
     // 3. Recent git commits (last 5) for orientation
     try {
-      const gitLog = execSync('git log --oneline -5 2>/dev/null', {
+      const gitLog = execFileSync('git', ['log', '--oneline', '-5'], {
         encoding: 'utf-8',
         stdio: ['ignore', 'pipe', 'ignore'],
       }).trim();
