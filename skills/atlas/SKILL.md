@@ -495,7 +495,13 @@ Spawn ALL reviewers **simultaneously**:
 Task A: agent-olympus:architect (opus) — functional completeness
 Task B: agent-olympus:security-reviewer (sonnet) — security
 Task C: agent-olympus:code-reviewer (sonnet) — quality
+Task D: agent-olympus:aphrodite (sonnet) — UI/UX design review [CONDITIONAL]
 ```
+
+**Task D is conditional**: Only spawn Aphrodite if the changeset includes frontend files
+(`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`).
+Check via: `git diff --name-only HEAD~1 | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'`
+If no frontend files changed → skip Task D silently.
 
 ```
 ┌─→ Collect verdicts

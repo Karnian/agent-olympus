@@ -13,6 +13,7 @@ import { classifyIntent } from '../lib/intent-patterns.mjs';
 
 const VALID_CATEGORIES = new Set([
   'visual-engineering',
+  'design-review',
   'deep',
   'quick',
   'writing',
@@ -168,12 +169,72 @@ test('classifyIntent: code block is stripped before matching', () => {
 test('classifyIntent: scores object contains all categories', () => {
   const result = classifyIntent('write documentation for this React component');
   const expectedCategories = [
-    'visual-engineering', 'deep', 'quick', 'writing', 'artistry', 'planning',
+    'visual-engineering', 'design-review', 'deep', 'quick', 'writing', 'artistry', 'planning',
   ];
   for (const cat of expectedCategories) {
     assert.ok(cat in result.scores, `scores should contain "${cat}"`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// UI/UX design review keywords → visual-engineering
+// ---------------------------------------------------------------------------
+
+test('classifyIntent: design critique request → design-review', () => {
+  const result = classifyIntent('run a design critique on the settings page');
+  assert.equal(result.category, 'design-review');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: a11y audit request → design-review', () => {
+  const result = classifyIntent('perform an accessibility audit on these form components');
+  assert.equal(result.category, 'design-review');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: design system audit → design-review', () => {
+  const result = classifyIntent('audit the design system for hardcoded color token leak values');
+  assert.equal(result.category, 'design-review');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: UX copy review → design-review', () => {
+  const result = classifyIntent('run a ux copy review and microcopy review on the onboarding flow');
+  assert.equal(result.category, 'design-review');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: Korean design review → design-review', () => {
+  const result = classifyIntent('이 페이지 디자인 리뷰하고 접근성 검사해줘');
+  assert.equal(result.category, 'design-review');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: usability heuristic evaluation → design-review', () => {
+  const result = classifyIntent('evaluate using Nielsen heuristic evaluation and gestalt principles');
+  assert.equal(result.category, 'design-review');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: visual regression review → design-review', () => {
+  const result = classifyIntent('check for visual regression in the usability review');
+  assert.equal(result.category, 'design-review');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: design-review dashboard UI → visual-engineering', () => {
+  const result = classifyIntent('design a beautiful dashboard UI with React and Tailwind');
+  assert.equal(result.category, 'visual-engineering');
+});
+
+test('classifyIntent: responsive navbar → visual-engineering', () => {
+  const result = classifyIntent('build a responsive navbar with CSS flexbox and dark mode toggle');
+  assert.equal(result.category, 'visual-engineering');
+});
+
+// ---------------------------------------------------------------------------
+// Confidence and edge cases
+// ---------------------------------------------------------------------------
 
 test('classifyIntent: confidence is clamped between 0 and 1', () => {
   const inputs = [

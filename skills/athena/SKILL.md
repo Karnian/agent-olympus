@@ -509,7 +509,12 @@ Spawn reviewers **simultaneously**:
 agent-olympus:architect (opus) — completeness
 agent-olympus:security-reviewer (sonnet) — security
 agent-olympus:code-reviewer (sonnet) — quality
+agent-olympus:aphrodite (sonnet) — UI/UX design review [CONDITIONAL: frontend files only]
 ```
+
+**Aphrodite is conditional**: Only spawn if changeset includes frontend files
+(`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`).
+Skip silently if no frontend files changed.
 
 ```
 ┌─→ ALL APPROVED → DONE ✓

@@ -1,7 +1,7 @@
 # Agent Olympus
 
 Standalone multi-model orchestrator plugin for Claude Code.
-Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 16 specialized agents, 15 skills, Claude + Codex multi-model execution, and tmux-based team infrastructure.
+Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 18 specialized agents, 24 skills, Claude + Codex multi-model execution, and tmux-based team infrastructure.
 
 ## Architecture
 
@@ -26,8 +26,8 @@ User Request
 
 ```
 agent-olympus/
-├── .claude-plugin/plugin.json    — Plugin manifest (v0.6.7)
-├── agents/                       — 16 agent personas (role definitions)
+├── .claude-plugin/plugin.json    — Plugin manifest (v0.8.3)
+├── agents/                       — 18 agent personas (role definitions)
 │   ├── atlas.md                  — Self-driving sub-agent orchestrator (Opus)
 │   ├── athena.md                 — Self-driving team orchestrator (Opus)
 │   ├── metis.md                  — Pre-planning analyst (Opus)
@@ -35,7 +35,8 @@ agent-olympus/
 │   ├── momus.md                  — Plan validator / critic (Opus)
 │   ├── hermes.md                 — Product planning specialist, forward & reverse PRD (Opus)
 │   ├── executor.md               — Implementation worker (Sonnet)
-│   ├── designer.md               — UI/UX specialist (Sonnet)
+│   ├── designer.md               — UI/UX implementation specialist (Sonnet)
+│   ├── aphrodite.md              — UI/UX design reviewer, goddess of beauty (Sonnet)
 │   ├── test-engineer.md          — Test strategy & TDD (Sonnet)
 │   ├── debugger.md               — Root-cause analysis & fix (Sonnet)
 │   ├── architect.md              — Architecture review, read-only (Opus)
@@ -44,7 +45,7 @@ agent-olympus/
 │   ├── explore.md                — Fast codebase scanner (Haiku)
 │   ├── writer.md                 — Documentation writer (Haiku)
 │   └── hephaestus.md             — Codex deep worker (Sonnet)
-├── skills/                       — 15 user-facing skills (workflow recipes)
+├── skills/                       — 24 user-facing skills (workflow recipes)
 │   ├── atlas/SKILL.md            — /atlas: autonomous sub-agent pipeline
 │   ├── athena/SKILL.md           — /athena: autonomous team pipeline
 │   ├── plan/SKILL.md             — /plan: forward/reverse product planning
@@ -59,7 +60,12 @@ agent-olympus/
 │   ├── deep-dive/SKILL.md        — /deep-dive: exhaustive single-topic investigation
 │   ├── consensus-plan/SKILL.md   — /consensus-plan: multi-agent planning consensus
 │   ├── external-context/SKILL.md — /external-context: inject external docs/specs into context
-│   └── verify-coverage/SKILL.md  — /verify-coverage: detect test coverage gaps for changed files
+│   ├── verify-coverage/SKILL.md  — /verify-coverage: detect test coverage gaps for changed files
+│   ├── design-critique/SKILL.md  — /design-critique: Nielsen + Gestalt + WCAG design critique
+│   ├── a11y-audit/SKILL.md       — /a11y-audit: WCAG 2.2 AA accessibility audit (code-review only)
+│   ├── design-system-audit/SKILL.md — /design-system-audit: token leaks, component API consistency
+│   ├── ux-copy-review/SKILL.md   — /ux-copy-review: UX copy clarity, consistency, tone, inclusivity
+│   └── ui-review/SKILL.md        — /ui-review: umbrella (chains all 4 design review skills)
 ├── scripts/                      — Hook scripts (Node.js ESM, zero dependencies)
 │   ├── run.cjs                   — Cross-platform hook runner with version fallback
 │   ├── intent-gate.mjs           — UserPromptSubmit: classify intent (EN/KO/JA/ZH)
@@ -68,10 +74,10 @@ agent-olympus/
 │   ├── concurrency-release.mjs   — PostToolUse: release task from concurrency pool
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (182 tests, 13 files)
+│   ├── test/                     — node:test unit tests (390 tests, 25 files)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
-│       ├── intent-patterns.mjs   — Intent classifier (7 categories, multilingual)
+│       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
 │       ├── model-router.mjs      — Routing logic with JSONC config merge
 │       ├── tmux-session.mjs      — Tmux session lifecycle + sanitizeForShellArg()
 │       ├── inbox-outbox.mjs      — File-based message queue for Claude↔Codex
@@ -109,7 +115,7 @@ agent-olympus/
 | Agent | Role |
 |-------|------|
 | **executor** | Standard implementation worker |
-| **designer** | UI/UX specialist |
+| **designer** | UI/UX implementation specialist |
 | **test-engineer** | Test strategy, TDD, coverage |
 | **debugger** | Root-cause analysis and fix |
 | **hephaestus** | Codex deep worker (large refactoring, algorithms) |
@@ -118,6 +124,7 @@ agent-olympus/
 | Agent | Role |
 |-------|------|
 | **architect** (Opus) | Functional completeness, architecture alignment |
+| **aphrodite** | UI/UX design critique — Nielsen heuristics, Gestalt principles, WCAG 2.2 AA |
 | **security-reviewer** | OWASP Top 10, secrets, injection |
 | **code-reviewer** | Logic defects, SOLID, DRY, AI slop |
 
@@ -168,6 +175,15 @@ agent-olympus/
 |-------|---------|--------------|
 | `/verify-coverage` | "coverage", "커버리지" | Detect test coverage gaps for recently changed files; generate missing tests |
 
+### UI/UX Design Review
+| Skill | Trigger | What It Does |
+|-------|---------|--------------|
+| `/ui-review` | "UI 리뷰", "full design review" | Comprehensive UI review — chains design-critique + a11y-audit + design-system-audit + ux-copy-review |
+| `/design-critique` | "디자인 리뷰", "critique" | Structured design feedback using Nielsen heuristics + Gestalt principles + WCAG |
+| `/a11y-audit` | "접근성 검사", "a11y" | WCAG 2.2 AA accessibility audit via code review (no browser required) |
+| `/design-system-audit` | "디자인 시스템 검사", "ds-audit" | Token leaks, component API consistency, state coverage matrix |
+| `/ux-copy-review` | "카피 리뷰", "copy review" | UX copy quality — clarity, consistency, tone, inclusivity, error messages |
+
 ## Hooks
 
 | Event | Hook | Purpose |
@@ -202,7 +218,7 @@ agent-olympus/
 | Model | Agent Tier | When Used |
 |-------|-----------|-----------|
 | Claude Haiku | explore, writer | Fast scans, documentation |
-| Claude Sonnet | executor, designer, debugger, reviewers, hephaestus | Standard implementation and review |
+| Claude Sonnet | executor, designer, aphrodite, debugger, reviewers, hephaestus | Standard implementation and review |
 | Claude Opus | atlas, athena, metis, prometheus, momus, hermes, architect | Orchestration, analysis, planning |
 | OpenAI Codex | hephaestus (via tmux) | Algorithms, large refactoring, deep exploration |
 

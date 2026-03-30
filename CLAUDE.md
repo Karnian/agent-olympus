@@ -19,7 +19,7 @@ scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
 scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom, worker-status,
               worktree, fs-atomic, provider-detect, config-validator, autonomy, cost-estimate,
               changelog, pr-create, ci-watch, notify)
-scripts/test → node:test based unit tests (363+ tests, 25 files)
+scripts/test → node:test based unit tests (390+ tests, 25 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -28,7 +28,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 ## Key Conventions
 
 ### Naming
-- **Agents**: Greek mythology names (atlas, athena, metis, prometheus, momus, hermes, hephaestus, themis); also role-based agents (test-engineer, code-reviewer, etc.)
+- **Agents**: Greek mythology names (atlas, athena, metis, prometheus, momus, hermes, hephaestus, themis, aphrodite); also role-based agents (test-engineer, code-reviewer, etc.)
 - **Namespace**: `agent-olympus:` prefix for all subagent_type references
 - **State files**: `.ao/state/` directory with `ao-` prefix per hook
 
@@ -51,8 +51,8 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - **Skill** (`skills/*/SKILL.md`) = workflow recipe with steps. User-facing, triggered by `/command` or keyword matching
 - **Agent** (`agents/*.md`) = role persona with model assignment. Called internally via `Task(subagent_type="agent-olympus:<name>")`
 - Not every agent has a matching skill. executor, debugger, designer etc. are internal-only
-- **Available agents** (agents/): atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hephaestus, hermes, metis, momus, prometheus, security-reviewer, test-engineer, themis, writer
-- **Available skills** (skills/): ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, external-context, finish-branch, git-master, plan, research, slop-cleaner, systematic-debug, tdd, trace, verify-coverage
+- **Available agents** (agents/): aphrodite, atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hephaestus, hermes, metis, momus, prometheus, security-reviewer, test-engineer, themis, writer
+- **Available skills** (skills/): a11y-audit, ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, design-critique, design-system-audit, external-context, finish-branch, git-master, plan, research, slop-cleaner, systematic-debug, tdd, trace, ui-review, ux-copy-review, verify-coverage
 
 ### State Management
 - `.ao/prd.json` — PRD with user stories and acceptance criteria (ephemeral working copy)
@@ -129,7 +129,7 @@ Session naming convention: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
 ## Testing
 
 ```bash
-# Run unit tests (182+ tests, 13 files)
+# Run unit tests (390+ tests, 25 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

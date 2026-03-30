@@ -6,7 +6,7 @@
 
 Agent Olympus is a standalone Claude Code plugin that transforms how you build software. Give it a task, and it orchestrates specialized AI agents to complete it autonomously — analyzing requirements, planning execution, implementing changes, verifying results, and fixing issues until everything passes.
 
-Two orchestrators, 17 specialized agents, 19 workflow skills. Zero npm dependencies.
+Two orchestrators, 18 specialized agents, 24 workflow skills. Zero npm dependencies.
 
 ## What It Does
 
@@ -22,8 +22,8 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 ## Features
 
 - **Two orchestrators**: Atlas (hub-and-spoke) and Athena (peer-to-peer team)
-- **17 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Hermes (spec), Executor, Designer (UI/UX), Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), **Themis (quality gate)**, Atlas, Athena
-- **19 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, **tdd, systematic-debug, brainstorm, finish-branch**
+- **18 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Hermes (spec), Executor, Designer (UI/UX), **Aphrodite (design review)**, Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Themis (quality gate), Atlas, Athena
+- **24 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, tdd, systematic-debug, brainstorm, finish-branch, **design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review**
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
 - **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs; intent-aware query expansion
 - **Zero npm dependencies**: Node.js built-ins only
@@ -41,7 +41,8 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Cost awareness** *(v0.8)*: Token cost estimate before long runs; configurable per orchestrator
 - **Auto-onboarding** *(v0.8)*: Runs `deepinit` automatically if no `AGENTS.md` found
 - **Visual verification** *(v0.8)*: Optional Claude Preview MCP screenshot after UI changes
-- **363+ unit tests**: Comprehensive test suite using `node:test` across 25 test files
+- **UI/UX design review** *(v0.8.3)*: Aphrodite agent + 5 design skills — critique (Nielsen+Gestalt), a11y audit (WCAG 2.2 AA), design system audit (token leaks), UX copy review, unified UI review
+- **372+ unit tests**: Comprehensive test suite using `node:test` across 25 test files
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -169,6 +170,14 @@ Configure by creating `.ao/autonomy.json` in your project:
 - **`/external-context`** — Fetch and inject external documentation or specs into the active context
 - **`/verify-coverage`** — Detect test coverage gaps for recently changed files and generate missing tests
 
+### UI/UX Design Review Skills (New in v0.8.3)
+
+- **`/ui-review`** — Comprehensive UI review: chains design-critique + a11y-audit + design-system-audit + ux-copy-review in parallel
+- **`/design-critique`** — Structured design feedback using Nielsen 10 heuristics + Gestalt principles + WCAG standards
+- **`/a11y-audit`** — WCAG 2.2 AA accessibility audit via code review only — no browser tools needed
+- **`/design-system-audit`** — Audit for token leaks (hardcoded colors, spacing), component API consistency, missing states
+- **`/ux-copy-review`** — Review error messages, CTAs, empty states, labels for clarity, consistency, and tone
+
 ## Orchestrators
 
 ### Atlas: Hub-and-Spoke
@@ -256,7 +265,7 @@ User Request
 | Best for | Independent tasks | Interdependent tasks |
 | Overhead | Lower | Higher but more collaborative |
 
-## Agents (17 Total)
+## Agents (18 Total)
 
 | Agent | Model | Role |
 |-------|-------|------|
@@ -268,7 +277,8 @@ User Request
 | **hermes** | Opus | Product planning specialist — transforms vague ideas into executable specs (forward & reverse PRD) |
 | **explore** | Haiku | Fast codebase scanner — architecture, file structure, tech stack, test framework |
 | **executor** | Sonnet/Opus | Implementation specialist — handles standard coding tasks, focused execution |
-| **designer** | Sonnet | UI/UX specialist — builds accessible, responsive, beautiful interfaces |
+| **designer** | Sonnet | UI/UX implementation specialist — builds accessible, responsive interfaces with design system discipline |
+| **aphrodite** | Sonnet | UI/UX design reviewer (read-only) — Nielsen heuristics, Gestalt principles, WCAG 2.2 AA critique |
 | **test-engineer** | Sonnet | Test specialist — designs comprehensive test strategies, writes robust tests |
 | **debugger** | Sonnet | Root-cause analyzer — systematically diagnoses and fixes bugs |
 | **hephaestus** | Sonnet | Deep autonomous coder — exploratory end-to-end multi-file tasks |
@@ -278,7 +288,7 @@ User Request
 | **themis** | Sonnet | Quality gate enforcer (read-only) — tests, syntax, namespace hygiene; PASS/FAIL/CONDITIONAL verdict |
 | **writer** | Haiku | Documentation specialist — clear, accurate technical docs and code comments |
 
-## Skills (19 Total)
+## Skills (24 Total)
 
 | Skill | Level | Aliases | Use Case |
 |-------|-------|---------|----------|
@@ -301,6 +311,11 @@ User Request
 | **consensus-plan** | 4 | `consensus-plan`, `합의`, `consensus` | Multi-agent planning consensus before execution |
 | **external-context** | 2 | `external-context`, `외부문서`, `docs`, `inject-docs` | Fetch and inject external docs/specs into context |
 | **verify-coverage** | 3 | `verify-coverage`, `coverage`, `커버리지`, `test-gaps` | Detect test coverage gaps for recently changed files |
+| **ui-review** | 3 | `ui-review`, `UI리뷰`, `종합UI검토`, `full-design-review` | Comprehensive UI review — chains 4 design review skills |
+| **design-critique** | 2 | `design-critique`, `디자인리뷰`, `design-review` | Structured design critique (Nielsen + Gestalt + WCAG) |
+| **a11y-audit** | 2 | `a11y-audit`, `접근성검사`, `accessibility-audit` | WCAG 2.2 AA accessibility audit via code review |
+| **design-system-audit** | 2 | `design-system-audit`, `디자인시스템검사`, `ds-audit` | Design system health: token leaks, component consistency |
+| **ux-copy-review** | 2 | `ux-copy-review`, `카피리뷰`, `copy-review` | UX copy quality: clarity, consistency, tone, inclusivity |
 
 ## Architecture
 
@@ -500,7 +515,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (363+ tests across 25 files) covers the core hook libraries. To run:
+A `node:test` based test suite (390+ tests across 25 files) covers the core hook libraries. To run:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'

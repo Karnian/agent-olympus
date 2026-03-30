@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.8.3] - 2026-03-30
+
+### Added — UI/UX Design Reinforcement
+
+- **`agents/aphrodite.md`** — New agent: Aphrodite, goddess of beauty. READ-ONLY UI/UX design reviewer using hybrid framework (Nielsen 10 Heuristics + Gestalt Principles + WCAG 2.2 AA). Structured 4-stage review protocol with severity-rated output and 15-point accessibility checklist
+- **`skills/design-critique/SKILL.md`** — Structured design critique skill using Nielsen heuristics, Gestalt principles, and WCAG standards. Spawns Aphrodite for evidence-based evaluation with prioritized severity report
+- **`skills/a11y-audit/SKILL.md`** — WCAG 2.2 AA accessibility audit via code review only (no browser tools required). 15 critical checks across 4 WCAG principles with compliance scorecard output
+- **`skills/design-system-audit/SKILL.md`** — Design system health audit: token leak detection (colors, spacing, typography, shadows), component API consistency checks, state coverage matrix, remediation plan
+- **`skills/ux-copy-review/SKILL.md`** — UX copy quality review: error messages, CTAs, empty states, labels, tooltips. Checks clarity, consistency, tone, and inclusivity with style guide extraction
+- **`skills/ui-review/SKILL.md`** — Umbrella skill that chains all 4 UI/UX review skills in parallel (design-critique + a11y-audit + design-system-audit + ux-copy-review) with unified verdict
+
+### Changed
+
+- **`agents/designer.md`** — Enhanced from 20 lines to 40 lines: added WCAG 2.2 AA + WAI-ARIA APG expertise, design systems/tokens/theming, i18n/RTL support, reduced-motion, 10 hard rules (state coverage, focus styles, token usage), 7 mental models (task-first, hierarchy-before-color, recognition-over-recall)
+- **`scripts/lib/intent-patterns.mjs`** — Added 12 design-specific keywords to visual-engineering category: design critique, design review, design system, design token, usability, heuristic, gestalt, ux copy, microcopy, empty state, visual regression, responsive test, a11y audit, accessibility audit
+- **`scripts/test/intent-patterns.test.mjs`** — Added 9 new tests for UI/UX design review intent classification (design critique, a11y audit, design system audit, ux copy review, Korean design review, usability heuristics, responsive/visual regression)
+- **`config/model-routing.jsonc`** — New `design-review` intent route: maps design critique/audit/copy review intents to `agent-olympus:aphrodite` (sonnet + gemini). Separated from `visual-engineering` (implementation) for clean routing
+- **`scripts/lib/intent-patterns.mjs`** — New `design-review` intent category (weight 1.2) with dedicated patterns for critique, audit, copy review, heuristic evaluation keywords (EN/KO/JA). Cleaned `visual-engineering` keywords to avoid routing conflicts
+- **`skills/atlas/SKILL.md`** — Phase 5 REVIEW: Aphrodite now spawns conditionally alongside architect, security-reviewer, code-reviewer when frontend files (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`) are in the changeset
+- **`skills/athena/SKILL.md`** — Phase 5 REVIEW: same conditional Aphrodite review for frontend changes
+- **`scripts/test/fixtures/a11y-violations.jsx`** — Seeded fixture with 15 planted WCAG violations (img alt, div onClick, missing labels, heading skip, outline:none, bad links, tabindex, small touch targets, missing aria-live, low contrast)
+- **`scripts/test/fixtures/a11y-clean.jsx`** — Zero-violation reference fixture for false-positive testing
+- **`scripts/test/a11y-fixtures.test.mjs`** — 18 tests verifying detection patterns match violations and produce zero false positives on clean fixture
+- Agent count: **17 → 18**, Skill count: **19 → 24**, Intent categories: **6 → 7**, Test count: **363 → 390**
+
+### Research & Cross-Validation
+
+- Codex (GPT-5.4, xhigh effort, 210K tokens) cross-validated priority ranking, skill decomposition, and framework selection
+- Claude research agent surveyed Nielsen NN/g, W3C WCAG 2.2, WAI-ARIA APG, Atomic Design, Storybook/Chromatic patterns, React Testing Library best practices
+- Key decisions validated by both models: designer/reviewer role separation, many-focused-skills over monolithic, code-review-only a11y auditing feasibility
+
 ## [0.8.1] - 2026-03-30
 
 ### Fixed

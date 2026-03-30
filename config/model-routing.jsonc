@@ -3,7 +3,7 @@
 // Changes here override the built-in defaults in scripts/lib/model-router.mjs.
 //
 // Route keys match intent categories from scripts/lib/intent-patterns.mjs:
-//   visual-engineering | deep | quick | writing | artistry | planning | unknown
+//   visual-engineering | design-review | deep | quick | writing | artistry | planning | unknown
 //
 // Model aliases: "opus" | "sonnet" | "haiku"  (resolved at runtime by Claude Code)
 // Agent aliases: any agent available via the Skill tool  (agent-olympus:<name>)
@@ -18,10 +18,19 @@
   // change — missing fields fall back to built-in defaults.
   // -----------------------------------------------------------------------
   "routes": {
-    // Visual / UI / Frontend tasks
+    // Visual / UI / Frontend implementation tasks
     // → designer agent + sonnet + Gemini team worker for multimodal visual work
     "visual-engineering": {
       "agent": "agent-olympus:designer",
+      "model": "sonnet",
+      "fallbackChain": ["sonnet", "haiku"],
+      "teamWorkerType": "gemini"
+    },
+
+    // UI/UX design review, critique, accessibility audit, design system audit
+    // → aphrodite agent (read-only) for Nielsen/Gestalt/WCAG evaluation
+    "design-review": {
+      "agent": "agent-olympus:aphrodite",
       "model": "sonnet",
       "fallbackChain": ["sonnet", "haiku"],
       "teamWorkerType": "gemini"
