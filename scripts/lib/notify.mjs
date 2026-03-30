@@ -15,6 +15,12 @@ import { execFileSync } from 'child_process';
 import { platform } from 'os';
 
 /**
+ * Check if running inside a test harness (node --test).
+ * When true, skip real OS notifications to avoid spam.
+ */
+const IS_TEST = !!(process.env.NODE_TEST_CONTEXT || process.env.AO_NOTIFY_DRY_RUN);
+
+/**
  * Detect notification backend based on OS.
  * @returns {'macos' | 'linux' | 'fallback'}
  */
@@ -23,6 +29,21 @@ export function detectPlatform() {
   if (os === 'darwin') return 'macos';
   if (os === 'linux') return 'linux';
   return 'fallback';
+}
+
+/**
+ * Detect the terminal application for macOS notification source.
+ * Maps TERM_PROGRAM env var to the macOS app name so notifications
+ * show the correct icon instead of "스크립트 편집기" (Script Editor).
+ * @returns {string} macOS application name
+ */
+function detectTerminalApp() {
+  const term = process.env.TERM_PROGRAM;
+  if (term === 'iTerm.app') return 'iTerm';
+  if (term === 'vscode') return 'Visual Studio Code';
+  if (term === 'Apple_Terminal') return 'Terminal';
+  // Fallback: Terminal.app is always available on macOS
+  return 'Terminal';
 }
 
 /**
@@ -47,11 +68,18 @@ function escapeAppleScript(str) {
  */
 export function notify({ title, body, sound = false }) {
   try {
+    // Skip real OS notifications during tests to prevent notification spam
+    if (IS_TEST) return true;
+
     const plat = detectPlatform();
 
     if (plat === 'macos') {
       const soundClause = sound ? ' sound name "Ping"' : '';
-      const script = `display notification "${escapeAppleScript(body)}" with title "${escapeAppleScript(title)}"${soundClause}`;
+      // Use 'tell application' to set the notification source app.
+      // Detect the running terminal so notifications show the terminal icon
+      // instead of "스크립트 편집기" (Script Editor).
+      const termApp = detectTerminalApp();
+      const script = `tell application "${escapeAppleScript(termApp)}" to display notification "${escapeAppleScript(body)}" with title "${escapeAppleScript(title)}"${soundClause}`;
       execFileSync('osascript', ['-e', script], { timeout: 5000, stdio: 'ignore' });
       return true;
     }

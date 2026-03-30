@@ -72,11 +72,11 @@ test('notifyOrchestrator: event=blocked, orchestrator=athena, with summary → r
   assert.equal(typeof result, 'boolean', 'notifyOrchestrator must return a boolean');
 });
 
-test('notifyOrchestrator: event=onCIFail → returns boolean without throwing', async () => {
+test('notifyOrchestrator: event=ci_failed → returns boolean without throwing', async () => {
   let threw = false;
   let result;
   try {
-    result = await notifyOrchestrator({ event: 'onCIFail', orchestrator: 'atlas' });
+    result = await notifyOrchestrator({ event: 'ci_failed', orchestrator: 'atlas' });
   } catch {
     threw = true;
   }
