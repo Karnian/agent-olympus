@@ -2,7 +2,7 @@
 
 > 전체 개선 항목의 구현 현황을 추적하는 문서. 버전 무관, 카테고리별 정리.
 
-**Last Updated**: 2026-03-30
+**Last Updated**: 2026-03-30 (v0.8.6)
 
 ---
 
@@ -13,7 +13,8 @@
 | Post-Code Automation | 4 | 4 | 0 | 0 |
 | User Communication | 3 | 3 | 0 | 0 |
 | Context Intelligence | 3 | 2 | 1 | 0 |
-| **Total** | **10** | **9** | **1** | **0** |
+| Harness Engineering | 4 | 4 | 0 | 0 |
+| **Total** | **14** | **13** | **1** | **0** |
 
 ---
 
@@ -108,6 +109,33 @@
   - 외부 임베딩 API 연동
   - 크로스 프로젝트 지식 공유
 - **비고**: 현재 키워드/카테고리 검색으로 충분히 동작. 시맨틱 검색은 wisdom이 200개 이상 또는 다중 프로젝트로 확장될 때 가치가 커짐
+
+---
+
+## D. Harness Engineering (v0.8.6)
+
+OpenAI 하네스 엔지니어링 원칙을 agent-olympus 워크플로우에 통합.
+참고: [OpenAI Harness Engineering](https://openai.com/index/harness-engineering/)
+
+### D1. harness-init 스킬 — ✅ Done
+
+- **구현**: `skills/harness-init/SKILL.md`
+- **동작**: 새 프로젝트에 하네스 구조 초기화 — AGENTS.md(TOC), docs/golden-principles.md, docs/ARCHITECTURE.md, docs/design-docs/, docs/exec-plans/, docs/QUALITY_SCORE.md, 구조적 테스트 스텁 생성
+
+### D2. deepinit TOC 포맷 전환 — ✅ Done
+
+- **구현**: `skills/deepinit/SKILL.md` Phase 3 + Phase 3.5
+- **동작**: AGENTS.md를 ≤100줄 목차로 생성. harness-init 실행 전이면 docs/ 스텁 자동 생성
+
+### D3. Atlas/Athena 하네스 컨텍스트 주입 — ✅ Done
+
+- **구현**: `skills/atlas/SKILL.md` Phase 0 Harness Check, `skills/athena/SKILL.md` Phase 0 Harness Check
+- **동작**: Phase 0에서 docs/golden-principles.md 로드 → 모든 executor/Codex 워커 프롬프트에 harness_context 주입
+
+### D4. Codex 교차검증 (매 스토리) — ✅ Done
+
+- **구현**: Atlas Phase 3 `atlas-codex-xval-<story-id>`, Athena Phase 3 `athena-<slug>-codex-xval-<story-id>`
+- **동작**: 각 스토리 완료 후 Codex가 acceptance criteria + golden principles + 아키텍처 레이어 준수 여부 검증. FAIL 시 최대 2사이클 재시도. Codex 미설치 시 graceful skip
 
 ---
 

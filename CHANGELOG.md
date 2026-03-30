@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.8.6] - 2026-03-30
+
+### Added — Harness Engineering Integration
+
+- **`skills/harness-init/SKILL.md`** — New skill: initialize OpenAI-style harness engineering structure for any project. 4-phase workflow: SCAN → DESIGN HARNESS (generates AGENTS.md as TOC ≤100 lines, `docs/ARCHITECTURE.md`, `docs/golden-principles.md`, `docs/design-docs/index.md`, `docs/exec-plans/`, `docs/QUALITY_SCORE.md`) → STRUCTURAL CONSTRAINTS (arch constraint test stubs) → VERIFY. Aliases: `harness-init`, `setup-harness`, `하네스초기화`
+- **`skills/atlas/SKILL.md`** — Phase 0 Harness Check: loads `docs/golden-principles.md` + `docs/ARCHITECTURE.md` as `<harness_context>`, injected into all executor and Codex worker prompts. Phase 3: Codex cross-validation per story via tmux (`atlas-codex-xval-<story-id>`) with `detectCodexError()` unavailability guard. Phase 5d: exec-plan completion record in `docs/exec-plans/tech-debt-tracker.md` with markdown header guard on first use
+- **`skills/athena/SKILL.md`** — Phase 0 Harness Check (same as Atlas). Phase 2 worker spawn: harness_context injected inline into all Claude and Codex worker prompts. Phase 3: Codex cross-validation (`athena-<slug>-codex-xval-<story-id>`) against post-merge file paths to catch conflict-resolution violations
+
+### Changed
+
+- **`skills/deepinit/SKILL.md`** — Phase 3 now generates AGENTS.md as table of contents (≤100 lines) pointing to `docs/`, not a monolithic file. New Phase 3.5 creates minimal `docs/` stubs when absent; skips if harness-init already ran. Stale "Phase 0.5" cross-reference corrected
+- **`skills/atlas/SKILL.md`** — Codex worker prompts include harness constraints when available. `harness-init` added to External_Skills list
+- **`skills/athena/SKILL.md`** — Codex worker prompts include harness constraints. Inbox broadcast note clarified to match actual inline injection
+
+### Design Rationale
+
+Follows OpenAI's harness engineering principles (Feb 2026): AGENTS.md as map not encyclopedia, `docs/` as system of record, golden principles encoded mechanically, architectural constraints enforced via structural tests, entropy management via exec-plan tracking, and Codex cross-validation per story before acceptance.
+
+- Skill count: **24 → 25** (`harness-init`)
+- Cross-validation: Claude code-reviewer + Codex (gpt-5.4) independent review
+
 ## [0.8.4] - 2026-03-30
 
 ### Fixed — Cross-Validation Bug Fixes (Claude × Codex 3-way review)
