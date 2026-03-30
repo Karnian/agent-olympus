@@ -2,7 +2,7 @@
 name: design-critique
 description: Structured UI/UX design critique using Nielsen heuristics, Gestalt principles, and WCAG standards
 level: 2
-aliases: [design-critique, 디자인리뷰, 디자인비평, design-review, review-design, critique-ui, UI리뷰, デザインレビュー]
+aliases: [design-critique, 디자인리뷰, 디자인비평, design-review, review-design, critique-ui, デザインレビュー]
 ---
 
 <Design_Critique>

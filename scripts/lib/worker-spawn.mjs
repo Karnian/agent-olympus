@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession } from './tmux-session.mjs';
-import { sendMessage, readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
+import { readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
 import { addWisdom } from './wisdom.mjs';
 import { cleanupTeamWorktrees } from './worktree.mjs';
 import { mkdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
@@ -220,7 +220,8 @@ export function monitorTeam(teamName) {
     let isDone = false;
     if (!errorDetection.failed && paneOutput && worker.status === 'running') {
       const lastLines = paneOutput.split('\n').slice(-5).join('\n');
-      isDone = /\$\s*$/.test(lastLines.trim());
+      // Match both bash ($) and zsh (%) prompts, with optional path/username prefix
+      isDone = /[$%]\s*$/.test(lastLines.trim());
     }
 
     // Activity-based liveness detection: track output changes over time

@@ -16,10 +16,11 @@ Both orchestrators autonomously loop until the task is fully complete (build pas
 agents/     → Agent persona definitions (.md files with model and role)
 skills/     → User-facing skills (SKILL.md with triggers, steps, workflow)
 scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
-scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom, worker-status,
-              worktree, fs-atomic, provider-detect, config-validator, autonomy, cost-estimate,
-              changelog, pr-create, ci-watch, notify)
-scripts/test → node:test based unit tests (390+ tests, 25 files)
+scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-outbox, checkpoint,
+              wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
+              autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
+              worker-spawn)
+scripts/test → node:test based unit tests (390+ tests, 26 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -129,7 +130,7 @@ Session naming convention: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
 ## Testing
 
 ```bash
-# Run unit tests (390+ tests, 25 files)
+# Run unit tests (390+ tests, 26 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

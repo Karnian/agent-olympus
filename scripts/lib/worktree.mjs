@@ -258,6 +258,9 @@ export function mergeWorkerBranch(cwd, branchName, workerName) {
       conflicts = conflictOutput ? conflictOutput.split('\n').filter(Boolean) : [];
     } catch {}
 
+    // Abort the failed merge so the repo is left in a clean state
+    try { execFileSync('git', ['-C', cwd, 'merge', '--abort'], { stdio: 'pipe' }); } catch {}
+
     return {
       success: false,
       conflicts,

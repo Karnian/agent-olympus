@@ -8,7 +8,8 @@
  * Zero npm dependencies — uses fs built-in only.
  */
 
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync } from 'fs';
+import { atomicWriteFileSync } from './fs-atomic.mjs';
 
 /**
  * @typedef {object} UserStory
@@ -76,7 +77,7 @@ export function prependToChangelog(filePath, entry) {
     existing = readFileSync(filePath, 'utf8');
   } catch {
     // File does not exist — create it from scratch
-    writeFileSync(filePath, `# Changelog\n\n${entry}\n`, { encoding: 'utf8' });
+    atomicWriteFileSync(filePath,`# Changelog\n\n${entry}\n`, { encoding: 'utf8' });
     return;
   }
 
@@ -88,12 +89,12 @@ export function prependToChangelog(filePath, entry) {
   if (insertIndex === -1) {
     // No existing version entry — append after whatever is already there
     const trimmed = existing.trimEnd();
-    writeFileSync(filePath, `${trimmed}\n\n${entry}\n`, { encoding: 'utf8' });
+    atomicWriteFileSync(filePath,`${trimmed}\n\n${entry}\n`, { encoding: 'utf8' });
     return;
   }
 
   // Insert the new entry + blank line before the first "## " line
   lines.splice(insertIndex, 0, ...`${entry}\n`.split('\n'));
 
-  writeFileSync(filePath, lines.join('\n'), { encoding: 'utf8' });
+  atomicWriteFileSync(filePath,lines.join('\n'), { encoding: 'utf8' });
 }

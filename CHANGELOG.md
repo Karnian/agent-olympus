@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.8.4] - 2026-03-30
+
+### Fixed — Cross-Validation Bug Fixes (Claude × Codex 3-way review)
+
+- **`scripts/lib/tmux-session.mjs`** — Replaced all `execSync` shell-string tmux commands with `execFileSync` + args array throughout (`resolveBinary`, `validateTmux`, `createTeamSession`, `spawnWorkerInSession`, `capturePane`, `killSession`, `killTeamSessions`, `listTeamSessions`). Eliminates shell injection via `sessionCwd`, session name, or binary path. Removed now-unused `execSync` import
+- **`scripts/lib/worker-spawn.mjs`** — Fixed zsh prompt detection: completion check now matches both `$` (bash) and `%` (zsh) prompts, preventing orchestrator hang on macOS default shell
+- **`scripts/lib/worktree.mjs`** — Added `git merge --abort` after failed `mergeWorkerBranch()` so the repo is never left in a half-merged state
+- **`scripts/lib/changelog.mjs`** — Replaced `writeFileSync` with `atomicWriteFileSync` in `prependToChangelog()` to prevent CHANGELOG.md corruption on mid-write crash. Consistent with all other state-file writes in the codebase
+- **`scripts/session-start.mjs`** — Replaced `execSync('git log ... 2>/dev/null')` shell invocation with `execFileSync('git', [...])` — the `stdio` option already suppressed stderr, making the shell redirect redundant
+- **`skills/consensus-plan/SKILL.md`** — Fixed caller pattern: `Task(subagent_type="agent-olympus:consensus-plan")` → `Skill(skill="agent-olympus:consensus-plan")`. `consensus-plan` is a skill, not an agent — the previous form would fail at runtime with "agent type not found"
+- **`skills/deep-dive/SKILL.md`** — Same fix: `Task(subagent_type="agent-olympus:deep-dive")` → `Skill(skill="agent-olympus:deep-dive")`
+- **`scripts/lib/notify.mjs`** — Fixed iTerm app name: `'iTerm'` → `'iTerm2'` in `detectTerminalApp()`
+
+### Changed
+
+- **`agents/atlas.md`, `agents/athena.md`** — `model: claude-opus-4-6` → `model: opus` to conform to CLAUDE.md convention (haiku | sonnet | opus aliases only)
+- **`skills/design-critique/SKILL.md`** — Removed duplicate alias `UI리뷰` (conflicted with `ui-review` skill, causing non-deterministic intent routing)
+- **`scripts/lib/worker-spawn.mjs`** — Removed unused `sendMessage` import
+- **`scripts/session-start.mjs`** — Removed unused `formatWisdomForPrompt` import
+- **`scripts/concurrency-release.mjs`** — Added missing `#!/usr/bin/env node` shebang (consistent with all other hook scripts)
+- **`CLAUDE.md`** — Updated `scripts/lib` module list: corrected `intent` → `intent-patterns`, `tmux` → `tmux-session`, added missing `model-router` and `worker-spawn`. Updated test file count: 25 → 26
+
+### Meta
+
+- Review methodology: 3-way cross-validation — arch-reviewer (Claude/opus), scripts-reviewer (Claude/sonnet), codex-1 (Codex/gpt-5.4) running independently in parallel via Athena orchestrator
+
 ## [0.8.3] - 2026-03-30
 
 ### Added — UI/UX Design Reinforcement

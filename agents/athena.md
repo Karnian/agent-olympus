@@ -1,7 +1,7 @@
 ---
 name: athena
 description: Self-driving team orchestrator — peer-to-peer Claude + Codex team, loops until complete
-model: claude-opus-4-6
+model: opus
 level: 4
 ---
 

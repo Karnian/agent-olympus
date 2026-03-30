@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { readStdin } from './lib/stdin.mjs';
 import { detectProvider } from './lib/provider-detect.mjs';
 import { readFileSync, mkdirSync } from 'fs';

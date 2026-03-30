@@ -39,7 +39,7 @@ export function detectPlatform() {
  */
 function detectTerminalApp() {
   const term = process.env.TERM_PROGRAM;
-  if (term === 'iTerm.app') return 'iTerm';
+  if (term === 'iTerm.app') return 'iTerm2';
   if (term === 'vscode') return 'Visual Studio Code';
   if (term === 'Apple_Terminal') return 'Terminal';
   // Fallback: Terminal.app is always available on macOS
