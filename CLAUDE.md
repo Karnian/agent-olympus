@@ -19,7 +19,7 @@ scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
 scripts/lib → Shared libraries (stdin, intent, tmux, inbox-outbox, checkpoint, wisdom, worker-status,
               worktree, fs-atomic, provider-detect, config-validator, autonomy, cost-estimate,
               changelog, pr-create, ci-watch, notify)
-scripts/test → node:test based unit tests (372+ tests, 25 files)
+scripts/test → node:test based unit tests (390+ tests, 25 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -129,7 +129,7 @@ Session naming convention: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
 ## Testing
 
 ```bash
-# Run unit tests (372+ tests, 25 files)
+# Run unit tests (390+ tests, 25 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

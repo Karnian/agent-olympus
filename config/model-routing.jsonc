@@ -3,7 +3,7 @@
 // Changes here override the built-in defaults in scripts/lib/model-router.mjs.
 //
 // Route keys match intent categories from scripts/lib/intent-patterns.mjs:
-//   visual-engineering | deep | quick | writing | artistry | planning | unknown
+//   visual-engineering | design-review | deep | quick | writing | artistry | planning | unknown
 //
 // Model aliases: "opus" | "sonnet" | "haiku"  (resolved at runtime by Claude Code)
 // Agent aliases: any agent available via the Skill tool  (agent-olympus:<name>)

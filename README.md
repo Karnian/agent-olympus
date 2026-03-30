@@ -515,7 +515,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (372+ tests across 25 files) covers the core hook libraries. To run:
+A `node:test` based test suite (390+ tests across 25 files) covers the core hook libraries. To run:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'
