@@ -260,8 +260,8 @@ When called from Atlas or Athena, this skill acts as a drop-in replacement for t
 Caller pattern (Atlas Phase 2):
 
 ```
-Task(subagent_type="agent-olympus:consensus-plan", model="opus",
-  prompt="Run consensus planning for this task.
+Skill(skill="agent-olympus:consensus-plan",
+  args="Run consensus planning for this task.
   Task: <user_request>
   Analysis: <metis_analysis>
   Wisdom: <formatWisdomForPrompt()>")

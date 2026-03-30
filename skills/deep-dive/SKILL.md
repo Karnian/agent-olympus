@@ -237,8 +237,8 @@ When called from Atlas or Athena as a pipeline stage (not directly by the user):
 
 Atlas invocation pattern:
 ```
-Task(subagent_type="agent-olympus:deep-dive", model="opus",
-  prompt="Run deep-dive investigation on: <task_description>
+Skill(skill="agent-olympus:deep-dive",
+  args="Run deep-dive investigation on: <task_description>
   Context from codebase scan: <explore_results>
   Return path to .ao/deep-dive-report.json when complete.")
 ```

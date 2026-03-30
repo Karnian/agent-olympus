@@ -1,7 +1,7 @@
 ---
 name: atlas
 description: Self-driving sub-agent orchestrator — loops until task is fully complete
-model: claude-opus-4-6
+model: opus
 level: 4
 ---
 

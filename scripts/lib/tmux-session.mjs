@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { mkdirSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { createWorkerWorktree } from './worktree.mjs';
@@ -26,7 +26,7 @@ export function resolveBinary(name) {
 
   // Try which first (works if PATH is correct)
   try {
-    const resolved = execSync(`which ${name}`, { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    const resolved = execFileSync('which', [name], { stdio: 'pipe', encoding: 'utf-8' }).trim();
     if (resolved) { _binCache.set(name, resolved); return resolved; }
   } catch {}
 
@@ -44,7 +44,7 @@ export function resolveBinary(name) {
 export function validateTmux() {
   const bin = resolveBinary('tmux');
   try {
-    execSync(`"${bin}" -V`, { stdio: 'pipe' });
+    execFileSync(bin, ['-V'], { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -115,10 +115,11 @@ export function createTeamSession(teamName, workers, cwd) {
 
     try {
       // Kill existing session if any
-      try { execSync(`"${resolveBinary('tmux')}" kill-session -t "${name}"`, { stdio: 'pipe' }); } catch {}
+      const tmux = resolveBinary('tmux');
+      try { execFileSync(tmux, ['kill-session', '-t', name], { stdio: 'pipe' }); } catch {}
 
       // Create new detached session rooted at the worker's worktree (or cwd on fallback)
-      execSync(`"${resolveBinary('tmux')}" new-session -d -s "${name}" -c "${sessionCwd}"`, { stdio: 'pipe' });
+      execFileSync(tmux, ['new-session', '-d', '-s', name, '-c', sessionCwd], { stdio: 'pipe' });
 
       results.push({
         name: worker.name,
@@ -158,7 +159,7 @@ export function spawnWorkerInSession(sessionName, command, env = {}) {
   const safeCommand = sanitizeForShellArg(fullCommand);
 
   try {
-    execSync(`"${resolveBinary('tmux')}" send-keys -t "${sessionName}" "${safeCommand}" Enter`, { stdio: 'pipe' });
+    execFileSync(resolveBinary('tmux'), ['send-keys', '-t', sessionName, safeCommand, 'Enter'], { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -167,7 +168,7 @@ export function spawnWorkerInSession(sessionName, command, env = {}) {
 
 export function capturePane(sessionName, lines = 80) {
   try {
-    return execSync(`"${resolveBinary('tmux')}" capture-pane -pt "${sessionName}" -S -${lines}`, {
+    return execFileSync(resolveBinary('tmux'), ['capture-pane', '-pt', sessionName, '-S', `-${lines}`], {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim();
@@ -178,7 +179,7 @@ export function capturePane(sessionName, lines = 80) {
 
 export function killSession(name) {
   try {
-    execSync(`"${resolveBinary('tmux')}" kill-session -t "${name}"`, { stdio: 'pipe' });
+    execFileSync(resolveBinary('tmux'), ['kill-session', '-t', name], { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -188,7 +189,7 @@ export function killSession(name) {
 export function killTeamSessions(teamName) {
   const prefix = `${SESSION_PREFIX}-${sanitizeName(teamName)}`;
   try {
-    const sessions = execSync(`"${resolveBinary('tmux')}" list-sessions -F "#{session_name}"`, {
+    const sessions = execFileSync(resolveBinary('tmux'), ['list-sessions', '-F', '#{session_name}'], {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim().split('\n');
@@ -212,7 +213,7 @@ export function listTeamSessions(teamName) {
     : SESSION_PREFIX;
 
   try {
-    const sessions = execSync(`"${resolveBinary('tmux')}" list-sessions -F "#{session_name}:#{session_created}"`, {
+    const sessions = execFileSync(resolveBinary('tmux'), ['list-sessions', '-F', '#{session_name}:#{session_created}'], {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim().split('\n');

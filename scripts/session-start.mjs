@@ -9,7 +9,7 @@
 
 import { execSync } from 'node:child_process';
 import { readStdin } from './lib/stdin.mjs';
-import { queryWisdom, formatWisdomForPrompt } from './lib/wisdom.mjs';
+import { queryWisdom } from './lib/wisdom.mjs';
 import { loadCheckpoint, formatCheckpoint } from './lib/checkpoint.mjs';
 
 async function main() {
