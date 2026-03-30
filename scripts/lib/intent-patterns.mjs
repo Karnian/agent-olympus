@@ -26,11 +26,26 @@ export const INTENT_CATEGORIES = {
       'dark mode', 'theme', 'pixel', 'wireframe', 'prototype', 'figma', 'sketch',
       'styled-components', 'emotion', 'sass', 'scss', 'less', 'postcss',
       'accessibility', 'a11y', 'aria', 'wcag',
-      'design critique', 'design review', 'design system', 'design token',
-      'usability', 'heuristic', 'gestalt', 'ux copy', 'microcopy', 'empty state',
-      'visual regression', 'responsive test', 'a11y audit', 'accessibility audit',
     ],
     weight: 1.0,
+  },
+
+  'design-review': {
+    patterns: [
+      /\b(design\s*critique|design\s*review|ui\s*review|ux\s*review|a11y\s*audit|accessibility\s*audit|design\s*system\s*audit|ux\s*copy|copy\s*review|microcopy\s*review)\b/i,
+      /\b(nielsen|heuristic\s*evaluation|gestalt|wcag\s*audit|usability\s*review|visual\s*regression)\b/i,
+      /\b(token\s*leak|hardcoded\s*color|design\s*debt|component\s*consistency)\b/i,
+      // Korean: 디자인 리뷰, 접근성 검사, UX 카피
+      /(?:디자인\s*리뷰|디자인\s*비평|접근성\s*검사|접근성\s*감사|카피\s*리뷰|디자인\s*시스템\s*검사|UI\s*리뷰)/u,
+      // Japanese: デザインレビュー, アクセシビリティ監査
+      /(?:デザインレビュー|アクセシビリティ監査|デザインシステム監査|UXコピー)/u,
+    ],
+    keywords: [
+      'design critique', 'design review', 'ui review', 'a11y audit',
+      'accessibility audit', 'design system audit', 'ux copy review',
+      'heuristic evaluation', 'usability review', 'token leak',
+    ],
+    weight: 1.2,
   },
 
   'deep': {
