@@ -62,6 +62,8 @@
   - 테스트 실행 시 실제 OS 알림 발사 → `IS_TEST` 가드 추가
   - "스크립트 편집기" 표시 → `detectTerminalApp()`으로 터미널 앱 감지
   - `onCIFail` 이벤트명 불일치 → `ci_failed`로 수정
+- **추가 수정 (PR #8, v0.8.4)**:
+  - `detectTerminalApp()`: `'iTerm'` → `'iTerm2'` 오탈자 수정
 
 ### B2. Progress Briefing — ✅ Done
 
