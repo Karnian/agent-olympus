@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.8.7] - 2026-03-30
+
+### Fixed — Post-review fixes (Themis + Architect + Codex 3-way review)
+
+- **`skills/harness-init/SKILL.md`** — Phase 2 agent changed from `architect` (read-only, cannot write files) to `executor`. Section numbering corrected (1–8, no duplicates). Added `docs/exec-plans/active/` and `docs/exec-plans/completed/` to scaffold output
+- **`skills/atlas/SKILL.md`** — `harness_context` injection extended to `designer` and `test-engineer` prompts (was previously only in `executor` prompt)
+- **`skills/athena/SKILL.md`** — Added `deepinit` and `harness-init` to External_Skills list (was missing, causing asymmetry with Atlas). Added Phase 5d exec-plan tracking (symmetric with Atlas)
+- **`CLAUDE.md`** — Added `harness-init` to Available skills list (24 → 25). Added xval session naming convention (`atlas-codex-xval-<story-id>`, `athena-<slug>-codex-xval-<story-id>`) alongside existing `atlas-codex-<N>` pattern
+- **`docs/plans/improvements.md`** — Fixed D4 phase reference: "Athena Phase 3" → "Athena Phase 4"
+
+### Meta
+
+- Review methodology: Themis (quality gate) + Architect (structural) + Codex (gpt-5.4, independent) running in parallel
+- Themis verdict: PASS — 390/390 tests, 26/26 scripts syntax clean, all versions aligned
+- Architect verdict: CONDITIONAL → resolved
+- Codex verdict: FAIL → resolved (architect read-only bug was the critical finding)
+
 ## [0.8.6] - 2026-03-30
 
 ### Added — Harness Engineering Integration
