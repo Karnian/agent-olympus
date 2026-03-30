@@ -578,6 +578,21 @@ node -e "
 ```
 If no CHANGELOG.md exists, one is created. Include in the next commit.
 
+### Phase 5d — EXEC-PLAN UPDATE
+
+If `docs/exec-plans/` exists, record this task as a completed plan entry:
+```bash
+# Ensure tracker has header row on first use
+if [ ! -f docs/exec-plans/tech-debt-tracker.md ]; then
+  printf "# Tech Debt Tracker\n| Date | Task | Files | Stories | Notes |\n|------|------|-------|---------|-------|\n" \
+    > docs/exec-plans/tech-debt-tracker.md
+fi
+echo "| $(date +%Y-%m-%d) | <task-slug> | <N files changed> | <N stories> | <one-line summary> |" \
+  >> docs/exec-plans/tech-debt-tracker.md
+```
+If an active exec-plan file exists in `docs/exec-plans/active/`, move it to `docs/exec-plans/completed/`.
+Include this file in the commit.
+
 ### Phase 6 — SHIP (PR Creation + Issue Linking)
 
 Load autonomy config to determine shipping behavior:
@@ -720,6 +735,8 @@ Common examples:
 - `agent-olympus:trace` — evidence-driven hypothesis analysis (use when systematic-debug also fails)
 - `agent-olympus:slop-cleaner` — AI bloat cleanup (use before final commit)
 - `agent-olympus:git-master` — atomic commit discipline (use as final step)
+- `agent-olympus:deepinit` — generate AGENTS.md codebase map (use on unfamiliar projects)
+- `agent-olympus:harness-init` — initialize harness engineering structure (docs/, golden principles, arch constraints)
 - `agent-olympus:research` — parallel web research for external docs/APIs
 
 **Recommended Athena workflow integration:**

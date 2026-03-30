@@ -53,7 +53,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - **Agent** (`agents/*.md`) = role persona with model assignment. Called internally via `Task(subagent_type="agent-olympus:<name>")`
 - Not every agent has a matching skill. executor, debugger, designer etc. are internal-only
 - **Available agents** (agents/): aphrodite, atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hephaestus, hermes, metis, momus, prometheus, security-reviewer, test-engineer, themis, writer
-- **Available skills** (skills/): a11y-audit, ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, design-critique, design-system-audit, external-context, finish-branch, git-master, plan, research, slop-cleaner, systematic-debug, tdd, trace, ui-review, ux-copy-review, verify-coverage
+- **Available skills** (skills/): a11y-audit, ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, design-critique, design-system-audit, external-context, finish-branch, git-master, harness-init, plan, research, slop-cleaner, systematic-debug, tdd, trace, ui-review, ux-copy-review, verify-coverage
 
 ### State Management
 - `.ao/prd.json` — PRD with user stories and acceptance criteria (ephemeral working copy)

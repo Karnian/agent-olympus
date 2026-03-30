@@ -55,8 +55,8 @@ Task(subagent_type="agent-olympus:explore", model="haiku",
 Architect the knowledge base and golden principles:
 
 ```
-Task(subagent_type="agent-olympus:architect", model="opus",
-  prompt="Design a harness engineering structure for this project.
+Task(subagent_type="agent-olympus:executor", model="opus",
+  prompt="Design and write a harness engineering structure for this project.
 
   Project scan: <explore_results>
 
@@ -119,7 +119,10 @@ Task(subagent_type="agent-olympus:architect", model="opus",
   Architecture decisions and design rationale.
   Add one file per significant design decision.
 
-  ## 6. docs/exec-plans/README.md
+  ## 6. docs/exec-plans/active/.gitkeep and docs/exec-plans/completed/.gitkeep
+  (empty files to scaffold the subdirectories)
+
+  ## 7. docs/exec-plans/README.md
   Index file:
   # Execution Plans
   Plans are first-class artifacts stored here, not in ephemeral chat.
@@ -133,13 +136,13 @@ Task(subagent_type="agent-olympus:architect", model="opus",
   ## Tech Debt Tracker
   See: tech-debt-tracker.md
 
-  ## 5. docs/exec-plans/tech-debt-tracker.md
+  ## 8. docs/exec-plans/tech-debt-tracker.md
   Template:
   # Tech Debt Tracker
   | Date | Task | Files | Stories | Notes |
   |------|------|-------|---------|-------|
 
-  ## 7. docs/QUALITY_SCORE.md
+  ## 8. docs/QUALITY_SCORE.md
   Template grading each module/domain:
   # Quality Scores
   | Module | Coverage | Lint | Arch Compliance | Last Updated |

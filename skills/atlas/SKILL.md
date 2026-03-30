@@ -353,8 +353,14 @@ Task(subagent_type="agent-olympus:executor", model="sonnet|opus", prompt="...
   ## Harness Constraints
   Follow these golden principles: <harness_context>
   Respect dependency layers: <docs/ARCHITECTURE.md summary>")
-Task(subagent_type="agent-olympus:designer", model="sonnet", prompt="...")
-Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...")
+Task(subagent_type="agent-olympus:designer", model="sonnet", prompt="...
+  [If harness_context exists:]
+  ## Harness Constraints
+  Follow these golden principles: <harness_context>")
+Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...
+  [If harness_context exists:]
+  ## Harness Constraints
+  Follow these golden principles: <harness_context>")
 ```
 
 **Codex deep workers (via tmux):**
