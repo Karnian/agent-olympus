@@ -81,6 +81,22 @@ Skill(skill="agent-olympus:deepinit")
 This runs once per project — subsequent runs skip when AGENTS.md is present.
 Feed the generated AGENTS.md context into metis analysis.
 
+#### Harness Check
+After AGENTS.md is confirmed, load the harness engineering context:
+
+```bash
+test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSING"
+```
+
+- **HARNESS_FOUND**: Read `docs/golden-principles.md` and `docs/ARCHITECTURE.md` (if exists).
+  Store as `<harness_context>` — inject inline into each worker prompt in Phase 2 spawn.
+  Log: `[athena] Harness loaded: <N> golden principles, architecture layers defined.`
+
+- **HARNESS_MISSING**:
+  - For `complex` or `architectural` tasks → suggest to user:
+    `"[athena] Harness not initialized. Run /harness-init for full setup (recommended). Proceeding without it."`
+  - For trivial/moderate tasks → skip silently, proceed.
+
 Analyze task and design team:
 ```
 Task(subagent_type="agent-olympus:metis", model="opus",
@@ -296,14 +312,18 @@ For each Claude worker:
        TDD_INSTRUCTION: If your story has testable acceptance criteria, follow TDD discipline:
          write a failing test first (RED), then minimum code to pass (GREEN), then refactor.
          Do not write production code before tests.
-       [OPTIONAL] For new functionality: follow /tdd discipline when implementing testable features.")
+       [OPTIONAL] For new functionality: follow /tdd discipline when implementing testable features.
+       [If harness_context exists:]
+       ## Harness Constraints
+       Follow these golden principles: <harness_context>
+       Respect dependency layers defined in docs/ARCHITECTURE.md.")
 ```
 
 **Codex workers** (via tmux, simultaneously):
 ```bash
 # Start session rooted at the worker's worktree path
 tmux new-session -d -s "athena-<slug>-codex-<N>" -c "<worktreePath>"
-tmux send-keys -t "athena-<slug>-codex-<N>" 'codex exec "<implementation prompt>"' Enter
+tmux send-keys -t "athena-<slug>-codex-<N>" 'codex exec "<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]"' Enter
 ```
 
 Workers must commit their changes to their branch before signalling completion.
@@ -459,7 +479,19 @@ Task(subagent_type="agent-olympus:executor", model="sonnet",
   prompt="Integrate Codex output: <codex_result>. Target files: <scope>")
 ```
 
-Mark stories `passes: true` in prd.json after verifying each worker's acceptance criteria.
+**Codex Cross-Validation** (per story) — before marking a story `passes: true`:
+```bash
+tmux new-session -d -s "athena-<slug>-codex-xval-<story-id>" -c "<cwd>"
+tmux send-keys -t "athena-<slug>-codex-xval-<story-id>" 'codex exec "Cross-validate implementation of <US-ID> (<story title>). Files changed in merged tree: <post-merge files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or \"none\">. Check: (1) all acceptance criteria met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings."' Enter
+# Poll: tmux capture-pane -pt "athena-<slug>-codex-xval-<story-id>" -S -200 (every 15s)
+# Cleanup: tmux kill-session -t "athena-<slug>-codex-xval-<story-id>"
+```
+- **PASS** → mark `passes: true`, proceed.
+- **FAIL** → route findings back to the responsible worker via inbox for fix, re-validate (max 2 cycles).
+- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`; skip silently if `auth_failed`, `not_installed`, or `rate_limited`. Log: `[athena] Codex cross-validation skipped: <reason>.`
+- **Note**: Run xval against post-merge file paths, not per-worker file paths, to catch violations introduced during conflict resolution.
+
+Mark stories `passes: true` in prd.json only after Codex cross-validation passes (or is unavailable).
 
 Run **simultaneously**: build, tests, linter.
 

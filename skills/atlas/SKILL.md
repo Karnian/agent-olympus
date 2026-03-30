@@ -94,6 +94,22 @@ Skill(skill="agent-olympus:deepinit")
 This runs once per project — subsequent runs skip when AGENTS.md is present.
 Feed the generated AGENTS.md context into metis analysis.
 
+#### Harness Check
+After AGENTS.md is confirmed, load the harness engineering context:
+
+```bash
+test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSING"
+```
+
+- **HARNESS_FOUND**: Read `docs/golden-principles.md` and `docs/ARCHITECTURE.md` (if exists).
+  Store as `<harness_context>` — inject into every executor prompt in Phase 3.
+  Log: `[atlas] Harness loaded: <N> golden principles, architecture layers defined.`
+
+- **HARNESS_MISSING**:
+  - For `complex` or `architectural` tasks → suggest to user:
+    `"[atlas] Harness not initialized. Run /harness-init for full setup (recommended). Proceeding without it."`
+  - For trivial/moderate tasks → skip silently, proceed.
+
 Classify and pick strategy. Spawn **simultaneously**:
 
 ```
@@ -332,7 +348,11 @@ For each story in prd.json with `passes: false`, execute and verify:
 
 **Claude sub-agents:**
 ```
-Task(subagent_type="agent-olympus:executor", model="sonnet|opus", prompt="...")
+Task(subagent_type="agent-olympus:executor", model="sonnet|opus", prompt="...
+  [If harness_context exists, append:]
+  ## Harness Constraints
+  Follow these golden principles: <harness_context>
+  Respect dependency layers: <docs/ARCHITECTURE.md summary>")
 Task(subagent_type="agent-olympus:designer", model="sonnet", prompt="...")
 Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...")
 ```
@@ -340,7 +360,7 @@ Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...")
 **Codex deep workers (via tmux):**
 ```bash
 tmux new-session -d -s "atlas-codex-<N>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-<N>" 'codex exec "<implementation prompt>"' Enter
+tmux send-keys -t "atlas-codex-<N>" 'codex exec "<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]"' Enter
 # Monitor: tmux capture-pane -pt "atlas-codex-<N>" -S -200
 # Cleanup: tmux kill-session -t "atlas-codex-<N>"
 ```
@@ -383,8 +403,20 @@ If story is a pure refactor / docs / config change (no runtime behavior change):
   → Standard executor dispatch (no TDD gate required)
 
 3. After each story completes, verify its acceptance criteria with FRESH evidence
-4. Mark `passes: true` in prd.json only when ALL criteria verified
-5. Record learnings via wisdom calls after each story:
+
+4. **Codex Cross-Validation** (per story) — spawn a Codex validator before marking passes:
+```bash
+tmux new-session -d -s "atlas-codex-xval-<story-id>" -c "<cwd>"
+tmux send-keys -t "atlas-codex-xval-<story-id>" 'codex exec "Cross-validate implementation of <US-ID> (<story title>). Files changed: <files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or \"none\">. Check: (1) all acceptance criteria genuinely met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings."' Enter
+# Poll: tmux capture-pane -pt "atlas-codex-xval-<story-id>" -S -200 (every 15s)
+# Cleanup: tmux kill-session -t "atlas-codex-xval-<story-id>"
+```
+- **PASS** → mark `passes: true`, proceed.
+- **FAIL** → fix the specific violation, re-run acceptance criteria, re-validate (max 2 cycles).
+- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`; skip silently if `auth_failed`, `not_installed`, or `rate_limited`. Log: `[atlas] Codex cross-validation skipped: <reason>.`
+
+5. Mark `passes: true` in prd.json only when ALL criteria verified AND Codex cross-validation passes (or is unavailable)
+6. Record learnings via wisdom calls after each story:
    ```
    addWisdom({ category: 'pattern', lesson: '<codebase convention discovered>', confidence: 'high' })
    addWisdom({ category: 'debug',   lesson: '<pitfall to avoid>',              confidence: 'high' })
@@ -534,6 +566,21 @@ node -e "
 ```
 If no CHANGELOG.md exists, one is created. Include in the next commit.
 
+### Phase 5d — EXEC-PLAN UPDATE
+
+If `docs/exec-plans/` exists, record this task as a completed plan entry:
+```bash
+# Ensure tracker has header row on first use
+if [ ! -f docs/exec-plans/tech-debt-tracker.md ]; then
+  printf "# Tech Debt Tracker\n| Date | Task | Files | Stories | Notes |\n|------|------|-------|---------|-------|\n" \
+    > docs/exec-plans/tech-debt-tracker.md
+fi
+echo "| $(date +%Y-%m-%d) | <task-slug> | <N files changed> | <N stories> | <one-line summary> |" \
+  >> docs/exec-plans/tech-debt-tracker.md
+```
+If an active exec-plan file exists in `docs/exec-plans/active/`, move it to `docs/exec-plans/completed/`.
+Include this file in the commit.
+
 ### Phase 6 — SHIP (PR Creation + Issue Linking)
 
 Load autonomy config to determine shipping behavior:
@@ -664,6 +711,7 @@ Common examples:
 - `agent-olympus:slop-cleaner` — AI bloat cleanup (use before final commit)
 - `agent-olympus:git-master` — atomic commit discipline (use as final step)
 - `agent-olympus:deepinit` — generate AGENTS.md codebase map (use on unfamiliar projects)
+- `agent-olympus:harness-init` — initialize harness engineering structure (docs/, golden principles, arch constraints)
 - `agent-olympus:research` — parallel web research for external docs/APIs
 
 **Recommended Atlas workflow integration:**
