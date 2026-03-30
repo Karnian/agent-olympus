@@ -126,6 +126,7 @@ tmux kill-session -t "<session-name>"             # cleanup
 ```
 
 Session naming convention: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
+Cross-validation sessions: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex-xval-<story-id>`
 
 ## Testing
 

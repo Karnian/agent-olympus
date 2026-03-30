@@ -119,10 +119,10 @@ Task(subagent_type="agent-olympus:executor", model="opus",
   Architecture decisions and design rationale.
   Add one file per significant design decision.
 
-  ## 6. docs/exec-plans/active/.gitkeep and docs/exec-plans/completed/.gitkeep
+  ## 5. docs/exec-plans/active/.gitkeep and docs/exec-plans/completed/.gitkeep
   (empty files to scaffold the subdirectories)
 
-  ## 7. docs/exec-plans/README.md
+  ## 6. docs/exec-plans/README.md
   Index file:
   # Execution Plans
   Plans are first-class artifacts stored here, not in ephemeral chat.
@@ -136,13 +136,14 @@ Task(subagent_type="agent-olympus:executor", model="opus",
   ## Tech Debt Tracker
   See: tech-debt-tracker.md
 
-  ## 8. docs/exec-plans/tech-debt-tracker.md
+  ## 7. docs/exec-plans/tech-debt-tracker.md
   Template:
   # Tech Debt Tracker
   | Date | Task | Files | Stories | Notes |
   |------|------|-------|---------|-------|
 
   ## 8. docs/QUALITY_SCORE.md
+
   Template grading each module/domain:
   # Quality Scores
   | Module | Coverage | Lint | Arch Compliance | Last Updated |
