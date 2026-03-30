@@ -175,6 +175,66 @@ test('classifyIntent: scores object contains all categories', () => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// UI/UX design review keywords → visual-engineering
+// ---------------------------------------------------------------------------
+
+test('classifyIntent: design critique request → visual-engineering', () => {
+  const result = classifyIntent('run a design critique on the settings page UI');
+  assert.equal(result.category, 'visual-engineering');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: a11y audit request → visual-engineering', () => {
+  const result = classifyIntent('perform an accessibility audit on these components');
+  assert.equal(result.category, 'visual-engineering');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: design system audit → visual-engineering', () => {
+  const result = classifyIntent('audit the design system for hardcoded design token values');
+  assert.equal(result.category, 'visual-engineering');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: UX copy review → visual-engineering', () => {
+  const result = classifyIntent('review the ux copy and microcopy in the empty state messages');
+  assert.equal(result.category, 'visual-engineering');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: Korean design review → visual-engineering', () => {
+  const result = classifyIntent('이 페이지 디자인 리뷰하고 접근성 검사해줘');
+  assert.equal(result.category, 'visual-engineering');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: usability heuristic evaluation → visual-engineering', () => {
+  const result = classifyIntent('evaluate usability using Nielsen heuristic and gestalt principles');
+  assert.equal(result.category, 'visual-engineering');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: responsive + visual regression → visual-engineering', () => {
+  const result = classifyIntent('check for visual regression and run responsive test at mobile breakpoint');
+  assert.equal(result.category, 'visual-engineering');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: design-review dashboard UI → visual-engineering', () => {
+  const result = classifyIntent('design a beautiful dashboard UI with React and Tailwind');
+  assert.equal(result.category, 'visual-engineering');
+});
+
+test('classifyIntent: responsive navbar → visual-engineering', () => {
+  const result = classifyIntent('build a responsive navbar with CSS flexbox and dark mode toggle');
+  assert.equal(result.category, 'visual-engineering');
+});
+
+// ---------------------------------------------------------------------------
+// Confidence and edge cases
+// ---------------------------------------------------------------------------
+
 test('classifyIntent: confidence is clamped between 0 and 1', () => {
   const inputs = [
     'refactor the entire database schema and optimize security auth',
