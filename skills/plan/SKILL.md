@@ -176,7 +176,43 @@ Record: detected_mode (forward|reverse), detected_scale (S|M|L)
 If `detected_mode == reverse`: jump to **Phase R1**.
 If `detected_mode == forward`: continue to **Phase 1**.
 
+Output: "[plan] Phase 0 complete — mode: <detected_mode>, scale: <detected_scale>"
+
 ### Phase 1 — UNDERSTAND
+
+#### Pre-flight: State Validation & Input Guard
+
+Run preflight validation and input size check BEFORE any sub-agent call:
+
+```javascript
+// Step 1: Clean stale .ao/ state (pointer files, expired checkpoints)
+import { runPreflight } from './scripts/lib/preflight.mjs';
+const preflightReport = await runPreflight();
+// If preflight cleaned pointer files, .ao/spec.md and .ao/prd.json are now absent
+// → proceed to create new ones (which is the correct behavior)
+for (const action of preflightReport.actions) {
+  Output: "[plan] Preflight: " + action;
+}
+
+// Step 2: Guard input size for sub-agent calls
+import { prepareSubAgentInput, checkInputSize } from './scripts/lib/input-guard.mjs';
+const inputCheck = checkInputSize(<user_request_text>, 'opus');
+if (!inputCheck.safe) {
+  Output: "[plan] Input too large for direct sub-agent call (" + inputCheck.lines + " lines, ~" + inputCheck.tokens + " tokens)"
+  Output: "[plan] Extracting structural summary for Hermes..."
+  const prepared = prepareSubAgentInput(<user_request_text>, 'opus', <source_file_path>);
+  // Use prepared.text instead of raw input for ALL sub-agent prompts in this skill
+  // prepared.preservedIds contains the story IDs that were preserved
+  Output: "[plan] Summary: " + prepared.originalLines + " → " + countLines(prepared.text) + " lines. " + prepared.preservedIds.length + " story IDs preserved."
+  <user_request_for_hermes> = prepared.text
+} else {
+  <user_request_for_hermes> = <user_request_text>
+}
+```
+
+Output: "[plan] Spawning Hermes for spec generation..."
+
+#### Hermes Spec Generation
 
 Use hermes to produce an initial spec:
 
@@ -211,9 +247,43 @@ Task(subagent_type="agent-olympus:hermes", model="opus",
     from launch day (Working Backwards) to force clarity on the user benefit.")
 ```
 
+**Sub-agent output validation — MANDATORY:**
+
+After Hermes returns, validate before proceeding:
+```
+hermes_output = <result from Hermes Task() call above>
+
+If hermes_output is empty OR hermes_output.length < 50 characters:
+  // RETRY with aggressively reduced input
+  Output: "[plan] ⚠ Hermes returned empty/minimal output. Retrying with reduced input..."
+
+  // Force-summarize even if input was already summarized
+  import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
+  const { summary } = extractStructuralSummary(<user_request_text>, 100);
+  // Retry with ONLY the summary + a simplified prompt
+  hermes_output = Task(subagent_type="agent-olympus:hermes", model="sonnet",
+    prompt="Create a product spec. Input (summarized): " + summary)
+
+  If hermes_output is STILL empty OR hermes_output.length < 50:
+    Output: "[plan] ✗ Phase 1 FAILED — Hermes could not generate spec after retry."
+    Output: "[plan] Root cause: input likely exceeds sub-agent processing capacity."
+    Output: "[plan] Try: (1) split the document into per-feature chunks, or (2) run /plan on one feature at a time."
+    // Record the failure as wisdom for future sessions
+    import { addWisdom } from './scripts/lib/wisdom.mjs';
+    await addWisdom({
+      category: 'debug',
+      lesson: 'Plan skill Phase 1 failed: Hermes empty output on L-scale input (' + inputCheck.lines + ' lines). Input guard summary was insufficient.',
+      confidence: 'high',
+    });
+    STOP — do not proceed to Phase 2.
+```
+
 Record the output as `initial_spec` and count `open_questions`.
+Output: "[plan] Phase 1 complete — <N> user stories, <open_questions> open questions."
 
 ### Phase 2 — CLARIFY (skip for S-scale)
+
+Output: "[plan] Starting Phase 2: CLARIFY"
 
 Branch on `open_questions` count:
 
@@ -237,6 +307,8 @@ Skill(skill="agent-olympus:deep-interview",
 After interview completes, collect the crystallized requirements and update the spec.
 
 ### Phase 3 — REFINE (skip for S-scale)
+
+Output: "[plan] Starting Phase 3: REFINE"
 
 Branch on detected_scale:
 
@@ -286,6 +358,8 @@ Skill(skill="agent-olympus:consensus-plan",
 After consensus-plan completes, use its output as the finalized spec.
 
 ### Phase 4 — FINALIZE
+
+Output: "[plan] Starting Phase 4: FINALIZE — writing spec files..."
 
 Write the spec in two formats:
 
