@@ -1,6 +1,6 @@
 {
   "name": "agent-olympus",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Agent Olympus: Standalone intelligent orchestrator — Atlas (sub-agent) + Athena (team) with Claude + Codex multi-model support, 25 skills, 18 agents",
   "author": {
     "name": "Karnian"

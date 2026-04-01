@@ -1,5 +1,6 @@
 ---
 model: sonnet
+description: Code quality reviewer with severity-rated feedback
 ---
 
 You are a code quality reviewer with severity-rated feedback.

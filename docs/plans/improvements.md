@@ -2,7 +2,7 @@
 
 > 전체 개선 항목의 구현 현황을 추적하는 문서. 버전 무관, 카테고리별 정리.
 
-**Last Updated**: 2026-04-01 (v0.9.0)
+**Last Updated**: 2026-04-01 (v0.9.1)
 
 ---
 
@@ -15,7 +15,8 @@
 | Context Intelligence | 3 | 2 | 1 | 0 |
 | Harness Engineering | 4 | 4 | 0 | 0 |
 | Source-Informed (v0.9) | 10 | 4 | 0 | 6 |
-| **Total** | **24** | **17** | **1** | **6** |
+| Hook System (v0.9.1) | 4 | 4 | 0 | 0 |
+| **Total** | **28** | **21** | **1** | **6** |
 
 ---
 
@@ -195,6 +196,36 @@ Claude Code 소스 구조(claw-code) 분석 + Codex 교차검증으로 도출된
 ### E10. Batch Orchestration — 📋 Backlog
 
 - **계획**: 다수 태스크 순차/병렬 배치 실행
+
+---
+
+## F. Hook System Extensions (v0.9.1)
+
+자체 평가 + 외부 생태계 연구를 기반으로 도출된 훅 시스템 확장 항목.
+Claude Code 훅 API가 28개 이벤트로 확장된 것에 맞춰 신규 훅 3종 추가 + 비동기 설정 적용.
+
+### F1. SubagentStop Hook — ✅ Done
+
+- **구현**: `scripts/subagent-stop.mjs`
+- **통합 지점**: `hooks/hooks.json` SubagentStop 이벤트 (async: true)
+- **동작**: 서브에이전트 완료 시 `last_assistant_message` 등 결과를 `.ao/state/ao-subagent-results.json`에 캡처 (50개 FIFO). 수동 트랜스크립트 파싱 대체
+
+### F2. SubagentStart Hook — ✅ Done
+
+- **구현**: `scripts/subagent-start.mjs`
+- **통합 지점**: `hooks/hooks.json` SubagentStart 이벤트 (동기)
+- **동작**: 서브에이전트 스폰 시 `.ao/wisdom.jsonl`에서 최근 10개 학습 항목 로드 → `additionalContext`로 주입
+
+### F3. SessionEnd Hook — ✅ Done
+
+- **구현**: `scripts/session-end.mjs`
+- **통합 지점**: `hooks/hooks.json` SessionEnd 이벤트 (async: true)
+- **동작**: 세션 종료 시 24시간 이상 된 `.ao/state/` 파일과 `.ao/teams/` 디렉토리 정리. Stop 훅(WIP 커밋)의 보완
+
+### F4. Async Hook Configuration — ✅ Done
+
+- **구현**: `hooks/hooks.json` 수정
+- **동작**: PostToolUse(concurrency-release), SubagentStop, SessionEnd 훅에 `"async": true` 설정. 메인 세션 블로킹 방지. SubagentStart는 의도적으로 동기(컨텍스트 주입이 스폰 전에 완료되어야 함)
 
 ---
 
