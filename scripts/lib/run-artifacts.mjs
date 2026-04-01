@@ -9,12 +9,13 @@
  * Artifacts live at .ao/artifacts/runs/<runId>/
  */
 
-import { mkdirSync, readFileSync, existsSync, appendFileSync, readdirSync } from 'fs';
+import { mkdirSync, readFileSync, existsSync, appendFileSync, readdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 
 const RUNS_BASE = join('.ao', 'artifacts', 'runs');
+const STATE_DIR = join('.ao', 'state');
 
 /**
  * Format a Date as YYYYMMDD.
@@ -58,6 +59,117 @@ function runDir(runId, base = RUNS_BASE) {
   return join(base, runId);
 }
 
+// ---------------------------------------------------------------------------
+// Active Run Identity (US-001)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the active-run file path for an orchestrator.
+ * @param {string} orchestrator
+ * @param {string} [stateDir]
+ * @returns {string}
+ */
+function activeRunPath(orchestrator, stateDir = STATE_DIR) {
+  return join(stateDir, `ao-active-run-${orchestrator}.json`);
+}
+
+/**
+ * Get the active runId for an orchestrator.
+ * Returns null if no active run exists. Never throws.
+ *
+ * @param {string} orchestrator - 'atlas' | 'athena'
+ * @param {object} [opts]
+ * @param {string} [opts.stateDir] - Override state directory (for testing)
+ * @returns {string|null}
+ */
+export function getActiveRunId(orchestrator, opts = {}) {
+  try {
+    const sd = opts.stateDir || STATE_DIR;
+    const raw = readFileSync(activeRunPath(orchestrator, sd), 'utf-8');
+    const data = JSON.parse(raw);
+    return data.runId || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Set the active runId for an orchestrator.
+ * Used by createRun internally and available for testing/recovery.
+ *
+ * @param {string} orchestrator
+ * @param {string} runId
+ * @param {object} [opts]
+ * @param {string} [opts.stateDir] - Override state directory (for testing)
+ */
+export function setActiveRunId(orchestrator, runId, opts = {}) {
+  try {
+    const sd = opts.stateDir || STATE_DIR;
+    mkdirSync(sd, { recursive: true, mode: 0o700 });
+    const data = { runId, orchestrator, startedAt: new Date().toISOString() };
+    atomicWriteFileSync(activeRunPath(orchestrator, sd), JSON.stringify(data, null, 2));
+  } catch {
+    // fail-safe: never throw
+  }
+}
+
+/**
+ * Clear the active run pointer for an orchestrator.
+ * Only deletes if the current pointer matches the given runId (compare-and-delete).
+ *
+ * @param {string} orchestrator
+ * @param {string} runId - Only clear if this matches the active runId
+ * @param {object} [opts]
+ * @param {string} [opts.stateDir] - Override state directory (for testing)
+ */
+function clearActiveRunId(orchestrator, runId, opts = {}) {
+  try {
+    const sd = opts.stateDir || STATE_DIR;
+    const filePath = activeRunPath(orchestrator, sd);
+    const raw = readFileSync(filePath, 'utf-8');
+    const data = JSON.parse(raw);
+    if (data.runId === runId) {
+      unlinkSync(filePath);
+    }
+  } catch {
+    // fail-safe: file may not exist
+  }
+}
+
+/**
+ * Discover which orchestrator has an active run.
+ * Checks both atlas and athena; if both exist, returns the most recent.
+ * Returns { orchestrator, runId } or null.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.stateDir] - Override state directory (for testing)
+ * @returns {{ orchestrator: string, runId: string }|null}
+ */
+export function discoverActiveRun(opts = {}) {
+  try {
+    const sd = opts.stateDir || STATE_DIR;
+    const candidates = [];
+    for (const orch of ['atlas', 'athena']) {
+      try {
+        const raw = readFileSync(activeRunPath(orch, sd), 'utf-8');
+        const data = JSON.parse(raw);
+        if (data.runId) {
+          candidates.push({ orchestrator: orch, runId: data.runId, startedAt: data.startedAt || '' });
+        }
+      } catch {
+        // not active for this orchestrator
+      }
+    }
+    if (candidates.length === 0) return null;
+    if (candidates.length === 1) return { orchestrator: candidates[0].orchestrator, runId: candidates[0].runId };
+    // Both active — pick the most recent
+    candidates.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    return { orchestrator: candidates[0].orchestrator, runId: candidates[0].runId };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Create a new run artifact directory and write the initial summary.
  *
@@ -85,6 +197,9 @@ export function createRun(orchestrator, taskDescription, opts = {}) {
     };
 
     atomicWriteFileSync(join(dir, 'summary.json'), JSON.stringify(summary, null, 2));
+
+    // Write active-run pointer (US-001)
+    setActiveRunId(orchestrator, runId, { stateDir: opts.stateDir || STATE_DIR });
 
     return { runId, runDir: dir };
   } catch {
@@ -128,6 +243,24 @@ export function addVerification(runId, result, opts = {}) {
     const filePath = join(dir, 'verification.jsonl');
     const line = JSON.stringify({ ...result, timestamp: result.timestamp || new Date().toISOString() });
     appendFileSync(filePath, line + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    // Emit verification_result event with full payload (US-006)
+    const activeRunId = getActiveRunId(result.orchestrator || opts.orchestrator || '', { stateDir: opts.stateDir || STATE_DIR });
+    if (activeRunId && activeRunId === runId) {
+      const criteria = result.criteria || [];
+      const failCount = criteria.filter(c => c.verdict === 'fail').length;
+      addEvent(runId, {
+        type: 'verification_result',
+        detail: {
+          story_id: result.story_id,
+          verdict: result.verdict,
+          verifiedBy: result.verifiedBy,
+          criteria: criteria.length > 0 ? criteria : undefined,
+          criteriaCount: criteria.length,
+          failCount,
+        },
+      }, { base });
+    }
   } catch {
     // fail-safe: verification loss is acceptable, never throw
   }
@@ -169,6 +302,22 @@ export function finalizeRun(runId, summary, opts = {}) {
     };
 
     atomicWriteFileSync(filePath, JSON.stringify(updated, null, 2));
+
+    // Emit run_finalized event (US-001)
+    addEvent(runId, {
+      type: 'run_finalized',
+      detail: {
+        status: 'completed',
+        storiesCompleted: summary.storiesCompleted || null,
+        duration_ms,
+      },
+    }, { base });
+
+    // Clear active-run pointer with compare-and-delete (US-001 + Codex fix #6)
+    const orchestrator = existing.orchestrator;
+    if (orchestrator) {
+      clearActiveRunId(orchestrator, runId, { stateDir: opts.stateDir || STATE_DIR });
+    }
   } catch {
     // fail-safe: finalization failure is logged but never throws
   }
@@ -268,4 +417,238 @@ export function getRun(runId, opts = {}) {
   }
 
   return { summary, events, verifications };
+}
+
+// ---------------------------------------------------------------------------
+// US-004: Replay Events to Reconstruct Checkpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * Read events from a run's events.jsonl.
+ * @param {string} runId
+ * @param {object} [opts]
+ * @param {string} [opts.base]
+ * @returns {object[]}
+ */
+function readEvents(runId, opts = {}) {
+  const base = opts.base || RUNS_BASE;
+  const dir = runDir(runId, base);
+  try {
+    const raw = readFileSync(join(dir, 'events.jsonl'), 'utf-8');
+    return raw
+      .split('\n')
+      .filter(line => line.trim().length > 0)
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Reconstruct checkpoint state from the event log.
+ * Iterates events in order; checkpoint_saved events overwrite accumulated state;
+ * verification_result events append to a verifications array.
+ *
+ * @param {string} runId
+ * @param {object} [opts]
+ * @param {string} [opts.base] - Override base directory (for testing)
+ * @returns {object|null} Reconstructed checkpoint state, or null if no checkpoint_saved events
+ */
+export function replayEvents(runId, opts = {}) {
+  try {
+    const events = readEvents(runId, opts);
+    if (events.length === 0) return null;
+
+    let state = null;
+    const verifications = [];
+
+    for (const event of events) {
+      if (event.type === 'checkpoint_saved' && event.detail) {
+        state = { ...event.detail };
+      } else if (event.type === 'verification_result' && event.detail) {
+        verifications.push(event.detail);
+      }
+    }
+
+    if (state === null) return null;
+
+    if (verifications.length > 0) {
+      state.verifications = verifications;
+    }
+
+    return state;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// US-006 + US-007: Criterion-Level Verification + Story Rollup
+// ---------------------------------------------------------------------------
+
+/**
+ * Get verification results for a specific story, including criterion-level detail.
+ * If multiple verification records exist for the same story, the last one wins.
+ *
+ * @param {string} runId
+ * @param {string} storyId
+ * @param {object} [opts]
+ * @param {string} [opts.base] - Override base directory (for testing)
+ * @returns {{ story_id: string, verdict: string, criteria: object[] }|null}
+ */
+export function verifyStory(runId, storyId, opts = {}) {
+  try {
+    const { verifications } = getRun(runId, opts);
+    const matches = verifications.filter(v => v.story_id === storyId);
+    if (matches.length === 0) return null;
+
+    // Last record wins
+    const latest = matches[matches.length - 1];
+    const criteria = latest.criteria || [];
+
+    // Compute aggregate verdict from criteria if present
+    let verdict = latest.verdict;
+    if (criteria.length > 0) {
+      const hasFail = criteria.some(c => c.verdict === 'fail');
+      const hasSkip = criteria.some(c => c.verdict === 'skip');
+      if (hasFail) verdict = 'fail';
+      else if (hasSkip) verdict = 'skip';
+      else verdict = 'pass';
+    }
+
+    return { story_id: storyId, verdict, criteria };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Get a summary of all story verifications for a run.
+ *
+ * @param {string} runId
+ * @param {object} [opts]
+ * @param {string} [opts.base] - Override base directory (for testing)
+ * @returns {{ total: number, passed: number, failed: number, skipped: number, stories: object }}
+ */
+export function getRunVerificationSummary(runId, opts = {}) {
+  try {
+    const { verifications } = getRun(runId, opts);
+
+    // Deduplicate: last record per story_id wins
+    const byStory = new Map();
+    for (const v of verifications) {
+      if (v.story_id) {
+        byStory.set(v.story_id, v);
+      }
+    }
+
+    let passed = 0, failed = 0, skipped = 0;
+    const stories = {};
+
+    for (const [sid, v] of byStory) {
+      const criteria = v.criteria || [];
+      let verdict = v.verdict;
+      if (criteria.length > 0) {
+        const hasFail = criteria.some(c => c.verdict === 'fail');
+        const hasSkip = criteria.some(c => c.verdict === 'skip');
+        if (hasFail) verdict = 'fail';
+        else if (hasSkip) verdict = 'skip';
+        else verdict = 'pass';
+      }
+
+      stories[sid] = { verdict, criteria, verifiedBy: v.verifiedBy };
+      if (verdict === 'pass') passed++;
+      else if (verdict === 'fail') failed++;
+      else skipped++;
+    }
+
+    return { total: byStory.size, passed, failed, skipped, stories };
+  } catch {
+    return { total: 0, passed: 0, failed: 0, skipped: 0, stories: {} };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// US-008: Completion Notices
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan a finalized run for unresolved gaps and return actionable notices.
+ * Returns string[] where each entry is prefixed with `[notice] <type>: `.
+ * Never throws; returns [] on any error.
+ *
+ * @param {string} runId
+ * @param {object} [opts]
+ * @param {string} [opts.base] - Override base directory (for testing)
+ * @returns {string[]}
+ */
+export function generateCompletionNotices(runId, opts = {}) {
+  try {
+    const { events, verifications } = getRun(runId, opts);
+    const notices = [];
+
+    // Deduplicate verifications: last per story_id
+    const byStory = new Map();
+    for (const v of verifications) {
+      if (v.story_id) byStory.set(v.story_id, v);
+    }
+
+    for (const [sid, v] of byStory) {
+      const allCriteria = v.criteria || [];
+
+      // Story-level checks
+      const evidence = (v.evidence || '').toLowerCase();
+
+      if (v.verdict === 'skip' || v.verdict === 'fail') {
+        if (evidence.includes('codex')) {
+          notices.push(`[notice] codex_unavailable: ${sid} verification skipped — codex was not available for cross-validation`);
+        }
+        if (evidence.includes('test')) {
+          notices.push(`[notice] tests_skipped: ${sid} verification skipped — tests were not executed`);
+        }
+        if (evidence.includes('preview') || evidence.includes('visual')) {
+          notices.push(`[notice] preview_skipped: ${sid} verification skipped — visual preview was not checked`);
+        }
+        if (evidence.includes('manual') || evidence.includes('review')) {
+          notices.push(`[notice] manual_review_needed: ${sid} requires manual review`);
+        }
+      }
+
+      // Criterion-level checks
+      for (const c of allCriteria) {
+        if (c.verdict !== 'skip') continue;
+        const cEvidence = (c.evidence || '').toLowerCase();
+        if (cEvidence.includes('manual') || cEvidence.includes('review')) {
+          notices.push(`[notice] manual_review_needed: ${sid} criterion ${c.criterion_index} requires manual review`);
+        }
+        if (cEvidence.includes('codex')) {
+          notices.push(`[notice] codex_unavailable: ${sid} criterion ${c.criterion_index} skipped — codex unavailable`);
+        }
+        if (cEvidence.includes('preview') || cEvidence.includes('visual')) {
+          notices.push(`[notice] preview_skipped: ${sid} criterion ${c.criterion_index} skipped — visual preview not checked`);
+        }
+        if (cEvidence.includes('test')) {
+          notices.push(`[notice] tests_skipped: ${sid} criterion ${c.criterion_index} skipped — tests not executed`);
+        }
+      }
+    }
+
+    // Event-level checks
+    for (const ev of events) {
+      if (ev.type === 'warning') {
+        const msg = ev.detail?.message || 'unknown warning';
+        notices.push(`[notice] unresolved_warnings: ${msg}`);
+      }
+      if (ev.type === 'worker_failed') {
+        const name = ev.detail?.workerName || 'unknown';
+        const phase = ev.detail?.storyId || 'unknown phase';
+        notices.push(`[notice] worker_failed: ${name} failed during ${phase}`);
+      }
+    }
+
+    return notices;
+  } catch {
+    return [];
+  }
 }

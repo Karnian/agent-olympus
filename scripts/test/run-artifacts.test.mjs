@@ -327,9 +327,11 @@ test('getRun: returns summary, events, and verifications for a completed run', a
     assert.equal(run.summary.status, 'completed');
     assert.equal(run.summary.result, 'success');
 
-    assert.equal(run.events.length, 2);
+    // 2 manually added events + 1 run_finalized event from finalizeRun
+    assert.equal(run.events.length, 3);
     assert.equal(run.events[0].type, 'worker_spawn');
     assert.equal(run.events[1].type, 'worker_complete');
+    assert.equal(run.events[2].type, 'run_finalized');
 
     assert.equal(run.verifications.length, 1);
     assert.equal(run.verifications[0].story_id, 'US-001');

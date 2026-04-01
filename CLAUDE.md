@@ -20,7 +20,7 @@ scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-ou
               wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
               worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts)
-scripts/test → node:test based unit tests (510+ tests, 34 files)
+scripts/test → node:test based unit tests (550+ tests, 36 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -64,9 +64,11 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/spec.md` — human-readable spec (ephemeral working copy)
 - `.ao/wisdom.jsonl` — structured cross-iteration learnings in JSONL format (NEVER delete, survives /cancel)
 - `.ao/progress.txt` — legacy format, auto-migrated to wisdom.jsonl on first run
-- `.ao/state/checkpoint-{atlas|athena}.json` — session recovery checkpoints (auto-expire 24h)
-- `.ao/state/ao-subagent-results.json` — captured subagent outputs (capped at 50, FIFO)
+- `.ao/state/checkpoint-{atlas|athena}.json` — session recovery checkpoints (auto-expire 24h); emits events to active run on save/clear
+- `.ao/state/ao-active-run-{atlas|athena}.json` — active run identity pointer (links checkpoint ↔ run-artifacts)
+- `.ao/state/ao-subagent-results.json` — captured subagent outputs (capped at 50, FIFO); also emits `subagent_completed` events to active run
 - `.ao/state/*.json` — transient state files (deleted on completion or cleaned by SessionEnd after 24h)
+- `.ao/artifacts/runs/<runId>/` — per-run artifacts (events.jsonl, summary.json, verification.jsonl)
 - `.ao/teams/` — tmux worker inbox/outbox directories (Athena only)
 - `.ao/worktrees/<teamSlug>/<workerName>/` — isolated git worktrees for Athena parallel workers (Athena only; cleaned up after team completion)
 - `docs/plans/` — git-tracked permanent plan storage (survives sessions, shared with team)
@@ -141,7 +143,7 @@ Cross-validation sessions: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex
 ## Testing
 
 ```bash
-# Run unit tests (510+ tests, 34 files)
+# Run unit tests (550+ tests, 36 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

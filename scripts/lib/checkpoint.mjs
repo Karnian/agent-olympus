@@ -4,13 +4,15 @@
  */
 
 import { promises as fs } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { atomicWriteFile } from './fs-atomic.mjs';
+import { getActiveRunId, addEvent } from './run-artifacts.mjs';
 
 const STATE_DIR = path.join('.ao', 'state');
 const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-const PHASE_NAMES = {
+export const PHASE_NAMES = {
   atlas:  ['TRIAGE', 'ANALYZE', 'PLAN', 'EXECUTE', 'VERIFY', 'REVIEW', 'SLOP_CLEAN', 'COMMIT'],
   athena: ['TRIAGE', 'PLAN', 'SPAWN_TEAM', 'MONITOR', 'INTEGRATE_VERIFY', 'REVIEW', 'SLOP_CLEAN', 'COMMIT'],
 };
@@ -31,6 +33,42 @@ export async function saveCheckpoint(orchestrator, data) {
     };
 
     const filePath = path.join(STATE_DIR, `checkpoint-${orchestrator}.json`);
+
+    // Emit events to active run if one exists (US-002 + US-003)
+    const activeRunId = getActiveRunId(orchestrator);
+    if (activeRunId) {
+      // Detect phase change for phase_transition event (US-003)
+      let previousPhase = null;
+      try {
+        const raw = readFileSync(filePath, 'utf-8');
+        const prev = JSON.parse(raw);
+        previousPhase = prev.phase ?? null;
+      } catch {
+        // No previous checkpoint — first save
+      }
+
+      const currentPhase = data.phase ?? null;
+      if (currentPhase !== null && currentPhase !== previousPhase) {
+        addEvent(activeRunId, {
+          type: 'phase_transition',
+          phase: currentPhase,
+          detail: {
+            from: previousPhase,
+            to: currentPhase,
+            fromName: previousPhase !== null ? (PHASE_NAMES[orchestrator]?.[previousPhase] ?? null) : null,
+            toName: PHASE_NAMES[orchestrator]?.[currentPhase] ?? null,
+          },
+        });
+      }
+
+      // Emit checkpoint_saved event (US-002)
+      addEvent(activeRunId, {
+        type: 'checkpoint_saved',
+        phase: currentPhase,
+        detail: { ...data },
+      });
+    }
+
     await atomicWriteFile(filePath, JSON.stringify(checkpoint, null, 2));
   } catch {
     // fail-safe: never throw
@@ -73,6 +111,15 @@ export async function loadCheckpoint(orchestrator) {
  */
 export async function clearCheckpoint(orchestrator) {
   try {
+    // Emit checkpoint_cleared event if active run exists (US-002)
+    const activeRunId = getActiveRunId(orchestrator);
+    if (activeRunId) {
+      addEvent(activeRunId, {
+        type: 'checkpoint_cleared',
+        detail: {},
+      });
+    }
+
     const filePath = path.join(STATE_DIR, `checkpoint-${orchestrator}.json`);
     await fs.unlink(filePath);
   } catch {
