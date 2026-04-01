@@ -110,9 +110,38 @@ test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSI
     `"[atlas] Harness not initialized. Run /harness-init for full setup (recommended). Proceeding without it."`
   - For trivial/moderate tasks → skip silently, proceed.
 
+**Phase Guard — early checkpoint + preflight:**
+
+```javascript
+// Step 1: Early checkpoint BEFORE any sub-agent call
+saveCheckpoint('atlas', { phase: 0, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
+Output: "[atlas] Phase 0: TRIAGE started (checkpoint saved)"
+
+// Step 2: Clean stale .ao/ state
+import { runPreflight } from './scripts/lib/preflight.mjs';
+const preflightReport = await runPreflight();
+for (const action of preflightReport.actions) {
+  Output: "[atlas] Preflight: " + action;
+}
+
+// Step 3: Guard input size
+import { prepareSubAgentInput, checkInputSize } from './scripts/lib/input-guard.mjs';
+const inputCheck = checkInputSize(<combined_input>, 'opus');
+if (!inputCheck.safe) {
+  Output: "[atlas] L-scale input detected (" + inputCheck.lines + " lines, ~" + inputCheck.tokens + " tokens)"
+  const prepared = prepareSubAgentInput(<combined_input>, 'opus', <source_file_path>);
+  Output: "[atlas] Structural summary: " + prepared.originalLines + " → " + countLines(prepared.text) + " lines"
+  <metis_input> = prepared.text
+} else {
+  <metis_input> = <combined_input>
+}
+```
+
 Classify and pick strategy. Spawn **simultaneously**:
 
 ```
+Output: "[atlas] Spawning Explore + Metis agents..."
+
 Agent A (fast): Task(subagent_type="agent-olympus:explore", model="haiku",
   prompt="Scan codebase: architecture, relevant files, tech stack, test framework.
   Report as bullet points. Context: <user_request>")
@@ -124,6 +153,30 @@ Agent B (deep): Task(subagent_type="agent-olympus:metis", model="opus",
   NEEDS_CODEX: yes/no
   Prior learnings: <formatWisdomForPrompt()>
   Task: <user_request>")
+```
+
+**Sub-agent output validation — MANDATORY:**
+
+After Metis and Explore return, validate before proceeding:
+```
+metis_output = <result from Metis Task() call>
+explore_output = <result from Explore Task() call>
+
+If metis_output is empty OR does not contain COMPLEXITY classification:
+  Output: "[atlas] ⚠ Metis returned empty/invalid classification. Retrying with reduced input..."
+  import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
+  const { summary } = extractStructuralSummary(<combined_input>, 100);
+  metis_output = Task(subagent_type="agent-olympus:metis", model="sonnet",
+    prompt="Classify this task: COMPLEXITY (trivial/moderate/complex/architectural), SCOPE, NEEDS_CODEX.\nTask: " + summary)
+
+  If metis_output is STILL empty:
+    Output: "[atlas] ✗ Phase 0 FAILED — triage could not complete after retry."
+    Output: "[atlas] Try: provide a simpler task description or use /plan first."
+    import { addWisdom } from './scripts/lib/wisdom.mjs';
+    await addWisdom({ category: 'debug', lesson: 'Atlas Phase 0 failed: Metis empty output on L-scale input.', confidence: 'high' });
+    STOP — do not proceed.
+
+Output: "[atlas] Triage complete — complexity: <complexity>, scope: <scope>"
 ```
 
 **Trivial tasks**: Skip phases 1-2, execute directly (Atlas CAN implement simple things itself).
@@ -167,6 +220,8 @@ Skill(skill="agent-olympus:external-context",
 Inject the returned markdown brief as `<external_context>` into the Phase 2 prompt for prometheus.
 
 ### Phase 1.5 — SPEC GATE (Hermes validation/creation)
+
+Output: "[atlas] Phase 1.5: SPEC GATE — validating/creating specification..."
 
 Before implementation planning, ensure a structured spec exists. Hermes acts as the quality gate between analysis and execution planning.
 
@@ -234,13 +289,34 @@ Task(subagent_type="agent-olympus:hermes", model="opus",
   For L-scale: comprehensive. Up to 5 open questions with defaults + impact analysis.")
 ```
 
+**Sub-agent output validation (Hermes) — MANDATORY:**
+```
+hermes_output = <result from Hermes Task() call above>
+
+If hermes_output is empty OR hermes_output.length < 50:
+  Output: "[atlas] ⚠ Hermes spec creation returned empty. Retrying with reduced input..."
+  import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
+  const { summary } = extractStructuralSummary(<user_request>, 100);
+  hermes_output = Task(subagent_type="agent-olympus:hermes", model="sonnet",
+    prompt="Create a product spec for: " + summary)
+
+  If hermes_output is STILL empty:
+    Output: "[atlas] ✗ Spec Gate FAILED — Hermes could not create spec after retry."
+    Output: "[atlas] Try: (1) run /plan first, or (2) provide a smaller task scope."
+    await addWisdom({ category: 'debug', lesson: 'Atlas Spec Gate failed: Hermes empty output.', confidence: 'high' });
+    STOP — do not proceed.
+```
+
 Write Hermes output to `.ao/spec.md` and `.ao/prd.json`.
+Output: "[atlas] Spec gate passed — <N> user stories ready for planning."
 
 #### After Spec Gate
 
 Proceed to Phase 2 with a guaranteed spec. Prometheus now receives structured requirements, not raw user intent.
 
 ### Phase 2 — PLAN + VALIDATE (skip for trivial)
+
+Output: "[atlas] Phase 2: PLAN + VALIDATE — creating execution plan..."
 
 **[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
 ```

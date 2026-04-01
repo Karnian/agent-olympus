@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.8.8] - 2026-04-01
+
+### Fixed — Silent failure on L-scale tasks (Issue #9)
+
+Three root causes were identified and resolved:
+
+**Root cause 1: L-scale input exceeded sub-agent effective context limits**
+- **`scripts/lib/input-guard.mjs`** *(new)* — Input size guard library. Estimates token count from text (CJK-aware), checks against per-tier effective limits (haiku: 30k tokens/500 lines, sonnet: 80k/1500, opus: 150k/3000), and extracts structural summaries when limits are exceeded. Structural extraction preserves headings, user story IDs (US-NNN, RF-NNN), GIVEN/WHEN/THEN acceptance criteria, list items, and table rows — stripping verbose prose. Summary target is tier limit ÷ 4 to leave headroom for orchestrator prompt + response generation. Bug fix: heading-embedded story IDs (e.g. `### US-001: Title`) now correctly extracted alongside body-level story IDs
+- **`skills/plan/SKILL.md`** — Phase 1 now runs `checkInputSize()` before calling Hermes; for unsafe inputs calls `prepareSubAgentInput()` to produce a structural summary first, then passes `prepared.text` to Hermes instead of the raw document
+- **`skills/athena/SKILL.md`** — Phase 0 runs `checkInputSize()` before calling Metis; same summarization path
+- **`skills/atlas/SKILL.md`** — Phase 0 runs `checkInputSize()` before calling Metis/Explore; same summarization path
+
+**Root cause 2: Stale pointer files blocked spec creation**
+- **`scripts/lib/preflight.mjs`** *(new)* — Preflight validation library. Detects pointer files in `.ao/spec.md` and `.ao/prd.json` (pattern matching: `# Pointer` heading, bare file paths ≤2 lines, JSON with only `canonical`/`ref` field), removes them, and warns about orphaned team state files (>2h old, still running). Also cleans expired checkpoints (>24h) that `loadCheckpoint()` would have silently ignored
+- **`scripts/session-start.mjs`** — Now calls `runPreflight()` on every session start before loading checkpoints or wisdom; actions/warnings injected into `additionalContext` under `## Preflight`
+
+**Root cause 3: No checkpoint before Phase 0 sub-agent calls**
+- **`skills/athena/SKILL.md`** — `saveCheckpoint()` now called **before** Metis invocation (was: after). Phase 0 checkpoint (`phase: 0`) is written immediately on skill entry so any failure is detectable
+- **`skills/atlas/SKILL.md`** — Same: `saveCheckpoint()` before Explore+Metis parallel spawn
+
+**Sub-agent output validation (all three skills)**
+- After every sub-agent call (Hermes, Metis, Explore), output is validated: empty/minimal results trigger one retry with sonnet + aggressively condensed input (100-line summary). If retry also fails, skill stops explicitly with a user-facing diagnosis message and records the failure to `wisdom.jsonl` for future sessions. No more silent continuation
+
+### Added
+
+- **`scripts/lib/preflight.mjs`** — `detectPointerFile()`, `cleanStalePointers()`, `runPreflight()`, `formatPreflightReport()`
+- **`scripts/lib/input-guard.mjs`** — `estimateTokens()`, `countLines()`, `checkInputSize()`, `extractStructuralSummary()`, `prepareSubAgentInput()`
+- **`scripts/test/preflight.test.mjs`** — 16 tests covering pointer detection, stale cleanup, expired checkpoints, orphaned team state
+- **`scripts/test/input-guard.test.mjs`** — 18 tests covering token estimation, tier limits, structural summary extraction, chunking correctness
+
+### Meta
+
+- Test count: **390 → 424** (+34 new tests, 0 failures)
+- Test files: **26 → 28**
+- Codex cross-validation: confirmed chunking correctness (8000 lines → 128 lines for haiku tier, safe=true)
+- Fix branch: `worktree-fix+silent-failure-lscale`
+
 ## [0.8.7] - 2026-03-30
 
 ### Fixed — Post-review fixes (Themis + Architect + Codex 3-way review)

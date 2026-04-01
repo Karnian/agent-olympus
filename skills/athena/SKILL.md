@@ -97,6 +97,35 @@ test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSI
     `"[athena] Harness not initialized. Run /harness-init for full setup (recommended). Proceeding without it."`
   - For trivial/moderate tasks → skip silently, proceed.
 
+**Phase Guard — early checkpoint + preflight:**
+
+```javascript
+// Step 1: Early checkpoint BEFORE any sub-agent call
+saveCheckpoint('athena', { phase: 0, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
+Output: "[athena] Phase 0: TRIAGE & TEAM DESIGN started (checkpoint saved)"
+
+// Step 2: Clean stale .ao/ state
+import { runPreflight } from './scripts/lib/preflight.mjs';
+const preflightReport = await runPreflight();
+for (const action of preflightReport.actions) {
+  Output: "[athena] Preflight: " + action;
+}
+
+// Step 3: Guard input size
+import { prepareSubAgentInput, checkInputSize } from './scripts/lib/input-guard.mjs';
+const inputCheck = checkInputSize(<combined_input>, 'opus');
+if (!inputCheck.safe) {
+  Output: "[athena] L-scale input detected (" + inputCheck.lines + " lines, ~" + inputCheck.tokens + " tokens)"
+  const prepared = prepareSubAgentInput(<combined_input>, 'opus', <source_file_path>);
+  Output: "[athena] Structural summary: " + prepared.originalLines + " → " + countLines(prepared.text) + " lines"
+  <metis_input> = prepared.text
+} else {
+  <metis_input> = <combined_input>
+}
+```
+
+Output: "[athena] Spawning Metis for team design..."
+
 Analyze task and design team:
 ```
 Task(subagent_type="agent-olympus:metis", model="opus",
@@ -108,6 +137,35 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   Rules: Codex for algorithms/large refactoring, Claude for standard impl/UI/tests
   Prior learnings: <formatWisdomForPrompt()>
   Task: <user_request>")
+```
+
+**Sub-agent output validation — MANDATORY:**
+
+After Metis returns, validate before proceeding:
+```
+metis_output = <result from Metis Task() call above>
+
+If metis_output is empty OR does not contain worker/stream assignments:
+  Output: "[athena] ⚠ Metis returned empty/invalid team design. Retrying with reduced input..."
+
+  // Force-summarize and retry with sonnet (more resilient to long inputs)
+  import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
+  const { summary } = extractStructuralSummary(<combined_input>, 100);
+  metis_output = Task(subagent_type="agent-olympus:metis", model="sonnet",
+    prompt="Design a team for this task. Break into independent streams with worker type and scope.\nTask summary: " + summary)
+
+  If metis_output is STILL empty:
+    Output: "[athena] ✗ Phase 0 FAILED — Metis could not design team after retry."
+    Output: "[athena] Try: (1) split into per-phase tasks, or (2) use /atlas for sequential execution."
+    import { addWisdom } from './scripts/lib/wisdom.mjs';
+    await addWisdom({
+      category: 'debug',
+      lesson: 'Athena Phase 0 failed: Metis empty output on L-scale input (' + inputCheck.lines + ' lines).',
+      confidence: 'high',
+    });
+    STOP — do not proceed to Phase 0.5.
+
+Output: "[athena] Metis team design complete — <N> workers proposed."
 ```
 
 **[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
@@ -129,10 +187,12 @@ Skill(skill="agent-olympus:external-context",
 Broadcast the returned markdown brief to all workers via team inbox before Phase 2 spawn.
 
 ```
-saveCheckpoint('athena', { phase: 1, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
+saveCheckpoint('athena', { phase: 1, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request>, teamDesign: <metis_team_design> })
 ```
 
 ### Phase 0.5 — SPEC GATE (Hermes validation/creation)
+
+Output: "[athena] Phase 0.5: SPEC GATE — validating/creating specification..."
 
 Before team planning, ensure a structured spec exists. Hermes acts as the quality gate between triage and execution planning.
 
@@ -194,13 +254,34 @@ Task(subagent_type="agent-olympus:hermes", model="opus",
   Ensure stories have clear boundaries so they can be assigned to independent workers.")
 ```
 
+**Sub-agent output validation (Hermes) — MANDATORY:**
+```
+hermes_output = <result from Hermes Task() call above>
+
+If hermes_output is empty OR hermes_output.length < 50:
+  Output: "[athena] ⚠ Hermes spec creation returned empty. Retrying with reduced input..."
+  import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
+  const { summary } = extractStructuralSummary(<user_request>, 100);
+  hermes_output = Task(subagent_type="agent-olympus:hermes", model="sonnet",
+    prompt="Create a product spec for: " + summary)
+
+  If hermes_output is STILL empty:
+    Output: "[athena] ✗ Spec Gate FAILED — Hermes could not create spec after retry."
+    Output: "[athena] Try: (1) run /plan first, or (2) provide a smaller task scope."
+    await addWisdom({ category: 'debug', lesson: 'Athena Spec Gate failed: Hermes empty output.', confidence: 'high' });
+    STOP — do not proceed.
+```
+
 Write Hermes output to `.ao/spec.md` and `.ao/prd.json`.
+Output: "[athena] Spec gate passed — <N> user stories ready for team planning."
 
 #### After Spec Gate
 
 Proceed to Phase 1 with a guaranteed spec. Prometheus now receives structured requirements, not raw user intent.
 
 ### Phase 1 — PLAN
+
+Output: "[athena] Phase 1: PLAN — creating execution plan..."
 
 **[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
 ```
@@ -272,6 +353,8 @@ saveCheckpoint('athena', { phase: 2, prdSnapshot: <prd.json contents>, completed
 ```
 
 ### Phase 2 — SPAWN TEAM
+
+Output: "[athena] Phase 2: SPAWN TEAM — creating worktrees and launching workers..."
 
 **Worktree isolation** (before spawning any worker):
 

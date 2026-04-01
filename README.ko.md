@@ -6,7 +6,7 @@
 
 Agent Olympus는 Claude Code를 위한 독립형 플러그인으로, 소프트웨어 개발 전 과정을 자동화합니다. 작업을 요청하면 전문화된 AI 에이전트들이 요구사항 분석부터 구현, 검증, 코드 리뷰, 최종 커밋까지 자율적으로 처리합니다. 빌드가 성공하고 테스트가 통과하고 모든 검토가 승인될 때까지 자동으로 반복합니다.
 
-2개의 오케스트레이터, 18개의 전문 에이전트, 24개의 워크플로우 스킬. npm 의존성 제로.
+2개의 오케스트레이터, 18개의 전문 에이전트, 25개의 워크플로우 스킬. npm 의존성 제로.
 
 ## 무엇을 하는가
 
@@ -23,7 +23,7 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 
 - **2개의 오케스트레이터**: Atlas (허브-앤-스포크)와 Athena (피어-투-피어 팀)
 - **18개 전문 에이전트**: 분석가(Metis), 전략가(Prometheus), 검증자(Momus), 기획자(Hermes), 개발자(Executor), 디자이너, **Aphrodite(디자인 리뷰)**, 테스트 엔지니어, 디버거, 아키텍트, 보안 검수자, 코드 리뷰어, 작가(Writer), 탐색가(Explore), Hephaestus, Themis(품질 게이트), Atlas, Athena
-- **24개 워크플로우 스킬**: atlas, athena, plan, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, tdd, systematic-debug, brainstorm, finish-branch, **design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review**
+- **25개 워크플로우 스킬**: atlas, athena, plan, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, tdd, systematic-debug, brainstorm, finish-branch, **design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review**, harness-init
 - **세션 복구**: 체크포인트 시스템으로 중단 후 어느 단계에서든 재개
 - **구조화된 Wisdom**: JSONL 형식의 세션 간 학습 데이터베이스; Intent-aware 쿼리 확장 지원
 - **npm 의존성 제로**: Node.js 내장 모듈만 사용
@@ -42,7 +42,8 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **자동 온보딩** *(v0.8)*: `AGENTS.md` 없으면 `deepinit` 자동 실행
 - **비주얼 검증** *(v0.8)*: UI 변경 감지 시 Claude Preview MCP 스크린샷으로 선택적 검증
 - **UI/UX 디자인 리뷰** *(v0.8.3)*: Aphrodite 에이전트 + 5개 디자인 스킬 — 디자인 비평(Nielsen+Gestalt), 접근성 감사(WCAG 2.2 AA), 디자인 시스템 감사(토큰 누수), UX 카피 리뷰, 통합 UI 리뷰
-- **390개+ 단위 테스트**: `node:test` 기반 25개 파일의 종합 테스트 스위트
+- **L-scale 안정성** *(v0.8.8)*: `input-guard` 라이브러리로 대용량 문서에서 sub-agent 무음 실패 방지 — story ID와 수용 기준(GIVEN/WHEN/THEN)을 보존하며 입력을 자동 요약. `preflight` 라이브러리로 실행 전 `.ao/` 내 stale 포인터 파일 자동 감지 및 정리
+- **424개+ 단위 테스트**: `node:test` 기반 28개 파일의 종합 테스트 스위트
 - **페일-세이프 아키텍처**: 훅이 Claude Code를 절대 차단하지 않음; 에러 시 우아한 저하
 
 ## 설치

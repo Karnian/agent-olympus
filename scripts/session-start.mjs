@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { readStdin } from './lib/stdin.mjs';
 import { queryWisdom } from './lib/wisdom.mjs';
 import { loadCheckpoint, formatCheckpoint } from './lib/checkpoint.mjs';
+import { runPreflight, formatPreflightReport } from './lib/preflight.mjs';
 
 async function main() {
   try {
@@ -20,6 +21,17 @@ async function main() {
     try { _data = JSON.parse(raw); } catch { /* non-fatal */ }
 
     const sections = [];
+
+    // 0. Preflight — clean stale state before loading anything
+    try {
+      const preflightReport = await runPreflight();
+      const preflightText = formatPreflightReport(preflightReport);
+      if (preflightText) {
+        sections.push(`## Preflight\n${preflightText}`);
+      }
+    } catch {
+      // preflight failure is non-fatal
+    }
 
     // 1. Checkpoint state — resume interrupted Atlas or Athena sessions
     const atlasCP = await loadCheckpoint('atlas');
