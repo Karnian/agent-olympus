@@ -16,6 +16,89 @@
 import { readStdin } from './lib/stdin.mjs';
 import { loadCheckpoint } from './lib/checkpoint.mjs';
 import { execSync, execFileSync } from 'child_process';
+import { basename } from 'path';
+
+/**
+ * Build a descriptive WIP commit message from staged file paths.
+ *
+ * @param {string} phase - 'manual' or 'phase-N'
+ * @param {string} stagedOutput - newline-separated staged file paths (from git diff --cached --name-only)
+ * @returns {string} Multi-line commit message: subject + optional body
+ */
+function buildWipMessage(phase, stagedOutput) {
+  try {
+    const files = stagedOutput.split('\n').filter(Boolean);
+    if (files.length === 0) {
+      return `ao-wip(${phase}): auto-save before session end`;
+    }
+
+    // Get name-status for richer info (A=added, M=modified, D=deleted)
+    let nameStatus;
+    try {
+      nameStatus = execSync('git diff --cached --name-status', {
+        encoding: 'utf-8',
+        stdio: 'pipe',
+      }).trim();
+    } catch {
+      nameStatus = '';
+    }
+
+    // Parse status entries
+    const added = [];
+    const modified = [];
+    const deleted = [];
+
+    if (nameStatus) {
+      for (const line of nameStatus.split('\n').filter(Boolean)) {
+        const tab = line.indexOf('\t');
+        if (tab === -1) continue;
+        const status = line.slice(0, tab).trim();
+        const filePath = line.slice(tab + 1).trim();
+        const name = basename(filePath);
+        if (status.startsWith('A')) added.push(name);
+        else if (status.startsWith('D')) deleted.push(name);
+        else modified.push(name);
+      }
+    } else {
+      // Fallback: treat all as modified
+      for (const f of files) modified.push(basename(f));
+    }
+
+    // Build subject line (max ~72 chars)
+    const parts = [];
+    if (added.length > 0) parts.push(`add ${formatNames(added)}`);
+    if (modified.length > 0) parts.push(`update ${formatNames(modified)}`);
+    if (deleted.length > 0) parts.push(`remove ${formatNames(deleted)}`);
+
+    let subject = `ao-wip(${phase}): ${parts.join(', ')}`;
+    if (subject.length > 72) {
+      // Shorten: just use counts
+      const counts = [];
+      if (added.length > 0) counts.push(`+${added.length} new`);
+      if (modified.length > 0) counts.push(`~${modified.length} modified`);
+      if (deleted.length > 0) counts.push(`-${deleted.length} deleted`);
+      subject = `ao-wip(${phase}): ${files.length} file(s) — ${counts.join(', ')}`;
+    }
+
+    // Build body with full file list when more than 3 files
+    if (files.length <= 3) return subject;
+
+    const body = files.map(f => `  ${f}`).join('\n');
+    return `${subject}\n\nFiles:\n${body}`;
+  } catch {
+    // Fallback: simple message
+    return `ao-wip(${phase}): auto-save before session end`;
+  }
+}
+
+/**
+ * Format a list of file names for the subject line.
+ * Shows up to 3 names, then "+N more".
+ */
+function formatNames(names) {
+  if (names.length <= 3) return names.join(', ');
+  return `${names.slice(0, 2).join(', ')} (+${names.length - 2} more)`;
+}
 
 async function main() {
   try {
@@ -72,8 +155,8 @@ async function main() {
       process.exit(0);
     }
 
-    // 5. Create the WIP commit (use execFileSync to avoid shell injection)
-    const message = `ao-wip(${phase}): auto-save ${fileCount} file(s) before session end`;
+    // 5. Build a descriptive WIP commit message from staged changes
+    const message = buildWipMessage(phase, staged);
     execFileSync('git', ['commit', '-m', message], { stdio: 'pipe' });
 
   } catch {
