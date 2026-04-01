@@ -104,10 +104,17 @@ describe('session-start: no checkpoint, no wisdom, no git', () => {
   });
   after(async () => { await removeTmpDir(tmpDir); });
 
-  it('outputs {} when there is nothing to inject', () => {
+  it('outputs only capability report when there is nothing else to inject', () => {
     const output = runHook({}, tmpDir);
-    // Should be an empty object (no additionalContext)
-    assert.deepEqual(output, {});
+    // With capability detection, clean runs may include a Capabilities section
+    if (output.additionalContext) {
+      assert.ok(output.additionalContext.includes('Capabilities'), 'should only contain capability report');
+      assert.ok(!output.additionalContext.includes('Interrupted Session'), 'should not contain checkpoint data');
+      assert.ok(!output.additionalContext.includes('Prior Learnings'), 'should not contain wisdom data');
+    }
+    // No other keys should be present
+    const keys = Object.keys(output).filter(k => k !== 'additionalContext');
+    assert.equal(keys.length, 0, 'should have no keys besides optional additionalContext');
   });
 });
 

@@ -10,6 +10,8 @@
  */
 
 import { promises as fs } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
 const AO_DIR = '.ao';
@@ -90,10 +92,76 @@ export async function cleanStalePointers() {
 }
 
 /**
+ * Detect available capabilities for orchestrator execution.
+ * All checks are fail-safe: if detection fails, capability is marked false.
+ *
+ * @returns {Promise<{
+ *   hasTmux: boolean,
+ *   hasCodex: boolean,
+ *   hasGitWorktree: boolean,
+ *   hasTeamTools: boolean,
+ *   hasPreviewMCP: boolean
+ * }>}
+ */
+export async function detectCapabilities() {
+  let hasTmux = false;
+  try {
+    execFileSync('which', ['tmux'], { stdio: 'ignore' });
+    hasTmux = true;
+  } catch {
+    // tmux not found
+  }
+
+  let hasCodex = false;
+  try {
+    execFileSync('which', ['codex'], { stdio: 'ignore' });
+    hasCodex = true;
+  } catch {
+    // codex not found
+  }
+
+  let hasGitWorktree = false;
+  try {
+    execFileSync('git', ['worktree', 'list'], { stdio: 'ignore' });
+    hasGitWorktree = true;
+  } catch {
+    // git worktree not available
+  }
+
+  // Native Claude Code tools are always available
+  const hasTeamTools = true;
+
+  // Preview MCP is available if .claude/launch.json exists
+  const hasPreviewMCP = existsSync('.claude/launch.json');
+
+  return { hasTmux, hasCodex, hasGitWorktree, hasTeamTools, hasPreviewMCP };
+}
+
+/**
+ * Format capability report for human-readable display.
+ * @param {{ hasTmux: boolean, hasCodex: boolean, hasGitWorktree: boolean, hasTeamTools: boolean, hasPreviewMCP: boolean }} caps
+ * @returns {string}
+ */
+export function formatCapabilityReport(caps) {
+  const fmt = (flag, name, desc) => `  ${flag ? '✓' : '✗'} ${name} — ${desc}`;
+  const lines = [
+    'Capabilities:',
+    fmt(caps.hasTmux, 'tmux       ', 'parallel worker sessions'),
+    fmt(caps.hasCodex, 'codex      ', 'cross-validation & multi-model'),
+    fmt(caps.hasGitWorktree, 'git worktree', 'isolated parallel workspaces'),
+    fmt(caps.hasTeamTools, 'team tools ', 'native Claude Code team management'),
+    fmt(caps.hasPreviewMCP, 'preview MCP', caps.hasPreviewMCP
+      ? 'visual verification'
+      : 'visual verification (no .claude/launch.json)'),
+  ];
+  return lines.join('\n');
+}
+
+/**
  * Validate .ao/ directory state before orchestrator execution.
  * Returns a report of issues found and actions taken.
  *
- * @returns {Promise<{ valid: boolean, actions: string[], warnings: string[] }>}
+ * @returns {Promise<{ valid: boolean, actions: string[], warnings: string[], capabilities: object }>}
  */
 export async function runPreflight() {
   const actions = [];
@@ -162,10 +230,13 @@ export async function runPreflight() {
     }
   }
 
+  const capabilities = await detectCapabilities();
+
   return {
     valid: warnings.length === 0,
     actions,
     warnings,
+    capabilities,
   };
 }
 
@@ -175,16 +246,17 @@ export async function runPreflight() {
  * @returns {string}
  */
 export function formatPreflightReport(report) {
-  if (report.actions.length === 0 && report.warnings.length === 0) {
-    return '';
-  }
-
   const parts = [];
   if (report.actions.length > 0) {
     parts.push('Preflight actions:\n' + report.actions.map(a => `  ✓ ${a}`).join('\n'));
   }
   if (report.warnings.length > 0) {
     parts.push('Preflight warnings:\n' + report.warnings.map(w => `  ⚠ ${w}`).join('\n'));
+  }
+  // Always include capability report when available — orchestrators need this
+  // at startup to choose fallback paths
+  if (report.capabilities) {
+    parts.push(formatCapabilityReport(report.capabilities));
   }
   return parts.join('\n');
 }
