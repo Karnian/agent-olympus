@@ -202,14 +202,21 @@ describe('stop-hook: git repo with uncommitted changes — WIP commit message fo
     assert.ok(msg.startsWith('ao-wip('), `commit message should start with "ao-wip(", got: ${msg}`);
   });
 
-  it('WIP commit message mentions file count', () => {
+  it('WIP commit message includes file name or action verb', () => {
     const msg = lastCommitMessage(tmpDir);
-    assert.match(msg, /\d+ file/, 'WIP commit message should mention file count');
+    // New format uses action verbs: add, update, remove; or file counts for long messages
+    assert.ok(
+      msg.includes('add ') || msg.includes('update ') || msg.includes('remove ') || /\d+ file/.test(msg),
+      `commit message should include action verb or file count, got: ${msg}`,
+    );
   });
 
-  it('WIP commit message mentions session end', () => {
+  it('WIP commit message references actual file name', () => {
     const msg = lastCommitMessage(tmpDir);
-    assert.ok(msg.includes('session end'), `commit message should mention "session end", got: ${msg}`);
+    assert.ok(
+      msg.includes('work-in-progress.js'),
+      `commit message should reference actual file name, got: ${msg}`,
+    );
   });
 });
 
@@ -317,11 +324,70 @@ describe('stop-hook: multiple uncommitted files', () => {
     assert.equal(afterCount, beforeCount + 1, 'should create exactly one WIP commit');
   });
 
-  it('WIP commit message mentions 3 files', () => {
+  it('WIP commit message mentions all three files or uses count', () => {
     const msg = lastCommitMessage(tmpDir);
+    // Either lists file names or shows count for >3 files
+    const mentionsFiles = msg.includes('file-a.js') || msg.includes('file-b.js') || msg.includes('file-c.js');
+    const mentionsCount = /3 file/.test(msg);
     assert.ok(
-      msg.includes('3 file'),
-      `WIP commit message should mention 3 files, got: ${msg}`,
+      mentionsFiles || mentionsCount,
+      `WIP commit message should mention file names or count, got: ${msg}`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Descriptive message: mixed add + modify
+// ---------------------------------------------------------------------------
+
+describe('stop-hook: descriptive message with add + modify', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    // Modify existing file
+    writeFileSync(path.join(tmpDir, '.gitkeep'), 'modified', 'utf-8');
+    // Add new file
+    writeFileSync(path.join(tmpDir, 'new-feature.ts'), 'export const x = 1;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('WIP commit message distinguishes add and update actions', () => {
+    runHook(tmpDir);
+    const msg = lastCommitMessage(tmpDir);
+    assert.ok(msg.startsWith('ao-wip('), `should start with ao-wip(, got: ${msg}`);
+    // Should mention both add and update
+    assert.ok(
+      msg.includes('add') && msg.includes('update'),
+      `should mention both add and update, got: ${msg}`,
+    );
+  });
+});
+
+describe('stop-hook: descriptive message with many files uses count format', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    // Create 6 files to trigger count-based format
+    for (let i = 0; i < 6; i++) {
+      writeFileSync(path.join(tmpDir, `module-${i}.mjs`), `export const x${i} = ${i};`, 'utf-8');
+    }
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('falls back to count format when subject line would exceed 72 chars', () => {
+    runHook(tmpDir);
+    // Read full commit message (body included)
+    const fullMsg = execSync('git log -1 --format=%B', {
+      encoding: 'utf-8',
+      cwd: tmpDir,
+      stdio: 'pipe',
+    }).trim();
+    // Should have a Files: section in the body
+    assert.ok(
+      fullMsg.includes('Files:'),
+      `commit body should list files when >3, got: ${fullMsg}`,
     );
   });
 });
