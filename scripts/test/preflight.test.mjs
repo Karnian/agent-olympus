@@ -267,9 +267,19 @@ test('runPreflight: returns valid:true when .ao/ does not exist', async () => {
 // formatPreflightReport
 // ---------------------------------------------------------------------------
 
-test('formatPreflightReport: returns empty string when nothing to report', async () => {
+test('formatPreflightReport: returns empty string when nothing to report and no capabilities', async () => {
   const { formatPreflightReport } = await import('../../scripts/lib/preflight.mjs');
   assert.equal(formatPreflightReport({ valid: true, actions: [], warnings: [] }), '');
+});
+
+test('formatPreflightReport: returns capability report even with no actions/warnings', async () => {
+  const { formatPreflightReport } = await import('../../scripts/lib/preflight.mjs');
+  const result = formatPreflightReport({
+    valid: true, actions: [], warnings: [],
+    capabilities: { hasTmux: true, hasCodex: false, hasGitWorktree: true, hasTeamTools: true, hasPreviewMCP: false }
+  });
+  assert.ok(result.length > 0, 'should include capability report');
+  assert.ok(result.includes('tmux'), 'should mention tmux');
 });
 
 test('formatPreflightReport: formats actions and warnings', async () => {
@@ -282,4 +292,106 @@ test('formatPreflightReport: formats actions and warnings', async () => {
   const formatted = formatPreflightReport(report);
   assert.ok(formatted.includes('Removed pointer'));
   assert.ok(formatted.includes('Orphaned team'));
+});
+
+// ---------------------------------------------------------------------------
+// detectCapabilities
+// ---------------------------------------------------------------------------
+
+test('detectCapabilities: returns object with all 5 boolean fields', async () => {
+  const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
+  const caps = await detectCapabilities();
+  assert.ok(typeof caps === 'object' && caps !== null);
+  assert.ok(typeof caps.hasTmux === 'boolean');
+  assert.ok(typeof caps.hasCodex === 'boolean');
+  assert.ok(typeof caps.hasGitWorktree === 'boolean');
+  assert.ok(typeof caps.hasTeamTools === 'boolean');
+  assert.ok(typeof caps.hasPreviewMCP === 'boolean');
+});
+
+test('detectCapabilities: hasTeamTools is always true', async () => {
+  const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
+  const caps = await detectCapabilities();
+  assert.equal(caps.hasTeamTools, true);
+});
+
+test('detectCapabilities: handles command failures gracefully (all binary checks return boolean)', async () => {
+  const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
+  // Even if binaries are missing, the function should never throw
+  const caps = await detectCapabilities();
+  // All fields must be booleans regardless of environment
+  for (const key of ['hasTmux', 'hasCodex', 'hasGitWorktree', 'hasTeamTools', 'hasPreviewMCP']) {
+    assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// formatCapabilityReport
+// ---------------------------------------------------------------------------
+
+test('formatCapabilityReport: formats ✓ for true capabilities', async () => {
+  const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
+  const caps = { hasTmux: true, hasCodex: true, hasGitWorktree: true, hasTeamTools: true, hasPreviewMCP: true };
+  const report = formatCapabilityReport(caps);
+  // All 5 entries should show ✓
+  const checkmarks = (report.match(/✓/g) || []).length;
+  assert.equal(checkmarks, 5);
+});
+
+test('formatCapabilityReport: formats ✗ for false capabilities', async () => {
+  const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
+  const caps = { hasTmux: false, hasCodex: false, hasGitWorktree: false, hasTeamTools: false, hasPreviewMCP: false };
+  const report = formatCapabilityReport(caps);
+  // All 5 entries should show ✗
+  const crosses = (report.match(/✗/g) || []).length;
+  assert.equal(crosses, 5);
+});
+
+test('formatCapabilityReport: includes all 5 capability names', async () => {
+  const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
+  const caps = { hasTmux: true, hasCodex: false, hasGitWorktree: true, hasTeamTools: true, hasPreviewMCP: false };
+  const report = formatCapabilityReport(caps);
+  assert.ok(report.includes('tmux'), 'should mention tmux');
+  assert.ok(report.includes('codex'), 'should mention codex');
+  assert.ok(report.includes('git worktree'), 'should mention git worktree');
+  assert.ok(report.includes('team tools'), 'should mention team tools');
+  assert.ok(report.includes('preview MCP'), 'should mention preview MCP');
+});
+
+// ---------------------------------------------------------------------------
+// runPreflight — capabilities field
+// ---------------------------------------------------------------------------
+
+test('runPreflight: includes capabilities field in result', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const origCwd = process.cwd();
+    process.chdir(tmpDir);
+    try {
+      const { runPreflight } = await import(`../../scripts/lib/preflight.mjs?caps-${Date.now()}`);
+      const report = await runPreflight();
+      assert.ok('capabilities' in report, 'report should have capabilities field');
+      assert.ok(typeof report.capabilities === 'object' && report.capabilities !== null);
+      assert.ok(typeof report.capabilities.hasTeamTools === 'boolean');
+    } finally {
+      process.chdir(origCwd);
+    }
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('formatPreflightReport: includes capability report when capabilities present alongside actions', async () => {
+  const { formatPreflightReport } = await import('../../scripts/lib/preflight.mjs');
+  const report = {
+    valid: true,
+    // Capabilities are appended when there are actions or warnings to report
+    actions: ['Removed stale pointer: .ao/spec.md'],
+    warnings: [],
+    capabilities: { hasTmux: true, hasCodex: false, hasGitWorktree: true, hasTeamTools: true, hasPreviewMCP: false },
+  };
+  const formatted = formatPreflightReport(report);
+  assert.ok(formatted.includes('Capabilities:'), 'should include Capabilities header');
+  assert.ok(formatted.includes('tmux'), 'should include tmux capability');
+  assert.ok(formatted.includes('team tools'), 'should include team tools capability');
 });

@@ -128,6 +128,89 @@ export function broadcast(teamName, fromWorker, body, workerNames) {
   return ids;
 }
 
+/**
+ * Write an entry to the team's shared blackboard.
+ * The blackboard is an append-only JSONL file where workers record
+ * discoveries, decisions, and warnings for the whole team to reference.
+ *
+ * @param {string} teamName
+ * @param {string} workerName - Who wrote this entry
+ * @param {{ category: string, content: string }} entry
+ *   category: 'discovery' | 'decision' | 'warning' | 'api-note'
+ * @returns {string} Entry ID
+ */
+export function writeBlackboard(teamName, workerName, entry) {
+  try {
+    const dir = join(TEAMS_DIR, teamName);
+    ensureDir(dir);
+
+    const record = {
+      id: randomUUID(),
+      from: workerName,
+      category: (entry && entry.category) ? entry.category : 'general',
+      content: (entry && entry.content !== undefined) ? entry.content : '',
+      timestamp: new Date().toISOString()
+    };
+
+    const blackboardPath = join(dir, 'blackboard.jsonl');
+    appendFileSync(blackboardPath, JSON.stringify(record) + '\n', { encoding: 'utf-8', mode: 0o600 });
+
+    return record.id;
+  } catch {
+    // fail-safe: return a UUID even on error so callers don't break
+    return randomUUID();
+  }
+}
+
+/**
+ * Read entries from the team's shared blackboard.
+ *
+ * @param {string} teamName
+ * @param {{ category?: string, limit?: number, since?: string }} [opts]
+ *   category: filter to entries matching this category
+ *   limit:    return only the most recent N entries
+ *   since:    ISO date string — only return entries after this time
+ * @returns {Array<{ id, from, category, content, timestamp }>}
+ */
+export function readBlackboard(teamName, opts = {}) {
+  try {
+    const blackboardPath = join(TEAMS_DIR, teamName, 'blackboard.jsonl');
+    if (!existsSync(blackboardPath)) return [];
+
+    const raw = readFileSync(blackboardPath, 'utf-8');
+    const lines = raw.split('\n').filter(l => l.trim().length > 0);
+
+    let entries = [];
+    for (const line of lines) {
+      try {
+        entries.push(JSON.parse(line));
+      } catch {
+        // skip malformed lines
+      }
+    }
+
+    // Filter by category
+    if (opts.category) {
+      entries = entries.filter(e => e.category === opts.category);
+    }
+
+    // Filter by since (ISO date string — only entries strictly after this time)
+    if (opts.since) {
+      const sinceMs = new Date(opts.since).getTime();
+      entries = entries.filter(e => new Date(e.timestamp).getTime() > sinceMs);
+    }
+
+    // Apply limit — most recent N
+    if (opts.limit !== undefined && opts.limit >= 0) {
+      entries = entries.slice(-opts.limit);
+    }
+
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
 export function cleanupTeam(teamName) {
   const baseDir = join(TEAMS_DIR, teamName);
   if (!existsSync(baseDir)) return;

@@ -6,6 +6,7 @@ import { cleanupTeamWorktrees } from './worktree.mjs';
 import { mkdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
+import { buildRecoveryStrategy } from './stuck-recovery.mjs';
 
 const STATE_DIR = '.ao/state';
 const ARTIFACTS_DIR = '.ao/artifacts';
@@ -275,10 +276,43 @@ export function monitorTeam(teamName) {
       workerEntry.errorMessage = errorDetection.message;
     }
 
-    // Report stall state to the orchestrator (informational, not a kill)
+    // Report stall state to the orchestrator and build a recovery strategy
     if (state.workers[i].stalled) {
       workerEntry.stalled = true;
       workerEntry.stalledMs = state.workers[i].stalledMs;
+
+      // Only build a recovery strategy once per stall event (not yet recovered)
+      if (!state.workers[i].recovered) {
+        // Initialize attempt counter on first stall detection
+        if (state.workers[i].recoveryAttempts == null) {
+          state.workers[i].recoveryAttempts = 0;
+        }
+
+        const stalledWorker = {
+          name: worker.name,
+          type: worker.type,
+          status: worker.status,
+          lastOutput: workerEntry.lastOutput,
+          stalledMs: state.workers[i].stalledMs,
+          recoveryAttempts: state.workers[i].recoveryAttempts,
+        };
+        const ctx = {
+          teamName,
+          orchestrator: 'athena',
+          availableAgents: [],
+        };
+
+        // buildRecoveryStrategy is synchronous — attach result directly
+        try {
+          workerEntry.recoveryStrategy = buildRecoveryStrategy(stalledWorker, ctx);
+        } catch {
+          // fail-safe: never break the monitor loop
+        }
+
+        // Increment attempt counter so the next poll uses the next strategy tier
+        state.workers[i].recoveryAttempts = (state.workers[i].recoveryAttempts || 0) + 1;
+        stateChanged = true;
+      }
     }
 
     status.workers.push(workerEntry);
