@@ -20,7 +20,7 @@ scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-ou
               wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
               worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts)
-scripts/test → node:test based unit tests (470+ tests, 30 files)
+scripts/test → node:test based unit tests (510+ tests, 34 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -43,9 +43,13 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 ### Hook Architecture
 - `run.cjs` is the universal entry point — it resolves the correct script path with version fallback
 - All hooks receive JSON on stdin and output JSON on stdout
-- Hooks must complete within their timeout (3s for most, 10s for Stop)
+- Hooks must complete within their timeout (3s for most, 5s for SessionStart/SessionEnd, 10s for Stop)
 - Hooks never block Claude Code — they fail open on any error
+- Hooks can set `"async": true` to run in the background without blocking Claude's execution
 - **SessionStart** (`scripts/session-start.mjs`) — fires at session start; injects prior wisdom and any interrupted checkpoint context into the conversation
+- **SubagentStart** (`scripts/subagent-start.mjs`) — fires when a subagent is spawned; injects wisdom context via `additionalContext`
+- **SubagentStop** (`scripts/subagent-stop.mjs`) — fires when a subagent completes; captures results to `.ao/state/ao-subagent-results.json` (async, non-blocking)
+- **SessionEnd** (`scripts/session-end.mjs`) — fires on session termination; cleans up stale state files older than 24h (async, non-blocking)
 - **Stop** (`scripts/stop-hook.mjs`) — fires at session end; auto-commits any uncommitted work as a WIP commit so nothing is lost
 
 ### Skill vs Agent
@@ -61,7 +65,8 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/wisdom.jsonl` — structured cross-iteration learnings in JSONL format (NEVER delete, survives /cancel)
 - `.ao/progress.txt` — legacy format, auto-migrated to wisdom.jsonl on first run
 - `.ao/state/checkpoint-{atlas|athena}.json` — session recovery checkpoints (auto-expire 24h)
-- `.ao/state/*.json` — transient state files (deleted on completion)
+- `.ao/state/ao-subagent-results.json` — captured subagent outputs (capped at 50, FIFO)
+- `.ao/state/*.json` — transient state files (deleted on completion or cleaned by SessionEnd after 24h)
 - `.ao/teams/` — tmux worker inbox/outbox directories (Athena only)
 - `.ao/worktrees/<teamSlug>/<workerName>/` — isolated git worktrees for Athena parallel workers (Athena only; cleaned up after team completion)
 - `docs/plans/` — git-tracked permanent plan storage (survives sessions, shared with team)
@@ -128,10 +133,15 @@ tmux kill-session -t "<session-name>"             # cleanup
 Session naming convention: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
 Cross-validation sessions: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex-xval-<story-id>`
 
+## Known Limitations
+
+- **`--bare` mode**: When Claude Code is run with the `--bare` flag, all hooks, plugins, and skill directory walks are skipped. Agent Olympus hooks will not fire in this mode. This flag is intended for scripted `-p` calls and requires `ANTHROPIC_API_KEY` or `apiKeyHelper`.
+- **Sandbox mode**: Hook scripts should be tested with Claude Code's sandbox mode enabled (available on Linux and Mac). All scripts use Node.js built-ins only, so they should be compatible, but edge cases around file system access in `.ao/` may arise.
+
 ## Testing
 
 ```bash
-# Run unit tests (470+ tests, 30 files)
+# Run unit tests (510+ tests, 34 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script
