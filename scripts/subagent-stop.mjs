@@ -9,6 +9,7 @@ import { readStdin } from './lib/stdin.mjs';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFile } from './lib/fs-atomic.mjs';
+import { discoverActiveRun, addEvent } from './lib/run-artifacts.mjs';
 
 const STATE_DIR = join(process.cwd(), '.ao', 'state');
 const RESULTS_FILE = join(STATE_DIR, 'ao-subagent-results.json');
@@ -50,6 +51,24 @@ async function main() {
     }
 
     await atomicWriteFile(RESULTS_FILE, JSON.stringify(results, null, 2), { mode: 0o600 });
+
+    // Emit subagent_completed event to active run if one exists (US-005)
+    try {
+      const activeRun = discoverActiveRun();
+      if (activeRun) {
+        addEvent(activeRun.runId, {
+          type: 'subagent_completed',
+          detail: {
+            agentType: data.tool_input?.subagent_type || null,
+            toolName: data.tool_name || null,
+            messageLength: lastMessage.length,
+          },
+        });
+      }
+    } catch {
+      // fail-safe: event emission failure must not affect FIFO behavior
+    }
+
     process.stdout.write('{}');
   } catch {
     process.stdout.write('{}');
