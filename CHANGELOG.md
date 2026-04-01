@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.9.0] - 2026-04-01
+
+### Added — Source-Informed Improvements (PR #11)
+
+Claude Code 소스 구조(claw-code) 분석 + Codex 교차검증을 통해 도출한 4개 모듈 구현.
+Athena 팀 오케스트레이션(4 workers)으로 병렬 구현 후 코드리뷰에서 Critical 2건 수정.
+
+#### E1. Stuck Recovery Policy (`scripts/lib/stuck-recovery.mjs`) *(new)*
+- 스톨된 워커 자동 복구 3-tier 체인: reframe → switch-agent → escalate
+- 에이전트 에스컬레이션 래더: executor → debugger → hephaestus
+- `worker-spawn.mjs`의 stall 감지 시 자동 호출, wisdom에 stuck 패턴 기록
+- **Critical fix**: `buildRecoveryStrategy`를 async→sync로 변경 — fire-and-forget `.then()`이 workerEntry 반환 후 mutate하는 레이스 컨디션 해결
+
+#### E2. Team Blackboard (`scripts/lib/inbox-outbox.mjs`)
+- `writeBlackboard(teamName, workerName, entry)` — JSONL append-only 공유 지식 보드
+- `readBlackboard(teamName, opts)` — category/limit/since 필터링
+- 카테고리: discovery, decision, warning, api-note
+- 기존 inbox/outbox 시스템 보완 (대체 아님)
+
+#### E3. Run Artifacts (`scripts/lib/run-artifacts.mjs`) *(new)*
+- `createRun`, `addEvent`, `addVerification`, `finalizeRun`, `listRuns`, `getRun`
+- Run ID: `<orchestrator>-YYYYMMDD-HHmmss-<rand4hex>`
+- 이벤트: `events.jsonl` (append-only), 요약: `summary.json` (atomic write), 검증: `verification.jsonl`
+- **Critical fix**: `addVerification`을 JSON read-modify-write → JSONL append-only로 변경 — 동시 접근 시 데이터 유실 방지
+
+#### E6. Capability Detection (`scripts/lib/preflight.mjs`)
+- `detectCapabilities()` — tmux, codex, git worktree, team tools, preview MCP 런타임 감지
+- `formatCapabilityReport(caps)` — ✓/✗ 기호로 세션 시작 시 자동 리포트
+- **Fix**: clean run에서 리포트가 누락되던 early-return 가드 제거
+
+### Meta
+
+- Version: **0.8.8 → 0.9.0**
+- Test count: **424 → 470** (+46 new tests, 0 failures)
+- Test files: **28 → 30**
+- New test files: `stuck-recovery.test.mjs` (13), `run-artifacts.test.mjs` (14), blackboard tests (+10), capability tests (+9)
+- Codex cross-validation: 4/4 PASS
+- Code review: Critical 2건 해결 (fire-and-forget race, read-modify-write race)
+- Branch: `feat/v0.9-source-informed`
+- Reference: [claw-code](https://github.com/instructkr/claw-code) — Claude Code Python clean-room rewrite
+
 ## [0.8.8] - 2026-04-01
 
 ### Fixed — Silent failure on L-scale tasks (Issue #9)

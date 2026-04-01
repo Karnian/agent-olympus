@@ -5,7 +5,7 @@
 
 ## Background
 
-Claude Code 소스 구조(claw-code 레포, Python clean-room rewrite)를 분석하여 내부 아키텍처를 파악.
+Claude Code 소스 구조([claw-code](https://github.com/instructkr/claw-code) 레포, Python clean-room rewrite)를 분석하여 내부 아키텍처를 파악.
 12개 개선 항목(G1-G12) 도출 후 Codex 교차검증 완료.
 
 **Codex Verdict**: 2 AGREE, 7 MODIFY, 3 DISAGREE (96K tokens consumed)
