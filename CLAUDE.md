@@ -19,8 +19,8 @@ scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
 scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-outbox, checkpoint,
               wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
-              worker-spawn)
-scripts/test → node:test based unit tests (390+ tests, 26 files)
+              worker-spawn, preflight, input-guard)
+scripts/test → node:test based unit tests (424+ tests, 28 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
