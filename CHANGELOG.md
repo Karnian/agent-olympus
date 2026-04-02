@@ -1,5 +1,78 @@
 # Changelog
 
+## [0.9.4] - 2026-04-02
+
+### Added — G#5 "Codex를 진짜 팀원으로" 4-Phase Worker Adapter System
+
+Codex/Claude 워커를 tmux 없이 직접 child_process로 제어하는 4단계 어댑터 시스템.
+각 Phase마다 실제 Codex CLI(GPT-5.4) 교차검증으로 와이어 프로토콜 오류 5건 발견 및 수정.
+
+#### Phase 0+1: codex-exec adapter (`scripts/lib/codex-exec.mjs`) *(new)*
+- `codex exec --json` via `child_process.spawn` — tmux 없이 JSONL 스트리밍
+- 5개 이벤트 타입 파싱: `thread.started`, `item.completed`, `turn.completed` 등
+- 7개 에러 카테고리 분류: auth_failed, rate_limited, not_installed, network, crash, timeout, unknown
+- SIGTERM → SIGKILL 단계적 셧다운
+
+#### Phase 2: codex-appserver adapter (`scripts/lib/codex-appserver.mjs`) *(new)*
+- `codex app-server` JSON-RPC 2.0 over stdio — 멀티턴 대화 지원
+- Thread/Turn 라이프사이클: createThread, startTurn, steerTurn, interruptTurn
+- 실시간 알림 처리: slash-separated 와이어 프로토콜 (`turn/completed`, `item/completed`)
+- `initialize` 핸드셰이크 필수 (Codex 교차검증에서 발견)
+- CodexErrorInfo → 표준 에러 카테고리 매핑
+- EventEmitter 'error' 충돌 방지 (`codex/error`로 네임스페이싱)
+
+#### Phase 3: claude-cli adapter (`scripts/lib/claude-cli.mjs`) *(new)*
+- `claude -p --output-format stream-json --verbose --bare` — 헤드리스 Claude Code 워커
+- stream-json JSONL 파싱: system(init), assistant(content), result(cost/usage)
+- 예산 초과 감지: `error_max_budget_usd` (is_error=false 엣지케이스 포함)
+- macOS/Linux 버전별 바이너리 자동 발견 (`resolveClaudeBinary`)
+- PID 재사용 방지: shutdown 전 _exitCode 체크
+- collect() 타임아웃 시 orphan 프로세스 자동 종료
+
+#### Binary Resolution 확장 (`scripts/lib/resolve-binary.mjs`)
+- `resolveClaudeBinary()` — `~/Library/Application Support/Claude/claude-code/<version>/...` 탐색
+- 버전별 디렉토리 스캔 → 최신 버전 우선 (semver 내림차순 정렬)
+- macOS + Linux 경로 지원, 프로세스 수명 캐싱
+
+#### Worker Adapter Router (`scripts/lib/worker-spawn.mjs`)
+- `selectAdapter()` 4단계 우선순위:
+  - Codex: `codex-appserver` > `codex-exec` > `tmux`
+  - Claude: `claude-cli` > `tmux`
+  - 기타: `tmux` (폴백)
+- `spawnTeam()`, `monitorTeam()`, `collectResults()`, `shutdownTeam()` 전부 4-tier 대응
+- `reassignToClaude()` 어댑터별 셧다운 분기
+
+#### Preflight 확장 (`scripts/lib/preflight.mjs`)
+- `hasCodexAppServer`, `hasClaudeCli` 캡빌리티 추가
+- `formatCapabilityReport()` 6개 항목으로 확장
+
+#### tmux PATH 주입 개선 (`scripts/lib/tmux-session.mjs`)
+- `buildResolvedPath()` — `resolveClaudeBinary()` 경로 포함
+- worktree 셸에서도 codex/claude 바이너리 발견 가능
+
+### Fixed — Codex 교차검증 버그 수정
+
+Phase별 Codex CLI(GPT-5.4) 실제 실행으로 발견한 이슈:
+
+- **CRITICAL**: `initialize` 핸드셰이크 누락 — app-server가 "Not initialized" 반환. `initializeServer()` 추가
+- **CRITICAL**: 알림 이름 불일치 — camelCase(`turnCompleted`) → slash(`turn/completed`) 수정
+- **CRITICAL**: 응답 경로 불일치 — `result.threadId` → `result.thread.id` 수정
+- **CRITICAL**: `collect()` 타임아웃 시 detached 프로세스 미종료 → `shutdown()` 호출 추가
+- **HIGH**: `turn.status`가 문자열이 아닌 객체(`{type: "completed"}`) — 타입 체크 추가
+- **HIGH**: 예산 초과가 성공으로 처리됨 — `subtype` 체크를 `is_error`보다 우선
+- **HIGH**: `shutdown()` PID 재사용 위험 — `_exitCode` 체크로 방어
+- **MEDIUM**: `buildResolvedPath()`에서 `resolveBinary('claude')` → `resolveClaudeBinary()` 변경
+- **MEDIUM**: startTurn 실패 시 이전 출력 보존, collectResults 어댑터 분기 누락 수정
+
+### Meta
+
+- Version: **0.9.3 → 0.9.4**
+- Test count: **575 → 739** (+164 new tests, 0 failures)
+- Test files: **37 → 39** (`codex-exec.test.mjs`, `codex-appserver.test.mjs`, `claude-cli.test.mjs`, `resolve-binary.test.mjs`)
+- New modules: 4 (`codex-exec`, `codex-appserver`, `claude-cli`, `resolve-binary`)
+- Cross-validation: 각 Phase마다 Codex CLI(GPT-5.4) 실제 실행 교차검증 — CRITICAL 4건, HIGH 3건, MEDIUM 2건 발견 및 수정
+- Branch: `claude/stupefied-shamir`
+
 ## [0.9.3] - 2026-04-02
 
 ### Added — Cross-Session Management System

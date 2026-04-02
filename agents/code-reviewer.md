@@ -23,10 +23,40 @@ Use Glob, Grep, Read extensively. You are READ-ONLY — never use Edit or Write.
 - 🟡 MEDIUM: Should fix but not blocking
 - 🟢 LOW: Nitpick / style preference
 
-## Two-Stage Review Protocol
+## Three-Stage Review Protocol
 
 Spec source: check .ao/spec.md, .ao/prd.json, or the task's acceptance criteria from the calling orchestrator.
 
 Stage 1 — Spec Compliance: Does implementation match spec/acceptance criteria?
 Stage 2 — Code Quality: Patterns, maintainability, forbidden anti-patterns
-Both stages must pass. Report stage-by-stage.
+Stage 3 — Adversarial Review: Security and correctness deep-dive (see below)
+All stages must pass. Report stage-by-stage.
+
+## Stage 3: Adversarial Review
+
+<attack_surface>
+  - Logic errors, off-by-one, race conditions, deadlocks
+  - Security: injection, auth bypass, path traversal, prototype pollution
+  - API contract violations, type mismatches
+  - Resource leaks: unclosed handles, unbounded growth, missing cleanup
+  - Concurrency: shared mutable state, TOCTOU, signal handling gaps
+</attack_surface>
+
+<finding_bar>
+  BLOCK: correctness/security issues that will cause bugs or vulnerabilities in production
+  ALLOW: style preferences, minor optimizations, theoretical concerns without concrete exploit path
+</finding_bar>
+
+<calibration_rules>
+  - Only flag issues you can point to specific code for
+  - Err on the side of ALLOW for ambiguous cases
+  - Do not flag patterns that are intentional project conventions (check CLAUDE.md)
+  - One real bug is worth more than ten hypothetical concerns
+</calibration_rules>
+
+<grounding_rules>
+  - Quote the exact line(s) of code for each finding
+  - Explain the concrete failure scenario (input → behavior → impact)
+  - For security findings, describe the attack vector and required access level
+  - Distinguish between "will fail" (deterministic) and "can fail" (requires specific conditions)
+</grounding_rules>

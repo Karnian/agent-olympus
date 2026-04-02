@@ -21,7 +21,7 @@ scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-ou
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
               worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts,
               session-registry)
-scripts/test → node:test based unit tests (575+ tests, 37 files)
+scripts/test → node:test based unit tests (739+ tests, 39 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -125,18 +125,42 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 2. Register in `hooks/hooks.json` under the appropriate event
 3. Use `run.cjs` as the command wrapper for version-safe resolution
 
-## Codex Integration
+## Worker Adapter System
 
-Codex is invoked via tmux, not via omc CLI:
-```bash
-tmux new-session -d -s "<session-name>" -c "<cwd>"
-tmux send-keys -t "<session-name>" 'codex exec "<prompt>"' Enter
-tmux capture-pane -pt "<session-name>" -S -200   # monitor output
-tmux kill-session -t "<session-name>"             # cleanup
-```
+Workers (Codex and Claude) are spawned via a strategy-pattern adapter system (`selectAdapter()`):
 
-Session naming convention: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
-Cross-validation sessions: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex-xval-<story-id>`
+### Adapter Priority (highest → lowest)
+
+**Codex workers** (`type: 'codex'`):
+1. **codex-appserver** — Multi-turn JSON-RPC 2.0 over stdio (`codex app-server`)
+   - Thread/turn lifecycle, live steering, structured errors
+   - Requires `hasCodexAppServer` capability (codex ≥ 0.116.0 + app-server subcommand)
+2. **codex-exec** — Single-turn JSONL via `child_process.spawn` (`codex exec --json`)
+   - 5 event types, error classification, SIGTERM→SIGKILL shutdown
+   - Requires `hasCodexExecJson` capability (codex ≥ 0.116.0)
+
+**Claude workers** (`type: 'claude'`):
+3. **claude-cli** — Headless Claude Code via `claude -p --output-format stream-json`
+   - Stream-json JSONL (system/assistant/result events), budget control, model override
+   - Binary auto-discovered from versioned install paths (macOS/Linux)
+   - Requires `hasClaudeCli` capability
+
+**All workers**:
+4. **tmux** — Legacy fallback, works for all worker types
+   - `tmux new-session` + `tmux send-keys` + `tmux capture-pane`
+   - Always available when tmux is installed
+
+### Key Files
+- `scripts/lib/codex-appserver.mjs` — App-server JSON-RPC client (thread/turn/steer/interrupt)
+- `scripts/lib/codex-exec.mjs` — Exec JSONL adapter (spawn/monitor/collect/shutdown)
+- `scripts/lib/claude-cli.mjs` — Claude CLI adapter (spawn/monitor/collect/shutdown via stream-json)
+- `scripts/lib/worker-spawn.mjs` — Adapter router (`selectAdapter`, `spawnTeam`, `monitorTeam`)
+- `scripts/lib/resolve-binary.mjs` — Binary resolution with caching + `resolveClaudeBinary()`
+- `scripts/lib/preflight.mjs` — Capability detection (`hasCodexAppServer`, `hasCodexExecJson`, `hasClaudeCli`)
+
+### Session Naming
+- tmux sessions: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
+- Cross-validation: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex-xval-<story-id>`
 
 ## Known Limitations
 
@@ -146,7 +170,7 @@ Cross-validation sessions: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex
 ## Testing
 
 ```bash
-# Run unit tests (575+ tests, 37 files)
+# Run unit tests (739+ tests, 38+ files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

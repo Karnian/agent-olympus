@@ -3,44 +3,12 @@ import { mkdirSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { dirname } from 'path';
 import { createWorkerWorktree } from './worktree.mjs';
+import { resolveBinary, resolveClaudeBinary, SEARCH_PATHS } from './resolve-binary.mjs';
+
+// Re-export for backward compatibility with callers that import from tmux-session
+export { resolveBinary } from './resolve-binary.mjs';
 
 const SESSION_PREFIX = 'ao-team';
-
-// Common binary search paths across platforms
-const SEARCH_PATHS = [
-  '/opt/homebrew/bin',   // macOS ARM (Apple Silicon)
-  '/usr/local/bin',      // macOS Intel / Linux manual installs
-  '/usr/bin',            // Linux system
-  '/usr/sbin',           // Linux system
-  '/home/linuxbrew/.linuxbrew/bin', // Linuxbrew
-];
-
-const _binCache = new Map();
-
-/**
- * Resolve a binary name to its full path.
- * Checks PATH first (via `which`), then falls back to common locations.
- * Results are cached for the lifetime of the process.
- */
-export function resolveBinary(name) {
-  if (_binCache.has(name)) return _binCache.get(name);
-
-  // Try which first (works if PATH is correct)
-  try {
-    const resolved = execFileSync('which', [name], { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    if (resolved) { _binCache.set(name, resolved); return resolved; }
-  } catch {}
-
-  // Fallback: scan known paths
-  for (const dir of SEARCH_PATHS) {
-    const candidate = `${dir}/${name}`;
-    if (existsSync(candidate)) { _binCache.set(name, candidate); return candidate; }
-  }
-
-  // Last resort: return bare name, let the OS figure it out
-  _binCache.set(name, name);
-  return name;
-}
 
 /**
  * Build a robust PATH string that includes all known binary directories.
@@ -67,7 +35,7 @@ export function buildResolvedPath() {
   }
 
   // Add parent directories of resolved key binaries
-  for (const bin of ['codex', 'claude', 'tmux', 'git', 'node']) {
+  for (const bin of ['codex', 'tmux', 'git', 'node']) {
     try {
       const resolved = resolveBinary(bin);
       if (resolved && resolved !== bin && resolved.includes('/')) {
@@ -75,6 +43,14 @@ export function buildResolvedPath() {
       }
     } catch {}
   }
+
+  // Claude CLI lives in a versioned app bundle path — use dedicated resolver
+  try {
+    const claudePath = resolveClaudeBinary();
+    if (claudePath && claudePath !== 'claude' && claudePath.includes('/')) {
+      dirs.add(dirname(claudePath));
+    }
+  } catch {}
 
   return [...dirs].join(':');
 }

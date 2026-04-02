@@ -1,11 +1,12 @@
 /**
- * Unit tests for scripts/lib/worker-spawn.mjs — detectCodexError()
+ * Unit tests for scripts/lib/worker-spawn.mjs
+ * Tests: detectCodexError(), selectAdapter(), adapter dispatch
  * Uses node:test — zero npm dependencies.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectCodexError } from '../lib/worker-spawn.mjs';
+import { detectCodexError, selectAdapter } from '../lib/worker-spawn.mjs';
 
 // ---------------------------------------------------------------------------
 // detectCodexError — no failure
@@ -146,4 +147,52 @@ test('detectCodexError: message is truncated to 200 chars', () => {
   assert.equal(result.failed, true);
   assert.equal(result.reason, 'auth_failed');
   assert.ok(result.message.length <= 200, `message length ${result.message.length} exceeds 200`);
+});
+
+// ---------------------------------------------------------------------------
+// selectAdapter — adapter selection
+// ---------------------------------------------------------------------------
+
+test('selectAdapter: codex worker + hasCodexExecJson → codex-exec', () => {
+  const result = selectAdapter({ type: 'codex', name: 'w1' }, { hasCodexExecJson: true });
+  assert.equal(result, 'codex-exec');
+});
+
+test('selectAdapter: codex worker + no hasCodexExecJson → tmux', () => {
+  const result = selectAdapter({ type: 'codex', name: 'w1' }, { hasCodexExecJson: false });
+  assert.equal(result, 'tmux');
+});
+
+test('selectAdapter: codex worker + empty capabilities → tmux', () => {
+  const result = selectAdapter({ type: 'codex', name: 'w1' }, {});
+  assert.equal(result, 'tmux');
+});
+
+test('selectAdapter: codex worker + no capabilities → tmux', () => {
+  const result = selectAdapter({ type: 'codex', name: 'w1' });
+  assert.equal(result, 'tmux');
+});
+
+test('selectAdapter: claude worker + hasCodexExecJson → tmux', () => {
+  const result = selectAdapter({ type: 'claude', name: 'w1' }, { hasCodexExecJson: true });
+  assert.equal(result, 'tmux');
+});
+
+test('selectAdapter: gemini worker → tmux', () => {
+  const result = selectAdapter({ type: 'gemini', name: 'w1' }, { hasCodexExecJson: true });
+  assert.equal(result, 'tmux');
+});
+
+test('selectAdapter: unknown worker type → tmux', () => {
+  const result = selectAdapter({ type: 'unknown', name: 'w1' }, { hasCodexExecJson: true });
+  assert.equal(result, 'tmux');
+});
+
+test('selectAdapter: is a pure function (no side effects)', () => {
+  const caps = { hasCodexExecJson: true };
+  const worker = { type: 'codex', name: 'w1' };
+  selectAdapter(worker, caps);
+  // Originals unchanged
+  assert.equal(caps.hasCodexExecJson, true);
+  assert.equal(worker.type, 'codex');
 });
