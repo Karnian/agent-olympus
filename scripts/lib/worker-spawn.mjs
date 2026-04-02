@@ -57,13 +57,19 @@ function loadTeamState(teamName) {
  * Select the appropriate spawn adapter for a worker.
  * Pure function — no side effects.
  *
+ * Priority: codex-appserver > codex-exec > tmux
+ * - codex-appserver: multi-turn, structured errors, turn steering (Phase 2)
+ * - codex-exec: single-turn JSONL, child_process.spawn (Phase 1)
+ * - tmux: legacy fallback for all worker types
+ *
  * @param {Object} worker - Worker descriptor with { type, name, prompt }
  * @param {Object} capabilities - From preflight.detectCapabilities()
- * @returns {'codex-exec' | 'tmux'}
+ * @returns {'codex-appserver' | 'codex-exec' | 'tmux'}
  */
 export function selectAdapter(worker, capabilities = {}) {
-  if (worker.type === 'codex' && capabilities.hasCodexExecJson) {
-    return 'codex-exec';
+  if (worker.type === 'codex') {
+    if (capabilities.hasCodexAppServer) return 'codex-appserver';
+    if (capabilities.hasCodexExecJson) return 'codex-exec';
   }
   return 'tmux';
 }
@@ -74,6 +80,14 @@ export function selectAdapter(worker, capabilities = {}) {
  */
 async function loadCodexExecAdapter() {
   return import('./codex-exec.mjs');
+}
+
+/**
+ * Lazily load the codex-appserver adapter module.
+ * @returns {Promise<Object>} The codex-appserver module
+ */
+async function loadCodexAppServerAdapter() {
+  return import('./codex-appserver.mjs');
 }
 
 // ─── Tmux adapter helpers (inline — wraps existing tmux-session functions) ──
@@ -139,6 +153,29 @@ function monitorCodexExecWorker(worker, codexExec) {
   return result;
 }
 
+/**
+ * Monitor a codex-appserver-based worker via the codex-appserver adapter.
+ * Returns a MonitorResult-shaped object.
+ *
+ * @param {Object} worker - Worker state object with _liveHandle
+ * @param {Object} appserver - The loaded codex-appserver module
+ * @returns {{ status: string, output: string, error?: { category: string, message: string }, stalled?: boolean, stalledMs?: number }}
+ */
+function monitorCodexAppServerWorker(worker, appserver) {
+  if (!worker._liveHandle) {
+    return { status: 'failed', output: '', error: { category: 'crash', message: 'No app-server handle' } };
+  }
+  const mr = appserver.monitor(worker._liveHandle);
+  const result = {
+    status: mr.status === 'ready' ? 'running' : mr.status,
+    output: (mr.output || '').slice(-500),
+  };
+  if (mr.error) {
+    result.error = mr.error;
+  }
+  return result;
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /**
@@ -183,7 +220,13 @@ export async function reassignToClaude(teamName, workerName, originalPrompt, fai
     const worker = state?.workers?.find(w => w.name === workerName);
     const adapterName = worker?._adapterName || 'tmux';
 
-    if (adapterName === 'codex-exec' && worker?._handle) {
+    if (adapterName === 'codex-appserver' && worker?._liveHandle) {
+      // Shutdown via codex-appserver adapter
+      try {
+        const appserver = await loadCodexAppServerAdapter();
+        await appserver.shutdownServer(worker._liveHandle);
+      } catch {}
+    } else if (adapterName === 'codex-exec' && worker?._handle) {
       // Shutdown via codex-exec adapter
       try {
         const codexExec = await loadCodexExecAdapter();
@@ -216,10 +259,14 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
     throw new Error('tmux is not installed. Run: brew install tmux');
   }
 
-  // Lazy-load codex-exec adapter if needed
+  // Lazy-load adapters as needed
   let codexExec = null;
+  let codexAppServer = null;
   if (adapterNames.includes('codex-exec')) {
     codexExec = await loadCodexExecAdapter();
+  }
+  if (adapterNames.includes('codex-appserver')) {
+    codexAppServer = await loadCodexAppServerAdapter();
   }
 
   const state = {
@@ -249,7 +296,35 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
   for (let i = 0; i < workers.length; i++) {
     const worker = workers[i];
 
-    if (adapterNames[i] === 'codex-exec') {
+    if (adapterNames[i] === 'codex-appserver') {
+      // Spawn via codex-appserver adapter (multi-turn)
+      try {
+        const serverHandle = codexAppServer.startServer({
+          cwd,
+          sessionSource: `agent-olympus:${teamName}`,
+        });
+        // Create thread and start first turn
+        const threadResult = await codexAppServer.createThread(serverHandle, {
+          cwd,
+          approvalPolicy: 'never',
+          ephemeral: true,
+        });
+        if (threadResult.error) {
+          throw new Error(threadResult.error.message || 'Failed to create thread');
+        }
+        const turnResult = await codexAppServer.startTurn(serverHandle, worker.prompt);
+        if (turnResult.error) {
+          throw new Error(turnResult.error.message || 'Failed to start turn');
+        }
+        state.workers[i].status = 'running';
+        state.workers[i].startedAt = new Date().toISOString();
+        state.workers[i]._handle = { pid: serverHandle.pid, threadId: serverHandle.threadId, turnId: serverHandle.turnId };
+        state.workers[i]._liveHandle = serverHandle;
+      } catch (err) {
+        state.workers[i].status = 'failed';
+        state.workers[i].error = err.message;
+      }
+    } else if (adapterNames[i] === 'codex-exec') {
       // Spawn via codex-exec adapter
       try {
         const handle = codexExec.spawn(worker.prompt, { cwd });
@@ -295,12 +370,13 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
   return state;
 }
 
-export function monitorTeam(teamName, _codexExecModule) {
+export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule) {
   const state = loadTeamState(teamName);
   if (!state) return null;
 
-  // Lazy-loaded codex-exec module (passed in or resolved from live handles)
+  // Lazy-loaded adapter modules (passed in or null)
   const codexExec = _codexExecModule || null;
+  const codexAppServer = _codexAppServerModule || null;
 
   const status = {
     teamName,
@@ -317,7 +393,9 @@ export function monitorTeam(teamName, _codexExecModule) {
 
     // ─── Dispatch monitoring to correct adapter ───
     let monitorResult;
-    if (adapterName === 'codex-exec' && codexExec && worker._liveHandle) {
+    if (adapterName === 'codex-appserver' && codexAppServer && worker._liveHandle) {
+      monitorResult = monitorCodexAppServerWorker(worker, codexAppServer);
+    } else if (adapterName === 'codex-exec' && codexExec && worker._liveHandle) {
       monitorResult = monitorCodexExecWorker({ ...worker, _handle: worker._liveHandle }, codexExec);
     } else {
       monitorResult = monitorTmuxWorker(worker);
@@ -415,11 +493,23 @@ export function collectResults(teamName) {
   const state = loadTeamState(teamName);
   if (state) {
     for (const worker of state.workers) {
-      if (worker.session) {
+      // Skip workers that already have outbox results
+      if (results[worker.name]) continue;
+
+      const adapter = worker._adapterName || 'tmux';
+
+      if (adapter === 'codex-appserver' && worker._liveHandle) {
+        // App-server: output is in the live handle
+        const output = worker._liveHandle._output;
+        if (output) results[worker.name] = output;
+      } else if (adapter === 'codex-exec' && worker._liveHandle) {
+        // Codex-exec: output is in the live handle
+        const output = worker._liveHandle._output;
+        if (output) results[worker.name] = output;
+      } else if (worker.session) {
+        // Tmux: capture pane output
         const output = capturePane(worker.session, 200);
-        if (output && !results[worker.name]) {
-          results[worker.name] = output;
-        }
+        if (output) results[worker.name] = output;
       }
     }
   }
@@ -437,7 +527,27 @@ export function collectResults(teamName) {
   return results;
 }
 
-export function shutdownTeam(teamName, cwd) {
+export async function shutdownTeam(teamName, cwd) {
+  // Shutdown non-tmux workers first (appserver + codex-exec child processes)
+  const state = loadTeamState(teamName);
+  if (state) {
+    for (const worker of state.workers) {
+      const adapter = worker._adapterName || 'tmux';
+      try {
+        if (adapter === 'codex-appserver' && worker._liveHandle) {
+          const appserver = await loadCodexAppServerAdapter();
+          await appserver.shutdownServer(worker._liveHandle);
+        } else if (adapter === 'codex-exec' && worker._liveHandle) {
+          const codexExec = await loadCodexExecAdapter();
+          await codexExec.shutdown(worker._liveHandle);
+        }
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  }
+
+  // Kill tmux sessions
   const killed = killTeamSessions(teamName);
   cleanupTeam(teamName);
 

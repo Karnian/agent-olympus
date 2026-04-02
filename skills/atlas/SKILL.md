@@ -198,8 +198,9 @@ Task(subagent_type="agent-olympus:metis", model="opus",
 If `NEEDS_CODEX`, simultaneously spawn Codex (batch executor — adapter auto-selected):
 ```bash
 # Adapter auto-selected by worker-spawn.mjs selectAdapter():
-# codex-appserver > codex-exec > tmux (fallback)
-# tmux fallback resolves binary path + injects PATH for worktree shells:
+#   codex-appserver (preferred) → multi-turn JSON-RPC, live steering
+#   codex-exec → single-turn JSONL
+#   tmux (fallback) → legacy pane capture, resolves binary + injects PATH
 CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-analyze" -c "<cwd>"
 tmux send-keys -t "atlas-codex-analyze" "\"$CODEX_BIN\" exec \"<analysis prompt>\"" Enter
@@ -456,15 +457,16 @@ tmux send-keys -t "atlas-codex-<N>" "\"$CODEX_BIN\" exec \"<implementation promp
 
 **Codex failure detection and Claude fallback:**
 
-The monitoring system detects failures via the active adapter (codex-exec JSONL events or tmux pane output):
+The monitoring system detects failures via the active adapter:
 
 ```javascript
 import { detectCodexError, reassignToClaude, selectAdapter } from './scripts/lib/worker-spawn.mjs';
 
 // monitorTeam() handles adapter dispatch automatically.
+// For codex-appserver: failures detected via structured CodexErrorInfo + mapAppServerErrorCode()
 // For codex-exec: failures detected via item.status="failed" + mapJsonlErrorToCategory()
 // For tmux: failures detected via detectCodexError(paneOutput) regex patterns
-// Error categories: auth_failed, rate_limited, not_installed, network, crash, timeout, unknown
+// Error categories: auth_failed, rate_limited, not_installed, network, crash, context_exceeded, timeout, unknown
 
 if (errorCheck.failed) {
   // reassignToClaude() is adapter-aware — shuts down correct adapter type
@@ -480,10 +482,10 @@ Rules:
 - If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again in this session.
 - If `errorCheck.reason` is `'crash'`, you may retry Codex once; if it crashes again, fall back to Claude.
 - If `errorCheck.reason` is `'timeout'`, retry once before reassigning.
-- `reassignToClaude()` handles adapter-specific cleanup (codex-exec process kill or tmux session kill) and wisdom recording.
+- `reassignToClaude()` handles adapter-specific cleanup (app-server shutdown, codex-exec kill, or tmux session kill) and wisdom recording.
 
 **Task Chaining** (for iterative Codex work):
-Since Codex is a batch executor, multi-step work uses sequential calls:
+With codex-appserver, use `steerTurn()` for live mid-turn input. For exec/tmux adapters, multi-step work uses sequential calls:
 ```
 exec #1: "Analyze the API" → Result A
 Atlas: merges Result A + own analysis

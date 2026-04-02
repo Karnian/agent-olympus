@@ -404,9 +404,10 @@ For each Claude worker:
 
 **Codex workers** (batch executors — spawned via adapter):
 
-The adapter is selected automatically based on `capabilities.hasCodexExecJson`:
-- **codex-exec adapter** (preferred): Uses `codex exec --json` via child_process.spawn. Structured JSONL events for monitoring. No tmux needed.
-- **tmux adapter** (fallback): Legacy tmux-based `codex exec`. Used when codex-exec is unavailable.
+The adapter is selected automatically based on detected capabilities (highest priority first):
+- **codex-appserver adapter** (preferred): Multi-turn JSON-RPC 2.0 via `codex app-server`. Thread/turn lifecycle, live steering, structured errors. Requires `hasCodexAppServer`.
+- **codex-exec adapter**: Single-turn `codex exec --json` via child_process.spawn. Structured JSONL events. Requires `hasCodexExecJson`.
+- **tmux adapter** (fallback): Legacy tmux-based `codex exec`. Used when neither exec-json nor app-server is available.
 
 ```bash
 # Adapter auto-selected: codex-appserver > codex-exec > tmux
@@ -836,19 +837,23 @@ Report: PRD stories (N/N), per-worker summary, files changed, coordination log, 
 ## Communication_Protocol
 
 **Claude ↔ Claude**: `SendMessage(to="worker", content="...")`
-**Codex** is a **batch executor** — it runs one-shot tasks and returns results. It cannot read messages mid-execution.
-**Claude → Codex**: Orchestrator includes all context in the spawn prompt. For multi-step work, use **task chaining** (see below).
+**Codex** communication depends on the adapter:
+- **codex-appserver**: True bidirectional — `turn/steer` injects input mid-execution, `turn/interrupt` aborts.
+- **codex-exec / tmux**: Batch executor — one-shot tasks, no mid-execution communication.
+
+**Claude → Codex**: With app-server, use `steerTurn()` for live input. With exec/tmux, include all context in spawn prompt or use **task chaining** (below).
 **Codex → Claude**: Orchestrator reads Codex output (via adapter), relays to Claude workers via SendMessage.
 
 ### Adapter Selection
-Codex workers are spawned via the adapter that matches runtime capabilities:
-- **codex-exec adapter** (preferred): `codex exec --json` via child_process — structured JSONL events, no tmux needed
-- **tmux adapter** (fallback): legacy tmux-based `codex exec` — used when `hasCodexExecJson` is false
+Codex workers are spawned via the adapter that matches runtime capabilities (priority order):
+- **codex-appserver** (preferred): Multi-turn JSON-RPC 2.0 — thread/turn lifecycle, live steering, structured errors
+- **codex-exec**: Single-turn `codex exec --json` — structured JSONL events, no tmux needed
+- **tmux** (fallback): legacy tmux-based `codex exec` — used when neither app-server nor exec-json is available
 
 The adapter is selected automatically by `selectAdapter(worker, capabilities)` in `worker-spawn.mjs`.
 
-### Task Chaining (pseudo-bidirectional)
-Since Codex cannot receive messages mid-execution, multi-step work uses sequential calls:
+### Task Chaining (pseudo-bidirectional for exec/tmux adapters)
+For codex-exec and tmux adapters (which cannot receive messages mid-execution), multi-step work uses sequential calls:
 ```
 exec #1: "Design the API schema" → Result A
 Orchestrator: merges Result A + Claude worker feedback

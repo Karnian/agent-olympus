@@ -127,16 +127,29 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 
 ## Codex Integration
 
-Codex is invoked via tmux, not via omc CLI:
-```bash
-tmux new-session -d -s "<session-name>" -c "<cwd>"
-tmux send-keys -t "<session-name>" 'codex exec "<prompt>"' Enter
-tmux capture-pane -pt "<session-name>" -S -200   # monitor output
-tmux kill-session -t "<session-name>"             # cleanup
-```
+Codex workers are spawned via a strategy-pattern adapter system (`selectAdapter()`):
 
-Session naming convention: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
-Cross-validation sessions: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex-xval-<story-id>`
+### Adapter Priority (highest → lowest)
+1. **codex-appserver** — Multi-turn JSON-RPC 2.0 over stdio (`codex app-server`)
+   - Thread/turn lifecycle, live steering, structured errors
+   - Requires `hasCodexAppServer` capability (codex ≥ 0.116.0 + app-server subcommand)
+2. **codex-exec** — Single-turn JSONL via `child_process.spawn` (`codex exec --json`)
+   - 5 event types, error classification, SIGTERM→SIGKILL shutdown
+   - Requires `hasCodexExecJson` capability (codex ≥ 0.116.0)
+3. **tmux** — Legacy fallback, works for all worker types
+   - `tmux new-session` + `tmux send-keys` + `tmux capture-pane`
+   - Always available when tmux is installed
+
+### Key Files
+- `scripts/lib/codex-appserver.mjs` — App-server JSON-RPC client (thread/turn/steer/interrupt)
+- `scripts/lib/codex-exec.mjs` — Exec JSONL adapter (spawn/monitor/collect/shutdown)
+- `scripts/lib/worker-spawn.mjs` — Adapter router (`selectAdapter`, `spawnTeam`, `monitorTeam`)
+- `scripts/lib/resolve-binary.mjs` — Binary resolution with caching
+- `scripts/lib/preflight.mjs` — Capability detection (`hasCodexAppServer`, `hasCodexExecJson`)
+
+### Session Naming
+- tmux sessions: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
+- Cross-validation: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex-xval-<story-id>`
 
 ## Known Limitations
 
@@ -146,7 +159,7 @@ Cross-validation sessions: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex
 ## Testing
 
 ```bash
-# Run unit tests (575+ tests, 37 files)
+# Run unit tests (739+ tests, 38+ files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

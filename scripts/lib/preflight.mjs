@@ -122,6 +122,7 @@ export function meetsMinVersion(versionStr, minMajor, minMinor, minPatch) {
  *   hasTmux: boolean,
  *   hasCodex: boolean,
  *   hasCodexExecJson: boolean,
+ *   hasCodexAppServer: boolean,
  *   hasGitWorktree: boolean,
  *   hasTeamTools: boolean,
  *   hasPreviewMCP: boolean
@@ -158,13 +159,28 @@ export async function detectCapabilities() {
 
   // Detect codex exec --json support (requires codex-cli >= 0.116.0)
   let hasCodexExecJson = false;
+  let hasCodexAppServer = false;
   try {
     const codexVersion = execFileSync(resolveBinary('codex'), ['--version'], {
       stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
     }).trim();
     hasCodexExecJson = meetsMinVersion(codexVersion, 0, 116, 0);
+    // app-server is available in the same version range as exec --json
+    // Detect by checking if 'codex app-server --help' succeeds
+    if (hasCodexExecJson) {
+      try {
+        execFileSync(resolveBinary('codex'), ['app-server', '--help'], {
+          stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
+        });
+        hasCodexAppServer = true;
+      } catch {
+        // app-server subcommand not available in this build
+        hasCodexAppServer = false;
+      }
+    }
   } catch {
     hasCodexExecJson = false;
+    hasCodexAppServer = false;
   }
 
   let hasGitWorktree = false;
@@ -181,7 +197,7 @@ export async function detectCapabilities() {
   // Preview MCP is available if .claude/launch.json exists
   const hasPreviewMCP = existsSync('.claude/launch.json');
 
-  return { hasTmux, hasCodex, hasCodexExecJson, hasGitWorktree, hasTeamTools, hasPreviewMCP };
+  return { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasGitWorktree, hasTeamTools, hasPreviewMCP };
 }
 
 /**
