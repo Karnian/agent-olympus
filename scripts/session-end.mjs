@@ -9,6 +9,7 @@
 import { readStdin } from './lib/stdin.mjs';
 import { readdirSync, statSync, unlinkSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { finalizeSession, getCurrentSessionId, pruneSessions } from './lib/session-registry.mjs';
 
 const STALE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -52,6 +53,17 @@ async function main() {
     const now = Date.now();
     const stateDir = join(process.cwd(), '.ao', 'state');
     const teamsDir = join(process.cwd(), '.ao', 'teams');
+
+    // Finalize session record — use session_id from stdin or pointer file
+    const sessionId = _data.session_id || getCurrentSessionId();
+    if (sessionId) {
+      finalizeSession(sessionId, { status: 'ended' });
+    }
+
+    // Prune old session records (10% chance per run to avoid overhead)
+    if (Math.random() < 0.1) {
+      pruneSessions();
+    }
 
     const cleanedState = cleanStaleFiles(stateDir, now);
     const cleanedTeams = cleanStaleFiles(teamsDir, now);

@@ -19,8 +19,9 @@ scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
 scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-outbox, checkpoint,
               wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
-              worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts)
-scripts/test → node:test based unit tests (550+ tests, 36 files)
+              worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts,
+              session-registry)
+scripts/test → node:test based unit tests (575+ tests, 37 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -57,7 +58,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - **Agent** (`agents/*.md`) = role persona with model assignment. Called internally via `Task(subagent_type="agent-olympus:<name>")`
 - Not every agent has a matching skill. executor, debugger, designer etc. are internal-only
 - **Available agents** (agents/): aphrodite, atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hephaestus, hermes, metis, momus, prometheus, security-reviewer, test-engineer, themis, writer
-- **Available skills** (skills/): a11y-audit, ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, design-critique, design-system-audit, external-context, finish-branch, git-master, harness-init, plan, research, slop-cleaner, systematic-debug, tdd, trace, ui-review, ux-copy-review, verify-coverage
+- **Available skills** (skills/): a11y-audit, ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, design-critique, design-system-audit, external-context, finish-branch, git-master, harness-init, plan, research, sessions, slop-cleaner, systematic-debug, tdd, trace, ui-review, ux-copy-review, verify-coverage
 
 ### State Management
 - `.ao/prd.json` — PRD with user stories and acceptance criteria (ephemeral working copy)
@@ -67,7 +68,9 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/state/checkpoint-{atlas|athena}.json` — session recovery checkpoints (auto-expire 24h); emits events to active run on save/clear
 - `.ao/state/ao-active-run-{atlas|athena}.json` — active run identity pointer (links checkpoint ↔ run-artifacts)
 - `.ao/state/ao-subagent-results.json` — captured subagent outputs (capped at 50, FIFO); also emits `subagent_completed` events to active run
+- `.ao/state/ao-current-session.json` — active session pointer (sessionId + startedAt); used for crash recovery
 - `.ao/state/*.json` — transient state files (deleted on completion or cleaned by SessionEnd after 24h)
+- `.ao/sessions/<sessionId>.json` — per-session metadata (branch, cwd, status, linked runIds); shared across worktrees; 90-day TTL
 - `.ao/artifacts/runs/<runId>/` — per-run artifacts (events.jsonl, summary.json, verification.jsonl)
 - `.ao/teams/` — tmux worker inbox/outbox directories (Athena only)
 - `.ao/worktrees/<teamSlug>/<workerName>/` — isolated git worktrees for Athena parallel workers (Athena only; cleaned up after team completion)
@@ -143,7 +146,7 @@ Cross-validation sessions: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex
 ## Testing
 
 ```bash
-# Run unit tests (550+ tests, 36 files)
+# Run unit tests (575+ tests, 37 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

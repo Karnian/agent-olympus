@@ -12,6 +12,7 @@ import { readStdin } from './lib/stdin.mjs';
 import { queryWisdom } from './lib/wisdom.mjs';
 import { loadCheckpoint, formatCheckpoint } from './lib/checkpoint.mjs';
 import { runPreflight, formatPreflightReport } from './lib/preflight.mjs';
+import { registerSession, recoverCrashedSession } from './lib/session-registry.mjs';
 
 async function main() {
   try {
@@ -22,7 +23,24 @@ async function main() {
 
     const sections = [];
 
-    // 0. Preflight — clean stale state before loading anything
+    // 0a. Session registry — recover crashed sessions and register current
+    try {
+      const crashedId = recoverCrashedSession();
+      if (crashedId) {
+        sections.push(`## Session Recovery\nPrevious session \`${crashedId}\` ended abnormally (crash/kill). Record updated.`);
+      }
+      const sessionId = _data.session_id || null;
+      if (sessionId) {
+        registerSession(sessionId, {
+          cwd: _data.cwd || process.cwd(),
+          transcriptPath: _data.transcript_path || null,
+        });
+      }
+    } catch {
+      // session registry failure is non-fatal
+    }
+
+    // 0c. Preflight — clean stale state before loading anything
     try {
       const preflightReport = await runPreflight();
       const preflightText = formatPreflightReport(preflightReport);
