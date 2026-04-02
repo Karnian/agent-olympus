@@ -57,19 +57,26 @@ function loadTeamState(teamName) {
  * Select the appropriate spawn adapter for a worker.
  * Pure function — no side effects.
  *
- * Priority: codex-appserver > codex-exec > tmux
+ * Priority for codex workers: codex-appserver > codex-exec > tmux
+ * Priority for claude workers: claude-cli > tmux
+ * Default (all others): tmux
+ *
  * - codex-appserver: multi-turn, structured errors, turn steering (Phase 2)
  * - codex-exec: single-turn JSONL, child_process.spawn (Phase 1)
+ * - claude-cli: headless Claude Code via `-p --output-format stream-json` (Phase 3)
  * - tmux: legacy fallback for all worker types
  *
  * @param {Object} worker - Worker descriptor with { type, name, prompt }
  * @param {Object} capabilities - From preflight.detectCapabilities()
- * @returns {'codex-appserver' | 'codex-exec' | 'tmux'}
+ * @returns {'codex-appserver' | 'codex-exec' | 'claude-cli' | 'tmux'}
  */
 export function selectAdapter(worker, capabilities = {}) {
   if (worker.type === 'codex') {
     if (capabilities.hasCodexAppServer) return 'codex-appserver';
     if (capabilities.hasCodexExecJson) return 'codex-exec';
+  }
+  if (worker.type === 'claude') {
+    if (capabilities.hasClaudeCli) return 'claude-cli';
   }
   return 'tmux';
 }
@@ -88,6 +95,14 @@ async function loadCodexExecAdapter() {
  */
 async function loadCodexAppServerAdapter() {
   return import('./codex-appserver.mjs');
+}
+
+/**
+ * Lazily load the claude-cli adapter module.
+ * @returns {Promise<Object>} The claude-cli module
+ */
+async function loadClaudeCliAdapter() {
+  return import('./claude-cli.mjs');
 }
 
 // ─── Tmux adapter helpers (inline — wraps existing tmux-session functions) ──
@@ -176,6 +191,29 @@ function monitorCodexAppServerWorker(worker, appserver) {
   return result;
 }
 
+/**
+ * Monitor a claude-cli-based worker via the claude-cli adapter.
+ * Returns a MonitorResult-shaped object.
+ *
+ * @param {Object} worker - Worker state object with _liveHandle
+ * @param {Object} claudeCli - The loaded claude-cli module
+ * @returns {{ status: string, output: string, error?: { category: string, message: string }, stalled?: boolean, stalledMs?: number }}
+ */
+function monitorClaudeCliWorker(worker, claudeCli) {
+  if (!worker._liveHandle) {
+    return { status: 'failed', output: '', error: { category: 'crash', message: 'No claude-cli handle' } };
+  }
+  const mr = claudeCli.monitor(worker._liveHandle);
+  const result = {
+    status: mr.status,
+    output: (mr.output || '').slice(-500),
+  };
+  if (mr.error) {
+    result.error = mr.error;
+  }
+  return result;
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 /**
@@ -226,6 +264,12 @@ export async function reassignToClaude(teamName, workerName, originalPrompt, fai
         const appserver = await loadCodexAppServerAdapter();
         await appserver.shutdownServer(worker._liveHandle);
       } catch {}
+    } else if (adapterName === 'claude-cli' && worker?._liveHandle) {
+      // Shutdown via claude-cli adapter
+      try {
+        const cli = await loadClaudeCliAdapter();
+        await cli.shutdown(worker._liveHandle);
+      } catch {}
     } else if (adapterName === 'codex-exec' && worker?._handle) {
       // Shutdown via codex-exec adapter
       try {
@@ -262,11 +306,15 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
   // Lazy-load adapters as needed
   let codexExec = null;
   let codexAppServer = null;
+  let claudeCli = null;
   if (adapterNames.includes('codex-exec')) {
     codexExec = await loadCodexExecAdapter();
   }
   if (adapterNames.includes('codex-appserver')) {
     codexAppServer = await loadCodexAppServerAdapter();
+  }
+  if (adapterNames.includes('claude-cli')) {
+    claudeCli = await loadClaudeCliAdapter();
   }
 
   const state = {
@@ -334,6 +382,23 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
           try { await codexAppServer.shutdownServer(serverHandle, 2000); } catch {}
         }
       }
+    } else if (adapterNames[i] === 'claude-cli') {
+      // Spawn via claude-cli adapter (headless Claude Code -p mode)
+      try {
+        const handle = claudeCli.spawn(worker.prompt, {
+          cwd,
+          model: worker.model,
+          appendSystemPrompt: worker.systemPrompt,
+          maxBudgetUsd: worker.maxBudgetUsd,
+        });
+        state.workers[i].status = 'running';
+        state.workers[i].startedAt = new Date().toISOString();
+        state.workers[i]._handle = { pid: handle.pid }; // sessionId populated async via init event
+        state.workers[i]._liveHandle = handle;
+      } catch (err) {
+        state.workers[i].status = 'failed';
+        state.workers[i].error = err.message;
+      }
     } else if (adapterNames[i] === 'codex-exec') {
       // Spawn via codex-exec adapter
       try {
@@ -380,13 +445,14 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
   return state;
 }
 
-export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule) {
+export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _claudeCliModule) {
   const state = loadTeamState(teamName);
   if (!state) return null;
 
   // Lazy-loaded adapter modules (passed in or null)
   const codexExec = _codexExecModule || null;
   const codexAppServer = _codexAppServerModule || null;
+  const claudeCli = _claudeCliModule || null;
 
   const status = {
     teamName,
@@ -405,6 +471,8 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule) {
     let monitorResult;
     if (adapterName === 'codex-appserver' && codexAppServer && worker._liveHandle) {
       monitorResult = monitorCodexAppServerWorker(worker, codexAppServer);
+    } else if (adapterName === 'claude-cli' && claudeCli && worker._liveHandle) {
+      monitorResult = monitorClaudeCliWorker(worker, claudeCli);
     } else if (adapterName === 'codex-exec' && codexExec && worker._liveHandle) {
       monitorResult = monitorCodexExecWorker({ ...worker, _handle: worker._liveHandle }, codexExec);
     } else {
@@ -512,6 +580,10 @@ export function collectResults(teamName) {
         // App-server: output is in the live handle
         const output = worker._liveHandle._output;
         if (output) results[worker.name] = output;
+      } else if (adapter === 'claude-cli' && worker._liveHandle) {
+        // Claude CLI: output is in the live handle
+        const output = worker._liveHandle._output;
+        if (output) results[worker.name] = output;
       } else if (adapter === 'codex-exec' && worker._liveHandle) {
         // Codex-exec: output is in the live handle
         const output = worker._liveHandle._output;
@@ -547,6 +619,9 @@ export async function shutdownTeam(teamName, cwd) {
         if (adapter === 'codex-appserver' && worker._liveHandle) {
           const appserver = await loadCodexAppServerAdapter();
           await appserver.shutdownServer(worker._liveHandle);
+        } else if (adapter === 'claude-cli' && worker._liveHandle) {
+          const cli = await loadClaudeCliAdapter();
+          await cli.shutdown(worker._liveHandle);
         } else if (adapter === 'codex-exec' && worker._liveHandle) {
           const codexExec = await loadCodexExecAdapter();
           await codexExec.shutdown(worker._liveHandle);

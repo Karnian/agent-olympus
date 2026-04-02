@@ -183,6 +183,24 @@ export async function detectCapabilities() {
     hasCodexAppServer = false;
   }
 
+  // Detect Claude CLI (claude -p mode for headless worker execution)
+  let hasClaudeCli = false;
+  try {
+    const claudePath = resolveClaudeBinary();
+    if (claudePath && claudePath !== 'claude') {
+      // Binary found via versioned path discovery
+      hasClaudeCli = true;
+    } else {
+      // Try running --version to verify it works
+      execFileSync(claudePath, ['--version'], {
+        stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
+      });
+      hasClaudeCli = true;
+    }
+  } catch {
+    hasClaudeCli = false;
+  }
+
   let hasGitWorktree = false;
   try {
     execFileSync('git', ['worktree', 'list'], { stdio: 'ignore' });
@@ -197,7 +215,7 @@ export async function detectCapabilities() {
   // Preview MCP is available if .claude/launch.json exists
   const hasPreviewMCP = existsSync('.claude/launch.json');
 
-  return { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasGitWorktree, hasTeamTools, hasPreviewMCP };
+  return { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGitWorktree, hasTeamTools, hasPreviewMCP };
 }
 
 /**
@@ -211,6 +229,7 @@ export function formatCapabilityReport(caps) {
     'Capabilities:',
     fmt(caps.hasTmux, 'tmux       ', 'parallel worker sessions'),
     fmt(caps.hasCodex, 'codex      ', 'cross-validation & multi-model'),
+    fmt(caps.hasClaudeCli, 'claude-cli ', 'headless Claude Code workers'),
     fmt(caps.hasGitWorktree, 'git worktree', 'isolated parallel workspaces'),
     fmt(caps.hasTeamTools, 'team tools ', 'native Claude Code team management'),
     fmt(caps.hasPreviewMCP, 'preview MCP', caps.hasPreviewMCP

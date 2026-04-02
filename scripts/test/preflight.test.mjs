@@ -340,11 +340,11 @@ test('formatCapabilityReport: formats ✓ for true capabilities', async () => {
 
 test('formatCapabilityReport: formats ✗ for false capabilities', async () => {
   const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
-  const caps = { hasTmux: false, hasCodex: false, hasGitWorktree: false, hasTeamTools: false, hasPreviewMCP: false };
+  const caps = { hasTmux: false, hasCodex: false, hasClaudeCli: false, hasGitWorktree: false, hasTeamTools: false, hasPreviewMCP: false };
   const report = formatCapabilityReport(caps);
-  // All 5 entries should show ✗
+  // All 6 entries should show ✗
   const crosses = (report.match(/✗/g) || []).length;
-  assert.equal(crosses, 5);
+  assert.equal(crosses, 6);
 });
 
 test('formatCapabilityReport: includes all 5 capability names', async () => {
@@ -353,6 +353,7 @@ test('formatCapabilityReport: includes all 5 capability names', async () => {
   const report = formatCapabilityReport(caps);
   assert.ok(report.includes('tmux'), 'should mention tmux');
   assert.ok(report.includes('codex'), 'should mention codex');
+  assert.ok(report.includes('claude-cli'), 'should mention claude-cli');
   assert.ok(report.includes('git worktree'), 'should mention git worktree');
   assert.ok(report.includes('team tools'), 'should mention team tools');
   assert.ok(report.includes('preview MCP'), 'should mention preview MCP');

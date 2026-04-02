@@ -3,7 +3,7 @@ import { mkdirSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { dirname } from 'path';
 import { createWorkerWorktree } from './worktree.mjs';
-import { resolveBinary, SEARCH_PATHS } from './resolve-binary.mjs';
+import { resolveBinary, resolveClaudeBinary, SEARCH_PATHS } from './resolve-binary.mjs';
 
 // Re-export for backward compatibility with callers that import from tmux-session
 export { resolveBinary } from './resolve-binary.mjs';
@@ -35,7 +35,7 @@ export function buildResolvedPath() {
   }
 
   // Add parent directories of resolved key binaries
-  for (const bin of ['codex', 'claude', 'tmux', 'git', 'node']) {
+  for (const bin of ['codex', 'tmux', 'git', 'node']) {
     try {
       const resolved = resolveBinary(bin);
       if (resolved && resolved !== bin && resolved.includes('/')) {
@@ -43,6 +43,14 @@ export function buildResolvedPath() {
       }
     } catch {}
   }
+
+  // Claude CLI lives in a versioned app bundle path — use dedicated resolver
+  try {
+    const claudePath = resolveClaudeBinary();
+    if (claudePath && claudePath !== 'claude' && claudePath.includes('/')) {
+      dirs.add(dirname(claudePath));
+    }
+  } catch {}
 
   return [...dirs].join(':');
 }

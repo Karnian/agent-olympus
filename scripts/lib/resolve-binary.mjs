@@ -1,5 +1,7 @@
 import { execFileSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, readdirSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
 
 // Common binary search paths across platforms
 export const SEARCH_PATHS = [
@@ -43,6 +45,91 @@ export function resolveBinary(name) {
  */
 export function clearBinCache() {
   _binCache.clear();
+}
+
+/**
+ * Resolve the Claude Code CLI binary path.
+ *
+ * Claude Code installs to a non-standard, versioned path with spaces:
+ *   macOS: ~/Library/Application Support/Claude/claude-code/<version>/claude.app/Contents/MacOS/claude
+ *   Linux: ~/.local/share/claude-code/<version>/claude (hypothetical)
+ *
+ * Discovery order:
+ * 1. `which claude` (if user added to PATH or symlinked)
+ * 2. macOS Application Support versioned directories (newest version first)
+ * 3. Linux .local/share fallback
+ *
+ * Results are cached under the key 'claude-cli'.
+ *
+ * @returns {string} Full path to the claude binary
+ */
+export function resolveClaudeBinary() {
+  if (_binCache.has('claude-cli')) return _binCache.get('claude-cli');
+
+  // 1. Try `which claude` first
+  try {
+    const resolved = execFileSync('which', ['claude'], { stdio: 'pipe', encoding: 'utf-8' }).trim();
+    if (resolved && existsSync(resolved)) {
+      _binCache.set('claude-cli', resolved);
+      return resolved;
+    }
+  } catch {}
+
+  // 2. macOS: ~/Library/Application Support/Claude/claude-code/<version>/claude.app/Contents/MacOS/claude
+  const home = homedir();
+  const macBase = join(home, 'Library', 'Application Support', 'Claude', 'claude-code');
+  try {
+    if (existsSync(macBase)) {
+      const versions = readdirSync(macBase)
+        .filter(v => /^\d+\.\d+\.\d+/.test(v))
+        .sort(_semverCompareDesc);
+      for (const ver of versions) {
+        const candidate = join(macBase, ver, 'claude.app', 'Contents', 'MacOS', 'claude');
+        if (existsSync(candidate)) {
+          _binCache.set('claude-cli', candidate);
+          return candidate;
+        }
+      }
+    }
+  } catch {}
+
+  // 3. Linux: ~/.local/share/claude-code/<version>/claude
+  const linuxBase = join(home, '.local', 'share', 'claude-code');
+  try {
+    if (existsSync(linuxBase)) {
+      const versions = readdirSync(linuxBase)
+        .filter(v => /^\d+\.\d+\.\d+/.test(v))
+        .sort(_semverCompareDesc);
+      for (const ver of versions) {
+        const candidate = join(linuxBase, ver, 'claude');
+        if (existsSync(candidate)) {
+          _binCache.set('claude-cli', candidate);
+          return candidate;
+        }
+      }
+    }
+  } catch {}
+
+  // Last resort: bare name
+  _binCache.set('claude-cli', 'claude');
+  return 'claude';
+}
+
+/**
+ * Compare two semver strings in descending order (newest first).
+ * @param {string} a
+ * @param {string} b
+ * @returns {number}
+ */
+function _semverCompareDesc(a, b) {
+  const pa = a.match(/(\d+)\.(\d+)\.(\d+)/);
+  const pb = b.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!pa || !pb) return 0;
+  for (let i = 1; i <= 3; i++) {
+    const diff = Number(pb[i]) - Number(pa[i]);
+    if (diff !== 0) return diff;
+  }
+  return 0;
 }
 
 /**
