@@ -13,6 +13,7 @@ import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { resolveBinary } from './tmux-session.mjs';
 
 const AO_DIR = '.ao';
 const STATE_DIR = path.join(AO_DIR, 'state');
@@ -106,16 +107,28 @@ export async function cleanStalePointers() {
 export async function detectCapabilities() {
   let hasTmux = false;
   try {
-    execFileSync('which', ['tmux'], { stdio: 'ignore' });
-    hasTmux = true;
+    // Use resolveBinary which checks PATH + fallback paths (homebrew, /usr/local, etc.)
+    const tmuxBin = resolveBinary('tmux');
+    if (tmuxBin && tmuxBin !== 'tmux') {
+      hasTmux = true;
+    } else {
+      // bare name returned — try running it to see if the OS can find it
+      execFileSync('which', ['tmux'], { stdio: 'ignore' });
+      hasTmux = true;
+    }
   } catch {
     // tmux not found
   }
 
   let hasCodex = false;
   try {
-    execFileSync('which', ['codex'], { stdio: 'ignore' });
-    hasCodex = true;
+    const codexBin = resolveBinary('codex');
+    if (codexBin && codexBin !== 'codex') {
+      hasCodex = true;
+    } else {
+      execFileSync('which', ['codex'], { stdio: 'ignore' });
+      hasCodex = true;
+    }
   } catch {
     // codex not found
   }

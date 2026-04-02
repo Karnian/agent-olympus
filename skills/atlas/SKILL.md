@@ -197,8 +197,10 @@ Task(subagent_type="agent-olympus:metis", model="opus",
 
 If `NEEDS_CODEX`, simultaneously spawn Codex via tmux:
 ```bash
+# Resolve binary path first — worktree shells may not inherit full PATH
+CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-analyze" -c "<cwd>"
-tmux send-keys -t "atlas-codex-analyze" 'codex exec "<analysis prompt>"' Enter
+tmux send-keys -t "atlas-codex-analyze" "\"$CODEX_BIN\" exec \"<analysis prompt>\"" Enter
 ```
 
 **[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
@@ -441,8 +443,10 @@ Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...
 
 **Codex deep workers (via tmux):**
 ```bash
+# Resolve binary path first — worktree shells may not inherit full PATH
+CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-<N>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-<N>" 'codex exec "<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]"' Enter
+tmux send-keys -t "atlas-codex-<N>" "\"$CODEX_BIN\" exec \"<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]\"" Enter
 # Monitor: tmux capture-pane -pt "atlas-codex-<N>" -S -200
 # Cleanup: tmux kill-session -t "atlas-codex-<N>"
 ```
@@ -486,18 +490,22 @@ If story is a pure refactor / docs / config change (no runtime behavior change):
 
 3. After each story completes, verify its acceptance criteria with FRESH evidence
 
-4. **Codex Cross-Validation** (per story) — spawn a Codex validator before marking passes:
+4. **Codex Cross-Validation** (per story) — MANDATORY: spawn a Codex validator before marking passes:
 ```bash
+# CRITICAL: resolve binary path first — worktree shells may not inherit full PATH
+CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-xval-<story-id>" 'codex exec "Cross-validate implementation of <US-ID> (<story title>). Files changed: <files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or \"none\">. Check: (1) all acceptance criteria genuinely met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings."' Enter
+tmux send-keys -t "atlas-codex-xval-<story-id>" "\"$CODEX_BIN\" exec \"Cross-validate implementation of <US-ID> (<story title>). Files changed: <files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or 'none'>. Check: (1) all acceptance criteria genuinely met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings.\"" Enter
 # Poll: tmux capture-pane -pt "atlas-codex-xval-<story-id>" -S -200 (every 15s)
 # Cleanup: tmux kill-session -t "atlas-codex-xval-<story-id>"
 ```
-- **PASS** → mark `passes: true`, proceed.
-- **FAIL** → fix the specific violation, re-run acceptance criteria, re-validate (max 2 cycles).
-- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`; skip silently if `auth_failed`, `not_installed`, or `rate_limited`. Log: `[atlas] Codex cross-validation skipped: <reason>.`
+- **PASS** → `addVerification(runId, { story_id, verdict: 'pass', evidence: 'codex xval passed', verifiedBy: 'codex' })` → mark `passes: true`, proceed.
+- **FAIL** → `addVerification(runId, { story_id, verdict: 'fail', evidence: '<specific findings>', verifiedBy: 'codex' })` → fix the specific violation, re-run acceptance criteria, re-validate (max 2 cycles).
+- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'codex <reason>: cross-validation skipped', verifiedBy: 'atlas' })`. Log: `[atlas] Codex cross-validation skipped for <story-id>: <reason>.`
 
-5. Mark `passes: true` in prd.json only when ALL criteria verified AND Codex cross-validation passes (or is unavailable)
+> **IMPORTANT**: "skip silently" does NOT mean "do nothing". Every story MUST have a verification record — pass, fail, or explicit skip. The PR verification gate will block if any story lacks a record.
+
+5. Mark `passes: true` in prd.json only when ALL criteria verified AND Codex cross-validation passes (or is unavailable with explicit skip recorded)
 6. Record learnings via wisdom calls after each story:
    ```
    addWisdom({ category: 'pattern', lesson: '<codebase convention discovered>', confidence: 'high' })
@@ -669,6 +677,39 @@ Load autonomy config to determine shipping behavior:
 ```javascript
 import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
 const config = loadAutonomyConfig(cwd);
+```
+
+#### Verification Gate (MANDATORY — blocks PR creation)
+Before any shipping activity, check that ALL stories have verification records:
+```javascript
+import { checkVerificationGate } from './scripts/lib/run-artifacts.mjs';
+const storyIds = prd.userStories.map(s => s.id);
+const gate = checkVerificationGate(runId, storyIds);
+
+if (!gate.gatePass) {
+  // Stories without verification records — MUST attempt xval for each
+  for (const missingId of gate.missing) {
+    // 1. First attempt: try Codex cross-validation (same as Phase 3 step 4)
+    // 2. If Codex unavailable, record explicit skip:
+    addVerification(runId, {
+      story_id: missingId,
+      verdict: 'skip',
+      evidence: 'codex unavailable: verification gate catch-up',
+      verifiedBy: 'atlas'
+    });
+  }
+  // Re-check — if STILL failing, STOP (addVerification may have silently failed)
+  const recheck = checkVerificationGate(runId, storyIds);
+  if (!recheck.gatePass) {
+    console.error(`[atlas] VERIFICATION GATE FAILED — ${recheck.missing.length} stories still lack records: ${recheck.missing.join(', ')}`);
+    console.error(`[atlas] Cannot create PR until all stories have verification records.`);
+    // STOP — do not proceed to PR creation
+  }
+}
+
+if (gate.skipped.length > 0) {
+  console.log(`[atlas] ${gate.skipped.length} stories had Codex xval skipped — results included in PR body`);
+}
 ```
 
 #### Preflight

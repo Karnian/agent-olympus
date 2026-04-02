@@ -1,6 +1,7 @@
 import { execFileSync } from 'child_process';
 import { mkdirSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
+import { dirname } from 'path';
 import { createWorkerWorktree } from './worktree.mjs';
 
 const SESSION_PREFIX = 'ao-team';
@@ -39,6 +40,43 @@ export function resolveBinary(name) {
   // Last resort: return bare name, let the OS figure it out
   _binCache.set(name, name);
   return name;
+}
+
+/**
+ * Build a robust PATH string that includes all known binary directories.
+ * Merges the current process PATH, SEARCH_PATHS, and parent directories of
+ * resolved binaries (codex, claude, tmux, git, node).
+ * Used to inject PATH into tmux sessions so workers can find CLIs regardless
+ * of how the shell inside tmux initializes its environment.
+ *
+ * @returns {string} colon-separated PATH string
+ */
+export function buildResolvedPath() {
+  const dirs = new Set();
+
+  // Collect from current process PATH
+  if (process.env.PATH) {
+    for (const p of process.env.PATH.split(':')) {
+      if (p) dirs.add(p);
+    }
+  }
+
+  // Add known search paths that actually exist
+  for (const p of SEARCH_PATHS) {
+    if (existsSync(p)) dirs.add(p);
+  }
+
+  // Add parent directories of resolved key binaries
+  for (const bin of ['codex', 'claude', 'tmux', 'git', 'node']) {
+    try {
+      const resolved = resolveBinary(bin);
+      if (resolved && resolved !== bin && resolved.includes('/')) {
+        dirs.add(dirname(resolved));
+      }
+    } catch {}
+  }
+
+  return [...dirs].join(':');
 }
 
 export function validateTmux() {
@@ -120,6 +158,13 @@ export function createTeamSession(teamName, workers, cwd) {
 
       // Create new detached session rooted at the worker's worktree (or cwd on fallback)
       execFileSync(tmux, ['new-session', '-d', '-s', name, '-c', sessionCwd], { stdio: 'pipe' });
+
+      // Inject resolved PATH so CLIs (codex, claude, etc.) are always findable,
+      // even when the tmux shell doesn't inherit the parent's full PATH.
+      const resolvedPath = buildResolvedPath();
+      try {
+        execFileSync(tmux, ['send-keys', '-t', name, `export PATH="${resolvedPath}"`, 'Enter'], { stdio: 'pipe' });
+      } catch {}
 
       results.push({
         name: worker.name,

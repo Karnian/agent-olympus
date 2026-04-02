@@ -12,6 +12,7 @@ import {
   sanitizeName,
   sanitizeForShellArg,
   sessionName,
+  buildResolvedPath,
 } from '../lib/tmux-session.mjs';
 
 // ---------------------------------------------------------------------------
@@ -96,4 +97,28 @@ test('sessionName: sanitizes team and worker names', () => {
 test('sessionName: handles special characters in both parts', () => {
   const result = sessionName('foo/bar', 'baz@qux');
   assert.equal(result, 'ao-team-foo-bar-baz-qux');
+});
+
+// ---------------------------------------------------------------------------
+// buildResolvedPath
+// ---------------------------------------------------------------------------
+
+test('buildResolvedPath: returns a non-empty colon-separated string', () => {
+  const result = buildResolvedPath();
+  assert.ok(typeof result === 'string');
+  assert.ok(result.length > 0);
+  assert.ok(result.includes(':'), 'should contain colon separators');
+});
+
+test('buildResolvedPath: includes current process PATH entries', () => {
+  const result = buildResolvedPath();
+  // At minimum, /usr/bin should be present on any system
+  assert.ok(result.includes('/usr/bin'), 'should include /usr/bin from system PATH');
+});
+
+test('buildResolvedPath: deduplicates entries', () => {
+  const result = buildResolvedPath();
+  const parts = result.split(':');
+  const unique = new Set(parts);
+  assert.equal(parts.length, unique.size, 'should not have duplicate path entries');
 });

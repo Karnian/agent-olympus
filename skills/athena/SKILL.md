@@ -404,9 +404,11 @@ For each Claude worker:
 
 **Codex workers** (via tmux, simultaneously):
 ```bash
+# Resolve binary path first — worktree shells may not inherit full PATH
+CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 # Start session rooted at the worker's worktree path
 tmux new-session -d -s "athena-<slug>-codex-<N>" -c "<worktreePath>"
-tmux send-keys -t "athena-<slug>-codex-<N>" 'codex exec "<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]"' Enter
+tmux send-keys -t "athena-<slug>-codex-<N>" "\"$CODEX_BIN\" exec \"<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]\"" Enter
 ```
 
 Workers must commit their changes to their branch before signalling completion.
@@ -562,19 +564,23 @@ Task(subagent_type="agent-olympus:executor", model="sonnet",
   prompt="Integrate Codex output: <codex_result>. Target files: <scope>")
 ```
 
-**Codex Cross-Validation** (per story) — before marking a story `passes: true`:
+**Codex Cross-Validation** (per story) — MANDATORY: before marking a story `passes: true`:
 ```bash
+# CRITICAL: resolve binary path first — worktree shells may not inherit full PATH
+CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "athena-<slug>-codex-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "athena-<slug>-codex-xval-<story-id>" 'codex exec "Cross-validate implementation of <US-ID> (<story title>). Files changed in merged tree: <post-merge files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or \"none\">. Check: (1) all acceptance criteria met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings."' Enter
+tmux send-keys -t "athena-<slug>-codex-xval-<story-id>" "\"$CODEX_BIN\" exec \"Cross-validate implementation of <US-ID> (<story title>). Files changed in merged tree: <post-merge files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or 'none'>. Check: (1) all acceptance criteria met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings.\"" Enter
 # Poll: tmux capture-pane -pt "athena-<slug>-codex-xval-<story-id>" -S -200 (every 15s)
 # Cleanup: tmux kill-session -t "athena-<slug>-codex-xval-<story-id>"
 ```
-- **PASS** → mark `passes: true`, proceed.
-- **FAIL** → route findings back to the responsible worker via inbox for fix, re-validate (max 2 cycles).
-- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`; skip silently if `auth_failed`, `not_installed`, or `rate_limited`. Log: `[athena] Codex cross-validation skipped: <reason>.`
+- **PASS** → `addVerification(runId, { story_id, verdict: 'pass', evidence: 'codex xval passed', verifiedBy: 'codex' })` → mark `passes: true`, proceed.
+- **FAIL** → `addVerification(runId, { story_id, verdict: 'fail', evidence: '<specific findings>', verifiedBy: 'codex' })` → route findings back to the responsible worker via inbox for fix, re-validate (max 2 cycles).
+- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'codex <reason>: cross-validation skipped', verifiedBy: 'athena' })`. Log: `[athena] Codex cross-validation skipped for <story-id>: <reason>.`
 - **Note**: Run xval against post-merge file paths, not per-worker file paths, to catch violations introduced during conflict resolution.
 
-Mark stories `passes: true` in prd.json only after Codex cross-validation passes (or is unavailable).
+> **IMPORTANT**: "skip silently" does NOT mean "do nothing". Every story MUST have a verification record — pass, fail, or explicit skip. The PR verification gate will block if any story lacks a record.
+
+Mark stories `passes: true` in prd.json only after Codex cross-validation passes (or is unavailable with explicit skip recorded).
 
 Run **simultaneously**: build, tests, linter.
 
@@ -682,6 +688,39 @@ Load autonomy config to determine shipping behavior:
 ```javascript
 import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
 const config = loadAutonomyConfig(cwd);
+```
+
+#### Verification Gate (MANDATORY — blocks PR creation)
+Before any shipping activity, check that ALL stories have verification records:
+```javascript
+import { checkVerificationGate } from './scripts/lib/run-artifacts.mjs';
+const storyIds = prd.userStories.map(s => s.id);
+const gate = checkVerificationGate(runId, storyIds);
+
+if (!gate.gatePass) {
+  // Stories without verification records — MUST attempt xval for each
+  for (const missingId of gate.missing) {
+    // 1. First attempt: try Codex cross-validation (same as Phase 4 xval step)
+    // 2. If Codex unavailable, record explicit skip:
+    addVerification(runId, {
+      story_id: missingId,
+      verdict: 'skip',
+      evidence: 'codex unavailable: verification gate catch-up',
+      verifiedBy: 'athena'
+    });
+  }
+  // Re-check — if STILL failing, STOP (addVerification may have silently failed)
+  const recheck = checkVerificationGate(runId, storyIds);
+  if (!recheck.gatePass) {
+    console.error(`[athena] VERIFICATION GATE FAILED — ${recheck.missing.length} stories still lack records: ${recheck.missing.join(', ')}`);
+    console.error(`[athena] Cannot create PR until all stories have verification records.`);
+    // STOP — do not proceed to PR creation
+  }
+}
+
+if (gate.skipped.length > 0) {
+  console.log(`[athena] ${gate.skipped.length} stories had Codex xval skipped — results included in PR body`);
+}
 ```
 
 #### Preflight

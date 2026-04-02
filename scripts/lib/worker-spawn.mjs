@@ -31,7 +31,7 @@ function quickHash(str) {
 const CODEX_ERROR_PATTERNS = [
   { pattern: /authentication|unauthorized|invalid.*api.*key|API key/i, reason: 'auth_failed' },
   { pattern: /rate.?limit|429|quota.*exceeded|too many requests/i, reason: 'rate_limited' },
-  { pattern: /command not found|ENOENT|codex:.*not found/i, reason: 'not_installed' },
+  { pattern: /command not found|ENOENT|codex:.*not found|No such file or directory|not found in PATH/i, reason: 'not_installed' },
   { pattern: /ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up|network error/i, reason: 'network' },
   { pattern: /fatal error|unhandled exception|panic:|SIGSEGV|SIGABRT|segmentation fault/i, reason: 'crash' },
 ];
