@@ -21,6 +21,7 @@ import {
   verifyStory,
   getRunVerificationSummary,
   generateCompletionNotices,
+  checkVerificationGate,
 } from '../lib/run-artifacts.mjs';
 
 // ---------------------------------------------------------------------------
@@ -525,6 +526,75 @@ test('generateCompletionNotices: detects preview_skipped', async () => {
 
     const notices = generateCompletionNotices(runId, { base: tmpDir });
     assert.ok(notices.some(n => n.includes('preview_skipped')));
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// checkVerificationGate
+// ---------------------------------------------------------------------------
+
+test('checkVerificationGate: passes when all stories have verification records', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId } = createRun('atlas', 'gate-test', { base: tmpDir });
+    addVerification(runId, { story_id: 'US-001', verdict: 'pass', evidence: 'xval pass', verifiedBy: 'codex' }, { base: tmpDir });
+    addVerification(runId, { story_id: 'US-002', verdict: 'pass', evidence: 'xval pass', verifiedBy: 'codex' }, { base: tmpDir });
+
+    const gate = checkVerificationGate(runId, ['US-001', 'US-002'], { base: tmpDir });
+    assert.equal(gate.gatePass, true);
+    assert.deepEqual(gate.missing, []);
+    assert.deepEqual(gate.skipped, []);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('checkVerificationGate: fails when stories are missing verification', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId } = createRun('atlas', 'gate-test', { base: tmpDir });
+    addVerification(runId, { story_id: 'US-001', verdict: 'pass', evidence: 'xval pass', verifiedBy: 'codex' }, { base: tmpDir });
+
+    const gate = checkVerificationGate(runId, ['US-001', 'US-002', 'US-003'], { base: tmpDir });
+    assert.equal(gate.gatePass, false);
+    assert.deepEqual(gate.missing, ['US-002', 'US-003']);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('checkVerificationGate: reports skipped stories separately', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId } = createRun('atlas', 'gate-test', { base: tmpDir });
+    addVerification(runId, { story_id: 'US-001', verdict: 'pass', evidence: 'xval pass', verifiedBy: 'codex' }, { base: tmpDir });
+    addVerification(runId, { story_id: 'US-002', verdict: 'skip', evidence: 'codex not_installed', verifiedBy: 'atlas' }, { base: tmpDir });
+
+    const gate = checkVerificationGate(runId, ['US-001', 'US-002'], { base: tmpDir });
+    assert.equal(gate.gatePass, true, 'gate passes because all stories have records');
+    assert.deepEqual(gate.missing, []);
+    assert.deepEqual(gate.skipped, ['US-002']);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('checkVerificationGate: returns safe defaults on invalid runId', () => {
+  const gate = checkVerificationGate('nonexistent-run-id', ['US-001'], { base: '/tmp/no-such-dir' });
+  assert.equal(gate.gatePass, false);
+  assert.deepEqual(gate.missing, ['US-001']);
+  assert.deepEqual(gate.skipped, []);
+});
+
+test('checkVerificationGate: empty storyIds always passes', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId } = createRun('atlas', 'gate-test', { base: tmpDir });
+    const gate = checkVerificationGate(runId, [], { base: tmpDir });
+    assert.equal(gate.gatePass, true);
+    assert.deepEqual(gate.missing, []);
   } finally {
     await removeTmpDir(tmpDir);
   }
