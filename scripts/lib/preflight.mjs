@@ -14,6 +14,7 @@ import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { resolveBinary } from './tmux-session.mjs';
+import { resolveClaudeBinary } from './resolve-binary.mjs';
 
 const AO_DIR = '.ao';
 const STATE_DIR = path.join(AO_DIR, 'state');
@@ -93,12 +94,34 @@ export async function cleanStalePointers() {
 }
 
 /**
+ * Parse a semver-like version string and check if it meets the minimum.
+ * Accepts formats like "0.116.0" or "codex-cli 0.116.0".
+ *
+ * @param {string} versionStr
+ * @param {number} minMajor
+ * @param {number} minMinor
+ * @param {number} minPatch
+ * @returns {boolean}
+ */
+export function meetsMinVersion(versionStr, minMajor, minMinor, minPatch) {
+  const match = String(versionStr).match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return false;
+  const [, major, minor, patch] = match.map(Number);
+  if (major > minMajor) return true;
+  if (major < minMajor) return false;
+  if (minor > minMinor) return true;
+  if (minor < minMinor) return false;
+  return patch >= minPatch;
+}
+
+/**
  * Detect available capabilities for orchestrator execution.
  * All checks are fail-safe: if detection fails, capability is marked false.
  *
  * @returns {Promise<{
  *   hasTmux: boolean,
  *   hasCodex: boolean,
+ *   hasCodexExecJson: boolean,
  *   hasGitWorktree: boolean,
  *   hasTeamTools: boolean,
  *   hasPreviewMCP: boolean
@@ -133,6 +156,17 @@ export async function detectCapabilities() {
     // codex not found
   }
 
+  // Detect codex exec --json support (requires codex-cli >= 0.116.0)
+  let hasCodexExecJson = false;
+  try {
+    const codexVersion = execFileSync(resolveBinary('codex'), ['--version'], {
+      stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
+    }).trim();
+    hasCodexExecJson = meetsMinVersion(codexVersion, 0, 116, 0);
+  } catch {
+    hasCodexExecJson = false;
+  }
+
   let hasGitWorktree = false;
   try {
     execFileSync('git', ['worktree', 'list'], { stdio: 'ignore' });
@@ -147,7 +181,7 @@ export async function detectCapabilities() {
   // Preview MCP is available if .claude/launch.json exists
   const hasPreviewMCP = existsSync('.claude/launch.json');
 
-  return { hasTmux, hasCodex, hasGitWorktree, hasTeamTools, hasPreviewMCP };
+  return { hasTmux, hasCodex, hasCodexExecJson, hasGitWorktree, hasTeamTools, hasPreviewMCP };
 }
 
 /**

@@ -395,3 +395,85 @@ test('formatPreflightReport: includes capability report when capabilities presen
   assert.ok(formatted.includes('tmux'), 'should include tmux capability');
   assert.ok(formatted.includes('team tools'), 'should include team tools capability');
 });
+
+// ---------------------------------------------------------------------------
+// meetsMinVersion
+// ---------------------------------------------------------------------------
+
+test('meetsMinVersion: returns true for version exactly at minimum', async () => {
+  const { meetsMinVersion } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(meetsMinVersion('0.116.0', 0, 116, 0), true);
+});
+
+test('meetsMinVersion: returns true for version above minimum (higher minor)', async () => {
+  const { meetsMinVersion } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(meetsMinVersion('0.117.0', 0, 116, 0), true);
+});
+
+test('meetsMinVersion: returns true for version above minimum (higher patch)', async () => {
+  const { meetsMinVersion } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(meetsMinVersion('0.116.5', 0, 116, 0), true);
+});
+
+test('meetsMinVersion: returns false for version below minimum (lower minor)', async () => {
+  const { meetsMinVersion } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(meetsMinVersion('0.115.9', 0, 116, 0), false);
+});
+
+test('meetsMinVersion: returns false for version below minimum (lower patch)', async () => {
+  const { meetsMinVersion } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(meetsMinVersion('0.115.0', 0, 116, 0), false);
+});
+
+test('meetsMinVersion: parses "codex-cli 0.116.0" format correctly', async () => {
+  const { meetsMinVersion } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(meetsMinVersion('codex-cli 0.116.0', 0, 116, 0), true);
+});
+
+test('meetsMinVersion: parses "codex-cli 0.115.9" format and returns false', async () => {
+  const { meetsMinVersion } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(meetsMinVersion('codex-cli 0.115.9', 0, 116, 0), false);
+});
+
+test('meetsMinVersion: returns false for invalid/empty string', async () => {
+  const { meetsMinVersion } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(meetsMinVersion('', 0, 116, 0), false);
+  assert.equal(meetsMinVersion('not-a-version', 0, 116, 0), false);
+  assert.equal(meetsMinVersion(null, 0, 116, 0), false);
+  assert.equal(meetsMinVersion(undefined, 0, 116, 0), false);
+});
+
+test('meetsMinVersion: returns true when major is higher than minimum', async () => {
+  const { meetsMinVersion } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(meetsMinVersion('1.0.0', 0, 116, 0), true);
+});
+
+// ---------------------------------------------------------------------------
+// detectCapabilities — hasCodexExecJson field
+// ---------------------------------------------------------------------------
+
+test('detectCapabilities: returns hasCodexExecJson as boolean', async () => {
+  const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
+  const caps = await detectCapabilities();
+  assert.ok(typeof caps.hasCodexExecJson === 'boolean', 'hasCodexExecJson must be a boolean');
+});
+
+test('detectCapabilities: hasCodexExecJson is false when codex is not installed', async () => {
+  // This test verifies fail-safe behaviour — if codex throws, hasCodexExecJson must be false.
+  // We cannot easily mock execFileSync here, so we verify the invariant: if hasCodex is false,
+  // hasCodexExecJson must also be false (cannot have json support without the binary).
+  const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
+  const caps = await detectCapabilities();
+  if (!caps.hasCodex) {
+    assert.equal(caps.hasCodexExecJson, false, 'hasCodexExecJson must be false when codex is absent');
+  }
+});
+
+test('detectCapabilities: handles all binary fields including hasCodexExecJson as booleans', async () => {
+  const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
+  const caps = await detectCapabilities();
+  const allFields = ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasGitWorktree', 'hasTeamTools', 'hasPreviewMCP'];
+  for (const key of allFields) {
+    assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
+  }
+});

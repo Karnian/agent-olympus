@@ -195,9 +195,11 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   Codebase context: <explore_results>. Task: <user_request>")
 ```
 
-If `NEEDS_CODEX`, simultaneously spawn Codex via tmux:
+If `NEEDS_CODEX`, simultaneously spawn Codex (batch executor — adapter auto-selected):
 ```bash
-# Resolve binary path first — worktree shells may not inherit full PATH
+# Adapter auto-selected by worker-spawn.mjs selectAdapter():
+# codex-appserver > codex-exec > tmux (fallback)
+# tmux fallback resolves binary path + injects PATH for worktree shells:
 CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-analyze" -c "<cwd>"
 tmux send-keys -t "atlas-codex-analyze" "\"$CODEX_BIN\" exec \"<analysis prompt>\"" Enter
@@ -441,45 +443,52 @@ Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...
   Follow these golden principles: <harness_context>")
 ```
 
-**Codex deep workers (via tmux):**
+**Codex deep workers** (batch executors — adapter auto-selected by `selectAdapter()`):
 ```bash
-# Resolve binary path first — worktree shells may not inherit full PATH
+# Adapter auto-selected: codex-appserver > codex-exec > tmux
+# tmux fallback resolves binary + injects PATH:
 CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-<N>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-<N>" "\"$CODEX_BIN\" exec \"<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]\"" Enter
+tmux send-keys -t "atlas-codex-<N>" "\"$CODEX_BIN\" exec \"<implementation prompt>\"" Enter
 # Monitor: tmux capture-pane -pt "atlas-codex-<N>" -S -200
 # Cleanup: tmux kill-session -t "atlas-codex-<N>"
 ```
 
 **Codex failure detection and Claude fallback:**
 
-After spawning each Codex worker, poll `tmux capture-pane` every 10–15 seconds and pass the output to `detectCodexError(output)` (from `scripts/lib/worker-spawn.mjs`):
+The monitoring system detects failures via the active adapter (codex-exec JSONL events or tmux pane output):
 
 ```javascript
-import { detectCodexError, reassignToClaude } from './scripts/lib/worker-spawn.mjs';
+import { detectCodexError, reassignToClaude, selectAdapter } from './scripts/lib/worker-spawn.mjs';
 
-const paneOutput = capturePane(`atlas-codex-${N}`, 200);
-const errorCheck = detectCodexError(paneOutput);
+// monitorTeam() handles adapter dispatch automatically.
+// For codex-exec: failures detected via item.status="failed" + mapJsonlErrorToCategory()
+// For tmux: failures detected via detectCodexError(paneOutput) regex patterns
+// Error categories: auth_failed, rate_limited, not_installed, network, crash, timeout, unknown
 
 if (errorCheck.failed) {
-  // Log the failure reason so it's visible in the session
-  console.error(`[atlas] Codex worker atlas-codex-${N} failed: ${errorCheck.reason} — ${errorCheck.message}`);
+  // reassignToClaude() is adapter-aware — shuts down correct adapter type
+  const fallback = await reassignToClaude('atlas', `codex-${N}`, originalPrompt, errorCheck.reason);
 
-  // Kill the tmux session and record the event in wisdom.
-  // Pass the session name explicitly to avoid the default sessionName() mismatch
-  // (atlas uses 'atlas-codex-N' directly, not 'omc-team-atlas-codex-N').
-  const fallback = await reassignToClaude('atlas', `codex-${N}`, originalPrompt, errorCheck.reason, `atlas-codex-${N}`);
-
-  // Spawn a Claude executor with the same prompt
+  // Spawn Claude replacement
   Task(subagent_type="agent-olympus:executor", model="sonnet",
     prompt=`${fallback.prompt}`)
 }
 ```
 
 Rules:
-- If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again in this session — use Claude for all remaining Codex stories.
+- If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again in this session.
 - If `errorCheck.reason` is `'crash'`, you may retry Codex once; if it crashes again, fall back to Claude.
-- Always call `await reassignToClaude()` before spawning the Claude replacement — it handles tmux cleanup and wisdom recording.
+- If `errorCheck.reason` is `'timeout'`, retry once before reassigning.
+- `reassignToClaude()` handles adapter-specific cleanup (codex-exec process kill or tmux session kill) and wisdom recording.
+
+**Task Chaining** (for iterative Codex work):
+Since Codex is a batch executor, multi-step work uses sequential calls:
+```
+exec #1: "Analyze the API" → Result A
+Atlas: merges Result A + own analysis
+exec #2: "Implement changes based on: {merged feedback}" → Result B
+```
 
 **TDD Routing** (per story, before spawning executor):
 If story has `requiresTDD: true` OR `acceptanceCriteria` contains testable/behavioral conditions:
