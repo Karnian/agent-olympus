@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.9.3] - 2026-04-02
+
+### Added — Cross-Session Management System
+
+세션 간 지식 공유 및 추적 시스템. 새 세션에서 이전 세션 작업을 조회하고, 필요 시 잠든 세션을 재개할 수 있음.
+Codex(GPT-5.4) + Claude code-reviewer 교차검증 완료.
+
+#### Session Registry (`scripts/lib/session-registry.mjs`) *(new)*
+- `registerSession()` — SessionStart 훅에서 세션 메타데이터 기록
+- `finalizeSession()` — SessionEnd 훅에서 세션 종료 처리
+- `recoverCrashedSession()` — 비정상 종료 감지 + 자동 복구 (isSessionAlive 확인 후 마킹)
+- `linkRunToSession()` — Atlas/Athena run을 세션에 연결
+- `getCurrentSessionId()`, `getSession()`, `listSessions()` — 세션 조회
+- `isSessionAlive()` — `~/.claude/sessions/` 확인으로 재개 가능 여부 판별
+- `pruneSessions()` — 90일 TTL 기반 정리 (active 세션 보호)
+- 저장소: `.ao/sessions/<sessionId>.json` (프로젝트 루트, worktree 공유)
+- 포인터: `.ao/state/ao-current-session.json` (crash recovery용)
+
+#### SessionStart Hook 확장 (`scripts/session-start.mjs`)
+- crash recovery: 이전 세션 포인터 잔존 시 crashed로 마킹 + 알림
+- 새 세션 등록: stdin의 `session_id`로 `registerSession()` 호출
+
+#### SessionEnd Hook 확장 (`scripts/session-end.mjs`)
+- 세션 종료 기록: `finalizeSession(sessionId, { status: 'ended' })`
+- 10% 확률 자동 정리: `pruneSessions()` (오버헤드 방지)
+
+#### Run-Artifacts 연동 (`scripts/lib/run-artifacts.mjs`)
+- `createRun()` 시 현재 sessionId를 summary에 포함 + `linkRunToSession()` 호출
+
+#### `/sessions` 스킬 *(new)* (`skills/sessions/SKILL.md`)
+- `/sessions` — 최근 세션 목록 + 활성 checkpoint + resume 가능 여부
+- `/sessions <id>` — 세션 상세 + 관련 run 정보
+- `/sessions search <keyword>` — branch명, CWD 기반 검색
+- `/sessions cleanup` — 90일+ 기록 정리 + stale state 정리
+- `/sessions resume <id>` — tmux에서 `claude -r <id>` 실행으로 세션 재개
+
+### Fixed — Cross-Validation Bug Fixes (Codex + Claude code-reviewer)
+
+- **CRITICAL**: `currentSessionPath()` — `process.cwd()` → `resolveProjectRoot()` 변경. worktree에서 포인터 파일 경로 불일치로 crash recovery 오작동하던 문제 수정
+- **HIGH**: `recoverCrashedSession()` — `isSessionAlive()` 체크 추가. 동시 세션 환경에서 살아있는 세션을 crashed로 잘못 마킹하는 문제 수정
+- **HIGH**: `pruneSessions()` — `status === 'active'` 세션 skip 가드 추가. active 세션이 TTL에 의해 삭제되는 문제 수정
+
+### Meta
+
+- Version: **0.9.2 → 0.9.3**
+- Test count: **550 → 575** (+25 new tests, 0 failures)
+- Test files: **36 → 37** (`session-registry.test.mjs`)
+- Skill count: **25 → 26** (`sessions`)
+- Cross-validation: Codex (GPT-5.4) + Claude code-reviewer — CRITICAL 1건, HIGH 2건, MEDIUM 1건 발견 및 수정
+- Branch: `claude/vigorous-rhodes`
+
 ## [0.9.0] - 2026-04-01
 
 ### Added — Source-Informed Improvements (PR #11)

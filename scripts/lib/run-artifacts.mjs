@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync, existsSync, appendFileSync, readdirSync, unlin
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
+import { getCurrentSessionId, linkRunToSession } from './session-registry.mjs';
 
 const RUNS_BASE = join('.ao', 'artifacts', 'runs');
 const STATE_DIR = join('.ao', 'state');
@@ -188,18 +189,27 @@ export function createRun(orchestrator, taskDescription, opts = {}) {
 
     mkdirSync(dir, { recursive: true, mode: 0o700 });
 
+    // Link to current Claude Code session if available
+    const sessionId = getCurrentSessionId({ stateBase: opts.stateDir || STATE_DIR });
+
     const summary = {
       runId,
       orchestrator,
       task: taskDescription,
       startedAt: now.toISOString(),
       status: 'running',
+      ...(sessionId ? { sessionId } : {}),
     };
 
     atomicWriteFileSync(join(dir, 'summary.json'), JSON.stringify(summary, null, 2));
 
     // Write active-run pointer (US-001)
     setActiveRunId(orchestrator, runId, { stateDir: opts.stateDir || STATE_DIR });
+
+    // Link run to session record (cross-reference)
+    if (sessionId) {
+      try { linkRunToSession(runId, { stateBase: opts.stateDir || STATE_DIR }); } catch {}
+    }
 
     return { runId, runDir: dir };
   } catch {
