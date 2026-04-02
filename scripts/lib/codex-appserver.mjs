@@ -1,10 +1,20 @@
 /**
  * Codex App-Server v2 adapter — JSON-RPC 2.0 over stdio.
  *
- * Provides multi-turn conversation support via the codex app-server protocol:
+ * Wire protocol verified against codex-cli 0.116.0 via live stdio probe:
+ *   1. Client sends `initialize` with `clientInfo: { name, version }`
+ *   2. Server responds with `result.userAgent`
+ *   3. Client sends `thread/start` → server responds with `result.thread.id`
+ *   4. Notifications use slash-separated names: `thread/started`, `turn/started`,
+ *      `item/started`, `item/completed`, `turn/completed`, `error`
+ *   5. Response paths: `result.thread.id` (not `result.threadId`),
+ *      `result.turn.id` (from turn/start or notifications)
+ *
+ * Provides multi-turn conversation support:
+ * - Initialize handshake (required before any other method)
  * - Thread creation and lifecycle (start, resume, fork, rollback)
  * - Turn management (start, steer, interrupt)
- * - Real-time notification handling (item.started, item.completed, turn.completed)
+ * - Real-time notification handling
  * - Structured error mapping (CodexErrorInfo → error categories)
  * - Graceful shutdown with SIGTERM → SIGKILL escalation
  *
@@ -24,6 +34,9 @@ const SHUTDOWN_GRACE_MS = 5000;
 
 /** Default timeout for RPC requests (ms) */
 const RPC_TIMEOUT_MS = 30000;
+
+/** Client info sent during initialize handshake */
+const CLIENT_INFO = { name: 'agent-olympus', version: '0.9.2' };
 
 // ─── JSON-RPC helpers ─────────────────────────────────────────────────────────
 
@@ -53,7 +66,6 @@ export function parseRpcMessage(line) {
   if (!trimmed) return null;
   try {
     const msg = JSON.parse(trimmed);
-    // Must be a JSON-RPC 2.0 message (response or notification)
     if (msg && typeof msg === 'object') return msg;
     return null;
   } catch {
@@ -62,16 +74,18 @@ export function parseRpcMessage(line) {
 }
 
 /**
- * Determine if a parsed JSON-RPC message is a response (has id) or notification (no id).
+ * Determine if a parsed JSON-RPC message is a response, notification, or server request.
  * @param {Object} msg
- * @returns {'response'|'notification'|'unknown'}
+ * @returns {'response'|'notification'|'request'|'unknown'}
  */
 export function classifyMessage(msg) {
   if (!msg || typeof msg !== 'object') return 'unknown';
+  // Response: has id + result or error
   if ('id' in msg && (msg.result !== undefined || msg.error !== undefined)) return 'response';
+  // Notification: has method, no id
   if (msg.method && !('id' in msg)) return 'notification';
-  // Could be a response with id but also could be a request — check for result/error
-  if ('id' in msg) return 'response';
+  // Server request: has id + method but no result/error
+  if ('id' in msg && msg.method) return 'request';
   return 'unknown';
 }
 
@@ -92,11 +106,9 @@ export function classifyMessage(msg) {
  */
 export function mapAppServerErrorCode(codexErrorInfo, fallbackMessage) {
   if (!codexErrorInfo) {
-    // Fall back to message-based heuristics (same as codex-exec)
     return _heuristicCategory(fallbackMessage);
   }
 
-  // Simple string variants
   if (typeof codexErrorInfo === 'string') {
     switch (codexErrorInfo) {
       case 'unauthorized':
@@ -122,7 +134,6 @@ export function mapAppServerErrorCode(codexErrorInfo, fallbackMessage) {
     }
   }
 
-  // Complex object variants: { httpConnectionFailed: { httpStatusCode? } }
   if (typeof codexErrorInfo === 'object') {
     if (codexErrorInfo.httpConnectionFailed) return 'network';
     if (codexErrorInfo.responseStreamConnectionFailed) return 'network';
@@ -152,6 +163,18 @@ function _heuristicCategory(text) {
   return 'unknown';
 }
 
+// ─── Notification method names (slash-separated, verified against codex 0.116.0) ──
+
+/** @type {Object<string, string>} Canonical notification method names from the wire protocol */
+const NOTIFY = {
+  THREAD_STARTED: 'thread/started',
+  TURN_STARTED: 'turn/started',
+  ITEM_STARTED: 'item/started',
+  ITEM_COMPLETED: 'item/completed',
+  TURN_COMPLETED: 'turn/completed',
+  ERROR: 'codex/error',  // Namespaced to avoid conflict with EventEmitter's built-in 'error' event
+};
+
 // ─── AppServerHandle ──────────────────────────────────────────────────────────
 
 /**
@@ -169,12 +192,15 @@ function _heuristicCategory(text) {
  * @property {Object|null} _turnError - Error from turn completion
  * @property {number|null} _exitCode - Process exit code
  * @property {string[]} _stderrChunks - Accumulated stderr
+ * @property {boolean} _initialized - Whether initialize handshake completed
  * @property {string} _adapterName - Always 'codex-appserver'
  */
 
 /**
  * Start the codex app-server subprocess.
  * Returns a handle for sending RPC requests and receiving notifications.
+ *
+ * NOTE: The handle is NOT ready until initializeServer() completes the handshake.
  *
  * @param {Object} [opts]
  * @param {string} [opts.cwd] - Working directory
@@ -216,6 +242,7 @@ export function startServer(opts = {}) {
     _turnError: null,
     _exitCode: null,
     _stderrChunks: [],
+    _initialized: false,
     _adapterName: 'codex-appserver',
   };
 
@@ -232,7 +259,6 @@ export function startServer(opts = {}) {
       const kind = classifyMessage(msg);
 
       if (kind === 'response') {
-        // Resolve pending RPC request
         const handler = handle._pending.get(msg.id);
         if (handler) {
           handle._pending.delete(msg.id);
@@ -241,7 +267,20 @@ export function startServer(opts = {}) {
       } else if (kind === 'notification') {
         _processNotification(handle, msg);
         emitter.emit('notification', msg);
-        if (msg.method) emitter.emit(msg.method, msg.params || msg);
+        if (msg.method) {
+          // Map wire 'error' to 'codex/error' to avoid EventEmitter collision
+          const emitName = msg.method === 'error' ? NOTIFY.ERROR : msg.method;
+          emitter.emit(emitName, msg.params || msg);
+        }
+      } else if (kind === 'request') {
+        // Server-initiated request (e.g., approval prompts).
+        // Auto-respond with empty result — we use approvalPolicy: 'never'.
+        try {
+          const resp = JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} });
+          handle.process.stdin.write(resp + '\n');
+        } catch {
+          // stdin may be closed
+        }
       }
     }
   });
@@ -253,15 +292,13 @@ export function startServer(opts = {}) {
     }
   });
 
-  // Process exit
+  // Process exit — register BEFORE any signals to avoid missing immediate exits
   child.on('exit', (code) => {
     handle._exitCode = code;
     if (handle.status === 'starting' || handle.status === 'ready' || handle.status === 'running') {
       handle.status = 'failed';
     }
-    // Flush partial buffer
     _flushPartial(handle);
-    // Reject all pending requests
     for (const [id, handler] of handle._pending) {
       handler.resolve({ jsonrpc: '2.0', id, error: { code: -1, message: 'Server process exited' } });
     }
@@ -275,14 +312,40 @@ export function startServer(opts = {}) {
     emitter.emit('error', err);
   });
 
-  // Mark as ready after a short delay (server starts immediately in stdio mode)
-  handle.status = 'ready';
-
   return handle;
 }
 
 /**
+ * Perform the required `initialize` handshake with the app-server.
+ * Must be called after startServer() and before any other method.
+ *
+ * Wire protocol: Client sends `initialize` with `clientInfo`, server responds
+ * with `userAgent` and platform info. No separate `initialized` notification.
+ *
+ * @param {AppServerHandle} handle
+ * @param {Object} [clientInfo] - Override client info (for testing)
+ * @returns {Promise<{ error?: Object }>}
+ */
+export async function initializeServer(handle, clientInfo) {
+  const response = await sendRequest(handle, 'initialize', {
+    clientInfo: clientInfo || CLIENT_INFO,
+  });
+
+  if (response.error) {
+    return { error: response.error };
+  }
+
+  handle._initialized = true;
+  handle.status = 'ready';
+  return {};
+}
+
+/**
  * Process a JSON-RPC notification and update handle state.
+ *
+ * Notification method names are slash-separated per the codex app-server wire protocol:
+ *   thread/started, turn/started, item/started, item/completed, turn/completed, error
+ *
  * @param {AppServerHandle} handle
  * @param {Object} notification
  */
@@ -291,30 +354,31 @@ function _processNotification(handle, notification) {
   const params = notification.params || {};
 
   switch (method) {
-    case 'threadStarted': {
-      if (params.threadId) handle.threadId = params.threadId;
+    case NOTIFY.THREAD_STARTED: {
+      // Wire: params.thread.id (not params.threadId)
+      const threadId = params.thread?.id;
+      if (threadId) handle.threadId = threadId;
       break;
     }
-    case 'turnStarted': {
+    case NOTIFY.TURN_STARTED: {
       handle.status = 'running';
+      // Wire: params.turn.id
       if (params.turn?.id) handle.turnId = params.turn.id;
       handle._items = [];
       handle._output = '';
       handle._turnError = null;
       break;
     }
-    case 'itemStarted': {
-      // Track in-progress items
+    case NOTIFY.ITEM_STARTED: {
       if (params.item) {
         handle._items.push({ ...params.item, _phase: 'started' });
       }
       break;
     }
-    case 'itemCompleted': {
+    case NOTIFY.ITEM_COMPLETED: {
       const item = params.item;
       if (!item) break;
 
-      // Replace the started version with the completed one
       const idx = handle._items.findIndex(i => i.id === item.id);
       if (idx >= 0) {
         handle._items[idx] = { ...item, _phase: 'completed' };
@@ -322,7 +386,6 @@ function _processNotification(handle, notification) {
         handle._items.push({ ...item, _phase: 'completed' });
       }
 
-      // Accumulate readable output
       if (item.type === 'agentMessage' && item.text) {
         handle._output += item.text + '\n';
       } else if (item.type === 'commandExecution' && item.aggregatedOutput) {
@@ -330,28 +393,32 @@ function _processNotification(handle, notification) {
       }
       break;
     }
-    case 'turnCompleted': {
+    case NOTIFY.TURN_COMPLETED: {
+      // Wire: params.turn.status.type (status is an object like {type: "completed"})
       const turn = params.turn || params;
-      const turnStatus = turn.status || 'completed';
+      const statusObj = turn.status;
+      const turnStatus = (typeof statusObj === 'object' && statusObj !== null)
+        ? statusObj.type
+        : (statusObj || 'completed');
 
       if (turnStatus === 'completed') {
         handle.status = 'completed';
       } else if (turnStatus === 'interrupted') {
-        handle.status = 'completed'; // Interruption is a clean stop
+        handle.status = 'completed';
       } else if (turnStatus === 'failed') {
         handle.status = 'failed';
         handle._turnError = turn.error || null;
       }
       break;
     }
-    case 'errorNotification': {
-      // Non-turn errors (server-level)
+    case 'error': {
+      // Wire method name is 'error' — maps to NOTIFY.ERROR ('codex/error') for emitting
       if (!params.willRetry) {
         handle._turnError = params.error || { message: 'Unknown error' };
       }
       break;
     }
-    // Ignore other notifications (threadStatusChanged, tokenUsageUpdated, etc.)
+    // Ignore other notifications (thread/statusChanged, tokenUsageUpdated, etc.)
   }
 }
 
@@ -425,6 +492,8 @@ export function sendRequest(handle, method, params, timeoutMs = RPC_TIMEOUT_MS) 
 /**
  * Create a new conversation thread.
  *
+ * Wire: thread/start → result.thread.id
+ *
  * @param {AppServerHandle} handle
  * @param {Object} [opts]
  * @param {string} [opts.cwd] - Working directory
@@ -435,6 +504,10 @@ export function sendRequest(handle, method, params, timeoutMs = RPC_TIMEOUT_MS) 
  * @returns {Promise<{ threadId?: string, error?: Object }>}
  */
 export async function createThread(handle, opts = {}) {
+  if (!handle._initialized) {
+    return { error: { code: -10, message: 'Server not initialized. Call initializeServer() first.' } };
+  }
+
   const params = {
     ephemeral: opts.ephemeral !== false,
     approvalPolicy: opts.approvalPolicy || 'never',
@@ -449,7 +522,8 @@ export async function createThread(handle, opts = {}) {
     return { error: response.error };
   }
 
-  const threadId = response.result?.threadId || handle.threadId;
+  // Wire: result.thread.id (not result.threadId)
+  const threadId = response.result?.thread?.id || handle.threadId;
   if (threadId) handle.threadId = threadId;
 
   return { threadId };
@@ -457,6 +531,8 @@ export async function createThread(handle, opts = {}) {
 
 /**
  * Start a new turn in the current thread.
+ *
+ * Wire: turn/start → result.turn.id (from response or turn/started notification)
  *
  * @param {AppServerHandle} handle
  * @param {string} prompt - User input text
@@ -490,7 +566,8 @@ export async function startTurn(handle, prompt, opts = {}) {
   handle._turnError = null;
   handle.status = 'running';
 
-  const turnId = response.result?.turnId || handle.turnId;
+  // Wire: result.turn.id (not result.turnId)
+  const turnId = response.result?.turn?.id || handle.turnId;
   if (turnId) handle.turnId = turnId;
 
   return { turnId };
@@ -582,7 +659,7 @@ export function monitor(handle) {
 
 /**
  * Wait for the current turn to complete.
- * Resolves when turnCompleted notification arrives, process exits, or timeout.
+ * Resolves when turn/completed notification arrives, process exits, or timeout.
  *
  * @param {AppServerHandle} handle
  * @param {number} [timeoutMs=120000] - Max wait time (2 minutes default)
@@ -590,7 +667,6 @@ export function monitor(handle) {
  */
 export function collectTurnResult(handle, timeoutMs = 120000) {
   return new Promise((resolve) => {
-    // Already done
     if (handle.status === 'completed' || handle.status === 'failed') {
       resolve(monitor(handle));
       return;
@@ -609,7 +685,7 @@ export function collectTurnResult(handle, timeoutMs = 120000) {
       settle();
     }, timeoutMs);
 
-    // Listen for turn completion
+    // Listen for turn completion (slash-separated notification name)
     const onTurnCompleted = () => {
       clearTimeout(timer);
       handle.events.removeListener('exit', onExit);
@@ -618,11 +694,11 @@ export function collectTurnResult(handle, timeoutMs = 120000) {
 
     const onExit = () => {
       clearTimeout(timer);
-      handle.events.removeListener('turnCompleted', onTurnCompleted);
+      handle.events.removeListener(NOTIFY.TURN_COMPLETED, onTurnCompleted);
       settle();
     };
 
-    handle.events.once('turnCompleted', onTurnCompleted);
+    handle.events.once(NOTIFY.TURN_COMPLETED, onTurnCompleted);
     handle.events.once('exit', onExit);
   });
 }
@@ -662,7 +738,8 @@ export async function executeTurn(handle, prompt, opts = {}) {
 
 /**
  * Shutdown the app-server process gracefully.
- * Sends SIGTERM first; escalates to SIGKILL on the process group after graceMs.
+ * Registers exit listener BEFORE sending SIGTERM to avoid missing immediate exits.
+ * Escalates to SIGKILL on the process group after graceMs.
  *
  * @param {AppServerHandle} handle
  * @param {number} [graceMs=5000]
@@ -671,13 +748,8 @@ export async function executeTurn(handle, prompt, opts = {}) {
 export function shutdownServer(handle, graceMs = SHUTDOWN_GRACE_MS) {
   if (!handle.process || handle.process.killed) return Promise.resolve();
 
-  // Try to close stdin gracefully first
-  try { handle.process.stdin.end(); } catch {}
-
-  // Send SIGTERM
-  try { handle.process.kill('SIGTERM'); } catch {}
-
   return new Promise((resolve) => {
+    // Register exit listener FIRST to avoid race with immediate exit
     const timer = setTimeout(() => {
       // Escalate: SIGKILL the entire process group
       try { process.kill(-handle.pid, 'SIGKILL'); } catch {}
@@ -690,6 +762,10 @@ export function shutdownServer(handle, graceMs = SHUTDOWN_GRACE_MS) {
       clearTimeout(timer);
       resolve();
     });
+
+    // Now send signals — after listener is registered
+    try { handle.process.stdin.end(); } catch {}
+    try { handle.process.kill('SIGTERM'); } catch {}
   });
 }
 
@@ -697,9 +773,10 @@ export function shutdownServer(handle, graceMs = SHUTDOWN_GRACE_MS) {
 
 /**
  * Register a callback for a specific notification type.
+ * Use slash-separated names: 'item/completed', 'turn/completed', etc.
  *
  * @param {AppServerHandle} handle
- * @param {string} method - Notification method name (e.g., 'itemCompleted', 'turnCompleted')
+ * @param {string} method - Notification method name (e.g., 'item/completed', 'turn/completed')
  * @param {Function} callback - Handler function
  * @returns {Function} Unsubscribe function
  */
@@ -707,3 +784,6 @@ export function onNotification(handle, method, callback) {
   handle.events.on(method, callback);
   return () => handle.events.removeListener(method, callback);
 }
+
+// Re-export NOTIFY for tests and consumers
+export { NOTIFY };

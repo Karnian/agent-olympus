@@ -298,11 +298,17 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
 
     if (adapterNames[i] === 'codex-appserver') {
       // Spawn via codex-appserver adapter (multi-turn)
+      let serverHandle = null;
       try {
-        const serverHandle = codexAppServer.startServer({
+        serverHandle = codexAppServer.startServer({
           cwd,
           sessionSource: `agent-olympus:${teamName}`,
         });
+        // Initialize handshake (required before any other method)
+        const initResult = await codexAppServer.initializeServer(serverHandle);
+        if (initResult.error) {
+          throw new Error(initResult.error.message || 'Failed to initialize server');
+        }
         // Create thread and start first turn
         const threadResult = await codexAppServer.createThread(serverHandle, {
           cwd,
@@ -323,6 +329,10 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
       } catch (err) {
         state.workers[i].status = 'failed';
         state.workers[i].error = err.message;
+        // Cleanup: kill the server process to prevent orphaned detached processes
+        if (serverHandle) {
+          try { await codexAppServer.shutdownServer(serverHandle, 2000); } catch {}
+        }
       }
     } else if (adapterNames[i] === 'codex-exec') {
       // Spawn via codex-exec adapter

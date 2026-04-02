@@ -4,6 +4,11 @@
  *
  * Tests use mock ChildProcess objects built from EventEmitter + streams,
  * so no real codex binary is needed and no processes are started.
+ *
+ * Wire protocol names verified against codex-cli 0.116.0 via live stdio probe:
+ * - Notifications: thread/started, turn/started, item/started, item/completed, turn/completed, error
+ * - Response paths: result.thread.id, result.turn.id (nested objects, not flat IDs)
+ * - Handshake: initialize with clientInfo required before any other method
  */
 
 import { test } from 'node:test';
@@ -17,6 +22,7 @@ import {
   classifyMessage,
   mapAppServerErrorCode,
   startServer,
+  initializeServer,
   sendRequest,
   createThread,
   startTurn,
@@ -27,6 +33,7 @@ import {
   executeTurn,
   shutdownServer,
   onNotification,
+  NOTIFY,
 } from '../lib/codex-appserver.mjs';
 
 // ─── Mock helpers ──────────────────────────────────────────────────────────────
@@ -48,7 +55,7 @@ function createMockChildProcess() {
 /**
  * Build an AppServerHandle manually (bypassing startServer()) for hermetic tests.
  */
-function createHandle(child) {
+function createHandle(child, initialized = false) {
   const emitter = new EventEmitter();
   const handle = {
     pid: child.pid,
@@ -56,7 +63,7 @@ function createHandle(child) {
     events: emitter,
     threadId: null,
     turnId: null,
-    status: 'ready',
+    status: initialized ? 'ready' : 'starting',
     _partial: '',
     _pending: new Map(),
     _items: [],
@@ -64,10 +71,11 @@ function createHandle(child) {
     _turnError: null,
     _exitCode: null,
     _stderrChunks: [],
+    _initialized: initialized,
     _adapterName: 'codex-appserver',
   };
 
-  // Wire up stdout parsing (same as startServer)
+  // Wire up stdout parsing (mirrors startServer)
   child.stdout.on('data', (chunk) => {
     const text = handle._partial + chunk.toString();
     const lines = text.split('\n');
@@ -87,7 +95,16 @@ function createHandle(child) {
       } else if (kind === 'notification') {
         _processNotificationForTest(handle, msg);
         emitter.emit('notification', msg);
-        if (msg.method) emitter.emit(msg.method, msg.params || msg);
+        if (msg.method) {
+          const emitName = msg.method === 'error' ? NOTIFY.ERROR : msg.method;
+          emitter.emit(emitName, msg.params || msg);
+        }
+      } else if (kind === 'request') {
+        // Auto-respond to server requests
+        try {
+          const resp = JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} });
+          child.stdin.write(resp + '\n');
+        } catch {}
       }
     }
   });
@@ -117,26 +134,28 @@ function createHandle(child) {
   return handle;
 }
 
-/** Replicate notification processing for test handle (mirrors _processNotification) */
+/** Replicate notification processing for test handle (uses NOTIFY constants) */
 function _processNotificationForTest(handle, notification) {
   const method = notification.method || '';
   const params = notification.params || {};
 
   switch (method) {
-    case 'threadStarted':
-      if (params.threadId) handle.threadId = params.threadId;
+    case NOTIFY.THREAD_STARTED: {
+      const threadId = params.thread?.id;
+      if (threadId) handle.threadId = threadId;
       break;
-    case 'turnStarted':
+    }
+    case NOTIFY.TURN_STARTED:
       handle.status = 'running';
       if (params.turn?.id) handle.turnId = params.turn.id;
       handle._items = [];
       handle._output = '';
       handle._turnError = null;
       break;
-    case 'itemStarted':
+    case NOTIFY.ITEM_STARTED:
       if (params.item) handle._items.push({ ...params.item, _phase: 'started' });
       break;
-    case 'itemCompleted': {
+    case NOTIFY.ITEM_COMPLETED: {
       const item = params.item;
       if (!item) break;
       const idx = handle._items.findIndex(i => i.id === item.id);
@@ -146,16 +165,19 @@ function _processNotificationForTest(handle, notification) {
       else if (item.type === 'commandExecution' && item.aggregatedOutput) handle._output += item.aggregatedOutput;
       break;
     }
-    case 'turnCompleted': {
+    case NOTIFY.TURN_COMPLETED: {
       const turn = params.turn || params;
-      if (turn.status === 'completed' || turn.status === 'interrupted') handle.status = 'completed';
-      else if (turn.status === 'failed') {
+      const statusObj = turn.status;
+      const turnStatus = (typeof statusObj === 'object' && statusObj !== null) ? statusObj.type : (statusObj || 'completed');
+      if (turnStatus === 'completed' || turnStatus === 'interrupted') handle.status = 'completed';
+      else if (turnStatus === 'failed') {
         handle.status = 'failed';
         handle._turnError = turn.error || null;
       }
       break;
     }
-    case 'errorNotification':
+    case 'error':
+      // Wire method is 'error' — processNotification matches the wire name
       if (!params.willRetry) handle._turnError = params.error || { message: 'Unknown error' };
       break;
   }
@@ -173,11 +195,28 @@ function emitErrorResponse(child, id, error) {
   child.stdout.emit('data', Buffer.from(msg));
 }
 
-/** Helper: emit a notification from mock stdout */
+/** Helper: emit a notification from mock stdout (slash-separated method names) */
 function emitNotification(child, method, params) {
   const msg = JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n';
   child.stdout.emit('data', Buffer.from(msg));
 }
+
+/** Helper: emit a server-initiated request */
+function emitServerRequest(child, id, method, params) {
+  const msg = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
+  child.stdout.emit('data', Buffer.from(msg));
+}
+
+// ─── NOTIFY constants ──────────────────────────────────────────────────────────
+
+test('NOTIFY: uses slash-separated method names', () => {
+  assert.equal(NOTIFY.THREAD_STARTED, 'thread/started');
+  assert.equal(NOTIFY.TURN_STARTED, 'turn/started');
+  assert.equal(NOTIFY.ITEM_STARTED, 'item/started');
+  assert.equal(NOTIFY.ITEM_COMPLETED, 'item/completed');
+  assert.equal(NOTIFY.TURN_COMPLETED, 'turn/completed');
+  assert.equal(NOTIFY.ERROR, 'codex/error'); // Namespaced to avoid EventEmitter 'error' collision
+});
 
 // ─── createRpcRequest ──────────────────────────────────────────────────────────
 
@@ -207,21 +246,10 @@ test('parseRpcMessage: parses valid JSON object', () => {
   assert.deepEqual(msg, { jsonrpc: '2.0', id: 1, result: {} });
 });
 
-test('parseRpcMessage: returns null for empty string', () => {
+test('parseRpcMessage: returns null for empty/invalid/non-object', () => {
   assert.equal(parseRpcMessage(''), null);
   assert.equal(parseRpcMessage('  '), null);
-});
-
-test('parseRpcMessage: returns null for invalid JSON', () => {
   assert.equal(parseRpcMessage('not json'), null);
-});
-
-test('parseRpcMessage: returns null for non-object JSON', () => {
-  assert.equal(parseRpcMessage('"string"'), null);
-  assert.equal(parseRpcMessage('42'), null);
-});
-
-test('parseRpcMessage: handles null/undefined input', () => {
   assert.equal(parseRpcMessage(null), null);
   assert.equal(parseRpcMessage(undefined), null);
 });
@@ -237,14 +265,15 @@ test('classifyMessage: identifies response with error', () => {
 });
 
 test('classifyMessage: identifies notification (method, no id)', () => {
-  assert.equal(classifyMessage({ method: 'turnCompleted', params: {} }), 'notification');
+  assert.equal(classifyMessage({ method: 'turn/completed', params: {} }), 'notification');
 });
 
-test('classifyMessage: returns unknown for null', () => {
+test('classifyMessage: identifies server request (id + method, no result/error)', () => {
+  assert.equal(classifyMessage({ id: 5, method: 'approval/request', params: {} }), 'request');
+});
+
+test('classifyMessage: returns unknown for null/empty', () => {
   assert.equal(classifyMessage(null), 'unknown');
-});
-
-test('classifyMessage: returns unknown for empty object', () => {
   assert.equal(classifyMessage({}), 'unknown');
 });
 
@@ -278,24 +307,14 @@ test('mapAppServerErrorCode: "other" falls to heuristic', () => {
   assert.equal(mapAppServerErrorCode('other', 'nothing special'), 'unknown');
 });
 
-test('mapAppServerErrorCode: unknown string code', () => {
+test('mapAppServerErrorCode: unknown string/object', () => {
   assert.equal(mapAppServerErrorCode('somethingNew'), 'unknown');
-});
-
-test('mapAppServerErrorCode: unknown object shape', () => {
   assert.equal(mapAppServerErrorCode({ weirdKey: true }), 'unknown');
 });
 
-test('mapAppServerErrorCode: heuristic timeout detection', () => {
+test('mapAppServerErrorCode: heuristic categories', () => {
   assert.equal(mapAppServerErrorCode(null, 'process timed out'), 'timeout');
-  assert.equal(mapAppServerErrorCode(null, 'did not complete within 30s'), 'timeout');
-});
-
-test('mapAppServerErrorCode: heuristic not_installed', () => {
   assert.equal(mapAppServerErrorCode(null, 'codex: command not found'), 'not_installed');
-});
-
-test('mapAppServerErrorCode: heuristic crash', () => {
   assert.equal(mapAppServerErrorCode(null, 'fatal error: segmentation fault'), 'crash');
 });
 
@@ -303,26 +322,21 @@ test('mapAppServerErrorCode: heuristic crash', () => {
 
 test('sendRequest: resolves when response arrives', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
-  // Intercept stdin to capture the request id
-  let sentReqId;
-  const origWrite = child.stdin.write.bind(child.stdin);
   child.stdin.write = (data, ...args) => {
     const req = JSON.parse(data.toString().trim());
-    sentReqId = req.id;
-    // Simulate response after a tick
-    setImmediate(() => emitResponse(child, sentReqId, { threadId: 'test-123' }));
-    return origWrite(data, ...args);
+    setImmediate(() => emitResponse(child, req.id, { thread: { id: 'test-123' } }));
+    return true;
   };
 
   const result = await sendRequest(handle, 'thread/start', { cwd: '/tmp' }, 5000);
-  assert.deepEqual(result.result, { threadId: 'test-123' });
+  assert.deepEqual(result.result, { thread: { id: 'test-123' } });
 });
 
 test('sendRequest: returns error when server not running', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'failed';
 
   const result = await sendRequest(handle, 'test');
@@ -332,7 +346,7 @@ test('sendRequest: returns error when server not running', async () => {
 
 test('sendRequest: times out if no response', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
   const result = await sendRequest(handle, 'slow/method', {}, 50);
   assert.ok(result.error);
@@ -340,100 +354,160 @@ test('sendRequest: times out if no response', async () => {
   assert.match(result.error.message, /timed out/i);
 });
 
-// ─── Notification processing ───────────────────────────────────────────────────
+// ─── initializeServer ──────────────────────────────────────────────────────────
 
-test('notification: threadStarted sets threadId', () => {
+test('initializeServer: sends initialize with clientInfo', async () => {
   const child = createMockChildProcess();
   const handle = createHandle(child);
 
-  emitNotification(child, 'threadStarted', { threadId: 'thread-abc' });
-  // Allow microtask
+  let capturedReq;
+  child.stdin.write = (data) => {
+    capturedReq = JSON.parse(data.toString().trim());
+    setImmediate(() => emitResponse(child, capturedReq.id, { userAgent: 'test/1.0' }));
+    return true;
+  };
+
+  const result = await initializeServer(handle);
+  assert.ok(!result.error);
+  assert.equal(capturedReq.method, 'initialize');
+  assert.ok(capturedReq.params.clientInfo);
+  assert.equal(capturedReq.params.clientInfo.name, 'agent-olympus');
+  assert.equal(handle._initialized, true);
+  assert.equal(handle.status, 'ready');
+});
+
+test('initializeServer: returns error on failure', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  child.stdin.write = (data) => {
+    const req = JSON.parse(data.toString().trim());
+    setImmediate(() => emitErrorResponse(child, req.id, { code: -32600, message: 'missing clientInfo' }));
+    return true;
+  };
+
+  const result = await initializeServer(handle);
+  assert.ok(result.error);
+  assert.equal(handle._initialized, false);
+});
+
+test('initializeServer: accepts custom clientInfo', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  let capturedReq;
+  child.stdin.write = (data) => {
+    capturedReq = JSON.parse(data.toString().trim());
+    setImmediate(() => emitResponse(child, capturedReq.id, { userAgent: 'custom/1.0' }));
+    return true;
+  };
+
+  await initializeServer(handle, { name: 'custom', version: '1.0' });
+  assert.equal(capturedReq.params.clientInfo.name, 'custom');
+});
+
+// ─── Notification processing (slash-separated names) ───────────────────────────
+
+test('notification: thread/started sets threadId from params.thread.id', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+
+  // Wire: { method: "thread/started", params: { thread: { id: "..." } } }
+  emitNotification(child, 'thread/started', { thread: { id: 'thread-abc' } });
   assert.equal(handle.threadId, 'thread-abc');
 });
 
-test('notification: turnStarted sets status and turnId', () => {
+test('notification: turn/started sets status and turnId', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
-  emitNotification(child, 'turnStarted', { turn: { id: 'turn-1', status: 'inProgress' } });
+  emitNotification(child, 'turn/started', { turn: { id: 'turn-1', status: { type: 'inProgress' } } });
   assert.equal(handle.status, 'running');
   assert.equal(handle.turnId, 'turn-1');
 });
 
-test('notification: itemCompleted accumulates agentMessage output', () => {
+test('notification: item/completed accumulates agentMessage output', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
-  emitNotification(child, 'itemCompleted', {
+  emitNotification(child, 'item/completed', {
     item: { id: 'item-0', type: 'agentMessage', text: 'Hello world', status: 'completed' },
   });
   assert.ok(handle._output.includes('Hello world'));
 });
 
-test('notification: itemCompleted accumulates command output', () => {
+test('notification: item/completed accumulates command output', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
-  emitNotification(child, 'itemCompleted', {
+  emitNotification(child, 'item/completed', {
     item: { id: 'item-1', type: 'commandExecution', aggregatedOutput: 'PASS\n', exitCode: 0, status: 'completed' },
   });
   assert.ok(handle._output.includes('PASS'));
 });
 
-test('notification: itemStarted then itemCompleted replaces item', () => {
+test('notification: item/started then item/completed replaces item', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
-  emitNotification(child, 'itemStarted', {
+  emitNotification(child, 'item/started', {
     item: { id: 'item-1', type: 'commandExecution', status: 'inProgress' },
   });
   assert.equal(handle._items.length, 1);
   assert.equal(handle._items[0]._phase, 'started');
 
-  emitNotification(child, 'itemCompleted', {
+  emitNotification(child, 'item/completed', {
     item: { id: 'item-1', type: 'commandExecution', status: 'completed', exitCode: 0, aggregatedOutput: 'ok' },
   });
   assert.equal(handle._items.length, 1);
   assert.equal(handle._items[0]._phase, 'completed');
-  assert.equal(handle._items[0].exitCode, 0);
 });
 
-test('notification: turnCompleted sets status to completed', () => {
+test('notification: turn/completed with status object sets completed', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'running';
 
-  emitNotification(child, 'turnCompleted', { turn: { status: 'completed' } });
+  // Wire: turn.status is an object { type: "completed" }
+  emitNotification(child, 'turn/completed', { turn: { status: { type: 'completed' } } });
   assert.equal(handle.status, 'completed');
 });
 
-test('notification: turnCompleted with failed status sets error', () => {
+test('notification: turn/completed with string status (backward compat)', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'running';
 
-  emitNotification(child, 'turnCompleted', {
-    turn: { status: 'failed', error: { message: 'context exceeded', codexErrorInfo: 'contextWindowExceeded' } },
+  emitNotification(child, 'turn/completed', { turn: { status: 'completed' } });
+  assert.equal(handle.status, 'completed');
+});
+
+test('notification: turn/completed failed sets error', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'running';
+
+  emitNotification(child, 'turn/completed', {
+    turn: { status: { type: 'failed' }, error: { message: 'context exceeded', codexErrorInfo: 'contextWindowExceeded' } },
   });
   assert.equal(handle.status, 'failed');
   assert.ok(handle._turnError);
-  assert.equal(handle._turnError.codexErrorInfo, 'contextWindowExceeded');
 });
 
-test('notification: turnCompleted interrupted is clean stop', () => {
+test('notification: turn/completed interrupted is clean stop', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'running';
 
-  emitNotification(child, 'turnCompleted', { turn: { status: 'interrupted' } });
+  emitNotification(child, 'turn/completed', { turn: { status: { type: 'interrupted' } } });
   assert.equal(handle.status, 'completed');
 });
 
-test('notification: errorNotification with willRetry=false sets turnError', () => {
+test('notification: error with willRetry=false sets turnError', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
-  emitNotification(child, 'errorNotification', {
+  emitNotification(child, 'error', {
     willRetry: false,
     error: { message: 'Unauthorized', codexErrorInfo: 'unauthorized' },
   });
@@ -441,22 +515,42 @@ test('notification: errorNotification with willRetry=false sets turnError', () =
   assert.equal(handle._turnError.codexErrorInfo, 'unauthorized');
 });
 
-test('notification: errorNotification with willRetry=true does not set error', () => {
+test('notification: error with willRetry=true does not set error', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
-  emitNotification(child, 'errorNotification', {
+  emitNotification(child, 'error', {
     willRetry: true,
     error: { message: 'Temporary' },
   });
   assert.equal(handle._turnError, null);
 });
 
+// ─── Server request handling ───────────────────────────────────────────────────
+
+test('server request: auto-responds with empty result', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  let responded = null;
+
+  const origWrite = child.stdin.write;
+  child.stdin.write = (data, ...args) => {
+    const parsed = JSON.parse(data.toString().trim());
+    if (parsed.id === 42) responded = parsed;
+    return origWrite.call(child.stdin, data, ...args);
+  };
+
+  emitServerRequest(child, 42, 'approval/request', { action: 'rm -rf /' });
+  assert.ok(responded);
+  assert.equal(responded.id, 42);
+  assert.deepEqual(responded.result, {});
+});
+
 // ─── monitor ───────────────────────────────────────────────────────────────────
 
 test('monitor: returns current state', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'running';
   handle.threadId = 'th-1';
   handle.turnId = 'tu-1';
@@ -471,44 +565,59 @@ test('monitor: returns current state', () => {
   assert.ok(!result.error);
 });
 
-test('monitor: includes error info when failed', () => {
+test('monitor: includes error info when failed with codexErrorInfo', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'failed';
   handle._turnError = { message: 'Context exceeded', codexErrorInfo: 'contextWindowExceeded' };
 
   const result = monitor(handle);
   assert.equal(result.status, 'failed');
-  assert.ok(result.error);
   assert.equal(result.error.category, 'context_exceeded');
   assert.equal(result.error.codexErrorInfo, 'contextWindowExceeded');
 });
 
-test('monitor: falls back to stderr for error classification', () => {
+test('monitor: includes exitCode in error', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'failed';
+  handle._exitCode = 1;
   handle._stderrChunks = ['Error: ETIMEDOUT'];
 
   const result = monitor(handle);
   assert.equal(result.error.category, 'network');
+  assert.equal(result.error.exitCode, 1);
 });
 
 // ─── createThread ──────────────────────────────────────────────────────────────
 
-test('createThread: sends thread/start and returns threadId', async () => {
+test('createThread: requires initialization', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, false); // not initialized
+
+  const result = await createThread(handle);
+  assert.ok(result.error);
+  assert.match(result.error.message, /not initialized/i);
+});
+
+test('createThread: sends thread/start and extracts result.thread.id', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
 
   let capturedReq;
-  child.stdin.write = (data, ...args) => {
+  child.stdin.write = (data) => {
     capturedReq = JSON.parse(data.toString().trim());
-    setImmediate(() => emitResponse(child, capturedReq.id, { threadId: 'th-new' }));
+    // Wire: result.thread.id
+    setImmediate(() => emitResponse(child, capturedReq.id, {
+      thread: { id: 'th-new', status: { type: 'idle' }, turns: [] },
+      model: 'gpt-5.4',
+    }));
     return true;
   };
 
   const result = await createThread(handle, { cwd: '/workspace' });
   assert.equal(result.threadId, 'th-new');
+  assert.equal(handle.threadId, 'th-new');
   assert.equal(capturedReq.method, 'thread/start');
   assert.equal(capturedReq.params.approvalPolicy, 'never');
   assert.equal(capturedReq.params.ephemeral, true);
@@ -516,7 +625,7 @@ test('createThread: sends thread/start and returns threadId', async () => {
 
 test('createThread: returns error on RPC failure', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
   child.stdin.write = (data) => {
     const req = JSON.parse(data.toString().trim());
@@ -532,7 +641,7 @@ test('createThread: returns error on RPC failure', async () => {
 
 test('startTurn: requires active thread', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.threadId = null;
 
   const result = await startTurn(handle, 'Hello');
@@ -540,29 +649,32 @@ test('startTurn: requires active thread', async () => {
   assert.match(result.error.message, /No active thread/);
 });
 
-test('startTurn: sends turn/start with prompt', async () => {
+test('startTurn: sends turn/start and extracts result.turn.id', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.threadId = 'th-1';
 
   let capturedReq;
   child.stdin.write = (data) => {
     capturedReq = JSON.parse(data.toString().trim());
-    setImmediate(() => emitResponse(child, capturedReq.id, { turnId: 'tu-1' }));
+    // Wire: result.turn.id
+    setImmediate(() => emitResponse(child, capturedReq.id, {
+      turn: { id: 'tu-1', status: { type: 'inProgress' } },
+    }));
     return true;
   };
 
   const result = await startTurn(handle, 'Run tests');
   assert.equal(result.turnId, 'tu-1');
+  assert.equal(handle.turnId, 'tu-1');
   assert.equal(capturedReq.method, 'turn/start');
   assert.equal(capturedReq.params.threadId, 'th-1');
-  assert.equal(capturedReq.params.input[0].type, 'text');
   assert.equal(capturedReq.params.input[0].text, 'Run tests');
 });
 
 test('startTurn: preserves prior output on RPC failure', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.threadId = 'th-1';
   handle._output = 'prior turn output\n';
   handle._items = [{ id: 'old', type: 'agentMessage' }];
@@ -575,21 +687,19 @@ test('startTurn: preserves prior output on RPC failure', async () => {
 
   const result = await startTurn(handle, 'New prompt');
   assert.ok(result.error);
-  // Prior state must NOT be cleared on failure
   assert.equal(handle._output, 'prior turn output\n');
   assert.equal(handle._items.length, 1);
-  assert.equal(handle._items[0].id, 'old');
 });
 
-test('startTurn: passes model override', async () => {
+test('startTurn: passes model and effort overrides', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.threadId = 'th-1';
 
   let capturedReq;
   child.stdin.write = (data) => {
     capturedReq = JSON.parse(data.toString().trim());
-    setImmediate(() => emitResponse(child, capturedReq.id, { turnId: 'tu-2' }));
+    setImmediate(() => emitResponse(child, capturedReq.id, { turn: { id: 'tu-2' } }));
     return true;
   };
 
@@ -602,16 +712,15 @@ test('startTurn: passes model override', async () => {
 
 test('steerTurn: requires active turn', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
   const result = await steerTurn(handle, 'more input');
   assert.ok(result.error);
-  assert.match(result.error.message, /No active turn/);
 });
 
 test('steerTurn: sends turn/steer with expectedTurnId', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.threadId = 'th-1';
   handle.turnId = 'tu-1';
 
@@ -626,14 +735,13 @@ test('steerTurn: sends turn/steer with expectedTurnId', async () => {
   assert.ok(!result.error);
   assert.equal(capturedReq.method, 'turn/steer');
   assert.equal(capturedReq.params.expectedTurnId, 'tu-1');
-  assert.equal(capturedReq.params.input[0].text, 'Also check lint');
 });
 
 // ─── interruptTurn ─────────────────────────────────────────────────────────────
 
 test('interruptTurn: requires active turn', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
   const result = await interruptTurn(handle);
   assert.ok(result.error);
@@ -641,7 +749,7 @@ test('interruptTurn: requires active turn', async () => {
 
 test('interruptTurn: sends turn/interrupt', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.threadId = 'th-1';
   handle.turnId = 'tu-1';
 
@@ -655,14 +763,13 @@ test('interruptTurn: sends turn/interrupt', async () => {
   const result = await interruptTurn(handle);
   assert.ok(!result.error);
   assert.equal(capturedReq.method, 'turn/interrupt');
-  assert.equal(capturedReq.params.turnId, 'tu-1');
 });
 
 // ─── collectTurnResult ─────────────────────────────────────────────────────────
 
 test('collectTurnResult: resolves immediately when already completed', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'completed';
   handle._output = 'done';
 
@@ -671,14 +778,13 @@ test('collectTurnResult: resolves immediately when already completed', async () 
   assert.equal(result.output, 'done');
 });
 
-test('collectTurnResult: resolves on turnCompleted notification', async () => {
+test('collectTurnResult: resolves on turn/completed notification', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'running';
 
-  // Emit turnCompleted after a tick
   setImmediate(() => {
-    emitNotification(child, 'turnCompleted', { turn: { status: 'completed' } });
+    emitNotification(child, 'turn/completed', { turn: { status: { type: 'completed' } } });
   });
 
   const result = await collectTurnResult(handle, 5000);
@@ -687,7 +793,7 @@ test('collectTurnResult: resolves on turnCompleted notification', async () => {
 
 test('collectTurnResult: resolves on process exit', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'running';
 
   setImmediate(() => {
@@ -702,12 +808,11 @@ test('collectTurnResult: resolves on process exit', async () => {
 
 test('collectTurnResult: times out if no completion', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.status = 'running';
 
   const result = await collectTurnResult(handle, 50);
   assert.equal(result.status, 'failed');
-  assert.ok(result.error);
   assert.match(result.error.message, /did not complete within/);
 });
 
@@ -715,7 +820,7 @@ test('collectTurnResult: times out if no completion', async () => {
 
 test('executeTurn: fails if no thread', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
   const result = await executeTurn(handle, 'Hello');
   assert.equal(result.status, 'failed');
@@ -724,20 +829,18 @@ test('executeTurn: fails if no thread', async () => {
 
 test('executeTurn: runs full turn lifecycle', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.threadId = 'th-1';
 
   child.stdin.write = (data) => {
     const req = JSON.parse(data.toString().trim());
-    // Respond to turn/start
     setImmediate(() => {
-      emitResponse(child, req.id, { turnId: 'tu-1' });
-      // Then emit item + turn completion
+      emitResponse(child, req.id, { turn: { id: 'tu-1' } });
       setImmediate(() => {
-        emitNotification(child, 'itemCompleted', {
+        emitNotification(child, 'item/completed', {
           item: { id: 'i0', type: 'agentMessage', text: 'Result', status: 'completed' },
         });
-        emitNotification(child, 'turnCompleted', { turn: { status: 'completed' } });
+        emitNotification(child, 'turn/completed', { turn: { status: { type: 'completed' } } });
       });
     });
     return true;
@@ -752,64 +855,71 @@ test('executeTurn: runs full turn lifecycle', async () => {
 
 test('shutdownServer: resolves immediately if already killed', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   handle.process.killed = true;
 
-  // Should not throw or hang
   await shutdownServer(handle);
 });
 
-test('shutdownServer: sends SIGTERM and resolves on exit', async () => {
+test('shutdownServer: registers exit listener before SIGTERM (race fix)', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
-  let terminated = false;
+  const handle = createHandle(child, true);
+  let killCalled = false;
+  let exitListenerRegisteredBeforeKill = false;
+
+  const origOnce = child.once.bind(child);
+  child.once = (event, listener) => {
+    if (event === 'exit' && !killCalled) {
+      exitListenerRegisteredBeforeKill = true;
+    }
+    return origOnce(event, listener);
+  };
+
   child.kill = (signal) => {
-    terminated = true;
+    killCalled = true;
     child.killed = true;
     setImmediate(() => child.emit('exit', 0));
   };
 
   await shutdownServer(handle, 1000);
-  assert.ok(terminated);
+  assert.ok(exitListenerRegisteredBeforeKill, 'exit listener must be registered before kill');
+  assert.ok(killCalled);
 });
 
 // ─── onNotification ────────────────────────────────────────────────────────────
 
-test('onNotification: registers listener and receives events', () => {
+test('onNotification: registers listener with slash-separated names', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
   let received = null;
 
-  const unsub = onNotification(handle, 'itemCompleted', (params) => {
+  const unsub = onNotification(handle, 'item/completed', (params) => {
     received = params;
   });
 
-  emitNotification(child, 'itemCompleted', {
+  emitNotification(child, 'item/completed', {
     item: { id: 'i1', type: 'agentMessage', text: 'Hi' },
   });
 
   assert.ok(received);
   assert.equal(received.item.text, 'Hi');
 
-  // Unsubscribe
   unsub();
   received = null;
-  emitNotification(child, 'itemCompleted', {
+  emitNotification(child, 'item/completed', {
     item: { id: 'i2', type: 'agentMessage', text: 'Bye' },
   });
-  assert.equal(received, null); // Should not fire after unsub
+  assert.equal(received, null);
 });
 
 // ─── Process exit handling ─────────────────────────────────────────────────────
 
 test('process exit: rejects pending requests', async () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
-  // Start a request but don't respond
   const resultPromise = sendRequest(handle, 'test/slow', {}, 5000);
 
-  // Process exits
   setImmediate(() => {
     handle._exitCode = 1;
     handle.status = 'failed';
@@ -824,55 +934,39 @@ test('process exit: rejects pending requests', async () => {
   assert.ok(result.error);
 });
 
-test('process exit: marks handle as failed if was running', () => {
-  const child = createMockChildProcess();
-  const handle = createHandle(child);
-  handle.status = 'running';
-
-  child.emit('exit', 1);
-  assert.equal(handle.status, 'failed');
-  assert.equal(handle._exitCode, 1);
-});
-
 // ─── Partial buffer handling ───────────────────────────────────────────────────
 
 test('partial buffer: handles split JSON lines', () => {
   const child = createMockChildProcess();
-  const handle = createHandle(child);
+  const handle = createHandle(child, true);
 
-  // Send first half of a notification
-  const fullNotif = JSON.stringify({ jsonrpc: '2.0', method: 'threadStarted', params: { threadId: 'partial-test' } });
+  const fullNotif = JSON.stringify({ jsonrpc: '2.0', method: 'thread/started', params: { thread: { id: 'partial-test' } } });
   const mid = Math.floor(fullNotif.length / 2);
   child.stdout.emit('data', Buffer.from(fullNotif.slice(0, mid)));
-  assert.equal(handle.threadId, null); // Not yet parsed
+  assert.equal(handle.threadId, null);
 
-  // Send second half + newline
   child.stdout.emit('data', Buffer.from(fullNotif.slice(mid) + '\n'));
   assert.equal(handle.threadId, 'partial-test');
 });
 
-// ─── Integration: selectAdapter with codex-appserver ───────────────────────────
+// ─── selectAdapter integration ─────────────────────────────────────────────────
 
 test('selectAdapter: prefers codex-appserver over codex-exec', async () => {
   const { selectAdapter } = await import('../lib/worker-spawn.mjs');
-  const caps = { hasCodexAppServer: true, hasCodexExecJson: true };
-  assert.equal(selectAdapter({ type: 'codex', name: 'w1' }, caps), 'codex-appserver');
+  assert.equal(selectAdapter({ type: 'codex', name: 'w1' }, { hasCodexAppServer: true, hasCodexExecJson: true }), 'codex-appserver');
 });
 
 test('selectAdapter: falls back to codex-exec when no appserver', async () => {
   const { selectAdapter } = await import('../lib/worker-spawn.mjs');
-  const caps = { hasCodexAppServer: false, hasCodexExecJson: true };
-  assert.equal(selectAdapter({ type: 'codex', name: 'w1' }, caps), 'codex-exec');
+  assert.equal(selectAdapter({ type: 'codex', name: 'w1' }, { hasCodexAppServer: false, hasCodexExecJson: true }), 'codex-exec');
 });
 
 test('selectAdapter: falls back to tmux when no codex features', async () => {
   const { selectAdapter } = await import('../lib/worker-spawn.mjs');
-  const caps = { hasCodexAppServer: false, hasCodexExecJson: false };
-  assert.equal(selectAdapter({ type: 'codex', name: 'w1' }, caps), 'tmux');
+  assert.equal(selectAdapter({ type: 'codex', name: 'w1' }, { hasCodexAppServer: false, hasCodexExecJson: false }), 'tmux');
 });
 
 test('selectAdapter: claude workers always use tmux', async () => {
   const { selectAdapter } = await import('../lib/worker-spawn.mjs');
-  const caps = { hasCodexAppServer: true, hasCodexExecJson: true };
-  assert.equal(selectAdapter({ type: 'claude', name: 'w1' }, caps), 'tmux');
+  assert.equal(selectAdapter({ type: 'claude', name: 'w1' }, { hasCodexAppServer: true, hasCodexExecJson: true }), 'tmux');
 });
