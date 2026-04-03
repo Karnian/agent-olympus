@@ -123,6 +123,8 @@ export function meetsMinVersion(versionStr, minMajor, minMinor, minPatch) {
  *   hasCodex: boolean,
  *   hasCodexExecJson: boolean,
  *   hasCodexAppServer: boolean,
+ *   hasGeminiCli: boolean,
+ *   hasGeminiAcp: boolean,
  *   hasGitWorktree: boolean,
  *   hasTeamTools: boolean,
  *   hasPreviewMCP: boolean
@@ -183,6 +185,33 @@ export async function detectCapabilities() {
     hasCodexAppServer = false;
   }
 
+  // Detect Gemini CLI
+  let hasGeminiCli = false;
+  let hasGeminiAcp = false;
+  try {
+    const geminiBin = resolveBinary('gemini');
+    if (geminiBin && geminiBin !== 'gemini') {
+      hasGeminiCli = true;
+    } else {
+      execFileSync('which', ['gemini'], { stdio: 'ignore' });
+      hasGeminiCli = true;
+    }
+  } catch {
+    // gemini not found
+  }
+
+  if (hasGeminiCli) {
+    try {
+      // Detect ACP support by checking if --acp flag is mentioned in help
+      const helpOutput = execFileSync(resolveBinary('gemini'), ['--help'], {
+        stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
+      });
+      hasGeminiAcp = /--acp|--experimental-acp/i.test(helpOutput);
+    } catch {
+      hasGeminiAcp = false;
+    }
+  }
+
   // Detect Claude CLI (claude -p mode for headless worker execution)
   let hasClaudeCli = false;
   try {
@@ -215,7 +244,7 @@ export async function detectCapabilities() {
   // Preview MCP is available if .claude/launch.json exists
   const hasPreviewMCP = existsSync('.claude/launch.json');
 
-  return { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGitWorktree, hasTeamTools, hasPreviewMCP };
+  return { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGeminiCli, hasGeminiAcp, hasGitWorktree, hasTeamTools, hasPreviewMCP };
 }
 
 /**
@@ -230,6 +259,7 @@ export function formatCapabilityReport(caps) {
     fmt(caps.hasTmux, 'tmux       ', 'parallel worker sessions'),
     fmt(caps.hasCodex, 'codex      ', 'cross-validation & multi-model'),
     fmt(caps.hasClaudeCli, 'claude-cli ', 'headless Claude Code workers'),
+    fmt(caps.hasGeminiCli, 'gemini-cli ', 'Gemini CLI workers'),
     fmt(caps.hasGitWorktree, 'git worktree', 'isolated parallel workspaces'),
     fmt(caps.hasTeamTools, 'team tools ', 'native Claude Code team management'),
     fmt(caps.hasPreviewMCP, 'preview MCP', caps.hasPreviewMCP

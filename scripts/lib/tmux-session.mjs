@@ -4,6 +4,7 @@ import { randomUUID } from 'crypto';
 import { createWorkerWorktree } from './worktree.mjs';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { resolveCodexApproval, codexApprovalFlag } from './codex-approval.mjs';
+import { resolveGeminiApproval, geminiApprovalFlag } from './gemini-approval.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
 
 // Re-export for backward compatibility with callers that import from tmux-session
@@ -235,8 +236,14 @@ export function buildWorkerCommand(worker, opts = {}) {
       const flagPart = flag ? ` ${flag}` : '';
       return `"${resolveBinary('codex')}"${flagPart} exec "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
     }
-    case 'gemini':
-      return `"${resolveBinary('gemini')}" "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
+    case 'gemini': {
+      // Mirror Claude's permission level to Gemini approval mode
+      const gAutonomy = opts.autonomyConfig || loadAutonomyConfig(opts.cwd || process.cwd());
+      const gMode = resolveGeminiApproval(gAutonomy, { cwd: opts.cwd });
+      const gFlag = geminiApprovalFlag(gMode);
+      const gFlagPart = gFlag ? ` ${gFlag}` : '';
+      return `"${resolveBinary('gemini')}"${gFlagPart} -p "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
+    }
     case 'claude':
     default:
       return `"${resolveBinary('claude')}" --print "$(cat "${safeFile}")"; rm -f "${safeFile}"`;

@@ -178,7 +178,17 @@ test('selectAdapter: claude worker + hasCodexExecJson → tmux', () => {
   assert.equal(result, 'tmux');
 });
 
-test('selectAdapter: gemini worker → tmux', () => {
+test('selectAdapter: gemini worker with ACP → gemini-acp', () => {
+  const result = selectAdapter({ type: 'gemini', name: 'w1' }, { hasGeminiAcp: true, hasGeminiCli: true });
+  assert.equal(result, 'gemini-acp');
+});
+
+test('selectAdapter: gemini worker with CLI only → gemini-exec', () => {
+  const result = selectAdapter({ type: 'gemini', name: 'w1' }, { hasGeminiCli: true });
+  assert.equal(result, 'gemini-exec');
+});
+
+test('selectAdapter: gemini worker without capabilities → tmux', () => {
   const result = selectAdapter({ type: 'gemini', name: 'w1' }, { hasCodexExecJson: true });
   assert.equal(result, 'tmux');
 });
