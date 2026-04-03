@@ -33,6 +33,9 @@ import {
   collectPromptResult,
   shutdownServer,
   onNotification,
+  enqueueMessage,
+  _drainQueue,
+  getQueueState,
   NOTIFY,
 } from '../lib/gemini-acp.mjs';
 
@@ -74,6 +77,9 @@ function createHandle(child, initialized = false) {
     _stderrChunks: [],
     _initialized: initialized,
     _adapterName: 'gemini-acp',
+    _messageQueue: [],
+    _draining: false,
+    _deadLetters: [],
   };
 
   // Wire up stdout JSONL parsing (mirrors startServer internals)
@@ -189,6 +195,10 @@ function _processNotificationForTest(handle, notification) {
         handle._turnError = params.error || null;
       } else {
         handle.status = 'completed';
+      }
+      // Auto-drain message queue when turn completes (mirrors real impl)
+      if (handle.status === 'completed' && handle._messageQueue?.length > 0 && !handle._draining) {
+        _drainQueue(handle).catch(() => {});
       }
       break;
     }
@@ -1003,4 +1013,410 @@ test('onNotification: receives events and unsubscribes via returned function', (
   emitNotification(child, 'promptCompleted', { status: 'completed' });
   // Should still be 1 — unsubscribed
   assert.equal(received.length, 1);
+});
+
+// ─── enqueueMessage ──────────────────────────────────────────────────────────
+
+test('enqueueMessage: returns queued=false for null handle or empty message', () => {
+  const r1 = enqueueMessage(null, 'hello');
+  assert.equal(r1.queued, false);
+  assert.equal(r1.position, -1);
+
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  const r2 = enqueueMessage(handle, '');
+  assert.equal(r2.queued, false);
+});
+
+test('enqueueMessage: appends message to queue with default priority', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'running'; // prevent auto-drain
+
+  const r = enqueueMessage(handle, 'API schema info', { from: 'api-worker' });
+  assert.equal(r.queued, true);
+  assert.equal(r.position, 0);
+  assert.equal(r.queueLength, 1);
+  assert.equal(handle._messageQueue[0].text, 'API schema info');
+  assert.equal(handle._messageQueue[0].from, 'api-worker');
+});
+
+test('enqueueMessage: high priority pushes to front of queue', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'running'; // prevent auto-drain
+
+  enqueueMessage(handle, 'msg-1', { from: 'worker-a' });
+  enqueueMessage(handle, 'msg-2', { from: 'worker-b' });
+  enqueueMessage(handle, 'urgent', { from: 'worker-c', priority: 'high' });
+
+  assert.equal(handle._messageQueue.length, 3);
+  assert.equal(handle._messageQueue[0].text, 'urgent');
+  assert.equal(handle._messageQueue[1].text, 'msg-1');
+  assert.equal(handle._messageQueue[2].text, 'msg-2');
+});
+
+test('enqueueMessage: defaults from to orchestrator', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'running';
+
+  enqueueMessage(handle, 'test msg');
+  assert.equal(handle._messageQueue[0].from, 'orchestrator');
+});
+
+test('enqueueMessage: includes enqueuedAt timestamp', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'running';
+
+  const before = new Date().toISOString();
+  enqueueMessage(handle, 'test');
+  const after = new Date().toISOString();
+
+  const ts = handle._messageQueue[0].enqueuedAt;
+  assert.ok(ts >= before && ts <= after);
+});
+
+// ─── getQueueState ───────────────────────────────────────────────────────────
+
+test('getQueueState: returns empty state for null handle', () => {
+  const state = getQueueState(null);
+  assert.equal(state.length, 0);
+  assert.equal(state.draining, false);
+  assert.equal(state.deadLetters, 0);
+  assert.deepEqual(state.messages, []);
+});
+
+test('getQueueState: returns correct queue snapshot', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'running';
+
+  enqueueMessage(handle, 'First message with extra context that is quite long and exceeds preview limit when truncated to one hundred characters for testing purposes', { from: 'w1' });
+  enqueueMessage(handle, 'Second', { from: 'w2' });
+
+  const state = getQueueState(handle);
+  assert.equal(state.length, 2);
+  assert.equal(state.draining, false);
+  assert.equal(state.messages[0].from, 'w1');
+  assert.equal(state.messages[1].from, 'w2');
+  // Preview should be truncated to 100 chars
+  assert.ok(state.messages[0].preview.length <= 100);
+  assert.equal(state.messages[1].preview, 'Second');
+});
+
+test('getQueueState: reflects draining flag', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle._draining = true;
+
+  const state = getQueueState(handle);
+  assert.equal(state.draining, true);
+});
+
+// ─── _drainQueue ─────────────────────────────────────────────────────────────
+
+test('_drainQueue: returns immediately if already draining', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle._draining = true;
+  handle._messageQueue.push({ text: 'msg', from: 'test', enqueuedAt: new Date().toISOString() });
+
+  const result = await _drainQueue(handle);
+  assert.equal(result.delivered, 0);
+  assert.equal(result.failed, 0);
+  // Queue should still have the message (not consumed)
+  assert.equal(handle._messageQueue.length, 1);
+});
+
+test('_drainQueue: stops if handle is failed — messages preserved in queue', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'failed';
+  handle._messageQueue.push({ text: 'msg', from: 'test', enqueuedAt: new Date().toISOString() });
+
+  const result = await _drainQueue(handle);
+  // Should not have delivered anything since server is failed
+  assert.equal(result.delivered, 0);
+  assert.equal(handle._draining, false);
+  // Message should still be in queue (not consumed — loop breaks before shift)
+  assert.equal(handle._messageQueue.length, 1);
+  assert.equal(handle._messageQueue[0].text, 'msg');
+});
+
+test('_drainQueue: stops if exitCode is set — messages preserved', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'completed';
+  handle._exitCode = 0; // server exited
+  handle._messageQueue.push({ text: 'msg', from: 'test', enqueuedAt: new Date().toISOString() });
+
+  const result = await _drainQueue(handle);
+  assert.equal(result.delivered, 0);
+  assert.equal(handle._draining, false);
+  // Message should still be in queue
+  assert.equal(handle._messageQueue.length, 1);
+});
+
+test('_drainQueue: resets draining flag on completion', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'failed'; // will cause immediate break
+  handle._messageQueue = [];
+
+  const result = await _drainQueue(handle);
+  assert.equal(handle._draining, false);
+  assert.equal(result.delivered, 0);
+  assert.equal(result.failed, 0);
+});
+
+test('_drainQueue: formats prompt with [Message from X] prefix', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle._initialized = true;
+  handle._sessionId = 'sess-1';
+  handle.status = 'completed';
+
+  // Capture what sendPrompt receives by intercepting stdin writes
+  const written = [];
+  child.stdin = new Writable({
+    write(chunk, enc, cb) {
+      written.push(chunk.toString());
+      cb();
+    },
+  });
+
+  handle._messageQueue.push({
+    text: 'Here is the API schema',
+    from: 'api-worker',
+    enqueuedAt: new Date().toISOString(),
+  });
+
+  // Start drain — sendPrompt will send a request but get no response (will hang)
+  // We'll let it timeout very quickly by setting handle to failed after a tick
+  const drainPromise = _drainQueue(handle);
+
+  // After a short delay, simulate the prompt failing (server died)
+  await new Promise(r => setTimeout(r, 10));
+  handle.status = 'failed';
+  handle._exitCode = 1;
+  // Reject the pending request so sendPrompt resolves
+  for (const [id, handler] of handle._pending) {
+    handler.resolve({ jsonrpc: '2.0', id, error: { code: -1, message: 'Server died' } });
+  }
+  handle._pending.clear();
+
+  const result = await drainPromise;
+
+  // Check that the sent prompt includes the [Message from api-worker] prefix
+  const promptReq = written.find(w => w.includes('api-worker'));
+  assert.ok(promptReq, 'Should have sent a prompt with api-worker prefix');
+  assert.ok(promptReq.includes('[Message from api-worker]'));
+});
+
+test('_drainQueue: orchestrator messages sent without prefix', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle._initialized = true;
+  handle._sessionId = 'sess-1';
+  handle.status = 'completed';
+
+  const written = [];
+  child.stdin = new Writable({
+    write(chunk, enc, cb) {
+      written.push(chunk.toString());
+      cb();
+    },
+  });
+
+  handle._messageQueue.push({
+    text: 'Direct instruction',
+    from: 'orchestrator',
+    enqueuedAt: new Date().toISOString(),
+  });
+
+  const drainPromise = _drainQueue(handle);
+
+  await new Promise(r => setTimeout(r, 10));
+  handle.status = 'failed';
+  handle._exitCode = 1;
+  for (const [id, handler] of handle._pending) {
+    handler.resolve({ jsonrpc: '2.0', id, error: { code: -1, message: 'Server died' } });
+  }
+  handle._pending.clear();
+
+  await drainPromise;
+
+  // Orchestrator messages should NOT have [Message from ...] prefix
+  const promptReq = written.find(w => w.includes('Direct instruction'));
+  assert.ok(promptReq, 'Should have sent the orchestrator message');
+  assert.ok(!promptReq.includes('[Message from'), 'Orchestrator messages should not have prefix');
+});
+
+// ─── Queue capacity limit ────────────────────────────────────────────────────
+
+test('enqueueMessage: rejects when queue is at capacity (MAX_QUEUE_DEPTH)', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'running'; // prevent auto-drain
+
+  // Fill queue to capacity (200)
+  for (let i = 0; i < 200; i++) {
+    const r = enqueueMessage(handle, `msg-${i}`);
+    assert.equal(r.queued, true);
+  }
+  assert.equal(handle._messageQueue.length, 200);
+
+  // 201st should be rejected
+  const rejected = enqueueMessage(handle, 'overflow');
+  assert.equal(rejected.queued, false);
+  assert.equal(rejected.position, -1);
+  assert.equal(handle._messageQueue.length, 200);
+});
+
+// ─── Position calculation ────────────────────────────────────────────────────
+
+test('enqueueMessage: position is correct for normal and high priority', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle.status = 'running';
+
+  const r1 = enqueueMessage(handle, 'first');
+  assert.equal(r1.position, 0);
+
+  const r2 = enqueueMessage(handle, 'second');
+  assert.equal(r2.position, 1);
+
+  // High priority should go to front
+  const r3 = enqueueMessage(handle, 'urgent', { priority: 'high' });
+  assert.equal(r3.position, 0);
+
+  // Next normal should be at end (now index 3)
+  const r4 = enqueueMessage(handle, 'fourth');
+  assert.equal(r4.position, 3);
+});
+
+// ─── Dead letter handling ────────────────────────────────────────────────────
+
+test('_drainQueue: failed message is re-queued with _retried flag on first failure', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle._initialized = true;
+  handle._sessionId = 'sess-1';
+  handle.status = 'completed';
+
+  child.stdin = new Writable({
+    write(chunk, enc, cb) { cb(); },
+  });
+
+  handle._messageQueue.push({
+    text: 'will-fail',
+    from: 'worker-a',
+    enqueuedAt: new Date().toISOString(),
+  });
+
+  // Start drain — sendPrompt will fail
+  const drainPromise = _drainQueue(handle);
+
+  // Let the first sendPrompt send its request, then fail it
+  await new Promise(r => setTimeout(r, 5));
+  for (const [id, handler] of handle._pending) {
+    handler.resolve({ jsonrpc: '2.0', id, error: { code: 429, message: 'Rate limited' } });
+  }
+  handle._pending.clear();
+
+  // sendPrompt failure sets handle.status='failed', which causes the loop to
+  // break before retrying. The message should be re-queued with _retried=true.
+  const result = await drainPromise;
+
+  assert.equal(handle._draining, false);
+  assert.equal(result.failed, 1);
+  // Message was re-queued at front with _retried flag (not consumed)
+  assert.equal(handle._messageQueue.length, 1);
+  assert.equal(handle._messageQueue[0].text, 'will-fail');
+  assert.equal(handle._messageQueue[0]._retried, true);
+});
+
+test('_drainQueue: message moved to dead letters after second failure', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle._initialized = true;
+  handle._sessionId = 'sess-1';
+  handle.status = 'completed';
+
+  child.stdin = new Writable({
+    write(chunk, enc, cb) { cb(); },
+  });
+
+  // Pre-mark as retried (simulating first failure already happened)
+  handle._messageQueue.push({
+    text: 'already-retried',
+    from: 'worker-a',
+    enqueuedAt: new Date().toISOString(),
+    _retried: true,
+  });
+
+  const drainPromise = _drainQueue(handle);
+
+  await new Promise(r => setTimeout(r, 5));
+  for (const [id, handler] of handle._pending) {
+    handler.resolve({ jsonrpc: '2.0', id, error: { code: 429, message: 'Rate limited' } });
+  }
+  handle._pending.clear();
+
+  const result = await drainPromise;
+
+  assert.equal(handle._draining, false);
+  assert.equal(result.failed, 1);
+  assert.equal(result.deadLettered, 1);
+  // Message should be in dead letters, not in queue
+  assert.equal(handle._messageQueue.length, 0);
+  assert.equal(handle._deadLetters.length, 1);
+  assert.equal(handle._deadLetters[0].text, 'already-retried');
+});
+
+// ─── getQueueState with dead letters ─────────────────────────────────────────
+
+test('getQueueState: includes deadLetters count', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle._deadLetters = [
+    { text: 'lost-1', from: 'w1', enqueuedAt: new Date().toISOString() },
+    { text: 'lost-2', from: 'w2', enqueuedAt: new Date().toISOString() },
+  ];
+
+  const state = getQueueState(handle);
+  assert.equal(state.deadLetters, 2);
+});
+
+// ─── Auto-drain from _processNotification ────────────────────────────────────
+
+test('notifications: promptCompleted triggers auto-drain when queue has messages', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  handle._initialized = true;
+  handle._sessionId = 'sess-1';
+  handle.status = 'running';
+
+  // Enqueue while running (won't auto-drain because status is 'running')
+  handle._messageQueue.push({
+    text: 'queued-during-run',
+    from: 'api-worker',
+    enqueuedAt: new Date().toISOString(),
+  });
+  assert.equal(handle._messageQueue.length, 1);
+
+  // Simulate promptCompleted notification — should trigger auto-drain
+  emitNotification(child, 'promptCompleted', { status: 'completed' });
+
+  // Auto-drain fires asynchronously (microtask), give it a tick
+  await new Promise(r => setTimeout(r, 10));
+
+  // The drain should have started (draining flag may be true or already done)
+  // The message should have been shifted off the queue by the drain attempt
+  // (sendPrompt will be called but fail since no real server — that's OK,
+  //  we just verify the drain was triggered)
+  assert.ok(handle._draining || handle._messageQueue.length < 1,
+    'Auto-drain should have started or completed');
 });
