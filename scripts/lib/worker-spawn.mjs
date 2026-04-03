@@ -68,7 +68,7 @@ function loadTeamState(teamName) {
  *
  * @param {Object} worker - Worker descriptor with { type, name, prompt }
  * @param {Object} capabilities - From preflight.detectCapabilities()
- * @returns {'codex-appserver' | 'codex-exec' | 'claude-cli' | 'tmux'}
+ * @returns {'codex-appserver' | 'codex-exec' | 'claude-cli' | 'gemini-acp' | 'gemini-exec' | 'tmux'}
  */
 export function selectAdapter(worker, capabilities = {}) {
   if (worker.type === 'codex') {
@@ -77,6 +77,10 @@ export function selectAdapter(worker, capabilities = {}) {
   }
   if (worker.type === 'claude') {
     if (capabilities.hasClaudeCli) return 'claude-cli';
+  }
+  if (worker.type === 'gemini') {
+    if (capabilities.hasGeminiAcp) return 'gemini-acp';
+    if (capabilities.hasGeminiCli) return 'gemini-exec';
   }
   return 'tmux';
 }
@@ -103,6 +107,72 @@ async function loadCodexAppServerAdapter() {
  */
 async function loadClaudeCliAdapter() {
   return import('./claude-cli.mjs');
+}
+
+/**
+ * Lazily load the gemini-exec adapter module.
+ * @returns {Promise<Object>} The gemini-exec module
+ */
+async function loadGeminiExecAdapter() {
+  return import('./gemini-exec.mjs');
+}
+
+/**
+ * Lazily load the gemini-acp adapter module.
+ * @returns {Promise<Object>} The gemini-acp module
+ */
+async function loadGeminiAcpAdapter() {
+  return import('./gemini-acp.mjs');
+}
+
+// ─── Gemini adapter monitor helpers ─────────────────────────────────────────
+
+/**
+ * Monitor a gemini-exec-based worker via the gemini-exec adapter.
+ * @param {Object} worker - Worker state with _handle (live GeminiHandle)
+ * @param {Object} geminiExec - The loaded gemini-exec module
+ * @returns {{ status: string, output: string, error?: { category: string, message: string } }}
+ */
+function monitorGeminiExecWorker(worker, geminiExec) {
+  if (!worker._handle) {
+    return { status: 'failed', output: '', error: { category: 'crash', message: 'No gemini-exec handle' } };
+  }
+  try {
+    const snapshot = geminiExec.monitor(worker._handle);
+    const result = { status: snapshot.status, output: snapshot.output || '' };
+    if (snapshot.error) {
+      // snapshot.error can be a string category or an object — normalize
+      const category = typeof snapshot.error === 'string' ? snapshot.error
+        : (snapshot.error.category || 'unknown');
+      result.error = { category, message: `Gemini exec error: ${category}` };
+    }
+    return result;
+  } catch {
+    return { status: worker.status || 'running', output: '' };
+  }
+}
+
+/**
+ * Monitor a gemini-acp-based worker via the gemini-acp adapter.
+ * @param {Object} worker - Worker state with _liveHandle (GeminiAcpHandle)
+ * @param {Object} geminiAcp - The loaded gemini-acp module
+ * @returns {{ status: string, output: string, error?: { category: string, message: string } }}
+ */
+function monitorGeminiAcpWorker(worker, geminiAcp) {
+  if (!worker._liveHandle) {
+    return { status: 'failed', output: '', error: { category: 'crash', message: 'No gemini-acp handle' } };
+  }
+  try {
+    const snapshot = geminiAcp.monitor(worker._liveHandle);
+    const result = { status: snapshot.status, output: snapshot.output || '' };
+    if (snapshot.error) {
+      const category = typeof snapshot.error === 'string' ? snapshot.error : snapshot.error.category || 'unknown';
+      result.error = { category, message: `Gemini ACP error: ${category}` };
+    }
+    return result;
+  } catch {
+    return { status: worker.status || 'running', output: '' };
+  }
 }
 
 // ─── Tmux adapter helpers (inline — wraps existing tmux-session functions) ──
@@ -276,6 +346,16 @@ export async function reassignToClaude(teamName, workerName, originalPrompt, fai
         const codexExec = await loadCodexExecAdapter();
         codexExec.shutdown(worker._handle);
       } catch {}
+    } else if (adapterName === 'gemini-acp' && worker?._liveHandle) {
+      try {
+        const geminiAcp = await loadGeminiAcpAdapter();
+        await geminiAcp.shutdownServer(worker._liveHandle);
+      } catch {}
+    } else if (adapterName === 'gemini-exec' && worker?._liveHandle) {
+      try {
+        const geminiExec = await loadGeminiExecAdapter();
+        geminiExec.shutdown(worker._liveHandle);
+      } catch {}
     } else {
       // Shutdown via tmux (default)
       const session = sessionOverride || sessionName(teamName, workerName);
@@ -284,7 +364,7 @@ export async function reassignToClaude(teamName, workerName, originalPrompt, fai
 
     await addWisdom({
       category: 'tool',
-      lesson: `Codex worker "${workerName}" failed (${failureReason}) — automatically reassigned to agent-olympus:executor. Avoid Codex for reason "${failureReason}" in this session.`,
+      lesson: `Worker "${workerName}" failed (${failureReason}) — automatically reassigned to agent-olympus:executor. Avoid worker type "${worker?.type || 'unknown'}" for reason "${failureReason}" in this session.`,
       confidence: 'high',
     });
 
@@ -307,6 +387,8 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
   let codexExec = null;
   let codexAppServer = null;
   let claudeCli = null;
+  let geminiExec = null;
+  let geminiAcp = null;
   if (adapterNames.includes('codex-exec')) {
     codexExec = await loadCodexExecAdapter();
   }
@@ -315,6 +397,12 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
   }
   if (adapterNames.includes('claude-cli')) {
     claudeCli = await loadClaudeCliAdapter();
+  }
+  if (adapterNames.includes('gemini-exec')) {
+    geminiExec = await loadGeminiExecAdapter();
+  }
+  if (adapterNames.includes('gemini-acp')) {
+    geminiAcp = await loadGeminiAcpAdapter();
   }
 
   const state = {
@@ -411,6 +499,53 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
         state.workers[i].status = 'failed';
         state.workers[i].error = err.message;
       }
+    } else if (adapterNames[i] === 'gemini-acp') {
+      // Spawn via gemini-acp adapter (multi-turn ACP JSON-RPC 2.0)
+      let serverHandle = null;
+      try {
+        serverHandle = geminiAcp.startServer({ cwd });
+        const initResult = await geminiAcp.initializeServer(serverHandle);
+        if (initResult?.error) {
+          throw new Error(initResult.error.message || 'Failed to initialize Gemini ACP server');
+        }
+        const sessionResult = await geminiAcp.createSession(serverHandle, {
+          cwd,
+          approvalMode: worker.approvalMode,
+          model: worker.model,
+        });
+        if (sessionResult?.error) {
+          throw new Error(sessionResult.error.message || 'Failed to create Gemini session');
+        }
+        // Fire-and-forget: sendPrompt returns a promise but we don't await it
+        // so the worker starts running immediately (like codex-appserver's startTurn)
+        geminiAcp.sendPrompt(serverHandle, worker.prompt).catch(() => {});
+        state.workers[i].status = 'running';
+        state.workers[i].startedAt = new Date().toISOString();
+        state.workers[i]._handle = { pid: serverHandle.pid, sessionId: serverHandle._sessionId };
+        state.workers[i]._liveHandle = serverHandle;
+      } catch (err) {
+        state.workers[i].status = 'failed';
+        state.workers[i].error = err.message;
+        if (serverHandle) {
+          try { await geminiAcp.shutdownServer(serverHandle, 2000); } catch {}
+        }
+      }
+    } else if (adapterNames[i] === 'gemini-exec') {
+      // Spawn via gemini-exec adapter (single-turn)
+      try {
+        const handle = geminiExec.spawn(worker.prompt, {
+          cwd,
+          model: worker.model,
+          approvalMode: worker.approvalMode,
+        });
+        state.workers[i].status = 'running';
+        state.workers[i].startedAt = new Date().toISOString();
+        state.workers[i]._handle = { pid: handle.pid };
+        state.workers[i]._liveHandle = handle;
+      } catch (err) {
+        state.workers[i].status = 'failed';
+        state.workers[i].error = err.message;
+      }
     } else {
       // Spawn via tmux
       const session = sessions[tmuxIdx++];
@@ -445,7 +580,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
   return state;
 }
 
-export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _claudeCliModule) {
+export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _claudeCliModule, _geminiExecModule, _geminiAcpModule) {
   const state = loadTeamState(teamName);
   if (!state) return null;
 
@@ -453,6 +588,8 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
   const codexExec = _codexExecModule || null;
   const codexAppServer = _codexAppServerModule || null;
   const claudeCli = _claudeCliModule || null;
+  const geminiExec = _geminiExecModule || null;
+  const geminiAcp = _geminiAcpModule || null;
 
   const status = {
     teamName,
@@ -475,6 +612,10 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
       monitorResult = monitorClaudeCliWorker(worker, claudeCli);
     } else if (adapterName === 'codex-exec' && codexExec && worker._liveHandle) {
       monitorResult = monitorCodexExecWorker({ ...worker, _handle: worker._liveHandle }, codexExec);
+    } else if (adapterName === 'gemini-acp' && geminiAcp && worker._liveHandle) {
+      monitorResult = monitorGeminiAcpWorker(worker, geminiAcp);
+    } else if (adapterName === 'gemini-exec' && geminiExec && worker._liveHandle) {
+      monitorResult = monitorGeminiExecWorker({ ...worker, _handle: worker._liveHandle }, geminiExec);
     } else {
       monitorResult = monitorTmuxWorker(worker);
     }
@@ -588,6 +729,12 @@ export function collectResults(teamName) {
         // Codex-exec: output is in the live handle
         const output = worker._liveHandle._output;
         if (output) results[worker.name] = output;
+      } else if (adapter === 'gemini-acp' && worker._liveHandle) {
+        const output = worker._liveHandle._output;
+        if (output) results[worker.name] = output;
+      } else if (adapter === 'gemini-exec' && worker._liveHandle) {
+        const output = worker._liveHandle._output;
+        if (output) results[worker.name] = output;
       } else if (worker.session) {
         // Tmux: capture pane output
         const output = capturePane(worker.session, 200);
@@ -625,6 +772,12 @@ export async function shutdownTeam(teamName, cwd) {
         } else if (adapter === 'codex-exec' && worker._liveHandle) {
           const codexExec = await loadCodexExecAdapter();
           await codexExec.shutdown(worker._liveHandle);
+        } else if (adapter === 'gemini-acp' && worker._liveHandle) {
+          const geminiAcp = await loadGeminiAcpAdapter();
+          await geminiAcp.shutdownServer(worker._liveHandle);
+        } else if (adapter === 'gemini-exec' && worker._liveHandle) {
+          const geminiExec = await loadGeminiExecAdapter();
+          await geminiExec.shutdown(worker._liveHandle);
         }
       } catch {
         // Best-effort cleanup

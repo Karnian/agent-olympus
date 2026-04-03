@@ -158,7 +158,7 @@ export function buildEnhancedPath() {
   }
 
   // Add parent directories of resolved key binaries
-  for (const bin of ['codex', 'tmux', 'git', 'node']) {
+  for (const bin of ['codex', 'gemini', 'tmux', 'git', 'node']) {
     try {
       const resolved = resolveBinary(bin);
       if (resolved && resolved !== bin && resolved.includes('/')) {

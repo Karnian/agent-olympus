@@ -331,20 +331,20 @@ test('detectCapabilities: handles command failures gracefully (all binary checks
 
 test('formatCapabilityReport: formats ✓ for true capabilities', async () => {
   const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
-  const caps = { hasTmux: true, hasCodex: true, hasGitWorktree: true, hasTeamTools: true, hasPreviewMCP: true };
+  const caps = { hasTmux: true, hasCodex: true, hasClaudeCli: true, hasGeminiCli: true, hasGitWorktree: true, hasTeamTools: true, hasPreviewMCP: true };
   const report = formatCapabilityReport(caps);
-  // All 5 entries should show ✓
+  // All 7 entries should show ✓
   const checkmarks = (report.match(/✓/g) || []).length;
-  assert.equal(checkmarks, 5);
+  assert.equal(checkmarks, 7);
 });
 
 test('formatCapabilityReport: formats ✗ for false capabilities', async () => {
   const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
-  const caps = { hasTmux: false, hasCodex: false, hasClaudeCli: false, hasGitWorktree: false, hasTeamTools: false, hasPreviewMCP: false };
+  const caps = { hasTmux: false, hasCodex: false, hasClaudeCli: false, hasGeminiCli: false, hasGitWorktree: false, hasTeamTools: false, hasPreviewMCP: false };
   const report = formatCapabilityReport(caps);
-  // All 6 entries should show ✗
+  // All 7 entries should show ✗
   const crosses = (report.match(/✗/g) || []).length;
-  assert.equal(crosses, 6);
+  assert.equal(crosses, 7);
 });
 
 test('formatCapabilityReport: includes all 5 capability names', async () => {
@@ -354,6 +354,7 @@ test('formatCapabilityReport: includes all 5 capability names', async () => {
   assert.ok(report.includes('tmux'), 'should mention tmux');
   assert.ok(report.includes('codex'), 'should mention codex');
   assert.ok(report.includes('claude-cli'), 'should mention claude-cli');
+  assert.ok(report.includes('gemini-cli'), 'should mention gemini-cli');
   assert.ok(report.includes('git worktree'), 'should mention git worktree');
   assert.ok(report.includes('team tools'), 'should mention team tools');
   assert.ok(report.includes('preview MCP'), 'should mention preview MCP');
