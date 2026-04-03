@@ -1,443 +1,158 @@
 # Agent Olympus — Improvement Tracker
 
-> 전체 개선 항목의 구현 현황을 추적하는 문서. 버전 무관, 카테고리별 정리.
+> 전체 개선 항목의 구현 현황을 추적하는 문서. 완료 항목은 요약만, 남은 항목은 상세 유지.
 
-**Last Updated**: 2026-04-04 (v0.9.5 — Code Quality 수정 + Codex Permission Mirroring 완료)
+**Last Updated**: 2026-04-04
 
 ---
 
 ## Summary
 
-| Category | Total | Done | Merged/Dropped | Remaining |
-|----------|-------|------|----------------|-----------|
-| A. Post-Code Automation | 4 | 4 | 0 | 0 |
-| B. User Communication | 3 | 3 | 0 | 0 |
-| C. Context Intelligence | 3 | 2 | 0 | 1 (redefine) |
-| D. Harness Engineering | 4 | 4 | 0 | 0 |
-| E. Source-Informed (v0.9) | 10 | 4 | 4 (merge/drop) | 2 (done via G) |
-| F. Hook System (v0.9.1) | 4 | 4 | 0 | 0 |
-| G. Consolidated Backlog (v0.9.2) | 5+1 | 3 | 0 | 2 (blocked) + 1 (redefine) |
-| H. Cross-Session (v0.9.3) | 1 | 1 | 0 | 0 |
-| I. Codex Permission Mirroring (v0.9.5) | 1 | 1 | 0 | 0 |
-| **Total** | **30+G** | **26** | **4** | **3 (2 blocked + 1 redefine)** |
-
-### Consolidated Backlog (교차검증 후)
-
-| # | 항목 | 구성 요소 | 우선순위 | 상태 |
-|---|------|-----------|---------|------|
-| 1 | Event-Backed Run System | E3확장+G3+E7+E4+F1통합 | High | ✅ Done (v0.9.2) |
-| 2 | Story-Level AC Evidence | E5 재정의 | Medium | ✅ Done (v0.9.2) |
-| 3 | Completion Notices | E9 재정의 | Low | ✅ Done (v0.9.2) |
-| 4 | Native Agent Teams | G2+E8 | Blocked | 🔒 experimental 졸업 대기 |
-| 5 | Codex를 진짜 팀원으로 | G1 재정의 | Partial | 🔄 Phase 0-1 즉시 가능, Phase 2+ 대기 |
-| + | Pragmatic Memory | C3 재정의 | Low | 🔄 독립 |
-
-**실행 이력**: 1 → 2 → 3 완료 (v0.9.2). 4는 외부 의존성 대기. 5는 재정의 후 Phase 0-1 즉시 착수 가능. C3-R은 독립적으로 언제든.
+| Category | Total | Done | Remaining |
+|----------|-------|------|-----------|
+| A~D. Core Automation + Comms + Context + Harness | 14 | 14 | 0 |
+| E. Source-Informed (v0.9) | 10 | 4 | 0 (4 merged, 2 done via G) |
+| F. Hook System (v0.9.1) | 4 | 4 | 0 |
+| G. Consolidated Backlog (v0.9.2~v0.9.5) | 5+1 | 4 | 1 blocked + 1 independent |
+| H. Cross-Session (v0.9.3) | 1 | 1 | 0 |
+| I. Superpowers Methodology (v0.10) | 18 | 16 | 1 partial + 1 not started |
+| **Total** | **53** | **43** | **4** |
 
 ---
 
-## A. Post-Code Automation
+## Completed Categories (archive)
 
-코드 작성 이후 워크플로우(PR, CI, 이슈, 문서)를 자동화하는 항목들.
+<details>
+<summary>A. Post-Code Automation (4/4) — PR, CI, Issue, Changelog 자동화</summary>
 
-### A1. PR Auto-Creation — ✅ Done
+- A1 PR Auto-Creation (`pr-create.mjs`) ✅
+- A2 CI Monitor & Auto-Fix (`ci-watch.mjs`) ✅
+- A3 Issue Tracker Integration (`extractIssueRefs()`) ✅
+- A4 Documentation Auto-Update (`changelog.mjs`) ✅
+</details>
 
-- **구현**: `scripts/lib/pr-create.mjs`
-- **주요 함수**: `createPR()`, `buildPRBody()`, `extractIssueRefs()`, `findExistingPR()`
-- **통합 지점**: Atlas/Athena Phase 6
-- **동작**: commit message + PRD에서 PR 제목/본문 자동 생성, 이슈 링크, 라벨 부여, `gh pr create` 실행
+<details>
+<summary>B. User Communication (3/3) — 알림, 진행, 비용</summary>
 
-### A2. CI Monitor & Auto-Fix — ✅ Done
+- B1 Desktop Notifications (`notify.mjs`) ✅
+- B2 Progress Briefing (Phase 3 내장) ✅
+- B3 Cost Awareness (`cost-estimate.mjs`) ✅
+</details>
 
-- **구현**: `scripts/lib/ci-watch.mjs`
-- **주요 함수**: `watchCI()`, `getFailedLogs()`
-- **통합 지점**: Atlas/Athena Phase 6b
-- **동작**: PR 생성 후 GitHub Actions 폴링 → 실패 시 로그 가져와 debugger 에스컬레이션 → 자동 수정 후 재푸시 (최대 2사이클)
+<details>
+<summary>C. Context Intelligence (2/3) — 온보딩, 시각검증, (메모리 독립)</summary>
 
-### A3. Issue Tracker Integration — ✅ Done
+- C1 Auto Project Onboarding ✅
+- C2 Visual Verification ✅
+- C3 → 독립 항목 "Pragmatic Memory"로 이동 (아래 G+ 참조)
+</details>
 
-- **구현**: `scripts/lib/pr-create.mjs` 내 `extractIssueRefs()`
-- **통합 지점**: Phase 6 PR 생성 시
-- **동작**: 브랜치명(`feat/42-description`) + 커밋 메시지에서 이슈 번호 추출 → PR body에 `Closes #42` 자동 추가
+<details>
+<summary>D. Harness Engineering (4/4) — harness-init, deepinit, 컨텍스트주입, Codex교차검증</summary>
 
-### A4. Documentation Auto-Update — ✅ Done
+- D1 harness-init 스킬 ✅
+- D2 deepinit TOC 포맷 ✅
+- D3 Atlas/Athena 하네스 컨텍스트 주입 ✅
+- D4 Codex 교차검증 ✅
+</details>
 
-- **구현**: `scripts/lib/changelog.mjs`
-- **주요 함수**: `generateChangelogEntry()`, `prependToChangelog()`
-- **통합 지점**: Atlas/Athena Phase 5c
-- **동작**: PRD 유저스토리에서 CHANGELOG 엔트리 자동 생성 → CHANGELOG.md 상단에 삽입
+<details>
+<summary>E. Source-Informed v0.9 (10/10 resolved) — 6 done, 4 merged/dropped</summary>
 
----
+- E1 Stuck Recovery ✅ | E2 Shared Blackboard ✅ | E3 Run Artifacts ✅ | E6 Capability Detection ✅
+- E4 → merged G#1 | E7 → merged G#1 | E8 → merged G#4 | E10 → dropped
+- E5 → done via G#2 | E9 → done via G#3
+</details>
 
-## B. User Communication
+<details>
+<summary>F. Hook System v0.9.1 (4/4) — SubagentStop/Start, SessionEnd, Async</summary>
 
-오케스트레이터와 사용자 간 커뮤니케이션 개선 항목들.
+- F1 SubagentStop Hook ✅ | F2 SubagentStart Hook ✅
+- F3 SessionEnd Hook ✅ | F4 Async Hook Configuration ✅
+</details>
 
-### B1. Desktop Notifications — ✅ Done
+<details>
+<summary>G. Consolidated Backlog v0.9.2 — 3/6 done</summary>
 
-- **구현**: `scripts/lib/notify.mjs`, `scripts/notify-cli.mjs`
-- **동작**: macOS(`osascript`), Linux(`notify-send`), fallback(terminal bell) 지원. 8개 이벤트 템플릿(`complete`, `blocked`, `escalated`, `ci_failed`, `ci_passed`, `started`, `progress`, `done`)
-- **버그 수정 (PR #7)**:
-  - 테스트 실행 시 실제 OS 알림 발사 → `IS_TEST` 가드 추가
-  - "스크립트 편집기" 표시 → `detectTerminalApp()`으로 터미널 앱 감지
-  - `onCIFail` 이벤트명 불일치 → `ci_failed`로 수정
-- **추가 수정 (PR #8, v0.8.4)**:
-  - `detectTerminalApp()`: `'iTerm'` → `'iTerm2'` 오탈자 수정
+- G#1 Event-Backed Run System ✅ | G#2 Story-Level AC Evidence ✅ | G#3 Completion Notices ✅
+- G#5 codex-plugin-cc 통합 ✅ (v0.9.4~v0.9.5: codex-exec, app-server, claude-cli adapter, permission mirroring)
+</details>
 
-### B2. Progress Briefing — ✅ Done
+<details>
+<summary>H. Cross-Session v0.9.3 (1/1)</summary>
 
-- **구현**: Atlas/Athena SKILL.md Phase 3에 내장
-- **동작**: 스토리/워커별 진행 로깅, 정체 감지, 컴팩트 상태 테이블 출력
-- **비고**: 별도 유틸리티 없이 오케스트레이터 로직에 직접 포함
-
-### B3. Cost Awareness — ✅ Done
-
-- **구현**: `scripts/lib/cost-estimate.mjs`
-- **주요 함수**: `estimateCost()`
-- **통합 지점**: Atlas/Athena Phase 2 (Plan)
-- **동작**: 모델별 토큰 단가 테이블 기반 비용 추정 → 사용자에게 표시. `.ao/autonomy.json`의 `budget.warnThresholdUsd` 설정 시 경고
-
----
-
-## C. Context Intelligence
-
-오케스트레이터의 컨텍스트 이해 및 학습 능력 개선 항목들.
-
-### C1. Auto Project Onboarding — ✅ Done
-
-- **구현**: Atlas/Athena Phase 0에서 `AGENTS.md` 존재 여부 확인
-- **통합 지점**: Phase 0 (Triage) 시작 시
-- **동작**: `AGENTS.md` 없으면 `deepinit` 스킬 자동 호출 → 코드베이스 구조 분석 후 생성. 프로젝트당 1회만 실행
-
-### C2. Visual Verification — ✅ Done
-
-- **구현**: Atlas SKILL.md Phase 4.2 (Optional)
-- **동작**: 프론트엔드 파일 변경 감지 → 프리뷰 서버 시작 → 스크린샷 캡처 + 콘솔 에러 체크 + 접근성 트리 검증 → 이슈 발견 시 designer 에이전트 투입 (최대 2사이클)
-- **의존성**: Claude Preview MCP + `.claude/launch.json` 필요. 없으면 자동 스킵
-
-### C3. Pragmatic Memory — 🔄 Redefine
-
-- **구현된 부분**: `scripts/lib/wisdom.mjs`
-  - JSONL 기반 구조화된 학습 기록 (`wisdom.jsonl`)
-  - 카테고리/신뢰도/인텐트 기반 필터링
-  - Jaccard 유사도(≥0.7) 기반 중복 제거
-  - 90일 자동 정리, 200개 상한
-- **재정의 (Codex 교차검증)**: "Semantic Memory" → "Pragmatic Memory"로 축소
-  - ~~벡터 임베딩 기반 시맨틱 검색~~ → DROP (zero npm deps 제약, 외부 API 불가)
-  - ~~크로스 프로젝트 지식 공유~~ → DROP (자동 공유는 복잡도만 추가)
-  - **남은 작업**: 토큰 정규화/점수 개선 + 명시적 export/import (`wisdom export/import`)
-- **비고**: wisdom은 큐레이션된 학습 기록. G3 event log와는 라이프사이클이 다름 (KEEP SEPARATE 확인)
+- H1 Session Registry + /sessions ✅
+</details>
 
 ---
 
-## D. Harness Engineering (v0.8.6)
+## Remaining: G — Blocked & Independent
 
-OpenAI 하네스 엔지니어링 원칙을 agent-olympus 워크플로우에 통합.
-참고: [OpenAI Harness Engineering](https://openai.com/index/harness-engineering/)
+### G#4. Native Agent Teams — 🔒 Blocked
 
-### D1. harness-init 스킬 — ✅ Done
+- **핵심**: Athena를 네이티브 팀 API 위의 래퍼로 전환
+- **의존성**: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` 졸업 대기
 
-- **구현**: `skills/harness-init/SKILL.md`
-- **동작**: 새 프로젝트에 하네스 구조 초기화 — AGENTS.md(TOC), docs/golden-principles.md, docs/ARCHITECTURE.md, docs/design-docs/, docs/exec-plans/, docs/QUALITY_SCORE.md, 구조적 테스트 스텁 생성
+### G+. Pragmatic Memory — 🔄 Independent (Low)
 
-### D2. deepinit TOC 포맷 전환 — ✅ Done
-
-- **구현**: `skills/deepinit/SKILL.md` Phase 3 + Phase 3.5
-- **동작**: AGENTS.md를 ≤100줄 목차로 생성. harness-init 실행 전이면 docs/ 스텁 자동 생성
-
-### D3. Atlas/Athena 하네스 컨텍스트 주입 — ✅ Done
-
-- **구현**: `skills/atlas/SKILL.md` Phase 0 Harness Check, `skills/athena/SKILL.md` Phase 0 Harness Check
-- **동작**: Phase 0에서 docs/golden-principles.md 로드 → 모든 executor/Codex 워커 프롬프트에 harness_context 주입
-
-### D4. Codex 교차검증 (매 스토리) — ✅ Done
-
-- **구현**: Atlas Phase 3 `atlas-codex-xval-<story-id>`, Athena Phase 4 `athena-<slug>-codex-xval-<story-id>`
-- **동작**: 각 스토리 완료 후 Codex가 acceptance criteria + golden principles + 아키텍처 레이어 준수 여부 검증. FAIL 시 최대 2사이클 재시도. Codex 미설치 시 graceful skip
+- **기존 구현**: `scripts/lib/wisdom.mjs` (JSONL, Jaccard 중복제거, 90일 정리, 200개 상한)
+- **남은 작업**: 토큰 정규화/점수 개선 + `wisdom export/import` CLI
 
 ---
 
-## E. Source-Informed Improvements (v0.9)
+## Remaining: I — Superpowers Methodology Integration (v0.10)
 
-Claude Code 소스 구조(claw-code) 분석 + Codex 교차검증으로 도출된 10개 항목.
-상세 스펙: [v0.9 spec](./v0.9-source-informed-improvements/spec.md)
-참고: [claw-code](https://github.com/instructkr/claw-code) — Claude Code Python clean-room rewrite
+> 스펙: `docs/plans/superpowers-methodology-integration/spec.md`
+> TDD, Brainstorm-first, Systematic Debug, Verification Iron Law, Two-Stage Review를 Atlas/Athena에 통합
 
-### E1. Stuck Recovery Policy — ✅ Done
+### ✅ Done (16/18)
 
-- **구현**: `scripts/lib/stuck-recovery.mjs`
-- **주요 함수**: `buildRecoveryStrategy()`, `formatRecoveryLog()`, `RECOVERY_STRATEGIES`
-- **통합 지점**: `worker-spawn.mjs` monitorTeam() stall detection
-- **동작**: 3-tier 복구 체인 (reframe → switch-agent → escalate), wisdom에 패턴 기록
+| # | 항목 | 구현 위치 |
+|---|------|-----------|
+| US-001 | TDD Skill (RED-GREEN-REFACTOR) | `skills/tdd/SKILL.md` |
+| US-002 | TDD Gate — Atlas Phase 3 | `skills/atlas/SKILL.md` L497-502 (requiresTDD 라우팅) |
+| US-003 | TDD Gate — Athena Phase 2 | `skills/athena/SKILL.md` L395 (TDD_INSTRUCTION 주입) |
+| US-004 | Brainstorm Skill (Diverge-Converge-Refine) | `skills/brainstorm/SKILL.md` |
+| US-005 | Brainstorm Gate — Atlas/Athena | Atlas L109-211, Athena L96-171 (complex/architectural deep-dive) |
+| US-006 | Systematic Debug Skill | `skills/systematic-debug/SKILL.md` |
+| US-007 | Debugger Agent — Systematic Debug 통합 | Atlas L558-560 (debugger→systematic-debug→trace 에스컬레이션) |
+| US-008 | Trace Skill — Systematic Debug 프로토콜 | `skills/trace/SKILL.md` (3 가설 + 프로브) |
+| US-009 | Verification Iron Law | Atlas L515-517, Athena L584-586 (`addVerification()` 호출) |
+| US-010 | Finish-Branch Skill | `skills/finish-branch/SKILL.md` |
+| US-011 | Two-Stage Code Review — Phase 5 | Atlas L626-645 (architect + security + quality 동시) |
+| US-013 | Code-Reviewer Agent — 3단계 리뷰 | `agents/code-reviewer.md` L26-62 (Spec + Quality + Adversarial) |
+| US-014 | Debugger Agent — Root-Cause Iron Law | `agents/debugger.md` L8 ("REPRODUCE FIRST (Iron Law)") |
+| US-015 | Verify-Coverage 강화 | `skills/verify-coverage/SKILL.md` (SHALLOW COVERAGE 감지) |
+| US-017 | Consensus-Plan — TDD 태깅 | `skills/consensus-plan/SKILL.md` L272 (requiresTDD) |
+| US-018 | Superpowers Coexistence Detection | `scripts/lib/codex-approval.mjs` (permission mirroring) |
 
-### E2. Team Shared Blackboard — ✅ Done
+### 🔄 Partial (1/18)
 
-- **구현**: `scripts/lib/inbox-outbox.mjs` (`writeBlackboard`, `readBlackboard`)
-- **통합 지점**: Athena Phase 3 워커 간 지식 공유
-- **동작**: JSONL append-only 블랙보드, category/limit/since 필터링
+| # | 항목 | 현재 상태 | 남은 작업 |
+|---|------|-----------|-----------|
+| US-016 | Plan Skill — Brainstorm 연동 | 패턴 문서화됨 (L946-951) | L-scale 시 자동 호출이 아닌 "invoke or ask" 형태 |
 
-### E3. Run Artifacts — ✅ Done
+### ❌ Not Started (1/18)
 
-- **구현**: `scripts/lib/run-artifacts.mjs`
-- **주요 함수**: `createRun()`, `addEvent()`, `addVerification()`, `finalizeRun()`, `listRuns()`, `getRun()`
-- **통합 지점**: Atlas/Athena 오케스트레이션 시작~종료
-- **동작**: 구조화된 실행 기록 (events.jsonl + summary.json + verification.jsonl)
-
-### E4. Per-Agent Snapshot — ➡️ Merged → Consolidated #1
-
-- **원래 계획**: `.ao/state/agent-snapshots/<agent>-<run-id>.json`
-- **Codex 판정**: MERGE → E3+F1. `subagent-stop.mjs`가 이미 결과 캡처. 별도 snapshot 디렉토리는 중복 저장소. run-artifacts에 runId/storyId/phase 키로 통합
-- **행선지**: Consolidated Backlog #1 (Event-Backed Run System)
-
-### E5. Story-Level AC Evidence — ✅ Done (via G#2, v0.9.2)
-
-- **원래 계획**: Acceptance Criteria 자동 검증 프레임워크
-- **Codex 판정**: REDEFINE → Consolidated Backlog #2로 이동
-- **구현 완료**: `addVerification()` criteria 배열 확장, `verifyStory()`, `getRunVerificationSummary()` — v0.9.2
-
-### E6. Capability Detection — ✅ Done
-
-- **구현**: `scripts/lib/preflight.mjs` (`detectCapabilities`, `formatCapabilityReport`)
-- **통합 지점**: `session-start.mjs` 세션 시작 시
-- **동작**: tmux/codex/worktree/preview MCP 런타임 감지 + 자동 리포트
-
-### E7. Session Replay — ➡️ Merged → Consolidated #1
-
-- **원래 계획**: Run artifacts 기반 실행 재생
-- **Codex 판정**: MERGE → G3. `events.jsonl` 인프라는 있으나 런타임 호출 부재. 리플레이 UI보다 이벤트 소싱 기반 복구/디버깅이 더 가치 있음
-- **행선지**: Consolidated Backlog #1 (Event-Backed Run System)
-
-### E8. TaskUpdate Events — ➡️ Merged → Consolidated #4
-
-- **원래 계획**: 워커 진행률 실시간 이벤트 스트림
-- **Codex 판정**: MERGE → G2. `worker-status.mjs`가 이미 상태 추적. `TaskUpdate`는 Native Teams 전환 시에만 의미. `hasTeamTools = true` 하드코딩 상태에서 별도 구현 불필요
-- **행선지**: Consolidated Backlog #4 (Native Agent Teams)
-
-### E9. Completion Notices — ✅ Done (via G#3, v0.9.2)
-
-- **원래 계획**: 실행 완료 후 다음 액션 자동 제안
-- **Codex 판정**: REDEFINE → Consolidated Backlog #3으로 이동
-- **구현 완료**: `generateCompletionNotices()` 6가지 갭 타입 감지 — v0.9.2
-
-### E10. Batch Orchestration — ❌ Dropped
-
-- **원래 계획**: 다수 태스크 순차/병렬 배치 실행
-- **Codex 판정**: DROP. Atlas는 스토리 분해로, Athena는 병렬 워커로 이미 배치 처리. 비관련 작업은 쉘 시퀀싱이 더 명확. 별도 `/batch` 스킬은 복잡도 대비 가치 없음
+| # | 항목 | 설명 |
+|---|------|------|
+| US-012 | Quality-Gate Agent | `agents/quality-gate.md` 신규 생성 필요 (v0.10 deferred)
 
 ---
-
-## F. Hook System Extensions (v0.9.1)
-
-자체 평가 + 외부 생태계 연구를 기반으로 도출된 훅 시스템 확장 항목.
-Claude Code 훅 API가 28개 이벤트로 확장된 것에 맞춰 신규 훅 3종 추가 + 비동기 설정 적용.
-
-### F1. SubagentStop Hook — ✅ Done
-
-- **구현**: `scripts/subagent-stop.mjs`
-- **통합 지점**: `hooks/hooks.json` SubagentStop 이벤트 (async: true)
-- **동작**: 서브에이전트 완료 시 `last_assistant_message` 등 결과를 `.ao/state/ao-subagent-results.json`에 캡처 (50개 FIFO). 수동 트랜스크립트 파싱 대체
-
-### F2. SubagentStart Hook — ✅ Done
-
-- **구현**: `scripts/subagent-start.mjs`
-- **통합 지점**: `hooks/hooks.json` SubagentStart 이벤트 (동기)
-- **동작**: 서브에이전트 스폰 시 `.ao/wisdom.jsonl`에서 최근 10개 학습 항목 로드 → `additionalContext`로 주입
-
-### F3. SessionEnd Hook — ✅ Done
-
-- **구현**: `scripts/session-end.mjs`
-- **통합 지점**: `hooks/hooks.json` SessionEnd 이벤트 (async: true)
-- **동작**: 세션 종료 시 24시간 이상 된 `.ao/state/` 파일과 `.ao/teams/` 디렉토리 정리. Stop 훅(WIP 커밋)의 보완
-
-### F4. Async Hook Configuration — ✅ Done
-
-- **구현**: `hooks/hooks.json` 수정
-- **동작**: PostToolUse(concurrency-release), SubagentStop, SessionEnd 훅에 `"async": true` 설정. 메인 세션 블로킹 방지. SubagentStart는 의도적으로 동기(컨텍스트 주입이 스폰 전에 완료되어야 함)
-
----
-
-## G. Consolidated Backlog (v0.9.2)
-
-Codex 교차검증 2차(C/E/G 중복 분석, 213K tokens)를 거쳐 통합된 백로그.
-기존 E 카테고리 백로그 6건 + G 카테고리 3건 → **5건으로 통합** (4 merged, 1 dropped, 2 redefined, 2 blocked).
-상세 스펙: [event-backed-runs spec](./event-backed-runs/spec.md), [v0.9.5 deferred spec](./v0.9.5-deferred/spec.md)
-
-### #1. Event-Backed Run System — ✅ Done (v0.9.2)
-
-- **통합 항목**: E3 확장 + G3(이벤트 소싱) + E7(세션 리플레이) + E4(에이전트 스냅샷) + F1(subagent-stop) 통합
-- **핵심**: `run-artifacts.mjs`의 `addEvent()`를 canonical append-only 이벤트 로그로 확장. `checkpoint.mjs`는 이벤트 emit + replay 지원
-- **구현 내역**:
-  - Active Run Identity: `getActiveRunId()`, `setActiveRunId()`, `discoverActiveRun()` — `.ao/state/ao-active-run-<orchestrator>.json`
-  - `createRun()` → active-run 포인터 자동 생성, `finalizeRun()` → compare-and-delete + `run_finalized` 이벤트
-  - `saveCheckpoint()` → `phase_transition` + `checkpoint_saved` 이벤트 자동 발행 (active run 있을 때만)
-  - `clearCheckpoint()` → `checkpoint_cleared` 이벤트 발행
-  - `subagent-stop.mjs` → `discoverActiveRun()` 으로 양쪽 orchestrator 확인 후 `subagent_completed` 이벤트 발행
-  - `replayEvents(runId)` → event log에서 checkpoint 상태 재구성
-  - `PHASE_NAMES` export
-- **테스트**: 11 tests (checkpoint-events.test.mjs)
-- **스펙**: [event-backed-runs/spec.md](./event-backed-runs/spec.md) US-001~US-005
-
-### #2. Story-Level AC Evidence — ✅ Done (v0.9.2)
-
-- **통합 항목**: E5 재정의
-- **핵심**: Themis는 범용 품질 게이트. AC 검증은 스토리/기준별 PASS/FAIL/SKIP + 구체적 증거
-- **구현 내역**:
-  - `addVerification()` 확장: `criteria` 배열 지원 (criterion_index, criterion_text, verdict, evidence)
-  - `verifyStory(runId, storyId)` — 스토리별 기준 집계 (fail > skip > pass 우선순위)
-  - `getRunVerificationSummary(runId)` — 전체 스토리 요약 (total/passed/failed/skipped)
-  - `verification_result` 이벤트: full payload 포함 (Codex 피드백 반영)
-  - 기존 스키마 (criteria 없음) 하위 호환 유지
-- **테스트**: 10 tests (completion-notices.test.mjs)
-- **스펙**: [event-backed-runs/spec.md](./event-backed-runs/spec.md) US-006~US-007
-
-### #3. Completion Notices — ✅ Done (v0.9.2)
-
-- **통합 항목**: E9 재정의
-- **핵심**: 범용 제안 → 미해결 갭 기반 구체적 notice만 출력
-- **구현 내역**:
-  - `generateCompletionNotices(runId)` — 6가지 갭 타입 감지
-  - 갭 타입: `tests_skipped`, `manual_review_needed`, `preview_skipped`, `codex_unavailable`, `unresolved_warnings`, `worker_failed`
-  - Story-level + Criterion-level 양쪽에서 evidence 기반 탐지
-  - Event log에서 `warning`, `worker_failed` 이벤트 탐지
-  - 갭 없으면 빈 배열 (노이즈 없음)
-- **테스트**: 8 tests (completion-notices.test.mjs)
-- **스펙**: [event-backed-runs/spec.md](./event-backed-runs/spec.md) US-008
-
-### #4. Native Agent Teams — 🔒 Blocked (High when unblocked)
-
-- **통합 항목**: G2 + E8(TaskUpdate)
-- **핵심**: Athena를 네이티브 팀 위의 래퍼로 전환. Codex 통합 + 에이전트 페르소나가 부가가치
-- **구현 계획**:
-  - feature-flag: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` 감지
-  - 네이티브 `TeamCreate`/`SendMessage`/`TaskUpdate`/worktree 사용
-  - `worker-status.mjs`는 fallback으로만 유지, 상태 전이는 canonical event log에 기록
-  - 미지원 환경 → 현재 Athena 구현으로 폴백
-- **의존성**: Native Agent Teams experimental 졸업
-- **참고**: #1과 event sink 공유 (상태 전이를 event log에 기록)
-
-### #5. Codex를 진짜 팀원으로 — 🔄 Redefine (Phase 0-1 즉시 가능)
-
-- **통합 항목**: G1 재정의
-- **배경**: Codex 교차검증(207K tokens) + Advocate/Critic 분석을 통해 근본 문제 발견
-  - 현재 Codex 워커는 `codex exec` one-shot 실행. **실행 중 inbox 읽기, 메시지 수신 불가**
-  - Athena 스킬 문서에 "Claude → Codex inbox 쓰기" 명시되어 있으나, Codex가 실제로 읽는 코드 없음
-  - Codex는 팀 "참여자"가 아니라 "배치 실행자" — 양방향 통신의 핵심 요건 미충족
-  - 원래 G#5 정의("app-server JSON-RPC로 트랜스포트 교체")는 문제의 본질을 놓침
-- **재정의**: "Codex를 진짜 팀원으로 만들기" — 트랜스포트 교체가 아닌 통신 역량 구현
-
-#### Phase 0: 즉시 실행 가능 (코드 변경 최소)
-
-- Athena SKILL.md에서 허위 양방향 통신 문서 정리 → Codex를 "배치 실행자"로 명확화
-- Adversarial review prompt 구조 (`<attack_surface>`, `<finding_bar>`, `<calibration_rules>`) → `agents/code-reviewer.md` 차용
-- `codex exec review` 서브커맨드 활용하여 xval 프롬프트 품질 개선
-- **의존성**: 없음
-
-#### Phase 1: `codex exec --json` + 태스크 체이닝 (tmux 분리)
-
-- `child_process.spawn("codex", ["exec", "--json", "-"])` + stdin 프롬프트
-- JSONL 이벤트 파싱 (`thread.started`, `turn.completed`, `turn.failed`, `item.*`, `error`)
-- 구조화된 완료/에러 감지 → `detectCodexError()` regex 6개 대체 (기존 에러 분류 보존)
-- **Codex를 tmux 의존에서 분리** — Claude/Gemini은 tmux 유지
-- `spawnTeam()`의 tmux 하드 의존 해소 (`preflight.mjs`에 `hasCodexExecJson` 탐지)
-- 오케스트레이터 중개 태스크 체이닝: `exec → 결과 + Claude 피드백 합침 → 재exec`
-- **의존성**: 없음 (`codex exec --json`은 codex-cli 0.116.0에서 이미 지원)
-
-#### Phase 2: `codex app-server` multi-turn (진짜 양방향)
-
-- `codex app-server` thread 기반 multi-turn 대화
-- mid-execution steer/interrupt, 후속 turn 추가 가능
-- orchestrator당 1 app-server (글로벌 broker 아님 — one-shot에 불필요)
-- Codex 버전 피닝 필수 (`[experimental]` 상태)
-- **의존성**: `codex app-server` 안정화 (codex-cli 0.116.0 기준 `[experimental]`)
-
-#### Phase 3: 네이티브 팀 통합 (G#4 합류)
-
-- G#4 Native Agent Teams와 합류
-- Codex를 first-class 팀원으로 — Native Teams에서 양방향 메시지 채널
-
-#### 폐기된 계획
-
-- ~~Broker 패턴으로 워커 간 Codex 런타임 공유~~ → DROP (one-shot `codex exec` 패턴에 불필요)
-- ~~Stop hook Review Gate (900s BLOCK)~~ → DEFER Phase 2+ (현재 stop-hook.mjs의 비차단 WIP 자동커밋과 설계 충돌)
-
-#### Codex 교차검증 결과 (6개 판정)
-
-| # | Claude 판단 | Codex 판정 | 근거 |
-|---|------------|-----------|------|
-| 1 | Broker 불필요 | **AGREE** | one-shot에 공유 런타임 불필요 |
-| 2 | 폴링 trivial | **DISAGREE** | CPU는 trivial이지만 UX 지연 5-7.5초 평균은 의미 있음 |
-| 3 | 셸 인젝션 방어 충분 | **MODIFY** | decent하지만 `codex exec` stdin 지원으로 더 단순화 가능 |
-| 4 | Phase 1에서 Broker skip | **MODIFY** | 외부 broker skip, in-process 클라이언트 매니저는 필요할 수 있음 |
-| 5 | 3-Phase 시퀀싱 | **MODIFY** | Phase 1은 app-server가 아니라 `codex exec --json`이어야 함 |
-| 6 | 놓친 사항 | **AGREE** | `exec --json` 경로, Stop hook 충돌, 공식 문서의 자동화 vs 리치 클라이언트 구분 |
-
-- **Codex 참고**: OpenAI 공식 문서는 app-server를 rich client 통합(VS Code 등)용으로, 자동화/CI는 SDK 사용 권장. AO는 자동화에 더 가까움
-
----
-
-## H. Cross-Session Management (v0.9.3)
-
-세션 간 지식 공유 및 추적 시스템. Codex(GPT-5.4) + Claude code-reviewer 교차검증.
-
-### H1. Session Registry + /sessions 스킬 — ✅ Done
-
-- **구현**:
-  - `scripts/lib/session-registry.mjs` *(new)* — 세션 레지스트리 라이브러리
-  - `scripts/session-start.mjs` — crash recovery + 세션 등록 추가
-  - `scripts/session-end.mjs` — 세션 종료 기록 + 자동 정리
-  - `scripts/lib/run-artifacts.mjs` — `createRun()` 시 sessionId 링크
-  - `skills/sessions/SKILL.md` *(new)* — on-demand 세션 브라우저 스킬
-  - `scripts/test/session-registry.test.mjs` *(new)* — 19 unit tests
-- **주요 기능**: 세션 등록/종료/조회, crash recovery, run 연결, alive 체크, TTL 정리, 세션 재개(tmux)
-- **교차검증 수정사항**:
-  - CRITICAL: `currentSessionPath()` worktree 경로 불일치 수정
-  - HIGH: `recoverCrashedSession()` isSessionAlive() 미호출 수정
-  - HIGH: `pruneSessions()` active 세션 보호 추가
-  - MEDIUM: `listSessions` 테스트 타이밍 flaky 수정
-
----
-
-## I. Codex Permission Mirroring (v0.9.5)
-
-Claude의 권한 수준을 Codex approval 모드에 자동 미러링. Codex 교차검증 완료.
-
-### I1. Codex Approval Auto-Detection — ✅ Done
-
-- **구현**:
-  - `scripts/lib/codex-approval.mjs` *(new)* — Claude 권한 감지 → Codex approval 모드 결정
-    - `detectClaudePermissionLevel()`: project/user `.claude/settings*.json` 읽기
-    - `resolveCodexApproval()`: autonomy config 또는 자동 감지
-    - `codexApprovalFlag()`: 모드 → CLI 플래그 변환
-  - `scripts/lib/autonomy.mjs` — `codex.approval` 설정 추가 (auto/suggest/auto-edit/full-auto)
-  - `scripts/lib/tmux-session.mjs` — `buildWorkerCommand()` codex 워커에 플래그 주입
-  - `scripts/lib/worker-spawn.mjs` — `buildWorkerCommand()` 호출 시 `cwd` 전달 (교차검증 발견)
-  - `skills/{atlas,athena,ask}/SKILL.md` — codex exec 명령에 `<approval-flag>` 반영
-  - `scripts/test/codex-approval.test.mjs` *(new)* — 24 unit tests
-- **권한 매핑**: `Bash(*)+Write(*)` → `--full-auto`, `Write(*)/Edit(*)` → `--auto-edit`, 그 외 → suggest
-- **교차검증 수정사항**:
-  - LOW: `worker-spawn.mjs` buildWorkerCommand() 호출 시 cwd 미전달 → worktree 경로 전달로 수정
-  - 추가 테스트: bare `Bash` (glob 없이) 인식, `auto` + 실제 settings 파일 chain 테스트
-
----
-
-## Origin
-
-이 항목들은 `docs/plans/v0.8-post-code-automation/spec.md`에서 최초 정의됨.
-원본 스펙의 상세 요구사항, Acceptance Criteria, 구현 노트는 해당 문서 참조.
 
 ## Cross-Validation History
 
-| 일시 | 대상 | Codex tokens | 결과 |
-|------|------|-------------|------|
-| v0.9 | E1~E10 초기 도출 | 96K | 2 AGREE, 7 MODIFY, 3 DISAGREE |
-| v0.9.1 (1차) | C3, E4~E10 재검토 | 54K | 1 REDEFINE, 3 MERGE, 2 REDEFINE, 1 DROP |
-| v0.9.1 (2차) | C/E/G 전체 중복 분석 | 159K | 3 MERGE, 2 SEQUENCE, 2 KEEP SEPARATE |
-| v0.9.2 (스펙) | G#1~#3 spec 교차검증 | 126K | MODIFY (4 Critical, 3 Medium) → 반영 후 구현 |
-| v0.9.3 | H1 구현 + 코드 리뷰 | — | CRITICAL 1, HIGH 2, MEDIUM 1 → 전부 수정 |
-| v0.9.3 (G#5) | G#5 재정의 (Advocate/Critic + Codex) | 207K | 1 AGREE, 1 DISAGREE, 4 MODIFY → G#5 4-Phase 재구성 |
+| 일시 | 대상 | 결과 |
+|------|------|------|
+| v0.9 | E1~E10 | 2 AGREE, 7 MODIFY, 3 DISAGREE |
+| v0.9.1 | C/E/G 중복 분석 | 3 MERGE, 2 SEQUENCE, 2 KEEP SEPARATE |
+| v0.9.2 | G#1~#3 spec | MODIFY (4 Critical, 3 Medium) |
+| v0.9.3 | H1 코드 리뷰 | CRITICAL 1, HIGH 2, MEDIUM 1 |
 
 ## References
 
-- [claw-code](https://github.com/instructkr/claw-code) — Claude Code Python clean-room rewrite. E 카테고리(v0.9) 개선 항목의 소스 분석 기반
-- `docs/plans/v0.9-source-informed-improvements/spec.md` — v0.9 상세 스펙 (Codex 교차검증 결과 포함)
-- `docs/plans/v0.9.5-deferred/spec.md` — Consolidated Backlog #4, #5 상세 스펙 (Native Teams, Codex 팀원화, Event Sourcing)
+- [Superpowers spec](./superpowers-methodology-integration/spec.md) — 18 User Stories 상세
+- [Event-Backed Runs spec](./event-backed-runs/spec.md) — G#1~#3 상세
+- [v0.9.5 Deferred spec](./v0.9.5-deferred/spec.md) — G#4 (Native Teams) 상세
+- [claw-code](https://github.com/instructkr/claw-code) — E 카테고리 소스 분석 기반
+- [codex-plugin-cc](https://github.com/openai/codex-plugin-cc) — G#5 codex-plugin-cc 통합의 참조 구현

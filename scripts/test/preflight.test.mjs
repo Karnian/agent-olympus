@@ -276,7 +276,7 @@ test('formatPreflightReport: returns capability report even with no actions/warn
   const { formatPreflightReport } = await import('../../scripts/lib/preflight.mjs');
   const result = formatPreflightReport({
     valid: true, actions: [], warnings: [],
-    capabilities: { hasTmux: true, hasCodex: false, hasGitWorktree: true, hasTeamTools: true, hasPreviewMCP: false }
+    capabilities: { hasTmux: true, hasCodex: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false }
   });
   assert.ok(result.length > 0, 'should include capability report');
   assert.ok(result.includes('tmux'), 'should mention tmux');
@@ -298,21 +298,35 @@ test('formatPreflightReport: formats actions and warnings', async () => {
 // detectCapabilities
 // ---------------------------------------------------------------------------
 
-test('detectCapabilities: returns object with all 5 boolean fields', async () => {
+test('detectCapabilities: returns object with all boolean fields', async () => {
   const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
   const caps = await detectCapabilities();
   assert.ok(typeof caps === 'object' && caps !== null);
-  assert.ok(typeof caps.hasTmux === 'boolean');
-  assert.ok(typeof caps.hasCodex === 'boolean');
-  assert.ok(typeof caps.hasGitWorktree === 'boolean');
-  assert.ok(typeof caps.hasTeamTools === 'boolean');
-  assert.ok(typeof caps.hasPreviewMCP === 'boolean');
+  for (const key of ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP']) {
+    assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
+  }
 });
 
-test('detectCapabilities: hasTeamTools is always true', async () => {
-  const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
-  const caps = await detectCapabilities();
-  assert.equal(caps.hasTeamTools, true);
+test('detectCapabilities: hasNativeTeamTools follows CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const preflightUrl = new URL('../../scripts/lib/preflight.mjs', import.meta.url).href;
+  const script = `const mod = await import(${JSON.stringify(preflightUrl)}); const caps = await mod.detectCapabilities(); console.log(JSON.stringify({ hasNativeTeamTools: caps.hasNativeTeamTools }));`;
+
+  // With env var set to '1' → true
+  const out1 = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' },
+    encoding: 'utf-8',
+  });
+  assert.equal(JSON.parse(out1.trim()).hasNativeTeamTools, true);
+
+  // With env var unset → false
+  const env2 = { ...process.env };
+  delete env2.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+  const out2 = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: env2,
+    encoding: 'utf-8',
+  });
+  assert.equal(JSON.parse(out2.trim()).hasNativeTeamTools, false);
 });
 
 test('detectCapabilities: handles command failures gracefully (all binary checks return boolean)', async () => {
@@ -320,7 +334,7 @@ test('detectCapabilities: handles command failures gracefully (all binary checks
   // Even if binaries are missing, the function should never throw
   const caps = await detectCapabilities();
   // All fields must be booleans regardless of environment
-  for (const key of ['hasTmux', 'hasCodex', 'hasGitWorktree', 'hasTeamTools', 'hasPreviewMCP']) {
+  for (const key of ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP']) {
     assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
   }
 });
@@ -331,7 +345,7 @@ test('detectCapabilities: handles command failures gracefully (all binary checks
 
 test('formatCapabilityReport: formats ✓ for true capabilities', async () => {
   const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
-  const caps = { hasTmux: true, hasCodex: true, hasClaudeCli: true, hasGeminiCli: true, hasGitWorktree: true, hasTeamTools: true, hasPreviewMCP: true };
+  const caps = { hasTmux: true, hasCodex: true, hasClaudeCli: true, hasGeminiCli: true, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: true };
   const report = formatCapabilityReport(caps);
   // All 7 entries should show ✓
   const checkmarks = (report.match(/✓/g) || []).length;
@@ -340,23 +354,23 @@ test('formatCapabilityReport: formats ✓ for true capabilities', async () => {
 
 test('formatCapabilityReport: formats ✗ for false capabilities', async () => {
   const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
-  const caps = { hasTmux: false, hasCodex: false, hasClaudeCli: false, hasGeminiCli: false, hasGitWorktree: false, hasTeamTools: false, hasPreviewMCP: false };
+  const caps = { hasTmux: false, hasCodex: false, hasClaudeCli: false, hasGeminiCli: false, hasGitWorktree: false, hasNativeTeamTools: false, hasPreviewMCP: false };
   const report = formatCapabilityReport(caps);
   // All 7 entries should show ✗
   const crosses = (report.match(/✗/g) || []).length;
   assert.equal(crosses, 7);
 });
 
-test('formatCapabilityReport: includes all 5 capability names', async () => {
+test('formatCapabilityReport: includes all 7 capability names', async () => {
   const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
-  const caps = { hasTmux: true, hasCodex: false, hasGitWorktree: true, hasTeamTools: true, hasPreviewMCP: false };
+  const caps = { hasTmux: true, hasCodex: false, hasClaudeCli: true, hasGeminiCli: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false };
   const report = formatCapabilityReport(caps);
   assert.ok(report.includes('tmux'), 'should mention tmux');
   assert.ok(report.includes('codex'), 'should mention codex');
   assert.ok(report.includes('claude-cli'), 'should mention claude-cli');
   assert.ok(report.includes('gemini-cli'), 'should mention gemini-cli');
   assert.ok(report.includes('git worktree'), 'should mention git worktree');
-  assert.ok(report.includes('team tools'), 'should mention team tools');
+  assert.ok(report.includes('Native Agent Teams'), 'should mention Native Agent Teams');
   assert.ok(report.includes('preview MCP'), 'should mention preview MCP');
 });
 
@@ -374,7 +388,7 @@ test('runPreflight: includes capabilities field in result', async () => {
       const report = await runPreflight();
       assert.ok('capabilities' in report, 'report should have capabilities field');
       assert.ok(typeof report.capabilities === 'object' && report.capabilities !== null);
-      assert.ok(typeof report.capabilities.hasTeamTools === 'boolean');
+      assert.ok(typeof report.capabilities.hasNativeTeamTools === 'boolean');
     } finally {
       process.chdir(origCwd);
     }
@@ -390,12 +404,12 @@ test('formatPreflightReport: includes capability report when capabilities presen
     // Capabilities are appended when there are actions or warnings to report
     actions: ['Removed stale pointer: .ao/spec.md'],
     warnings: [],
-    capabilities: { hasTmux: true, hasCodex: false, hasGitWorktree: true, hasTeamTools: true, hasPreviewMCP: false },
+    capabilities: { hasTmux: true, hasCodex: false, hasClaudeCli: false, hasGeminiCli: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false },
   };
   const formatted = formatPreflightReport(report);
   assert.ok(formatted.includes('Capabilities:'), 'should include Capabilities header');
   assert.ok(formatted.includes('tmux'), 'should include tmux capability');
-  assert.ok(formatted.includes('team tools'), 'should include team tools capability');
+  assert.ok(formatted.includes('Native Agent Teams'), 'should include Native Agent Teams capability');
 });
 
 // ---------------------------------------------------------------------------
@@ -474,7 +488,7 @@ test('detectCapabilities: hasCodexExecJson is false when codex is not installed'
 test('detectCapabilities: handles all binary fields including hasCodexExecJson as booleans', async () => {
   const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
   const caps = await detectCapabilities();
-  const allFields = ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasGitWorktree', 'hasTeamTools', 'hasPreviewMCP'];
+  const allFields = ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP'];
   for (const key of allFields) {
     assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
   }
