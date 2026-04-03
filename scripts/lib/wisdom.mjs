@@ -12,14 +12,75 @@ const PROGRESS_PATH = path.join(process.cwd(), '.ao', 'progress.txt');
 const MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
 /**
- * Jaccard similarity between two strings (word-level, words > 2 chars)
+ * 47 high-frequency English stop words removed before Jaccard comparison.
+ * Limited to function words that carry no discriminative meaning for lesson similarity.
+ */
+const STOP_WORDS = new Set([
+  'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all',
+  'can', 'had', 'her', 'was', 'one', 'our', 'out', 'has',
+  'his', 'how', 'its', 'may', 'new', 'now', 'old', 'see',
+  'way', 'who', 'did', 'get', 'let', 'say', 'she', 'too',
+  'use', 'that', 'with', 'have', 'this', 'will', 'your',
+  'from', 'they', 'been', 'each', 'make', 'when', 'than',
+]);
+
+/**
+ * Suffix stripping rules — longest suffixes first.
+ * minBefore: minimum stem length after stripping (must be >= 4 to prevent false conflation).
+ */
+const SUFFIX_RULES = [
+  { suffix: 'tion', minBefore: 4 },
+  { suffix: 'sion', minBefore: 4 },
+  { suffix: 'ness', minBefore: 4 },
+  { suffix: 'ment', minBefore: 4 },
+  { suffix: 'able', minBefore: 4 },
+  { suffix: 'ible', minBefore: 4 },
+  { suffix: 'ally', minBefore: 4 },
+  { suffix: 'ing',  minBefore: 4 },
+  { suffix: 'ies',  minBefore: 4 },
+  { suffix: 'ed',   minBefore: 4 },
+  { suffix: 'er',   minBefore: 4 },
+  { suffix: 'ly',   minBefore: 4 },
+  { suffix: 's',    minBefore: 4 },
+];
+
+/**
+ * Strip a single common English suffix if the remaining stem is >= 4 chars.
+ * @param {string} word
+ * @returns {string}
+ */
+function stripSuffix(word) {
+  for (const { suffix, minBefore } of SUFFIX_RULES) {
+    if (word.endsWith(suffix) && word.length - suffix.length >= minBefore) {
+      return word.slice(0, word.length - suffix.length);
+    }
+  }
+  return word;
+}
+
+/**
+ * Tokenize text: lowercase, split, filter short words, remove stop words, strip suffixes.
+ * @param {string} text
+ * @returns {string[]}
+ */
+function tokenize(text) {
+  return text
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(w => w.length > 2)
+    .filter(w => !STOP_WORDS.has(w))
+    .map(stripSuffix);
+}
+
+/**
+ * Jaccard similarity between two strings using normalized tokens.
  * @param {string} a
  * @param {string} b
  * @returns {number} similarity 0–1
  */
 function jaccardSimilarity(a, b) {
-  const setA = new Set(a.toLowerCase().split(/\s+/).filter(w => w.length > 2));
-  const setB = new Set(b.toLowerCase().split(/\s+/).filter(w => w.length > 2));
+  const setA = new Set(tokenize(a));
+  const setB = new Set(tokenize(b));
   const intersection = [...setA].filter(w => setB.has(w)).length;
   const union = new Set([...setA, ...setB]).size;
   return union === 0 ? 0 : intersection / union;
@@ -106,55 +167,120 @@ export async function addWisdom(entry) {
  */
 const CONFIDENCE_RANK = { low: 0, medium: 1, high: 2 };
 
+// ---------------------------------------------------------------------------
+// Multi-dimensional scoring (US-C3R-002)
+// ---------------------------------------------------------------------------
+
+const CONFIDENCE_SCORES = { high: 1.0, medium: 0.66, low: 0.33 };
+
+function scoreRecency(entry) {
+  try {
+    const ageMs = Date.now() - new Date(entry.timestamp).getTime();
+    return Math.max(0, 1 - ageMs / MAX_AGE_MS);
+  } catch {
+    return 0;
+  }
+}
+
+function scoreConfidence(entry) {
+  return CONFIDENCE_SCORES[entry.confidence] ?? 0.33;
+}
+
+function scoreCategory(entry, queryCategory) {
+  return entry.category === queryCategory ? 1.0 : 0.0;
+}
+
+function scoreIntent(entry, queryIntent) {
+  return entry.intent === queryIntent ? 1.0 : 0.0;
+}
+
+function scoreFilePattern(entry, queryFilePattern) {
+  const patterns = entry.filePatterns ?? [];
+  return patterns.some(p => p.includes(queryFilePattern)) ? 1.0 : 0.0;
+}
+
 /**
- * Query wisdom entries with flexible filtering, most recent first.
+ * Compute composite relevance score with weight renormalization.
+ * Unspecified dimensions are excluded; active weights renormalize to sum to 1.0.
+ */
+function scoreEntry(entry, query) {
+  const dims = [
+    { weight: 0.3, score: scoreRecency(entry) },
+    { weight: 0.1, score: scoreConfidence(entry) },
+  ];
+
+  if (query.category) {
+    dims.push({ weight: 0.25, score: scoreCategory(entry, query.category) });
+  }
+  if (query.intent) {
+    dims.push({ weight: 0.2, score: scoreIntent(entry, query.intent) });
+  }
+  if (query.filePattern) {
+    dims.push({ weight: 0.15, score: scoreFilePattern(entry, query.filePattern) });
+  }
+
+  const totalWeight = dims.reduce((sum, d) => sum + d.weight, 0);
+  return dims.reduce((sum, d) => sum + (d.weight / totalWeight) * d.score, 0);
+}
+
+/**
+ * Query wisdom entries with flexible filtering.
+ *
+ * Scoring activates ONLY when the query object contains at least one of
+ * {category, intent, filePattern}. Otherwise, entries are returned in
+ * reverse chronological order (legacy behavior).
  *
  * Backwards-compatible overloads:
- *   queryWisdom(category, limit)            — legacy string-based call
+ *   queryWisdom(category, limit)            — legacy string-based call (recency-only)
  *   queryWisdom({ category, intent, minConfidence, filePattern, limit })
  *
  * @param {string|null|object} categoryOrOptions
- *   string|null  → filter by category (legacy)
- *   object       → { category?, intent?, minConfidence?, filePattern?, limit? }
- *     category       - category to filter, or omit/null for all
- *     intent         - 'visual-engineering'|'deep'|'quick'|'writing'|'planning'|'unknown'
- *     minConfidence  - 'high'|'medium'|'low' (inclusive lower bound)
- *     filePattern    - substring match against any element of entry.filePatterns[]
- *     limit          - max entries to return (overrides second argument)
- * @param {number} limit - max entries (used only in legacy string-based call)
+ * @param {number} limit
  * @returns {Promise<Array>}
  */
 export async function queryWisdom(categoryOrOptions, limit = 10) {
   try {
     const entries = await readAllEntries();
 
-    let category = null;
-    let intent = null;
-    let minConfidence = null;
-    let filePattern = null;
-    let effectiveLimit = limit;
-
-    if (categoryOrOptions !== null && typeof categoryOrOptions === 'object') {
-      // New options-object form
-      category = categoryOrOptions.category ?? null;
-      intent = categoryOrOptions.intent ?? null;
-      minConfidence = categoryOrOptions.minConfidence ?? null;
-      filePattern = categoryOrOptions.filePattern ?? null;
-      effectiveLimit = categoryOrOptions.limit ?? limit;
-    } else {
-      // Legacy string (or null) form
-      category = categoryOrOptions;
+    // Legacy string/null path — bypass scorer entirely
+    if (typeof categoryOrOptions === 'string' || categoryOrOptions === null || categoryOrOptions === undefined) {
+      const category = categoryOrOptions;
+      const filtered = category
+        ? entries.filter(e => e.category === category)
+        : entries;
+      return filtered.toReversed().slice(0, limit);
     }
+
+    // Options-object path
+    const category = categoryOrOptions.category ?? null;
+    const intent = categoryOrOptions.intent ?? null;
+    const minConfidence = categoryOrOptions.minConfidence ?? null;
+    const filePattern = categoryOrOptions.filePattern ?? null;
+    const effectiveLimit = categoryOrOptions.limit ?? limit;
 
     const minRank = minConfidence != null ? (CONFIDENCE_RANK[minConfidence] ?? 0) : null;
 
+    // Hard pre-filter (minConfidence is a filter, not a scoring dimension)
     const filtered = entries.filter(e => {
-      if (category && e.category !== category) return false;
-      if (intent && e.intent !== intent) return false;
       if (minRank !== null) {
         const eRank = CONFIDENCE_RANK[e.confidence] ?? 0;
         if (eRank < minRank) return false;
       }
+      return true;
+    });
+
+    // Determine if scoring should activate
+    const hasScoringDimensions = category || intent || filePattern;
+
+    if (!hasScoringDimensions) {
+      // No scoring dimensions — recency-only (existing caller behavior)
+      return filtered.toReversed().slice(0, effectiveLimit);
+    }
+
+    // Scoring path: filter by dimensions first, then score and sort
+    const matched = filtered.filter(e => {
+      if (category && e.category !== category) return false;
+      if (intent && e.intent !== intent) return false;
       if (filePattern) {
         const patterns = e.filePatterns ?? [];
         if (!patterns.some(p => p.includes(filePattern))) return false;
@@ -162,8 +288,15 @@ export async function queryWisdom(categoryOrOptions, limit = 10) {
       return true;
     });
 
-    // Most recent first
-    return filtered.toReversed().slice(0, effectiveLimit);
+    const query = { category, intent, filePattern };
+    matched.sort((a, b) => {
+      const scoreDiff = scoreEntry(b, query) - scoreEntry(a, query);
+      if (scoreDiff !== 0) return scoreDiff;
+      // Tie-break: most recent first
+      return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    });
+
+    return matched.slice(0, effectiveLimit);
   } catch {
     return [];
   }
@@ -291,4 +424,73 @@ export function formatWisdomForPrompt(entries, maxLines = 20) {
     .slice(0, maxLines)
     .map(e => `- [${e.category}] ${e.lesson}`);
   return '## Prior Learnings\n' + lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Export / Import (US-C3R-003)
+// ---------------------------------------------------------------------------
+
+/**
+ * Export all wisdom entries as a JSON array string.
+ * @returns {Promise<string>}
+ */
+export async function exportWisdom() {
+  try {
+    const entries = await readAllEntries();
+    return JSON.stringify(entries, null, 2);
+  } catch {
+    return '[]';
+  }
+}
+
+/**
+ * Import wisdom entries from a JSON array string.
+ * @param {string} jsonString — JSON array of wisdom entry objects
+ * @param {{ merge?: boolean }} options — merge (default true) deduplicates via Jaccard
+ * @returns {Promise<{ imported: number, duplicatesSkipped: number }>}
+ */
+export async function importWisdom(jsonString, { merge = true } = {}) {
+  const incoming = JSON.parse(jsonString);
+  if (!Array.isArray(incoming)) throw new Error('Expected JSON array');
+
+  if (!merge) {
+    const valid = incoming.filter(e => e.lesson && typeof e.lesson === 'string');
+    await writeAllEntries(valid.map(e => ({
+      timestamp: e.timestamp || new Date().toISOString(),
+      project: e.project || path.basename(process.cwd()),
+      category: e.category || 'general',
+      lesson: e.lesson,
+      ...(e.filePatterns ? { filePatterns: e.filePatterns } : {}),
+      confidence: e.confidence || 'medium',
+      ...(e.intent ? { intent: e.intent } : {}),
+    })));
+    return { imported: valid.length, duplicatesSkipped: 0 };
+  }
+
+  const existing = await readAllEntries();
+  let duplicatesSkipped = 0;
+  let imported = 0;
+
+  for (const entry of incoming) {
+    if (!entry.lesson || typeof entry.lesson !== 'string') continue;
+    const isDup = existing.some(e => jaccardSimilarity(e.lesson, entry.lesson) >= 0.7);
+    if (isDup) {
+      duplicatesSkipped++;
+      continue;
+    }
+    existing.push({
+      timestamp: entry.timestamp || new Date().toISOString(),
+      project: entry.project || path.basename(process.cwd()),
+      category: entry.category || 'general',
+      lesson: entry.lesson,
+      ...(entry.filePatterns ? { filePatterns: entry.filePatterns } : {}),
+      confidence: entry.confidence || 'medium',
+      ...(entry.intent ? { intent: entry.intent } : {}),
+    });
+    imported++;
+  }
+
+  await fs.mkdir(path.dirname(WISDOM_PATH), { recursive: true, mode: 0o700 });
+  await writeAllEntries(existing);
+  return { imported, duplicatesSkipped };
 }

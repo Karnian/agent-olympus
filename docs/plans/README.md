@@ -11,4 +11,5 @@ Auto-generated index of all project specifications.
 | [v0.9.1 Hook System + Hygiene](./improvements.md#f-hook-system-extensions-v091) | S | forward | 4 items (4 done) | done | 2026-04-01 |
 | [v0.10 Deferred Items](./v0.10-deferred/spec.md) | M | forward | 2 items (blocked) | backlog | 2026-04-01 |
 | [v0.9.3 Cross-Session Management](./improvements.md#h-cross-session-management-v093) | S | forward | 1 item (1 done) | done | 2026-04-02 |
+| [C3-R Pragmatic Memory](./c3r-pragmatic-memory/spec.md) | S | forward | 3 stories (US-C3R-001~003) | plan (R1) | 2026-04-04 |
 | [Improvement Tracker](./improvements.md) | — | — | 29 items | 25 done, 2 blocked, 1 redefine | 2026-04-02 |

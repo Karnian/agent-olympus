@@ -13,10 +13,10 @@
 | A~D. Core Automation + Comms + Context + Harness | 14 | 14 | 0 |
 | E. Source-Informed (v0.9) | 10 | 4 | 0 (4 merged, 2 done via G) |
 | F. Hook System (v0.9.1) | 4 | 4 | 0 |
-| G. Consolidated Backlog (v0.9.2~v0.9.6) | 5+1 | 5 | 1 independent |
+| G. Consolidated Backlog (v0.9.2~v0.9.6) | 5+1 | 6 | 0 |
 | H. Cross-Session (v0.9.3) | 1 | 1 | 0 |
 | I. Superpowers Methodology (v0.10) | 18 | 16 | 1 partial + 1 not started |
-| **Total** | **53** | **44** | **3** |
+| **Total** | **53** | **45** | **2** |
 
 ---
 
@@ -93,10 +93,11 @@
 - **구현**: `hasNativeTeamTools` env var 런타임 감지, SKILL.md Path A/B 분기, Gemini 통합
 - **스펙**: `docs/plans/native-agent-teams/spec.md`
 
-### G+. Pragmatic Memory — 🔄 Independent (Low)
+### G+. Pragmatic Memory — ✅ Done (C3-R)
 
-- **기존 구현**: `scripts/lib/wisdom.mjs` (JSONL, Jaccard 중복제거, 90일 정리, 200개 상한)
-- **남은 작업**: 토큰 정규화/점수 개선 + `wisdom export/import` CLI
+- **구현**: `scripts/lib/wisdom.mjs` — 토큰 정규화 (47 stop words + 13 suffix rules), 5차원 가중 스코어링, export/import
+- **스펙**: `docs/plans/c3r-pragmatic-memory/spec.md`
+- **교차검증**: Architect APPROVE + Momus APPROVE (1 revision), Codex PASS + Gemini PASS (48 tests)
 
 ---
 
