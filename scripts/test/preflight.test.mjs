@@ -298,15 +298,13 @@ test('formatPreflightReport: formats actions and warnings', async () => {
 // detectCapabilities
 // ---------------------------------------------------------------------------
 
-test('detectCapabilities: returns object with all 5 boolean fields', async () => {
+test('detectCapabilities: returns object with all boolean fields', async () => {
   const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
   const caps = await detectCapabilities();
   assert.ok(typeof caps === 'object' && caps !== null);
-  assert.ok(typeof caps.hasTmux === 'boolean');
-  assert.ok(typeof caps.hasCodex === 'boolean');
-  assert.ok(typeof caps.hasGitWorktree === 'boolean');
-  assert.ok(typeof caps.hasNativeTeamTools === 'boolean');
-  assert.ok(typeof caps.hasPreviewMCP === 'boolean');
+  for (const key of ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP']) {
+    assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
+  }
 });
 
 test('detectCapabilities: hasNativeTeamTools follows CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var', async () => {
@@ -336,7 +334,7 @@ test('detectCapabilities: handles command failures gracefully (all binary checks
   // Even if binaries are missing, the function should never throw
   const caps = await detectCapabilities();
   // All fields must be booleans regardless of environment
-  for (const key of ['hasTmux', 'hasCodex', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP']) {
+  for (const key of ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP']) {
     assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
   }
 });
@@ -363,9 +361,9 @@ test('formatCapabilityReport: formats ✗ for false capabilities', async () => {
   assert.equal(crosses, 7);
 });
 
-test('formatCapabilityReport: includes all 6 capability names', async () => {
+test('formatCapabilityReport: includes all 7 capability names', async () => {
   const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
-  const caps = { hasTmux: true, hasCodex: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false };
+  const caps = { hasTmux: true, hasCodex: false, hasClaudeCli: true, hasGeminiCli: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false };
   const report = formatCapabilityReport(caps);
   assert.ok(report.includes('tmux'), 'should mention tmux');
   assert.ok(report.includes('codex'), 'should mention codex');
@@ -406,7 +404,7 @@ test('formatPreflightReport: includes capability report when capabilities presen
     // Capabilities are appended when there are actions or warnings to report
     actions: ['Removed stale pointer: .ao/spec.md'],
     warnings: [],
-    capabilities: { hasTmux: true, hasCodex: false, hasClaudeCli: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false },
+    capabilities: { hasTmux: true, hasCodex: false, hasClaudeCli: false, hasGeminiCli: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false },
   };
   const formatted = formatPreflightReport(report);
   assert.ok(formatted.includes('Capabilities:'), 'should include Capabilities header');
@@ -490,7 +488,7 @@ test('detectCapabilities: hasCodexExecJson is false when codex is not installed'
 test('detectCapabilities: handles all binary fields including hasCodexExecJson as booleans', async () => {
   const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
   const caps = await detectCapabilities();
-  const allFields = ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP'];
+  const allFields = ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP'];
   for (const key of allFields) {
     assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
   }

@@ -519,11 +519,13 @@ saveCheckpoint('athena', {
 │
 │   ALWAYS (both paths):
 │     Check Codex worker output (via adapter — codex-exec JSONL or tmux pane)
-│     ├─ Claude completes something Codex needs → include in next task chain prompt
-│     ├─ Codex completes something Claude needs →
+│     Check Gemini worker output (via adapter — gemini-exec JSONL, ACP message queue, or tmux pane)
+│     ├─ Claude completes something Codex/Gemini needs → include in next task chain prompt
+│     ├─ Codex/Gemini completes something Claude needs →
 │     │     Path A: SendMessage to Claude worker
 │     │     Path B: include in next agent prompt (no SendMessage available)
 │     ├─ Codex worker fails (auth/rate-limit/crash/timeout) → reassign to Claude executor
+│     ├─ Gemini worker fails (auth/quota/crash/timeout) → reassign to Claude executor
 │     ├─ Worker blocked → unblock or escalate
 │     └─ All done? → proceed to Phase 4
 └── Loop (max 10 monitor iterations)
@@ -563,6 +565,29 @@ Rules:
 - If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again for any worker in this session.
 - If `errorCheck.reason` is `'crash'`, retry Codex once; if it crashes again, fall back to Claude.
 - Always call `await reassignToClaude()` before spawning the replacement — it handles tmux cleanup and wisdom recording in one step.
+
+**Gemini failure detection and Claude fallback:**
+
+Apply the same pattern for Gemini workers. During each monitoring iteration, for every active Gemini worker, check adapter output for errors:
+
+```javascript
+// Inside the monitoring loop, for each Gemini worker:
+// For gemini-exec: check JSONL output for error events
+// For gemini-acp: check message queue for error/timeout signals
+// For tmux fallback: capture pane and check for error patterns
+
+if (geminiWorkerFailed) {
+  reportWorkerStatus(teamName, workerName, 'failed', `Gemini error: ${reason}`);
+  const fallback = await reassignToClaude(teamName, workerName, originalPrompt, reason, geminiSession);
+  reportWorkerStatus(teamName, workerName, 'implementing', `Gemini → Claude: ${reason}`);
+  Task(subagent_type="agent-olympus:executor", model="sonnet", prompt=`${fallback.prompt}`)
+}
+```
+
+Rules (same as Codex):
+- If `reason` is `'auth_failed'`, `'quota_exceeded'`, or `'not_installed'`, do NOT retry Gemini for that error type again.
+- If `reason` is `'crash'`, retry Gemini once; if it crashes again, fall back to Claude.
+- ACP-specific: if message queue shows `dead_letter` entries, treat as partial failure and collect available output before reassigning.
 
 After checking each worker's status, record it via worker-status (import from `scripts/lib/worker-status.mjs`):
 ```javascript
@@ -859,10 +884,10 @@ Clean up:
 - IF Path A (native teams):
   - `TeamDelete("athena-<slug>")` — if TeamDelete fails, log warning but don't block
   - `addEvent(runId, { type: 'native_team_deleted', detail: { teamName: "athena-<slug>" } })`
-- Shut down Codex workers properly via adapter lifecycle:
+- Shut down Codex + Gemini workers properly via adapter lifecycle:
   ```javascript
   import { shutdownTeam } from './scripts/lib/worker-spawn.mjs';
-  await shutdownTeam(teamSlug);  // graceful adapter shutdown (appserver interrupt, exec SIGTERM, tmux kill)
+  await shutdownTeam(teamSlug);  // graceful adapter shutdown (codex appserver interrupt, gemini-acp teardown, exec SIGTERM, tmux kill)
   ```
 - Remove `.ao/teams/<slug>/`
 - Remove `.ao/state/athena-state.json`, `.ao/prd.json`
