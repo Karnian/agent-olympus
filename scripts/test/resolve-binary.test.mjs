@@ -16,6 +16,7 @@ import {
   _binCache,
   SEARCH_PATHS,
   _createResolver,
+  buildEnhancedPath,
 } from '../lib/resolve-binary.mjs';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -133,4 +134,41 @@ test('real resolveBinary returns a non-empty string for any input', () => {
   const result = resolveBinary('node');
   assert.equal(typeof result, 'string');
   assert.ok(result.length > 0);
+});
+
+// ─── buildEnhancedPath tests ─────────────────────────────────────────────────
+
+test('buildEnhancedPath returns a non-empty colon-separated string', () => {
+  const result = buildEnhancedPath();
+  assert.equal(typeof result, 'string');
+  assert.ok(result.length > 0);
+  assert.ok(result.includes(':'), 'should be colon-separated');
+});
+
+test('buildEnhancedPath includes process.env.PATH entries', () => {
+  const result = buildEnhancedPath();
+  // At least /usr/bin should be present from process.env.PATH
+  const parts = result.split(':');
+  assert.ok(parts.some(p => p === '/usr/bin'), 'should include /usr/bin from process.env.PATH');
+});
+
+test('buildEnhancedPath includes SEARCH_PATHS entries that exist on disk', () => {
+  const result = buildEnhancedPath();
+  const parts = new Set(result.split(':'));
+  // At least one of the SEARCH_PATHS should be present if it exists on this machine
+  const anySearchPath = SEARCH_PATHS.some(p => parts.has(p));
+  assert.ok(anySearchPath, 'should include at least one SEARCH_PATHS entry');
+});
+
+test('buildEnhancedPath has no duplicate entries', () => {
+  const result = buildEnhancedPath();
+  const parts = result.split(':');
+  const unique = new Set(parts);
+  assert.equal(parts.length, unique.size, 'should not contain duplicate path entries');
+});
+
+test('buildEnhancedPath has no empty segments', () => {
+  const result = buildEnhancedPath();
+  const parts = result.split(':');
+  assert.ok(parts.every(p => p.length > 0), 'should not contain empty segments');
 });

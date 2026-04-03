@@ -1,5 +1,5 @@
 import { spawn as nodeSpawn } from 'child_process';
-import { resolveBinary } from './resolve-binary.mjs';
+import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 
 /**
  * @typedef {Object} CodexHandle
@@ -101,7 +101,7 @@ export function spawn(prompt, opts = {}) {
   const child = nodeSpawn(codexPath, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ...opts.env },
+    env: { ...process.env, PATH: buildEnhancedPath(), ...opts.env },
     detached: true, // Required for process-group cleanup in the lifecycle manager (US-005)
   });
 

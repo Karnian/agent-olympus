@@ -25,7 +25,7 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import { EventEmitter } from 'events';
-import { resolveBinary } from './resolve-binary.mjs';
+import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -221,7 +221,7 @@ export function startServer(opts = {}) {
   const child = nodeSpawn(codexPath, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ...opts.env },
+    env: { ...process.env, PATH: buildEnhancedPath(), ...opts.env },
     detached: true,
   });
 

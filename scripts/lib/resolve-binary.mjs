@@ -1,7 +1,7 @@
 import { execFileSync } from 'child_process';
 import { existsSync, readdirSync } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { join, dirname } from 'path';
 
 // Common binary search paths across platforms
 export const SEARCH_PATHS = [
@@ -130,6 +130,52 @@ function _semverCompareDesc(a, b) {
     if (diff !== 0) return diff;
   }
   return 0;
+}
+
+/**
+ * Build a robust PATH string that includes all known binary directories.
+ * Merges the current process PATH, SEARCH_PATHS, and parent directories of
+ * resolved binaries (codex, claude, tmux, git, node).
+ *
+ * Used to inject PATH into child processes (adapters, tmux sessions) so
+ * workers can find CLIs regardless of sandbox PATH restrictions.
+ *
+ * @returns {string} colon-separated PATH string
+ */
+export function buildEnhancedPath() {
+  const dirs = new Set();
+
+  // Collect from current process PATH
+  if (process.env.PATH) {
+    for (const p of process.env.PATH.split(':')) {
+      if (p) dirs.add(p);
+    }
+  }
+
+  // Add known search paths that actually exist
+  for (const p of SEARCH_PATHS) {
+    try { if (existsSync(p)) dirs.add(p); } catch {}
+  }
+
+  // Add parent directories of resolved key binaries
+  for (const bin of ['codex', 'tmux', 'git', 'node']) {
+    try {
+      const resolved = resolveBinary(bin);
+      if (resolved && resolved !== bin && resolved.includes('/')) {
+        dirs.add(dirname(resolved));
+      }
+    } catch {}
+  }
+
+  // Claude CLI lives in a versioned app bundle path — use dedicated resolver
+  try {
+    const claudePath = resolveClaudeBinary();
+    if (claudePath && claudePath !== 'claude' && claudePath.includes('/')) {
+      dirs.add(dirname(claudePath));
+    }
+  } catch {}
+
+  return [...dirs].join(':');
 }
 
 /**
