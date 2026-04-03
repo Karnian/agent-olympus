@@ -9,14 +9,32 @@
  */
 
 /**
- * Anthropic model pricing in USD per 1M tokens (as of early 2026).
+ * Model pricing in USD per 1M tokens (as of early 2026).
+ * Includes Anthropic (Claude) and Google (Gemini) model families.
  *
- * @type {{ opus: { input: number, output: number }, sonnet: { input: number, output: number }, haiku: { input: number, output: number } }}
+ * Gemini pricing source: Google AI pricing page (2026-Q1).
+ * - gemini-pro / gemini-2.5-pro: $1.25 input, $10.00 output (>200k context)
+ * - gemini-flash / gemini-2.5-flash: $0.15 input, $0.60 output (>200k context)
+ * - gemini-flash-lite: $0.075 input, $0.30 output
+ *
+ * For unknown models, estimateCost() falls back to zero — callers should
+ * handle this gracefully in UI display.
+ *
+ * @type {Record<string, { input: number, output: number }>}
  */
 export const PRICING = {
+  // Anthropic Claude models
   opus:   { input: 15,   output: 75   },
   sonnet: { input: 3,    output: 15   },
   haiku:  { input: 0.25, output: 1.25 },
+
+  // Google Gemini models (canonical short names used by model-router)
+  'gemini-pro':        { input: 1.25,  output: 10.0  },
+  'gemini-flash':      { input: 0.15,  output: 0.60  },
+  'gemini-flash-lite': { input: 0.075, output: 0.30  },
+  // Full version names (aliases for convenience)
+  'gemini-2.5-pro':        { input: 1.25,  output: 10.0  },
+  'gemini-2.5-flash':      { input: 0.15,  output: 0.60  },
 };
 
 /**
@@ -30,7 +48,7 @@ const TOKENS_PER_SPAWN = {
 
 /**
  * @typedef {object} ModelTier
- * @property {string} model  - Model name: 'opus' | 'sonnet' | 'haiku'
+ * @property {string} model  - Model name: 'opus' | 'sonnet' | 'haiku' | 'gemini-pro' | 'gemini-flash' | 'gemini-flash-lite' | 'gemini-2.5-pro' | 'gemini-2.5-flash'
  * @property {number} count  - Number of agent spawns at this tier
  */
 

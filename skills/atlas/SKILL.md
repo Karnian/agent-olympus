@@ -375,7 +375,7 @@ Write `.ao/prd.json` with user stories from the plan:
       "title": "...",
       "acceptanceCriteria": ["specific", "measurable", "testable"],
       "passes": false,
-      "assignTo": "claude|codex",
+      "assignTo": "claude|codex|gemini",
       "model": "opus|sonnet|haiku",
       "parallelGroup": "A"
     }
@@ -457,7 +457,25 @@ tmux send-keys -t "atlas-codex-<N>" "\"$CODEX_BIN\" <approval-flag> exec \"<impl
 # Cleanup: tmux kill-session -t "atlas-codex-<N>"
 ```
 
-**Codex failure detection and Claude fallback:**
+**Gemini workers** (for visual/multimodal tasks — adapter auto-selected by `selectAdapter()`):
+
+When `teamWorkerType === 'gemini'` in model-routing config (visual-engineering, design-review, artistry):
+```bash
+# Adapter auto-selected: gemini-acp > gemini-exec > tmux
+# Gemini approval mode mirrors Claude's permission level (gemini-approval.mjs).
+# Override: set gemini.approval in .ao/autonomy.json to "default", "auto_edit", "yolo", or "plan".
+#
+# gemini-acp (preferred): Multi-turn JSON-RPC 2.0 — newSession/prompt lifecycle, message queue
+# gemini-exec: Single-turn `gemini --output-format json -p "<prompt>"`
+# tmux (fallback): legacy pane capture
+GEMINI_BIN=$(which gemini 2>/dev/null || echo /opt/homebrew/bin/gemini)
+tmux new-session -d -s "atlas-gemini-<N>" -c "<cwd>"
+tmux send-keys -t "atlas-gemini-<N>" "\"$GEMINI_BIN\" <approval-flag> -p \"<implementation prompt>\"" Enter
+# Monitor: tmux capture-pane -pt "atlas-gemini-<N>" -S -200
+# Cleanup: tmux kill-session -t "atlas-gemini-<N>"
+```
+
+**Codex/Gemini failure detection and Claude fallback:**
 
 The monitoring system detects failures via the active adapter:
 
@@ -807,17 +825,19 @@ Report to user:
 
 ## Model_Selection
 
-| Task Type | Model | Codex? |
-|-----------|-------|--------|
-| Trivial fix | Haiku | No |
-| Standard impl | Sonnet | No |
-| Complex refactor | Opus | Yes |
-| Algorithm | Opus | Yes (primary) |
-| Codebase scan | Haiku (explore) | No |
-| Architecture | Opus | Yes (2nd opinion) |
-| Tests | Sonnet | No |
-| UI/UX | Sonnet (designer) | No |
-| Docs | Haiku (writer) | No |
+| Task Type | Model | External Worker |
+|-----------|-------|-----------------|
+| Trivial fix | Haiku | — |
+| Standard impl | Sonnet | — |
+| Complex refactor | Opus | Codex |
+| Algorithm | Opus | Codex (primary) |
+| Codebase scan | Haiku (explore) | — |
+| Architecture | Opus | Codex (2nd opinion) |
+| Tests | Sonnet | — |
+| UI/UX / Visual | Sonnet (designer) | Gemini (multimodal) |
+| Design review | Sonnet (aphrodite) | Gemini (visual eval) |
+| Creative / Art | Sonnet (designer) | Gemini (generative) |
+| Docs | Haiku (writer) | — |
 
 ## External_Skills
 
