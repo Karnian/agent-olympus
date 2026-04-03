@@ -402,21 +402,30 @@ For each Claude worker:
        Respect dependency layers defined in docs/ARCHITECTURE.md.")
 ```
 
-**Codex workers** (via tmux, simultaneously):
+**Codex workers** (batch executors — spawned via adapter):
+
+The adapter is selected automatically based on detected capabilities (highest priority first):
+- **codex-appserver adapter** (preferred): Multi-turn JSON-RPC 2.0 via `codex app-server`. Thread/turn lifecycle, live steering, structured errors. Requires `hasCodexAppServer`.
+- **codex-exec adapter**: Single-turn `codex exec --json` via child_process.spawn. Structured JSONL events. Requires `hasCodexExecJson`.
+- **tmux adapter** (fallback): Legacy tmux-based `codex exec`. Used when neither exec-json nor app-server is available.
+
 ```bash
-# Start session rooted at the worker's worktree path
+# Adapter auto-selected: codex-appserver > codex-exec > tmux
 # <approval-flag> mirrors Claude's permission level (resolved by codex-approval.mjs)
+# tmux fallback resolves binary + injects PATH for worktree shells:
+CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "athena-<slug>-codex-<N>" -c "<worktreePath>"
-tmux send-keys -t "athena-<slug>-codex-<N>" 'codex <approval-flag> exec "<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]"' Enter
+tmux send-keys -t "athena-<slug>-codex-<N>" "\"$CODEX_BIN\" <approval-flag> exec \"<implementation prompt>\"" Enter
 ```
 
 Workers must commit their changes to their branch before signalling completion.
 
-**Bridge** (automatic):
+**Inbox/Outbox** (Claude workers only):
 ```
-.ao/teams/<slug>/<worker>/inbox/    — messages TO worker
-.ao/teams/<slug>/<worker>/outbox/   — messages FROM worker
+.ao/teams/<slug>/<worker>/inbox/    — messages TO Claude worker
+.ao/teams/<slug>/<worker>/outbox/   — messages FROM Claude worker
 ```
+Note: Codex workers do NOT read inbox — they are batch executors. Use task chaining for iterative work.
 
 ```
 saveCheckpoint('athena', {
@@ -450,10 +459,10 @@ saveCheckpoint('athena', {
 
 ```
 ┌─→ Check TaskList for Claude worker status
-│   Check tmux panes for Codex worker output
-│   ├─ Claude completes something Codex needs → write to inbox
+│   Check Codex worker output (via adapter — codex-exec JSONL or tmux pane)
+│   ├─ Claude completes something Codex needs → include in next task chain prompt
 │   ├─ Codex completes something Claude needs → SendMessage to Claude worker
-│   ├─ Codex worker fails (auth/rate-limit/crash) → reassign to Claude executor
+│   ├─ Codex worker fails (auth/rate-limit/crash/timeout) → reassign to Claude executor
 │   ├─ Worker blocked → unblock or escalate
 │   └─ All done? → proceed to Phase 4
 └── Loop (max 10 monitor iterations)
@@ -563,19 +572,23 @@ Task(subagent_type="agent-olympus:executor", model="sonnet",
   prompt="Integrate Codex output: <codex_result>. Target files: <scope>")
 ```
 
-**Codex Cross-Validation** (per story) — before marking a story `passes: true`:
+**Codex Cross-Validation** (per story) — MANDATORY: before marking a story `passes: true`:
 ```bash
+# CRITICAL: resolve binary path first — worktree shells may not inherit full PATH
+CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "athena-<slug>-codex-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "athena-<slug>-codex-xval-<story-id>" 'codex <approval-flag> exec "Cross-validate implementation of <US-ID> (<story title>). Files changed in merged tree: <post-merge files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or \"none\">. Check: (1) all acceptance criteria met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings."' Enter
+tmux send-keys -t "athena-<slug>-codex-xval-<story-id>" "\"$CODEX_BIN\" <approval-flag> exec \"Cross-validate implementation of <US-ID> (<story title>). Files changed in merged tree: <post-merge files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or 'none'>. Check: (1) all acceptance criteria met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings.\"" Enter
 # Poll: tmux capture-pane -pt "athena-<slug>-codex-xval-<story-id>" -S -200 (every 15s)
 # Cleanup: tmux kill-session -t "athena-<slug>-codex-xval-<story-id>"
 ```
-- **PASS** → mark `passes: true`, proceed.
-- **FAIL** → route findings back to the responsible worker via inbox for fix, re-validate (max 2 cycles).
-- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`; skip silently if `auth_failed`, `not_installed`, or `rate_limited`. Log: `[athena] Codex cross-validation skipped: <reason>.`
+- **PASS** → `addVerification(runId, { story_id, verdict: 'pass', evidence: 'codex xval passed', verifiedBy: 'codex' })` → mark `passes: true`, proceed.
+- **FAIL** → `addVerification(runId, { story_id, verdict: 'fail', evidence: '<specific findings>', verifiedBy: 'codex' })` → route findings back to the responsible worker via inbox for fix, re-validate (max 2 cycles).
+- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'codex <reason>: cross-validation skipped', verifiedBy: 'athena' })`. Log: `[athena] Codex cross-validation skipped for <story-id>: <reason>.`
 - **Note**: Run xval against post-merge file paths, not per-worker file paths, to catch violations introduced during conflict resolution.
 
-Mark stories `passes: true` in prd.json only after Codex cross-validation passes (or is unavailable).
+> **IMPORTANT**: "skip silently" does NOT mean "do nothing". Every story MUST have a verification record — pass, fail, or explicit skip. The PR verification gate will block if any story lacks a record.
+
+Mark stories `passes: true` in prd.json only after Codex cross-validation passes (or is unavailable with explicit skip recorded).
 
 Run **simultaneously**: build, tests, linter.
 
@@ -685,6 +698,39 @@ import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
 const config = loadAutonomyConfig(cwd);
 ```
 
+#### Verification Gate (MANDATORY — blocks PR creation)
+Before any shipping activity, check that ALL stories have verification records:
+```javascript
+import { checkVerificationGate } from './scripts/lib/run-artifacts.mjs';
+const storyIds = prd.userStories.map(s => s.id);
+const gate = checkVerificationGate(runId, storyIds);
+
+if (!gate.gatePass) {
+  // Stories without verification records — MUST attempt xval for each
+  for (const missingId of gate.missing) {
+    // 1. First attempt: try Codex cross-validation (same as Phase 4 xval step)
+    // 2. If Codex unavailable, record explicit skip:
+    addVerification(runId, {
+      story_id: missingId,
+      verdict: 'skip',
+      evidence: 'codex unavailable: verification gate catch-up',
+      verifiedBy: 'athena'
+    });
+  }
+  // Re-check — if STILL failing, STOP (addVerification may have silently failed)
+  const recheck = checkVerificationGate(runId, storyIds);
+  if (!recheck.gatePass) {
+    console.error(`[athena] VERIFICATION GATE FAILED — ${recheck.missing.length} stories still lack records: ${recheck.missing.join(', ')}`);
+    console.error(`[athena] Cannot create PR until all stories have verification records.`);
+    // STOP — do not proceed to PR creation
+  }
+}
+
+if (gate.skipped.length > 0) {
+  console.log(`[athena] ${gate.skipped.length} stories had Codex xval skipped — results included in PR body`);
+}
+```
+
 #### Preflight
 ```bash
 node -e "import('./scripts/lib/pr-create.mjs').then(m => console.log(JSON.stringify(m.preflightCheck())))"
@@ -792,8 +838,28 @@ Report: PRD stories (N/N), per-worker summary, files changed, coordination log, 
 ## Communication_Protocol
 
 **Claude ↔ Claude**: `SendMessage(to="worker", content="...")`
-**Claude → Codex**: Write to `.ao/teams/<slug>/codex-N/inbox/<timestamp>.json`
-**Codex → Claude**: Lead reads tmux output, relays via SendMessage
+**Codex** communication depends on the adapter:
+- **codex-appserver**: True bidirectional — `turn/steer` injects input mid-execution, `turn/interrupt` aborts.
+- **codex-exec / tmux**: Batch executor — one-shot tasks, no mid-execution communication.
+
+**Claude → Codex**: With app-server, use `steerTurn()` for live input. With exec/tmux, include all context in spawn prompt or use **task chaining** (below).
+**Codex → Claude**: Orchestrator reads Codex output (via adapter), relays to Claude workers via SendMessage.
+
+### Adapter Selection
+Codex workers are spawned via the adapter that matches runtime capabilities (priority order):
+- **codex-appserver** (preferred): Multi-turn JSON-RPC 2.0 — thread/turn lifecycle, live steering, structured errors
+- **codex-exec**: Single-turn `codex exec --json` — structured JSONL events, no tmux needed
+- **tmux** (fallback): legacy tmux-based `codex exec` — used when neither app-server nor exec-json is available
+
+The adapter is selected automatically by `selectAdapter(worker, capabilities)` in `worker-spawn.mjs`.
+
+### Task Chaining (pseudo-bidirectional for exec/tmux adapters)
+For codex-exec and tmux adapters (which cannot receive messages mid-execution), multi-step work uses sequential calls:
+```
+exec #1: "Design the API schema" → Result A
+Orchestrator: merges Result A + Claude worker feedback
+exec #2: "Revise based on this feedback: {feedback}" → Result B
+```
 
 ## External_Skills
 

@@ -24,17 +24,18 @@ function quickHash(str) {
 }
 
 /**
- * Error patterns that indicate a Codex worker has failed unrecoverably.
- * Ordered from most specific to most generic to reduce false positives.
+ * Error patterns that indicate a Codex worker has failed unrecoverably (tmux path).
  * @type {Array<{ pattern: RegExp, reason: string }>}
  */
 const CODEX_ERROR_PATTERNS = [
   { pattern: /authentication|unauthorized|invalid.*api.*key|API key/i, reason: 'auth_failed' },
   { pattern: /rate.?limit|429|quota.*exceeded|too many requests/i, reason: 'rate_limited' },
-  { pattern: /command not found|ENOENT|codex:.*not found/i, reason: 'not_installed' },
+  { pattern: /command not found|ENOENT|codex:.*not found|No such file or directory|not found in PATH/i, reason: 'not_installed' },
   { pattern: /ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up|network error/i, reason: 'network' },
   { pattern: /fatal error|unhandled exception|panic:|SIGSEGV|SIGABRT|segmentation fault/i, reason: 'crash' },
 ];
+
+// ─── State persistence ──────────────────────────────────────────────────────
 
 function saveTeamState(teamName, state) {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
@@ -50,11 +51,174 @@ function loadTeamState(teamName) {
   catch { return null; }
 }
 
+// ─── Adapter selection ──────────────────────────────────────────────────────
+
+/**
+ * Select the appropriate spawn adapter for a worker.
+ * Pure function — no side effects.
+ *
+ * Priority for codex workers: codex-appserver > codex-exec > tmux
+ * Priority for claude workers: claude-cli > tmux
+ * Default (all others): tmux
+ *
+ * - codex-appserver: multi-turn, structured errors, turn steering (Phase 2)
+ * - codex-exec: single-turn JSONL, child_process.spawn (Phase 1)
+ * - claude-cli: headless Claude Code via `-p --output-format stream-json` (Phase 3)
+ * - tmux: legacy fallback for all worker types
+ *
+ * @param {Object} worker - Worker descriptor with { type, name, prompt }
+ * @param {Object} capabilities - From preflight.detectCapabilities()
+ * @returns {'codex-appserver' | 'codex-exec' | 'claude-cli' | 'tmux'}
+ */
+export function selectAdapter(worker, capabilities = {}) {
+  if (worker.type === 'codex') {
+    if (capabilities.hasCodexAppServer) return 'codex-appserver';
+    if (capabilities.hasCodexExecJson) return 'codex-exec';
+  }
+  if (worker.type === 'claude') {
+    if (capabilities.hasClaudeCli) return 'claude-cli';
+  }
+  return 'tmux';
+}
+
+/**
+ * Lazily load the codex-exec adapter module.
+ * @returns {Promise<Object>} The codex-exec module
+ */
+async function loadCodexExecAdapter() {
+  return import('./codex-exec.mjs');
+}
+
+/**
+ * Lazily load the codex-appserver adapter module.
+ * @returns {Promise<Object>} The codex-appserver module
+ */
+async function loadCodexAppServerAdapter() {
+  return import('./codex-appserver.mjs');
+}
+
+/**
+ * Lazily load the claude-cli adapter module.
+ * @returns {Promise<Object>} The claude-cli module
+ */
+async function loadClaudeCliAdapter() {
+  return import('./claude-cli.mjs');
+}
+
+// ─── Tmux adapter helpers (inline — wraps existing tmux-session functions) ──
+
+/**
+ * Monitor a tmux-based worker via capturePane + error detection.
+ * Returns a MonitorResult-shaped object.
+ *
+ * @param {Object} worker - Worker state object with session, type, etc.
+ * @returns {{ status: string, output: string, error?: { category: string, message: string }, stalled?: boolean, stalledMs?: number }}
+ */
+function monitorTmuxWorker(worker) {
+  const paneOutput = worker.session ? capturePane(worker.session, 200) : null;
+
+  // Error detection for codex workers in tmux path
+  let errorDetection = { failed: false };
+  if (worker.type === 'codex' && worker.status === 'running' && paneOutput) {
+    errorDetection = detectCodexError(paneOutput);
+  }
+
+  // Completion detection: shell prompt returns
+  let isDone = false;
+  if (!errorDetection.failed && paneOutput && worker.status === 'running') {
+    const lastLines = paneOutput.split('\n').slice(-5).join('\n');
+    isDone = /[$%]\s*$/.test(lastLines.trim());
+  }
+
+  const result = {
+    status: isDone ? 'completed' : (errorDetection.failed ? 'failed' : worker.status),
+    output: paneOutput ? paneOutput.slice(-500) : '',
+  };
+
+  if (errorDetection.failed) {
+    result.error = {
+      category: errorDetection.reason,
+      message: errorDetection.message || 'Codex tmux error',
+    };
+  }
+
+  return result;
+}
+
+/**
+ * Monitor a codex-exec-based worker via the codex-exec adapter.
+ * Returns a MonitorResult-shaped object.
+ *
+ * @param {Object} worker - Worker state object with _handle
+ * @param {Object} codexExec - The loaded codex-exec module
+ * @returns {{ status: string, output: string, error?: { category: string, message: string }, stalled?: boolean, stalledMs?: number }}
+ */
+function monitorCodexExecWorker(worker, codexExec) {
+  if (!worker._handle) {
+    return { status: 'failed', output: '', error: { category: 'crash', message: 'No codex-exec handle' } };
+  }
+  const mr = codexExec.monitor(worker._handle);
+  const result = {
+    status: mr.status,
+    output: (mr.output || '').slice(-500),
+  };
+  if (mr.error) {
+    result.error = mr.error;
+  }
+  return result;
+}
+
+/**
+ * Monitor a codex-appserver-based worker via the codex-appserver adapter.
+ * Returns a MonitorResult-shaped object.
+ *
+ * @param {Object} worker - Worker state object with _liveHandle
+ * @param {Object} appserver - The loaded codex-appserver module
+ * @returns {{ status: string, output: string, error?: { category: string, message: string }, stalled?: boolean, stalledMs?: number }}
+ */
+function monitorCodexAppServerWorker(worker, appserver) {
+  if (!worker._liveHandle) {
+    return { status: 'failed', output: '', error: { category: 'crash', message: 'No app-server handle' } };
+  }
+  const mr = appserver.monitor(worker._liveHandle);
+  const result = {
+    status: mr.status === 'ready' ? 'running' : mr.status,
+    output: (mr.output || '').slice(-500),
+  };
+  if (mr.error) {
+    result.error = mr.error;
+  }
+  return result;
+}
+
+/**
+ * Monitor a claude-cli-based worker via the claude-cli adapter.
+ * Returns a MonitorResult-shaped object.
+ *
+ * @param {Object} worker - Worker state object with _liveHandle
+ * @param {Object} claudeCli - The loaded claude-cli module
+ * @returns {{ status: string, output: string, error?: { category: string, message: string }, stalled?: boolean, stalledMs?: number }}
+ */
+function monitorClaudeCliWorker(worker, claudeCli) {
+  if (!worker._liveHandle) {
+    return { status: 'failed', output: '', error: { category: 'crash', message: 'No claude-cli handle' } };
+  }
+  const mr = claudeCli.monitor(worker._liveHandle);
+  const result = {
+    status: mr.status,
+    output: (mr.output || '').slice(-500),
+  };
+  if (mr.error) {
+    result.error = mr.error;
+  }
+  return result;
+}
+
+// ─── Public API ─────────────────────────────────────────────────────────────
+
 /**
  * Scan tmux pane output for known Codex failure signatures.
  * Returns the first matching error, or `{ failed: false }` if none match.
- * Only runs against 'codex'-type workers to avoid false positives on
- * normal Claude output that may contain words like "error" contextually.
  *
  * @param {string} output - Raw captured pane text
  * @returns {{ failed: boolean, reason?: string, message?: string }}
@@ -66,11 +230,7 @@ export function detectCodexError(output) {
     for (const { pattern, reason } of CODEX_ERROR_PATTERNS) {
       const match = output.match(pattern);
       if (match) {
-        return {
-          failed: true,
-          reason,
-          message: match[0].slice(0, 200),
-        };
+        return { failed: true, reason, message: match[0].slice(0, 200) };
       }
     }
     return { failed: false };
@@ -80,108 +240,204 @@ export function detectCodexError(output) {
 }
 
 /**
- * Kill a failed Codex tmux session, record the failure in wisdom, and
- * return a descriptor that the caller can use to spawn a Claude fallback.
+ * Kill a failed worker, record the failure in wisdom, and return a
+ * descriptor for the orchestrator to spawn a Claude fallback.
+ * Adapter-aware: calls the correct shutdown method based on _adapterName.
  *
- * The actual Task() call to spawn agent-olympus:executor cannot be made
- * from a Node.js library — it must be issued by the orchestrating Claude
- * agent. This function handles everything that CAN be done synchronously
- * (tmux cleanup + wisdom recording) and returns the information the
- * orchestrator needs to issue the Task() call.
- *
- * @param {string} teamName        - Team identifier
- * @param {string} workerName      - Name of the failed worker
- * @param {string} originalPrompt  - The prompt the Codex worker was given
- * @param {string} failureReason   - Reason code from detectCodexError()
- * @param {string} [sessionOverride] - Optional tmux session name override (e.g. 'atlas-codex-1');
- *                                     when omitted, the default sessionName(teamName, workerName) is used.
- * @returns {{ fallbackNeeded: boolean, teamName: string, workerName: string, prompt: string, reason: string }}
+ * @param {string} teamName
+ * @param {string} workerName
+ * @param {string} originalPrompt
+ * @param {string} failureReason
+ * @param {string} [sessionOverride] - tmux session name override
+ * @returns {Promise<{ fallbackNeeded: boolean, teamName: string, workerName: string, prompt: string, reason: string }>}
  */
 export async function reassignToClaude(teamName, workerName, originalPrompt, failureReason, sessionOverride) {
   try {
-    // Kill the failed tmux session
-    const session = sessionOverride || sessionName(teamName, workerName);
-    try { killSession(session); } catch {}
+    // Load team state to find the worker's adapter
+    const state = loadTeamState(teamName);
+    const worker = state?.workers?.find(w => w.name === workerName);
+    const adapterName = worker?._adapterName || 'tmux';
 
-    // Record the fallback event as wisdom so future sessions avoid the same issue
+    if (adapterName === 'codex-appserver' && worker?._liveHandle) {
+      // Shutdown via codex-appserver adapter
+      try {
+        const appserver = await loadCodexAppServerAdapter();
+        await appserver.shutdownServer(worker._liveHandle);
+      } catch {}
+    } else if (adapterName === 'claude-cli' && worker?._liveHandle) {
+      // Shutdown via claude-cli adapter
+      try {
+        const cli = await loadClaudeCliAdapter();
+        await cli.shutdown(worker._liveHandle);
+      } catch {}
+    } else if (adapterName === 'codex-exec' && worker?._handle) {
+      // Shutdown via codex-exec adapter
+      try {
+        const codexExec = await loadCodexExecAdapter();
+        codexExec.shutdown(worker._handle);
+      } catch {}
+    } else {
+      // Shutdown via tmux (default)
+      const session = sessionOverride || sessionName(teamName, workerName);
+      try { killSession(session); } catch {}
+    }
+
     await addWisdom({
       category: 'tool',
       lesson: `Codex worker "${workerName}" failed (${failureReason}) — automatically reassigned to agent-olympus:executor. Avoid Codex for reason "${failureReason}" in this session.`,
       confidence: 'high',
     });
 
-    return {
-      fallbackNeeded: true,
-      teamName,
-      workerName,
-      prompt: originalPrompt,
-      reason: failureReason,
-    };
+    return { fallbackNeeded: true, teamName, workerName, prompt: originalPrompt, reason: failureReason };
   } catch {
-    // fail-safe: return minimal descriptor so caller can still attempt a fallback
-    return {
-      fallbackNeeded: true,
-      teamName,
-      workerName,
-      prompt: originalPrompt,
-      reason: failureReason,
-    };
+    return { fallbackNeeded: true, teamName, workerName, prompt: originalPrompt, reason: failureReason };
   }
 }
 
-export async function spawnTeam(teamName, workers, cwd) {
-  if (!validateTmux()) {
+export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
+  // Determine adapter per worker
+  const adapterNames = workers.map(w => selectAdapter(w, capabilities));
+  const needsTmux = adapterNames.some(a => a === 'tmux');
+
+  if (needsTmux && !validateTmux()) {
     throw new Error('tmux is not installed. Run: brew install tmux');
+  }
+
+  // Lazy-load adapters as needed
+  let codexExec = null;
+  let codexAppServer = null;
+  let claudeCli = null;
+  if (adapterNames.includes('codex-exec')) {
+    codexExec = await loadCodexExecAdapter();
+  }
+  if (adapterNames.includes('codex-appserver')) {
+    codexAppServer = await loadCodexAppServerAdapter();
+  }
+  if (adapterNames.includes('claude-cli')) {
+    claudeCli = await loadClaudeCliAdapter();
   }
 
   const state = {
     teamName,
-    workers: workers.map(w => ({
+    workers: workers.map((w, i) => ({
       ...w,
       status: 'pending',
       startedAt: null,
       completedAt: null,
       retryCount: 0,
-      originalPrompt: w.prompt || '',  // persist for fallback recovery
+      originalPrompt: w.prompt || '',
+      _adapterName: adapterNames[i],
     })),
     phase: 'spawning',
     startedAt: new Date().toISOString(),
     cwd
   };
 
-  // Create tmux sessions (each session gets its own git worktree)
-  const sessions = createTeamSession(teamName, workers, cwd);
+  // Spawn tmux workers first (need sessions created in batch)
+  const tmuxWorkers = workers.map((w, i) => ({ ...w, idx: i })).filter((_, i) => adapterNames[i] === 'tmux');
+  let sessions = [];
+  if (tmuxWorkers.length > 0) {
+    sessions = createTeamSession(teamName, tmuxWorkers, cwd);
+  }
 
-  // Spawn workers
+  let tmuxIdx = 0;
   for (let i = 0; i < workers.length; i++) {
     const worker = workers[i];
-    const session = sessions[i];
 
-    if (session.status !== 'created') {
-      state.workers[i].status = 'failed';
-      state.workers[i].error = session.error;
-      // Still record worktree info even for failed sessions (for cleanup)
-      state.workers[i].worktreePath = session.worktreePath || null;
-      state.workers[i].branchName = session.branchName || null;
-      state.workers[i].worktreeCreated = session.worktreeCreated || false;
-      continue;
+    if (adapterNames[i] === 'codex-appserver') {
+      // Spawn via codex-appserver adapter (multi-turn)
+      let serverHandle = null;
+      try {
+        serverHandle = codexAppServer.startServer({
+          cwd,
+          sessionSource: `agent-olympus:${teamName}`,
+        });
+        // Initialize handshake (required before any other method)
+        const initResult = await codexAppServer.initializeServer(serverHandle);
+        if (initResult.error) {
+          throw new Error(initResult.error.message || 'Failed to initialize server');
+        }
+        // Create thread and start first turn
+        const threadResult = await codexAppServer.createThread(serverHandle, {
+          cwd,
+          approvalPolicy: 'never',
+          ephemeral: true,
+        });
+        if (threadResult.error) {
+          throw new Error(threadResult.error.message || 'Failed to create thread');
+        }
+        const turnResult = await codexAppServer.startTurn(serverHandle, worker.prompt);
+        if (turnResult.error) {
+          throw new Error(turnResult.error.message || 'Failed to start turn');
+        }
+        state.workers[i].status = 'running';
+        state.workers[i].startedAt = new Date().toISOString();
+        state.workers[i]._handle = { pid: serverHandle.pid, threadId: serverHandle.threadId, turnId: serverHandle.turnId };
+        state.workers[i]._liveHandle = serverHandle;
+      } catch (err) {
+        state.workers[i].status = 'failed';
+        state.workers[i].error = err.message;
+        // Cleanup: kill the server process to prevent orphaned detached processes
+        if (serverHandle) {
+          try { await codexAppServer.shutdownServer(serverHandle, 2000); } catch {}
+        }
+      }
+    } else if (adapterNames[i] === 'claude-cli') {
+      // Spawn via claude-cli adapter (headless Claude Code -p mode)
+      try {
+        const handle = claudeCli.spawn(worker.prompt, {
+          cwd,
+          model: worker.model,
+          appendSystemPrompt: worker.systemPrompt,
+          maxBudgetUsd: worker.maxBudgetUsd,
+        });
+        state.workers[i].status = 'running';
+        state.workers[i].startedAt = new Date().toISOString();
+        state.workers[i]._handle = { pid: handle.pid }; // sessionId populated async via init event
+        state.workers[i]._liveHandle = handle;
+      } catch (err) {
+        state.workers[i].status = 'failed';
+        state.workers[i].error = err.message;
+      }
+    } else if (adapterNames[i] === 'codex-exec') {
+      // Spawn via codex-exec adapter
+      try {
+        const handle = codexExec.spawn(worker.prompt, { cwd });
+        state.workers[i].status = 'running';
+        state.workers[i].startedAt = new Date().toISOString();
+        state.workers[i]._handle = { pid: handle.pid }; // Serializable subset
+        state.workers[i]._liveHandle = handle; // Non-serializable, for in-process monitoring
+      } catch (err) {
+        state.workers[i].status = 'failed';
+        state.workers[i].error = err.message;
+      }
+    } else {
+      // Spawn via tmux
+      const session = sessions[tmuxIdx++];
+      if (!session || session.status !== 'created') {
+        state.workers[i].status = 'failed';
+        state.workers[i].error = session?.error || 'Session creation failed';
+        state.workers[i].worktreePath = session?.worktreePath || null;
+        state.workers[i].branchName = session?.branchName || null;
+        state.workers[i].worktreeCreated = session?.worktreeCreated || false;
+        continue;
+      }
+
+      const command = buildWorkerCommand(worker, { cwd: session?.worktreePath || cwd });
+      const env = {
+        AO_TEAM_NAME: teamName,
+        AO_WORKER_NAME: worker.name,
+        AO_WORKER_TYPE: worker.type
+      };
+
+      const spawned = spawnWorkerInSession(session.session, command, env);
+      state.workers[i].status = spawned ? 'running' : 'failed';
+      state.workers[i].startedAt = new Date().toISOString();
+      state.workers[i].session = session.session;
+      state.workers[i].worktreePath = session?.worktreePath || null;
+      state.workers[i].branchName = session?.branchName || null;
+      state.workers[i].worktreeCreated = session?.worktreeCreated || false;
     }
-
-    const command = buildWorkerCommand(worker, { cwd: session.worktreePath || cwd });
-    const env = {
-      AO_TEAM_NAME: teamName,
-      AO_WORKER_NAME: worker.name,
-      AO_WORKER_TYPE: worker.type
-    };
-
-    const spawned = spawnWorkerInSession(session.session, command, env);
-    state.workers[i].status = spawned ? 'running' : 'failed';
-    state.workers[i].startedAt = new Date().toISOString();
-    state.workers[i].session = session.session;
-    // Record worktree info for merge/cleanup later
-    state.workers[i].worktreePath = session.worktreePath || null;
-    state.workers[i].branchName = session.branchName || null;
-    state.workers[i].worktreeCreated = session.worktreeCreated || false;
   }
 
   state.phase = 'running';
@@ -189,9 +445,14 @@ export async function spawnTeam(teamName, workers, cwd) {
   return state;
 }
 
-export function monitorTeam(teamName) {
+export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _claudeCliModule) {
   const state = loadTeamState(teamName);
   if (!state) return null;
+
+  // Lazy-loaded adapter modules (passed in or null)
+  const codexExec = _codexExecModule || null;
+  const codexAppServer = _codexAppServerModule || null;
+  const claudeCli = _claudeCliModule || null;
 
   const status = {
     teamName,
@@ -200,43 +461,34 @@ export function monitorTeam(teamName) {
     outboxes: readAllOutboxes(teamName)
   };
 
-  // Track whether any worker status changed so we can persist the update
   let stateChanged = false;
 
   for (let i = 0; i < state.workers.length; i++) {
     const worker = state.workers[i];
-    const paneOutput = worker.session ? capturePane(worker.session, 200) : null;
+    const adapterName = worker._adapterName || 'tmux';
 
-    // Check errors FIRST for codex workers — errors take priority over completion signals
-    let errorDetection = { failed: false };
-    if (worker.type === 'codex' && worker.status === 'running' && paneOutput) {
-      errorDetection = detectCodexError(paneOutput);
+    // ─── Dispatch monitoring to correct adapter ───
+    let monitorResult;
+    if (adapterName === 'codex-appserver' && codexAppServer && worker._liveHandle) {
+      monitorResult = monitorCodexAppServerWorker(worker, codexAppServer);
+    } else if (adapterName === 'claude-cli' && claudeCli && worker._liveHandle) {
+      monitorResult = monitorClaudeCliWorker(worker, claudeCli);
+    } else if (adapterName === 'codex-exec' && codexExec && worker._liveHandle) {
+      monitorResult = monitorCodexExecWorker({ ...worker, _handle: worker._liveHandle }, codexExec);
+    } else {
+      monitorResult = monitorTmuxWorker(worker);
     }
 
-    // Improved isDone detection:
-    // Check the last few lines for a shell prompt ('$ ' at end of output),
-    // rather than scanning the entire pane, to avoid false positives from
-    // inline '$' in code output. Both Codex and Claude workers run in tmux
-    // shells, so the completion signal is the same: the shell prompt returns.
-    let isDone = false;
-    if (!errorDetection.failed && paneOutput && worker.status === 'running') {
-      const lastLines = paneOutput.split('\n').slice(-5).join('\n');
-      // Match both bash ($) and zsh (%) prompts, with optional path/username prefix
-      isDone = /[$%]\s*$/.test(lastLines.trim());
-    }
-
-    // Activity-based liveness detection: track output changes over time
-    const currentHash = quickHash(paneOutput);
+    // ─── Activity-based stall detection (adapter-agnostic) ───
+    const currentHash = quickHash(monitorResult.output);
     const prevHash = worker.lastOutputHash || null;
     const now = Date.now();
 
     if (currentHash !== prevHash) {
-      // Output changed — worker is active
       state.workers[i].lastOutputHash = currentHash;
       state.workers[i].lastActivityAt = new Date(now).toISOString();
       stateChanged = true;
     } else if (worker.status === 'running' && worker.lastActivityAt) {
-      // Output unchanged — check for stall
       const stalledMs = now - new Date(worker.lastActivityAt).getTime();
       if (stalledMs > STALL_THRESHOLD_MS && !worker.stalled) {
         state.workers[i].stalled = true;
@@ -244,19 +496,19 @@ export function monitorTeam(teamName) {
         stateChanged = true;
       }
     }
-    // Initialize lastActivityAt on first monitor cycle
     if (!state.workers[i].lastActivityAt && worker.status === 'running') {
       state.workers[i].lastActivityAt = new Date(now).toISOString();
       state.workers[i].lastOutputHash = currentHash;
       stateChanged = true;
     }
 
+    // ─── Resolve final status ───
     let resolvedStatus = worker.status;
-    if (isDone) {
+    if (monitorResult.status === 'completed') {
       resolvedStatus = 'completed';
-    } else if (errorDetection.failed) {
+    } else if (monitorResult.error) {
       // For crash failures, allow one retry before marking as failed
-      if (errorDetection.reason === 'crash' && (worker.retryCount || 0) < 1) {
+      if (monitorResult.error.category === 'crash' && (worker.retryCount || 0) < 1) {
         resolvedStatus = 'retry';
         state.workers[i].retryCount = (worker.retryCount || 0) + 1;
       } else {
@@ -268,69 +520,43 @@ export function monitorTeam(teamName) {
       name: worker.name,
       type: worker.type,
       status: resolvedStatus,
-      lastOutput: paneOutput ? paneOutput.slice(-500) : null,
+      lastOutput: monitorResult.output || null,
     };
 
-    if (errorDetection.failed) {
-      workerEntry.errorReason = errorDetection.reason;
-      workerEntry.errorMessage = errorDetection.message;
+    if (monitorResult.error) {
+      workerEntry.errorReason = monitorResult.error.category;
+      workerEntry.errorMessage = monitorResult.error.message;
     }
 
-    // Report stall state to the orchestrator and build a recovery strategy
-    if (state.workers[i].stalled) {
+    // ─── Stall recovery (adapter-agnostic) ───
+    if (state.workers[i].stalled && !state.workers[i].recovered) {
       workerEntry.stalled = true;
       workerEntry.stalledMs = state.workers[i].stalledMs;
 
-      // Only build a recovery strategy once per stall event (not yet recovered)
-      if (!state.workers[i].recovered) {
-        // Initialize attempt counter on first stall detection
-        if (state.workers[i].recoveryAttempts == null) {
-          state.workers[i].recoveryAttempts = 0;
-        }
-
-        const stalledWorker = {
-          name: worker.name,
-          type: worker.type,
-          status: worker.status,
-          lastOutput: workerEntry.lastOutput,
-          stalledMs: state.workers[i].stalledMs,
-          recoveryAttempts: state.workers[i].recoveryAttempts,
-        };
-        const ctx = {
-          teamName,
-          orchestrator: 'athena',
-          availableAgents: [],
-        };
-
-        // buildRecoveryStrategy is synchronous — attach result directly
-        try {
-          workerEntry.recoveryStrategy = buildRecoveryStrategy(stalledWorker, ctx);
-        } catch {
-          // fail-safe: never break the monitor loop
-        }
-
-        // Increment attempt counter so the next poll uses the next strategy tier
-        state.workers[i].recoveryAttempts = (state.workers[i].recoveryAttempts || 0) + 1;
-        stateChanged = true;
+      if (state.workers[i].recoveryAttempts == null) {
+        state.workers[i].recoveryAttempts = 0;
       }
+      try {
+        workerEntry.recoveryStrategy = buildRecoveryStrategy(
+          { name: worker.name, type: worker.type, status: worker.status, lastOutput: workerEntry.lastOutput, stalledMs: state.workers[i].stalledMs, recoveryAttempts: state.workers[i].recoveryAttempts },
+          { teamName, orchestrator: 'athena', availableAgents: [] }
+        );
+      } catch {}
+      state.workers[i].recoveryAttempts = (state.workers[i].recoveryAttempts || 0) + 1;
+      stateChanged = true;
     }
 
     status.workers.push(workerEntry);
 
-    // Persist any status changes back to the state object
-    const newStatus = workerEntry.status;
-    if (newStatus && newStatus !== state.workers[i].status) {
-      state.workers[i].status = newStatus;
-      if (workerEntry.errorReason) {
-        state.workers[i].errorReason = workerEntry.errorReason;
-      }
+    // Persist status changes
+    if (resolvedStatus !== state.workers[i].status) {
+      state.workers[i].status = resolvedStatus;
+      if (workerEntry.errorReason) state.workers[i].errorReason = workerEntry.errorReason;
       stateChanged = true;
     }
   }
 
-  // Write state file once if anything changed
   if (stateChanged) saveTeamState(teamName, state);
-
   return status;
 }
 
@@ -342,20 +568,34 @@ export function collectResults(teamName) {
     results[worker] = messages.map(m => m.body).join('\n\n');
   }
 
-  // Also capture final pane outputs
   const state = loadTeamState(teamName);
   if (state) {
     for (const worker of state.workers) {
-      if (worker.session) {
+      // Skip workers that already have outbox results
+      if (results[worker.name]) continue;
+
+      const adapter = worker._adapterName || 'tmux';
+
+      if (adapter === 'codex-appserver' && worker._liveHandle) {
+        // App-server: output is in the live handle
+        const output = worker._liveHandle._output;
+        if (output) results[worker.name] = output;
+      } else if (adapter === 'claude-cli' && worker._liveHandle) {
+        // Claude CLI: output is in the live handle
+        const output = worker._liveHandle._output;
+        if (output) results[worker.name] = output;
+      } else if (adapter === 'codex-exec' && worker._liveHandle) {
+        // Codex-exec: output is in the live handle
+        const output = worker._liveHandle._output;
+        if (output) results[worker.name] = output;
+      } else if (worker.session) {
+        // Tmux: capture pane output
         const output = capturePane(worker.session, 200);
-        if (output && !results[worker.name]) {
-          results[worker.name] = output;
-        }
+        if (output) results[worker.name] = output;
       }
     }
   }
 
-  // Save artifacts
   const artifactsDir = join(ARTIFACTS_DIR, 'team', teamName);
   mkdirSync(artifactsDir, { recursive: true, mode: 0o700 });
 
@@ -369,16 +609,37 @@ export function collectResults(teamName) {
   return results;
 }
 
-export function shutdownTeam(teamName, cwd) {
+export async function shutdownTeam(teamName, cwd) {
+  // Shutdown non-tmux workers first (appserver + codex-exec child processes)
+  const state = loadTeamState(teamName);
+  if (state) {
+    for (const worker of state.workers) {
+      const adapter = worker._adapterName || 'tmux';
+      try {
+        if (adapter === 'codex-appserver' && worker._liveHandle) {
+          const appserver = await loadCodexAppServerAdapter();
+          await appserver.shutdownServer(worker._liveHandle);
+        } else if (adapter === 'claude-cli' && worker._liveHandle) {
+          const cli = await loadClaudeCliAdapter();
+          await cli.shutdown(worker._liveHandle);
+        } else if (adapter === 'codex-exec' && worker._liveHandle) {
+          const codexExec = await loadCodexExecAdapter();
+          await codexExec.shutdown(worker._liveHandle);
+        }
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  }
+
+  // Kill tmux sessions
   const killed = killTeamSessions(teamName);
   cleanupTeam(teamName);
 
-  // Clean up git worktrees for this team (fail-safe)
   if (cwd) {
     try { cleanupTeamWorktrees(cwd, teamName); } catch {}
   }
 
-  // Clean state file
   const statePath = join(STATE_DIR, `team-${teamName}.json`);
   try { unlinkSync(statePath); } catch {}
 

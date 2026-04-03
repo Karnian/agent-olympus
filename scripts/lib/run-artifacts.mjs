@@ -580,6 +580,45 @@ export function getRunVerificationSummary(runId, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Verification Gate — ensures every story has a verification record before PR
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether all expected stories have a verification record (pass, fail, or skip).
+ * Orchestrators call this before PR creation to enforce cross-validation.
+ *
+ * @param {string} runId
+ * @param {string[]} storyIds - all story IDs that should have verification
+ * @param {object} [opts]
+ * @param {string} [opts.base] - Override base directory (for testing)
+ * @returns {{ gatePass: boolean, missing: string[], skipped: string[], summary: object }}
+ */
+export function checkVerificationGate(runId, storyIds, opts = {}) {
+  try {
+    const summary = getRunVerificationSummary(runId, opts);
+    const verifiedIds = new Set(Object.keys(summary.stories));
+    const missing = storyIds.filter(id => !verifiedIds.has(id));
+    const skipped = Object.entries(summary.stories)
+      .filter(([, s]) => s.verdict === 'skip')
+      .map(([id]) => id);
+
+    return {
+      gatePass: missing.length === 0,
+      missing,
+      skipped,
+      summary,
+    };
+  } catch {
+    return {
+      gatePass: false,
+      missing: [...storyIds],
+      skipped: [],
+      summary: { total: 0, passed: 0, failed: 0, skipped: 0, stories: {} },
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // US-008: Completion Notices
 // ---------------------------------------------------------------------------
 

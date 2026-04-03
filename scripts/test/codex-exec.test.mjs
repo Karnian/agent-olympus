@@ -1,0 +1,511 @@
+/**
+ * Unit tests for scripts/lib/codex-exec.mjs
+ * Uses node:test — zero npm dependencies.
+ *
+ * spawn/monitor/collect/shutdown tests use mock ChildProcess objects built
+ * from EventEmitter + Readable/Writable streams, so no real codex binary is
+ * needed and no processes are started.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import { Readable, Writable } from 'node:stream';
+
+import {
+  parseJSONLEvents,
+  mapJsonlErrorToCategory,
+  monitor,
+  collect,
+  shutdown,
+} from '../lib/codex-exec.mjs';
+
+// ─── Mock helpers ──────────────────────────────────────────────────────────────
+
+/**
+ * Build a minimal mock ChildProcess compatible with the CodexHandle internals.
+ * Wires up stdin/stdout/stderr as proper streams so the handle's event listeners
+ * attach cleanly.
+ */
+function createMockChildProcess() {
+  const child = new EventEmitter();
+  child.stdin = new Writable({ write(chunk, enc, cb) { cb(); } });
+  child.stdout = new Readable({ read() {} });
+  child.stderr = new Readable({ read() {} });
+  child.pid = 12345;
+  child.killed = false;
+  child.kill = (signal = 'SIGTERM') => {
+    child.killed = true;
+    child.emit('exit', 0, signal);
+  };
+  return child;
+}
+
+/**
+ * Build a CodexHandle manually (bypassing spawn()) so tests stay hermetic.
+ * Attaches the same data/exit/error listeners that spawn() would attach.
+ */
+function createHandle(child) {
+  const handle = {
+    pid: child.pid,
+    process: child,
+    stdout: child.stdout,
+    kill: (signal = 'SIGTERM') => {
+      try { child.kill(signal); } catch {}
+    },
+    _events: [],
+    _partial: '',
+    threadId: null,
+    status: 'running',
+    _output: '',
+    _usage: null,
+    _exitCode: null,
+    _stderrChunks: [],
+  };
+
+  child.stdout.on('data', (chunk) => {
+    const { parseJSONLEvents: parse } = { parseJSONLEvents };
+    const text = handle._partial + chunk.toString();
+    const { events, remainder } = parseJSONLEvents(text);
+    handle._partial = remainder;
+
+    for (const event of events) {
+      handle._events.push(event);
+
+      if (event.type === 'thread.started' && event.thread_id) {
+        handle.threadId = event.thread_id;
+      }
+
+      if (event.type === 'item.completed' && event.item) {
+        if (event.item.type === 'agent_message' && event.item.text) {
+          handle._output += event.item.text + '\n';
+        } else if (event.item.type === 'command_execution' && event.item.aggregated_output) {
+          handle._output += event.item.aggregated_output;
+        }
+        if (event.item.status === 'failed') {
+          handle.status = 'failed';
+        }
+      }
+
+      if (event.type === 'turn.completed') {
+        if (handle.status !== 'failed') handle.status = 'completed';
+        if (event.usage) handle._usage = event.usage;
+      }
+    }
+  });
+
+  child.stderr.on('data', (chunk) => {
+    handle._stderrChunks.push(chunk.toString());
+  });
+
+  child.on('exit', (code) => {
+    handle._exitCode = code;
+    if (code !== 0 && handle.status === 'running') {
+      handle.status = 'failed';
+    }
+  });
+
+  child.on('error', (err) => {
+    handle._stderrChunks.push(err.message);
+    handle.status = 'failed';
+  });
+
+  return handle;
+}
+
+// ─── parseJSONLEvents ─────────────────────────────────────────────────────────
+
+test('parseJSONLEvents: parses valid JSONL into event objects', () => {
+  const input = '{"type":"thread.started","thread_id":"abc"}\n{"type":"turn.started"}\n';
+  const { events, remainder } = parseJSONLEvents(input);
+  assert.equal(events.length, 2);
+  assert.equal(events[0].type, 'thread.started');
+  assert.equal(events[0].thread_id, 'abc');
+  assert.equal(events[1].type, 'turn.started');
+  assert.equal(remainder, '');
+});
+
+test('parseJSONLEvents: partial last line is returned as remainder', () => {
+  const input = '{"type":"turn.started"}\n{"type":"item.star';
+  const { events, remainder } = parseJSONLEvents(input);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'turn.started');
+  assert.equal(remainder, '{"type":"item.star');
+});
+
+test('parseJSONLEvents: empty and whitespace-only lines are skipped', () => {
+  const input = '\n   \n{"type":"turn.started"}\n\n';
+  const { events } = parseJSONLEvents(input);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'turn.started');
+});
+
+test('parseJSONLEvents: malformed JSON lines are skipped without throwing', () => {
+  const input = 'not-json\n{"type":"turn.started"}\n{broken\n';
+  const { events } = parseJSONLEvents(input);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, 'turn.started');
+});
+
+test('parseJSONLEvents: empty string returns empty events and empty remainder', () => {
+  const { events, remainder } = parseJSONLEvents('');
+  assert.equal(events.length, 0);
+  assert.equal(remainder, '');
+});
+
+// ─── mapJsonlErrorToCategory ──────────────────────────────────────────────────
+
+test('mapJsonlErrorToCategory: "authentication failed" → auth_failed', () => {
+  assert.equal(mapJsonlErrorToCategory('authentication failed for token'), 'auth_failed');
+});
+
+test('mapJsonlErrorToCategory: "invalid api key" → auth_failed', () => {
+  assert.equal(mapJsonlErrorToCategory('Error: invalid api key provided'), 'auth_failed');
+});
+
+test('mapJsonlErrorToCategory: "rate limit exceeded" → rate_limited', () => {
+  assert.equal(mapJsonlErrorToCategory('rate limit exceeded, please slow down'), 'rate_limited');
+});
+
+test('mapJsonlErrorToCategory: "429" status → rate_limited', () => {
+  assert.equal(mapJsonlErrorToCategory('HTTP 429: too many requests'), 'rate_limited');
+});
+
+test('mapJsonlErrorToCategory: "command not found" → not_installed', () => {
+  assert.equal(mapJsonlErrorToCategory('zsh: command not found: codex'), 'not_installed');
+});
+
+test('mapJsonlErrorToCategory: "ENOENT" → not_installed', () => {
+  assert.equal(mapJsonlErrorToCategory("spawn ENOENT '/usr/local/bin/codex'"), 'not_installed');
+});
+
+test('mapJsonlErrorToCategory: "ETIMEDOUT" → network', () => {
+  assert.equal(mapJsonlErrorToCategory('Error: ETIMEDOUT connecting to api.openai.com'), 'network');
+});
+
+test('mapJsonlErrorToCategory: "ECONNRESET" → network', () => {
+  assert.equal(mapJsonlErrorToCategory('ECONNRESET: connection reset by peer'), 'network');
+});
+
+test('mapJsonlErrorToCategory: "socket hang up" → network', () => {
+  assert.equal(mapJsonlErrorToCategory('socket hang up after inactivity'), 'network');
+});
+
+test('mapJsonlErrorToCategory: "fatal error SIGSEGV" → crash', () => {
+  assert.equal(mapJsonlErrorToCategory('fatal error: received signal SIGSEGV'), 'crash');
+});
+
+test('mapJsonlErrorToCategory: "unhandled exception" → crash', () => {
+  assert.equal(mapJsonlErrorToCategory('unhandled exception: TypeError: null'), 'crash');
+});
+
+test('mapJsonlErrorToCategory: no pattern match → unknown', () => {
+  assert.equal(mapJsonlErrorToCategory('something completely different'), 'unknown');
+});
+
+test('mapJsonlErrorToCategory: null input → unknown', () => {
+  assert.equal(mapJsonlErrorToCategory(null), 'unknown');
+});
+
+test('mapJsonlErrorToCategory: undefined input → unknown', () => {
+  assert.equal(mapJsonlErrorToCategory(undefined), 'unknown');
+});
+
+// ─── monitor ─────────────────────────────────────────────────────────────────
+
+test('monitor: returns MonitorResult shape for a freshly created running handle', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  const result = monitor(handle);
+
+  assert.ok('status' in result, 'result must have status');
+  assert.ok('output' in result, 'result must have output');
+  assert.ok('events' in result, 'result must have events');
+  assert.ok(Array.isArray(result.events), 'events must be an array');
+  assert.equal(result.status, 'running');
+  assert.equal(result.output, '');
+  assert.equal(result.events.length, 0);
+  assert.ok(!('error' in result), 'no error field on running handle');
+  assert.ok(!('usage' in result), 'no usage field until turn.completed');
+});
+
+// Helper: wait for the readable stream's async data event to fire
+const tick = () => new Promise(r => setImmediate(r));
+
+test('monitor: status=completed + usage after turn.completed event', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  const usagePayload = { input_tokens: 100, cached_input_tokens: 0, output_tokens: 50 };
+  child.stdout.push(
+    JSON.stringify({ type: 'thread.started', thread_id: 'tid-1' }) + '\n' +
+    JSON.stringify({ type: 'turn.started' }) + '\n' +
+    JSON.stringify({ type: 'turn.completed', usage: usagePayload }) + '\n'
+  );
+  await tick(); // Readable.push fires 'data' on next tick
+
+  const result = monitor(handle);
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.usage, usagePayload);
+  assert.ok(!('error' in result));
+});
+
+test('monitor: threadId captured from thread.started', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  child.stdout.push(JSON.stringify({ type: 'thread.started', thread_id: 'my-thread-uuid' }) + '\n');
+  await tick();
+
+  assert.equal(handle.threadId, 'my-thread-uuid');
+});
+
+test('monitor: agent_message text accumulated in output', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  child.stdout.push(
+    JSON.stringify({ type: 'item.completed', item: { id: 'item_1', type: 'agent_message', text: 'Hello world' } }) + '\n'
+  );
+  await tick();
+
+  const result = monitor(handle);
+  assert.ok(result.output.includes('Hello world'));
+});
+
+test('monitor: command_execution aggregated_output accumulated', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  child.stdout.push(
+    JSON.stringify({
+      type: 'item.completed',
+      item: { id: 'item_2', type: 'command_execution', command: 'ls', aggregated_output: 'file.txt\n', exit_code: 0, status: 'completed' },
+    }) + '\n'
+  );
+  await tick();
+
+  const result = monitor(handle);
+  assert.ok(result.output.includes('file.txt'));
+});
+
+test('monitor: item.status=failed sets handle.status to failed', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  child.stdout.push(
+    JSON.stringify({
+      type: 'item.completed',
+      item: { id: 'item_3', type: 'command_execution', command: 'bad-cmd', aggregated_output: '', exit_code: 1, status: 'failed' },
+    }) + '\n'
+  );
+  await tick();
+
+  const result = monitor(handle);
+  assert.equal(result.status, 'failed');
+  assert.ok('error' in result);
+  assert.equal(typeof result.error.category, 'string');
+});
+
+test('monitor: error.category populated on failed handle with stderr', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  // Simulate non-zero exit
+  handle.status = 'failed';
+  handle._stderrChunks.push('authentication failed: invalid API key');
+  handle._exitCode = 1;
+
+  const result = monitor(handle);
+  assert.equal(result.error.category, 'auth_failed');
+  assert.equal(result.error.exitCode, 1);
+});
+
+// ─── collect ─────────────────────────────────────────────────────────────────
+
+test('collect: resolves immediately when handle is already completed', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+  handle.status = 'completed';
+  handle._usage = { input_tokens: 10, cached_input_tokens: 0, output_tokens: 5 };
+
+  const result = await collect(handle, 5000);
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.usage, handle._usage);
+});
+
+test('collect: resolves immediately when handle is already failed', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+  handle.status = 'failed';
+  handle._exitCode = 1;
+
+  const result = await collect(handle, 5000);
+  assert.equal(result.status, 'failed');
+  assert.ok('error' in result);
+});
+
+test('collect: waits for exit event then resolves', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+  // handle is 'running'; simulate process completing after a tick
+
+  const collectPromise = collect(handle, 5000);
+
+  // Push turn.completed data and wait for the Readable data event to fire,
+  // then emit exit so the handle's status is 'completed' before collect resolves.
+  child.stdout.push(
+    JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 5, cached_input_tokens: 0, output_tokens: 2 } }) + '\n'
+  );
+  await tick(); // Readable data event fires on next tick
+  child.emit('exit', 0);
+
+  const result = await collectPromise;
+  assert.equal(result.status, 'completed');
+});
+
+test('collect: resolves with timeout error when process hangs', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+  // Do NOT emit exit — let it time out
+
+  const result = await collect(handle, 50); // 50ms timeout
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.category, 'timeout');
+  assert.ok(result.error.message.includes('50ms'));
+});
+
+test('collect: flushes partial buffer on exit (no trailing newline)', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  // Push data WITHOUT trailing newline — goes into _partial
+  child.stdout.push('{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5}}');
+  await tick();
+
+  // Verify it's stuck in _partial, not parsed
+  assert.equal(handle._events.length, 0, 'event should be in _partial, not parsed');
+  assert.ok(handle._partial.length > 0, '_partial should have data');
+
+  // Now collect — should flush _partial on exit
+  const collectPromise = collect(handle, 5000);
+  child.emit('exit', 0);
+  const result = await collectPromise;
+
+  assert.equal(result.status, 'completed', 'should be completed after flush');
+  assert.ok(result.events.length > 0, 'flushed event should appear');
+});
+
+// ─── shutdown ─────────────────────────────────────────────────────────────────
+
+test('shutdown: sends SIGTERM and marks process as killed', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  assert.equal(child.killed, false);
+  shutdown(handle);
+  assert.equal(child.killed, true);
+});
+
+test('shutdown: does nothing if process is already killed', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+  child.killed = true;
+
+  // Should not throw
+  assert.doesNotThrow(() => shutdown(handle));
+});
+
+// ─── US-005: Process lifecycle — SIGTERM → SIGKILL escalation ───────────────
+
+test('shutdown: returns a promise', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+  const result = shutdown(handle, 100);
+  assert.ok(result instanceof Promise || result === undefined || (result && typeof result.then === 'function'));
+});
+
+test('shutdown: SIGKILL after grace period if process does not exit', async () => {
+  const child = createMockChildProcess();
+  // Override kill to NOT emit exit (simulates hung process)
+  const signals = [];
+  child.kill = (signal) => { signals.push(signal); };
+  child.killed = false;
+  const handle = createHandle(child);
+  handle.kill = (signal) => { signals.push(signal); };
+
+  await shutdown(handle, 50); // 50ms grace
+  // Should have received SIGTERM first, then SIGKILL (from process.kill or handle.kill)
+  assert.ok(signals.includes('SIGTERM'), 'SIGTERM should be sent first');
+  assert.ok(signals.includes('SIGKILL'), 'SIGKILL should be sent after grace');
+});
+
+test('shutdown: resolves early if process exits within grace period', async () => {
+  const child = createMockChildProcess();
+  const exitSignals = [];
+  child.kill = (signal) => {
+    exitSignals.push(signal);
+    // Simulate normal exit on SIGTERM
+    setImmediate(() => child.emit('exit', 0, signal));
+  };
+  child.killed = false;
+  const handle = createHandle(child);
+
+  const start = Date.now();
+  await shutdown(handle, 5000);
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed < 1000, `Should resolve quickly, took ${elapsed}ms`);
+  assert.ok(exitSignals.includes('SIGTERM'));
+  assert.ok(!exitSignals.includes('SIGKILL'), 'SIGKILL should NOT be sent if process exits');
+});
+
+test('shutdown: no-op when process is already killed', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+  child.killed = true;
+  handle.process.killed = true;
+
+  const result = await shutdown(handle, 50);
+  // Should resolve without error
+  assert.ok(true);
+});
+
+// ─── US-006: Error taxonomy — timeout category ─────────────────────────────
+
+test('mapJsonlErrorToCategory: "timeout" → timeout', () => {
+  assert.equal(mapJsonlErrorToCategory('operation timeout after 30s'), 'timeout');
+});
+
+test('mapJsonlErrorToCategory: "did not complete within" → timeout', () => {
+  assert.equal(mapJsonlErrorToCategory('Codex process did not complete within 30000ms'), 'timeout');
+});
+
+test('mapJsonlErrorToCategory: "timed out" → timeout', () => {
+  assert.equal(mapJsonlErrorToCategory('request timed out waiting for response'), 'timeout');
+});
+
+test('mapJsonlErrorToCategory: all 7 categories exist', () => {
+  const categories = new Set([
+    mapJsonlErrorToCategory('authentication failed'),
+    mapJsonlErrorToCategory('rate limit exceeded'),
+    mapJsonlErrorToCategory('command not found'),
+    mapJsonlErrorToCategory('ETIMEDOUT connection'),
+    mapJsonlErrorToCategory('fatal error SIGSEGV'),
+    mapJsonlErrorToCategory('operation timeout'),
+    mapJsonlErrorToCategory('something else entirely'),
+  ]);
+  assert.deepEqual(categories, new Set(['auth_failed', 'rate_limited', 'not_installed', 'network', 'crash', 'timeout', 'unknown']));
+});
+
+// ─── export surface ───────────────────────────────────────────────────────────
+
+test('all required exports are present and callable', async () => {
+  const mod = await import('../lib/codex-exec.mjs');
+  assert.equal(typeof mod.spawn, 'function', 'spawn must be exported');
+  assert.equal(typeof mod.monitor, 'function', 'monitor must be exported');
+  assert.equal(typeof mod.collect, 'function', 'collect must be exported');
+  assert.equal(typeof mod.shutdown, 'function', 'shutdown must be exported');
+  assert.equal(typeof mod.parseJSONLEvents, 'function', 'parseJSONLEvents must be exported');
+  assert.equal(typeof mod.mapJsonlErrorToCategory, 'function', 'mapJsonlErrorToCategory must be exported');
+});

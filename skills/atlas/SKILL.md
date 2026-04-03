@@ -195,13 +195,17 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   Codebase context: <explore_results>. Task: <user_request>")
 ```
 
-If `NEEDS_CODEX`, simultaneously spawn Codex via tmux:
+If `NEEDS_CODEX`, simultaneously spawn Codex (batch executor — adapter auto-selected):
 ```bash
-# Codex approval mode mirrors Claude's permission level automatically.
-# Resolved by resolveCodexApproval() from .ao/autonomy.json ("auto" → detect from Claude settings).
+# Adapter auto-selected by worker-spawn.mjs selectAdapter():
+#   codex-appserver (preferred) → multi-turn JSON-RPC, live steering
+#   codex-exec → single-turn JSONL
+#   tmux (fallback) → legacy pane capture, resolves binary + injects PATH
+# Codex approval mode mirrors Claude's permission level automatically (codex-approval.mjs).
 # Override: set codex.approval in .ao/autonomy.json to "suggest", "auto-edit", or "full-auto".
+CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-analyze" -c "<cwd>"
-tmux send-keys -t "atlas-codex-analyze" 'codex <approval-flag> exec "<analysis prompt>"' Enter
+tmux send-keys -t "atlas-codex-analyze" "\"$CODEX_BIN\" <approval-flag> exec \"<analysis prompt>\"" Enter
 ```
 
 **[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
@@ -442,43 +446,53 @@ Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...
   Follow these golden principles: <harness_context>")
 ```
 
-**Codex deep workers (via tmux):**
+**Codex deep workers** (batch executors — adapter auto-selected by `selectAdapter()`):
 ```bash
+# Adapter auto-selected: codex-appserver > codex-exec > tmux
+# tmux fallback resolves binary + injects PATH:
+CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-<N>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-<N>" 'codex <approval-flag> exec "<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]"' Enter
+tmux send-keys -t "atlas-codex-<N>" "\"$CODEX_BIN\" <approval-flag> exec \"<implementation prompt>\"" Enter
 # Monitor: tmux capture-pane -pt "atlas-codex-<N>" -S -200
 # Cleanup: tmux kill-session -t "atlas-codex-<N>"
 ```
 
 **Codex failure detection and Claude fallback:**
 
-After spawning each Codex worker, poll `tmux capture-pane` every 10–15 seconds and pass the output to `detectCodexError(output)` (from `scripts/lib/worker-spawn.mjs`):
+The monitoring system detects failures via the active adapter:
 
 ```javascript
-import { detectCodexError, reassignToClaude } from './scripts/lib/worker-spawn.mjs';
+import { detectCodexError, reassignToClaude, selectAdapter } from './scripts/lib/worker-spawn.mjs';
 
-const paneOutput = capturePane(`atlas-codex-${N}`, 200);
-const errorCheck = detectCodexError(paneOutput);
+// monitorTeam() handles adapter dispatch automatically.
+// For codex-appserver: failures detected via structured CodexErrorInfo + mapAppServerErrorCode()
+// For codex-exec: failures detected via item.status="failed" + mapJsonlErrorToCategory()
+// For tmux: failures detected via detectCodexError(paneOutput) regex patterns
+// Error categories: auth_failed, rate_limited, not_installed, network, crash, context_exceeded, timeout, unknown
 
 if (errorCheck.failed) {
-  // Log the failure reason so it's visible in the session
-  console.error(`[atlas] Codex worker atlas-codex-${N} failed: ${errorCheck.reason} — ${errorCheck.message}`);
+  // reassignToClaude() is adapter-aware — shuts down correct adapter type
+  const fallback = await reassignToClaude('atlas', `codex-${N}`, originalPrompt, errorCheck.reason);
 
-  // Kill the tmux session and record the event in wisdom.
-  // Pass the session name explicitly to avoid the default sessionName() mismatch
-  // (atlas uses 'atlas-codex-N' directly, not 'omc-team-atlas-codex-N').
-  const fallback = await reassignToClaude('atlas', `codex-${N}`, originalPrompt, errorCheck.reason, `atlas-codex-${N}`);
-
-  // Spawn a Claude executor with the same prompt
+  // Spawn Claude replacement
   Task(subagent_type="agent-olympus:executor", model="sonnet",
     prompt=`${fallback.prompt}`)
 }
 ```
 
 Rules:
-- If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again in this session — use Claude for all remaining Codex stories.
+- If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again in this session.
 - If `errorCheck.reason` is `'crash'`, you may retry Codex once; if it crashes again, fall back to Claude.
-- Always call `await reassignToClaude()` before spawning the Claude replacement — it handles tmux cleanup and wisdom recording.
+- If `errorCheck.reason` is `'timeout'`, retry once before reassigning.
+- `reassignToClaude()` handles adapter-specific cleanup (app-server shutdown, codex-exec kill, or tmux session kill) and wisdom recording.
+
+**Task Chaining** (for iterative Codex work):
+With codex-appserver, use `steerTurn()` for live mid-turn input. For exec/tmux adapters, multi-step work uses sequential calls:
+```
+exec #1: "Analyze the API" → Result A
+Atlas: merges Result A + own analysis
+exec #2: "Implement changes based on: {merged feedback}" → Result B
+```
 
 **TDD Routing** (per story, before spawning executor):
 If story has `requiresTDD: true` OR `acceptanceCriteria` contains testable/behavioral conditions:
@@ -489,18 +503,22 @@ If story is a pure refactor / docs / config change (no runtime behavior change):
 
 3. After each story completes, verify its acceptance criteria with FRESH evidence
 
-4. **Codex Cross-Validation** (per story) — spawn a Codex validator before marking passes:
+4. **Codex Cross-Validation** (per story) — MANDATORY: spawn a Codex validator before marking passes:
 ```bash
+# CRITICAL: resolve binary path first — worktree shells may not inherit full PATH
+CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-xval-<story-id>" 'codex <approval-flag> exec "Cross-validate implementation of <US-ID> (<story title>). Files changed: <files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or \"none\">. Check: (1) all acceptance criteria genuinely met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings."' Enter
+tmux send-keys -t "atlas-codex-xval-<story-id>" "\"$CODEX_BIN\" <approval-flag> exec \"Cross-validate implementation of <US-ID> (<story title>). Files changed: <files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or 'none'>. Check: (1) all acceptance criteria genuinely met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings.\"" Enter
 # Poll: tmux capture-pane -pt "atlas-codex-xval-<story-id>" -S -200 (every 15s)
 # Cleanup: tmux kill-session -t "atlas-codex-xval-<story-id>"
 ```
-- **PASS** → mark `passes: true`, proceed.
-- **FAIL** → fix the specific violation, re-run acceptance criteria, re-validate (max 2 cycles).
-- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`; skip silently if `auth_failed`, `not_installed`, or `rate_limited`. Log: `[atlas] Codex cross-validation skipped: <reason>.`
+- **PASS** → `addVerification(runId, { story_id, verdict: 'pass', evidence: 'codex xval passed', verifiedBy: 'codex' })` → mark `passes: true`, proceed.
+- **FAIL** → `addVerification(runId, { story_id, verdict: 'fail', evidence: '<specific findings>', verifiedBy: 'codex' })` → fix the specific violation, re-run acceptance criteria, re-validate (max 2 cycles).
+- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'codex <reason>: cross-validation skipped', verifiedBy: 'atlas' })`. Log: `[atlas] Codex cross-validation skipped for <story-id>: <reason>.`
 
-5. Mark `passes: true` in prd.json only when ALL criteria verified AND Codex cross-validation passes (or is unavailable)
+> **IMPORTANT**: "skip silently" does NOT mean "do nothing". Every story MUST have a verification record — pass, fail, or explicit skip. The PR verification gate will block if any story lacks a record.
+
+5. Mark `passes: true` in prd.json only when ALL criteria verified AND Codex cross-validation passes (or is unavailable with explicit skip recorded)
 6. Record learnings via wisdom calls after each story:
    ```
    addWisdom({ category: 'pattern', lesson: '<codebase convention discovered>', confidence: 'high' })
@@ -672,6 +690,39 @@ Load autonomy config to determine shipping behavior:
 ```javascript
 import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
 const config = loadAutonomyConfig(cwd);
+```
+
+#### Verification Gate (MANDATORY — blocks PR creation)
+Before any shipping activity, check that ALL stories have verification records:
+```javascript
+import { checkVerificationGate } from './scripts/lib/run-artifacts.mjs';
+const storyIds = prd.userStories.map(s => s.id);
+const gate = checkVerificationGate(runId, storyIds);
+
+if (!gate.gatePass) {
+  // Stories without verification records — MUST attempt xval for each
+  for (const missingId of gate.missing) {
+    // 1. First attempt: try Codex cross-validation (same as Phase 3 step 4)
+    // 2. If Codex unavailable, record explicit skip:
+    addVerification(runId, {
+      story_id: missingId,
+      verdict: 'skip',
+      evidence: 'codex unavailable: verification gate catch-up',
+      verifiedBy: 'atlas'
+    });
+  }
+  // Re-check — if STILL failing, STOP (addVerification may have silently failed)
+  const recheck = checkVerificationGate(runId, storyIds);
+  if (!recheck.gatePass) {
+    console.error(`[atlas] VERIFICATION GATE FAILED — ${recheck.missing.length} stories still lack records: ${recheck.missing.join(', ')}`);
+    console.error(`[atlas] Cannot create PR until all stories have verification records.`);
+    // STOP — do not proceed to PR creation
+  }
+}
+
+if (gate.skipped.length > 0) {
+  console.log(`[atlas] ${gate.skipped.length} stories had Codex xval skipped — results included in PR body`);
+}
 ```
 
 #### Preflight

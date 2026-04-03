@@ -44,7 +44,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **UI/UX design review** *(v0.8.3)*: Aphrodite agent + 5 design skills — critique (Nielsen+Gestalt), a11y audit (WCAG 2.2 AA), design system audit (token leaks), UX copy review, unified UI review
 - **L-scale resilience** *(v0.8.8)*: `input-guard` library prevents sub-agent silent failures on large documents — auto-summarizes oversized inputs while preserving story IDs and acceptance criteria. `preflight` library detects and clears stale pointer files in `.ao/` before each run
 - **Codex permission mirroring** *(v0.9.5)*: Automatically detects Claude's permission level and mirrors it to Codex's approval mode (`full-auto`, `auto-edit`, `suggest`). Configurable via `.ao/autonomy.json` `codex.approval` (default: `auto` = auto-detect from Claude settings)
-- **627+ unit tests**: Comprehensive test suite using `node:test` across 40 test files
+- **821+ unit tests**: Comprehensive test suite using `node:test` across 44 test files
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation

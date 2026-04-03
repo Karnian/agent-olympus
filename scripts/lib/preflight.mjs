@@ -13,6 +13,8 @@ import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { resolveBinary } from './tmux-session.mjs';
+import { resolveClaudeBinary } from './resolve-binary.mjs';
 
 const AO_DIR = '.ao';
 const STATE_DIR = path.join(AO_DIR, 'state');
@@ -92,12 +94,35 @@ export async function cleanStalePointers() {
 }
 
 /**
+ * Parse a semver-like version string and check if it meets the minimum.
+ * Accepts formats like "0.116.0" or "codex-cli 0.116.0".
+ *
+ * @param {string} versionStr
+ * @param {number} minMajor
+ * @param {number} minMinor
+ * @param {number} minPatch
+ * @returns {boolean}
+ */
+export function meetsMinVersion(versionStr, minMajor, minMinor, minPatch) {
+  const match = String(versionStr).match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return false;
+  const [, major, minor, patch] = match.map(Number);
+  if (major > minMajor) return true;
+  if (major < minMajor) return false;
+  if (minor > minMinor) return true;
+  if (minor < minMinor) return false;
+  return patch >= minPatch;
+}
+
+/**
  * Detect available capabilities for orchestrator execution.
  * All checks are fail-safe: if detection fails, capability is marked false.
  *
  * @returns {Promise<{
  *   hasTmux: boolean,
  *   hasCodex: boolean,
+ *   hasCodexExecJson: boolean,
+ *   hasCodexAppServer: boolean,
  *   hasGitWorktree: boolean,
  *   hasTeamTools: boolean,
  *   hasPreviewMCP: boolean
@@ -106,18 +131,74 @@ export async function cleanStalePointers() {
 export async function detectCapabilities() {
   let hasTmux = false;
   try {
-    execFileSync('which', ['tmux'], { stdio: 'ignore' });
-    hasTmux = true;
+    // Use resolveBinary which checks PATH + fallback paths (homebrew, /usr/local, etc.)
+    const tmuxBin = resolveBinary('tmux');
+    if (tmuxBin && tmuxBin !== 'tmux') {
+      hasTmux = true;
+    } else {
+      // bare name returned — try running it to see if the OS can find it
+      execFileSync('which', ['tmux'], { stdio: 'ignore' });
+      hasTmux = true;
+    }
   } catch {
     // tmux not found
   }
 
   let hasCodex = false;
   try {
-    execFileSync('which', ['codex'], { stdio: 'ignore' });
-    hasCodex = true;
+    const codexBin = resolveBinary('codex');
+    if (codexBin && codexBin !== 'codex') {
+      hasCodex = true;
+    } else {
+      execFileSync('which', ['codex'], { stdio: 'ignore' });
+      hasCodex = true;
+    }
   } catch {
     // codex not found
+  }
+
+  // Detect codex exec --json support (requires codex-cli >= 0.116.0)
+  let hasCodexExecJson = false;
+  let hasCodexAppServer = false;
+  try {
+    const codexVersion = execFileSync(resolveBinary('codex'), ['--version'], {
+      stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
+    }).trim();
+    hasCodexExecJson = meetsMinVersion(codexVersion, 0, 116, 0);
+    // app-server is available in the same version range as exec --json
+    // Detect by checking if 'codex app-server --help' succeeds
+    if (hasCodexExecJson) {
+      try {
+        execFileSync(resolveBinary('codex'), ['app-server', '--help'], {
+          stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
+        });
+        hasCodexAppServer = true;
+      } catch {
+        // app-server subcommand not available in this build
+        hasCodexAppServer = false;
+      }
+    }
+  } catch {
+    hasCodexExecJson = false;
+    hasCodexAppServer = false;
+  }
+
+  // Detect Claude CLI (claude -p mode for headless worker execution)
+  let hasClaudeCli = false;
+  try {
+    const claudePath = resolveClaudeBinary();
+    if (claudePath && claudePath !== 'claude') {
+      // Binary found via versioned path discovery
+      hasClaudeCli = true;
+    } else {
+      // Try running --version to verify it works
+      execFileSync(claudePath, ['--version'], {
+        stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
+      });
+      hasClaudeCli = true;
+    }
+  } catch {
+    hasClaudeCli = false;
   }
 
   let hasGitWorktree = false;
@@ -134,7 +215,7 @@ export async function detectCapabilities() {
   // Preview MCP is available if .claude/launch.json exists
   const hasPreviewMCP = existsSync('.claude/launch.json');
 
-  return { hasTmux, hasCodex, hasGitWorktree, hasTeamTools, hasPreviewMCP };
+  return { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGitWorktree, hasTeamTools, hasPreviewMCP };
 }
 
 /**
@@ -148,6 +229,7 @@ export function formatCapabilityReport(caps) {
     'Capabilities:',
     fmt(caps.hasTmux, 'tmux       ', 'parallel worker sessions'),
     fmt(caps.hasCodex, 'codex      ', 'cross-validation & multi-model'),
+    fmt(caps.hasClaudeCli, 'claude-cli ', 'headless Claude Code workers'),
     fmt(caps.hasGitWorktree, 'git worktree', 'isolated parallel workspaces'),
     fmt(caps.hasTeamTools, 'team tools ', 'native Claude Code team management'),
     fmt(caps.hasPreviewMCP, 'preview MCP', caps.hasPreviewMCP

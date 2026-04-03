@@ -1,46 +1,60 @@
 import { execFileSync } from 'child_process';
 import { mkdirSync, existsSync, writeFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
+import { dirname } from 'path';
 import { createWorkerWorktree } from './worktree.mjs';
+import { resolveBinary, resolveClaudeBinary, SEARCH_PATHS } from './resolve-binary.mjs';
 import { resolveCodexApproval, codexApprovalFlag } from './codex-approval.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
 
+// Re-export for backward compatibility with callers that import from tmux-session
+export { resolveBinary } from './resolve-binary.mjs';
+
 const SESSION_PREFIX = 'ao-team';
 
-// Common binary search paths across platforms
-const SEARCH_PATHS = [
-  '/opt/homebrew/bin',   // macOS ARM (Apple Silicon)
-  '/usr/local/bin',      // macOS Intel / Linux manual installs
-  '/usr/bin',            // Linux system
-  '/usr/sbin',           // Linux system
-  '/home/linuxbrew/.linuxbrew/bin', // Linuxbrew
-];
-
-const _binCache = new Map();
-
 /**
- * Resolve a binary name to its full path.
- * Checks PATH first (via `which`), then falls back to common locations.
- * Results are cached for the lifetime of the process.
+ * Build a robust PATH string that includes all known binary directories.
+ * Merges the current process PATH, SEARCH_PATHS, and parent directories of
+ * resolved binaries (codex, claude, tmux, git, node).
+ * Used to inject PATH into tmux sessions so workers can find CLIs regardless
+ * of how the shell inside tmux initializes its environment.
+ *
+ * @returns {string} colon-separated PATH string
  */
-export function resolveBinary(name) {
-  if (_binCache.has(name)) return _binCache.get(name);
+export function buildResolvedPath() {
+  const dirs = new Set();
 
-  // Try which first (works if PATH is correct)
-  try {
-    const resolved = execFileSync('which', [name], { stdio: 'pipe', encoding: 'utf-8' }).trim();
-    if (resolved) { _binCache.set(name, resolved); return resolved; }
-  } catch {}
-
-  // Fallback: scan known paths
-  for (const dir of SEARCH_PATHS) {
-    const candidate = `${dir}/${name}`;
-    if (existsSync(candidate)) { _binCache.set(name, candidate); return candidate; }
+  // Collect from current process PATH
+  if (process.env.PATH) {
+    for (const p of process.env.PATH.split(':')) {
+      if (p) dirs.add(p);
+    }
   }
 
-  // Last resort: return bare name, let the OS figure it out
-  _binCache.set(name, name);
-  return name;
+  // Add known search paths that actually exist
+  for (const p of SEARCH_PATHS) {
+    if (existsSync(p)) dirs.add(p);
+  }
+
+  // Add parent directories of resolved key binaries
+  for (const bin of ['codex', 'tmux', 'git', 'node']) {
+    try {
+      const resolved = resolveBinary(bin);
+      if (resolved && resolved !== bin && resolved.includes('/')) {
+        dirs.add(dirname(resolved));
+      }
+    } catch {}
+  }
+
+  // Claude CLI lives in a versioned app bundle path — use dedicated resolver
+  try {
+    const claudePath = resolveClaudeBinary();
+    if (claudePath && claudePath !== 'claude' && claudePath.includes('/')) {
+      dirs.add(dirname(claudePath));
+    }
+  } catch {}
+
+  return [...dirs].join(':');
 }
 
 export function validateTmux() {
@@ -122,6 +136,13 @@ export function createTeamSession(teamName, workers, cwd) {
 
       // Create new detached session rooted at the worker's worktree (or cwd on fallback)
       execFileSync(tmux, ['new-session', '-d', '-s', name, '-c', sessionCwd], { stdio: 'pipe' });
+
+      // Inject resolved PATH so CLIs (codex, claude, etc.) are always findable,
+      // even when the tmux shell doesn't inherit the parent's full PATH.
+      const resolvedPath = buildResolvedPath();
+      try {
+        execFileSync(tmux, ['send-keys', '-t', name, `export PATH="${resolvedPath}"`, 'Enter'], { stdio: 'pipe' });
+      } catch {}
 
       results.push({
         name: worker.name,
