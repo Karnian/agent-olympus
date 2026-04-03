@@ -197,8 +197,11 @@ Task(subagent_type="agent-olympus:metis", model="opus",
 
 If `NEEDS_CODEX`, simultaneously spawn Codex via tmux:
 ```bash
+# Codex approval mode mirrors Claude's permission level automatically.
+# Resolved by resolveCodexApproval() from .ao/autonomy.json ("auto" → detect from Claude settings).
+# Override: set codex.approval in .ao/autonomy.json to "suggest", "auto-edit", or "full-auto".
 tmux new-session -d -s "atlas-codex-analyze" -c "<cwd>"
-tmux send-keys -t "atlas-codex-analyze" 'codex exec "<analysis prompt>"' Enter
+tmux send-keys -t "atlas-codex-analyze" 'codex <approval-flag> exec "<analysis prompt>"' Enter
 ```
 
 **[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
@@ -442,7 +445,7 @@ Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...
 **Codex deep workers (via tmux):**
 ```bash
 tmux new-session -d -s "atlas-codex-<N>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-<N>" 'codex exec "<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]"' Enter
+tmux send-keys -t "atlas-codex-<N>" 'codex <approval-flag> exec "<implementation prompt>[If harness_context exists: Harness constraints — follow golden principles: <harness_context>. Respect dependency layers from docs/ARCHITECTURE.md.]"' Enter
 # Monitor: tmux capture-pane -pt "atlas-codex-<N>" -S -200
 # Cleanup: tmux kill-session -t "atlas-codex-<N>"
 ```
@@ -489,7 +492,7 @@ If story is a pure refactor / docs / config change (no runtime behavior change):
 4. **Codex Cross-Validation** (per story) — spawn a Codex validator before marking passes:
 ```bash
 tmux new-session -d -s "atlas-codex-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-xval-<story-id>" 'codex exec "Cross-validate implementation of <US-ID> (<story title>). Files changed: <files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or \"none\">. Check: (1) all acceptance criteria genuinely met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings."' Enter
+tmux send-keys -t "atlas-codex-xval-<story-id>" 'codex <approval-flag> exec "Cross-validate implementation of <US-ID> (<story title>). Files changed: <files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or \"none\">. Check: (1) all acceptance criteria genuinely met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings."' Enter
 # Poll: tmux capture-pane -pt "atlas-codex-xval-<story-id>" -S -200 (every 15s)
 # Cleanup: tmux kill-session -t "atlas-codex-xval-<story-id>"
 ```

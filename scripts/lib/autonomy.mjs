@@ -43,6 +43,9 @@ export const DEFAULT_AUTONOMY_CONFIG = {
   budget: {
     warnThresholdUsd: null,
   },
+  codex: {
+    approval: 'auto',
+  },
 };
 
 /**
@@ -198,6 +201,27 @@ export function validateAutonomyConfig(config) {
             errors.push(
               'config.budget.warnThresholdUsd must be null or a positive number; received: ' +
               JSON.stringify(warnThresholdUsd)
+            );
+          }
+        }
+      }
+    }
+
+    // --- codex ---
+    if (config.codex !== undefined) {
+      if (!config.codex || typeof config.codex !== 'object' || Array.isArray(config.codex)) {
+        errors.push(
+          'config.codex must be a non-null object; received: ' +
+          (config.codex === null ? 'null' : typeof config.codex)
+        );
+      } else {
+        const approval = config.codex.approval;
+        if (approval !== undefined) {
+          const validApprovals = ['auto', 'suggest', 'auto-edit', 'full-auto'];
+          if (typeof approval !== 'string' || !validApprovals.includes(approval)) {
+            errors.push(
+              'config.codex.approval must be one of: auto, suggest, auto-edit, full-auto; received: ' +
+              JSON.stringify(approval)
             );
           }
         }

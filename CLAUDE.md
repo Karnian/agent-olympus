@@ -20,8 +20,8 @@ scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-ou
               wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
               worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts,
-              session-registry)
-scripts/test → node:test based unit tests (575+ tests, 37 files)
+              session-registry, codex-approval)
+scripts/test → node:test based unit tests (627+ tests, 40 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -130,10 +130,24 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 Codex is invoked via tmux, not via omc CLI:
 ```bash
 tmux new-session -d -s "<session-name>" -c "<cwd>"
-tmux send-keys -t "<session-name>" 'codex exec "<prompt>"' Enter
+tmux send-keys -t "<session-name>" 'codex <approval-flag> exec "<prompt>"' Enter
 tmux capture-pane -pt "<session-name>" -S -200   # monitor output
 tmux kill-session -t "<session-name>"             # cleanup
 ```
+
+### Permission Mirroring
+Codex approval mode is automatically determined from Claude's permission level:
+- `Bash(*) + Write(*)` in Claude settings → `--full-auto`
+- `Write(*)` or `Edit(*)` only → `--auto-edit`
+- Otherwise → no flag (suggest/read-only)
+
+Detection checks (in priority order): project `.claude/settings.local.json` → user `~/.claude/settings.local.json` → user `~/.claude/settings.json`
+
+Override via `.ao/autonomy.json`:
+```json
+{ "codex": { "approval": "full-auto" } }
+```
+Valid values: `auto` (default, detect from Claude), `suggest`, `auto-edit`, `full-auto`
 
 Session naming convention: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
 Cross-validation sessions: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex-xval-<story-id>`
@@ -146,7 +160,7 @@ Cross-validation sessions: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex
 ## Testing
 
 ```bash
-# Run unit tests (575+ tests, 37 files)
+# Run unit tests (627+ tests, 40 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

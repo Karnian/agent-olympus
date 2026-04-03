@@ -6,7 +6,7 @@
 
 Agent Olympus is a standalone Claude Code plugin that transforms how you build software. Give it a task, and it orchestrates specialized AI agents to complete it autonomously — analyzing requirements, planning execution, implementing changes, verifying results, and fixing issues until everything passes.
 
-Two orchestrators, 18 specialized agents, 25 workflow skills. Zero npm dependencies.
+Two orchestrators, 18 specialized agents, 26 workflow skills. Zero npm dependencies.
 
 ## What It Does
 
@@ -23,7 +23,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 
 - **Two orchestrators**: Atlas (hub-and-spoke) and Athena (peer-to-peer team)
 - **18 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Hermes (spec), Executor, Designer (UI/UX), **Aphrodite (design review)**, Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Themis (quality gate), Atlas, Athena
-- **25 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, tdd, systematic-debug, brainstorm, finish-branch, **design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review**, harness-init
+- **26 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, tdd, systematic-debug, brainstorm, finish-branch, **design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review**, harness-init, sessions
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
 - **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs; intent-aware query expansion
 - **Zero npm dependencies**: Node.js built-ins only
@@ -43,7 +43,8 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Visual verification** *(v0.8)*: Optional Claude Preview MCP screenshot after UI changes
 - **UI/UX design review** *(v0.8.3)*: Aphrodite agent + 5 design skills — critique (Nielsen+Gestalt), a11y audit (WCAG 2.2 AA), design system audit (token leaks), UX copy review, unified UI review
 - **L-scale resilience** *(v0.8.8)*: `input-guard` library prevents sub-agent silent failures on large documents — auto-summarizes oversized inputs while preserving story IDs and acceptance criteria. `preflight` library detects and clears stale pointer files in `.ao/` before each run
-- **424+ unit tests**: Comprehensive test suite using `node:test` across 28 test files
+- **Codex permission mirroring** *(v0.9.5)*: Automatically detects Claude's permission level and mirrors it to Codex's approval mode (`full-auto`, `auto-edit`, `suggest`). Configurable via `.ao/autonomy.json` `codex.approval` (default: `auto` = auto-detect from Claude settings)
+- **627+ unit tests**: Comprehensive test suite using `node:test` across 40 test files
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -289,7 +290,7 @@ User Request
 | **themis** | Sonnet | Quality gate enforcer (read-only) — tests, syntax, namespace hygiene; PASS/FAIL/CONDITIONAL verdict |
 | **writer** | Haiku | Documentation specialist — clear, accurate technical docs and code comments |
 
-## Skills (24 Total)
+## Skills (26 Total)
 
 | Skill | Level | Aliases | Use Case |
 |-------|-------|---------|----------|
@@ -427,10 +428,12 @@ For algorithmic work, large refactoring, or exploratory coding, orchestrators sp
 
 ```bash
 tmux new-session -d -s "atlas-codex-<N>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-<N>" 'codex exec "<prompt>"' Enter
+tmux send-keys -t "atlas-codex-<N>" 'codex <approval-flag> exec "<prompt>"' Enter
 tmux capture-pane -pt "atlas-codex-<N>" -S -200  # monitor output
 tmux kill-session -t "atlas-codex-<N>"            # cleanup
 ```
+
+The `<approval-flag>` is automatically resolved from Claude's permission level (see [Permission Mirroring](#features)). Override via `.ao/autonomy.json` `codex.approval`.
 
 Session naming convention:
 - Atlas: `atlas-codex-<N>`
@@ -516,7 +519,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (390+ tests across 25 files) covers the core hook libraries. To run:
+A `node:test` based test suite (601+ tests across 39 files) covers the core hook libraries. To run:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'
