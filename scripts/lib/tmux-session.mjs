@@ -1,9 +1,8 @@
 import { execFileSync } from 'child_process';
-import { mkdirSync, existsSync, writeFileSync, unlinkSync } from 'fs';
+import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
-import { dirname } from 'path';
 import { createWorkerWorktree } from './worktree.mjs';
-import { resolveBinary, resolveClaudeBinary, SEARCH_PATHS } from './resolve-binary.mjs';
+import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { resolveCodexApproval, codexApprovalFlag } from './codex-approval.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
 
@@ -14,47 +13,13 @@ const SESSION_PREFIX = 'ao-team';
 
 /**
  * Build a robust PATH string that includes all known binary directories.
- * Merges the current process PATH, SEARCH_PATHS, and parent directories of
- * resolved binaries (codex, claude, tmux, git, node).
- * Used to inject PATH into tmux sessions so workers can find CLIs regardless
- * of how the shell inside tmux initializes its environment.
+ * Delegates to buildEnhancedPath() in resolve-binary.mjs.
+ * Kept as a named export for backward compatibility with existing callers.
  *
  * @returns {string} colon-separated PATH string
  */
 export function buildResolvedPath() {
-  const dirs = new Set();
-
-  // Collect from current process PATH
-  if (process.env.PATH) {
-    for (const p of process.env.PATH.split(':')) {
-      if (p) dirs.add(p);
-    }
-  }
-
-  // Add known search paths that actually exist
-  for (const p of SEARCH_PATHS) {
-    if (existsSync(p)) dirs.add(p);
-  }
-
-  // Add parent directories of resolved key binaries
-  for (const bin of ['codex', 'tmux', 'git', 'node']) {
-    try {
-      const resolved = resolveBinary(bin);
-      if (resolved && resolved !== bin && resolved.includes('/')) {
-        dirs.add(dirname(resolved));
-      }
-    } catch {}
-  }
-
-  // Claude CLI lives in a versioned app bundle path — use dedicated resolver
-  try {
-    const claudePath = resolveClaudeBinary();
-    if (claudePath && claudePath !== 'claude' && claudePath.includes('/')) {
-      dirs.add(dirname(claudePath));
-    }
-  } catch {}
-
-  return [...dirs].join(':');
+  return buildEnhancedPath();
 }
 
 export function validateTmux() {

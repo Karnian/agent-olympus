@@ -21,7 +21,7 @@
  */
 
 import { spawn as nodeSpawn } from 'child_process';
-import { resolveClaudeBinary } from './resolve-binary.mjs';
+import { resolveClaudeBinary, buildEnhancedPath } from './resolve-binary.mjs';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -206,7 +206,7 @@ export function spawn(prompt, opts = {}) {
   const child = nodeSpawn(claudePath, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, ...opts.env },
+    env: { ...process.env, PATH: buildEnhancedPath(), ...opts.env },
     detached: true, // Required for process-group cleanup
   });
 
