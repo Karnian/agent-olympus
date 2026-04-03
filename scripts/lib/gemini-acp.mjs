@@ -53,6 +53,9 @@ const PROMPT_TIMEOUT_MS = 120000;
 /** Max stderr chunks retained to prevent unbounded memory growth */
 const MAX_STDERR_CHUNKS = 100;
 
+/** Max queued messages to prevent unbounded memory growth if worker is stuck */
+const MAX_QUEUE_DEPTH = 200;
+
 /** Protocol version used in the initialize handshake */
 const PROTOCOL_VERSION = '2025-07-01';
 
@@ -215,6 +218,9 @@ function _heuristicCategory(text) {
  * @property {string[]} _stderrChunks - Accumulated stderr (capped at MAX_STDERR_CHUNKS)
  * @property {boolean} _initialized - Whether the initialize handshake completed
  * @property {string} _adapterName - Always 'gemini-acp'
+ * @property {Object[]} _messageQueue - Pending messages to deliver after current turn completes
+ * @property {boolean} _draining - Whether the queue drain loop is active
+ * @property {Object[]} _deadLetters - Messages that failed delivery after retry
  */
 
 // ─── Server lifecycle ─────────────────────────────────────────────────────────
@@ -266,6 +272,9 @@ export function startServer(opts = {}) {
     _stderrChunks: [],
     _initialized: false,
     _adapterName: 'gemini-acp',
+    _messageQueue: [],
+    _draining: false,
+    _deadLetters: [],
   };
 
   // Parse stdout as JSONL — each newline-terminated line is a JSON-RPC message
@@ -422,6 +431,10 @@ function _processNotification(handle, notification) {
       } else {
         // Unknown status — treat as completed to avoid hanging callers
         handle.status = 'completed';
+      }
+      // Auto-drain message queue when turn completes (non-blocking)
+      if (handle.status === 'completed' && handle._messageQueue?.length > 0 && !handle._draining) {
+        _drainQueue(handle).catch(() => {});
       }
       break;
     }
@@ -784,6 +797,142 @@ export function collectPromptResult(handle, timeoutMs = PROMPT_TIMEOUT_MS) {
     handle.events.once('turn/completed', onCompleted);
     handle.events.once('exit', onExit);
   });
+}
+
+// ─── Message Queue (team communication) ──────────────────────────────────────
+
+/**
+ * Enqueue a message for delivery after the current turn completes.
+ *
+ * When a Gemini worker is executing a turn, other workers may need to send it
+ * information (e.g., API schema from a Claude worker). Unlike Codex app-server
+ * which supports `steerTurn()` for mid-turn injection, Gemini ACP only accepts
+ * new prompts between turns.
+ *
+ * This function queues messages and automatically drains the queue when the
+ * current turn finishes. Each queued message becomes a new turn with the
+ * previous turn's context preserved (ACP session continuity).
+ *
+ * @param {GeminiAcpHandle} handle
+ * @param {string} message - The message/context to deliver
+ * @param {Object} [opts]
+ * @param {string} [opts.from] - Source worker name (for context in the prompt)
+ * @param {string} [opts.priority='normal'] - 'high' pushes to front of queue
+ * @returns {{ queued: boolean, position: number, queueLength: number }}
+ */
+export function enqueueMessage(handle, message, opts = {}) {
+  if (!handle || !message) return { queued: false, position: -1, queueLength: 0 };
+
+  // Reject if queue is at capacity to prevent unbounded memory growth
+  if (handle._messageQueue.length >= MAX_QUEUE_DEPTH) {
+    return { queued: false, position: -1, queueLength: handle._messageQueue.length };
+  }
+
+  const entry = {
+    text: message,
+    from: opts.from || 'orchestrator',
+    enqueuedAt: new Date().toISOString(),
+  };
+
+  let position;
+  if (opts.priority === 'high') {
+    handle._messageQueue.unshift(entry);
+    position = 0;
+  } else {
+    position = handle._messageQueue.length; // will be at this index after push
+    handle._messageQueue.push(entry);
+  }
+
+  // If the worker is idle (turn completed), start draining immediately
+  if ((handle.status === 'completed' || handle.status === 'ready') && !handle._draining) {
+    _drainQueue(handle).catch(() => {});
+  }
+
+  return { queued: true, position, queueLength: handle._messageQueue.length };
+}
+
+/**
+ * Drain the message queue by sending each message as a new turn.
+ * Waits for each turn to complete before sending the next.
+ * Automatically triggered when a turn completes and the queue is non-empty.
+ *
+ * Failed messages are re-queued at the front (up to 1 retry per message).
+ * Messages that fail twice are placed in `handle._deadLetters` for inspection.
+ * If the server dies mid-drain, remaining messages stay in the queue (not consumed).
+ *
+ * @param {GeminiAcpHandle} handle
+ * @returns {Promise<{ delivered: number, failed: number, deadLettered: number }>}
+ */
+export async function _drainQueue(handle) {
+  if (handle._draining) return { delivered: 0, failed: 0, deadLettered: 0 };
+  handle._draining = true;
+
+  let delivered = 0;
+  let failed = 0;
+  let deadLettered = 0;
+
+  // Ensure dead letter list exists
+  if (!handle._deadLetters) handle._deadLetters = [];
+
+  try {
+    while (handle._messageQueue.length > 0) {
+      // Don't drain if the server is dead — leave remaining messages in queue
+      if (handle.status === 'failed' || handle._exitCode !== null) break;
+
+      const entry = handle._messageQueue.shift();
+      const prompt = entry.from !== 'orchestrator'
+        ? `[Message from ${entry.from}]: ${entry.text}`
+        : entry.text;
+
+      let success = false;
+      try {
+        const result = await sendPrompt(handle, prompt);
+        success = result.status !== 'failed';
+      } catch {
+        success = false;
+      }
+
+      if (success) {
+        delivered++;
+      } else {
+        failed++;
+        // Re-queue once; if already retried, move to dead letters
+        if (!entry._retried) {
+          entry._retried = true;
+          handle._messageQueue.unshift(entry);
+        } else {
+          deadLettered++;
+          if (handle._deadLetters.length < MAX_QUEUE_DEPTH) {
+            handle._deadLetters.push(entry);
+          }
+        }
+      }
+    }
+  } finally {
+    handle._draining = false;
+  }
+
+  return { delivered, failed, deadLettered };
+}
+
+/**
+ * Get the current message queue state.
+ *
+ * @param {GeminiAcpHandle} handle
+ * @returns {{ length: number, draining: boolean, deadLetters: number, messages: Array<{ from: string, enqueuedAt: string, preview: string }> }}
+ */
+export function getQueueState(handle) {
+  if (!handle) return { length: 0, draining: false, deadLetters: 0, messages: [] };
+  return {
+    length: handle._messageQueue.length,
+    draining: handle._draining,
+    deadLetters: (handle._deadLetters || []).length,
+    messages: handle._messageQueue.map(e => ({
+      from: e.from,
+      enqueuedAt: e.enqueuedAt,
+      preview: e.text.substring(0, 100),
+    })),
+  };
 }
 
 // ─── Shutdown ─────────────────────────────────────────────────────────────────
