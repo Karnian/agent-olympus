@@ -1,6 +1,6 @@
 ---
 name: athena
-description: Self-driving team orchestrator — spawns Claude + Codex peer-to-peer team and loops until task is fully complete
+description: Self-driving team orchestrator — spawns Claude + Codex + Gemini peer-to-peer team and loops until task is fully complete
 level: 5
 aliases: [athena, 아테나, team-do-it, 팀으로해, 같이해, team, collaborate]
 ---
@@ -31,7 +31,7 @@ Athena = many brains collaborating.
 
 **NEVER STOP UNTIL DONE.** After spawning the team:
 - Monitor continuously until all workers complete
-- Bridge ALL Claude↔Codex communication
+- Bridge ALL Claude↔Codex↔Gemini communication
 - If integration fails → debug and retry
 - If reviews reject → fix and re-review
 - Only stop when ALL checks pass, or after 15 iterations (then escalate)
@@ -39,21 +39,21 @@ Athena = many brains collaborating.
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│              ATHENA LEAD                     │
-│  (orchestrates, monitors, bridges, NEVER     │
-│   implements — only coordinates)             │
-└──────┬───────────────────────┬──────────────┘
-       │                       │
-  ┌────┴────┐            ┌────┴────┐
-  │ Claude  │            │ Codex   │
-  │ Native  │◄──bridge──►│ TMux    │
-  │ Team    │            │ Workers │
-  └────┬────┘            └────┬────┘
-       │                       │
-  SendMessage              inbox/outbox
-  TaskList                (.ao/teams/)
-  (peer-to-peer)
+┌─────────────────────────────────────────────────────────┐
+│                    ATHENA LEAD                           │
+│  (orchestrates, monitors, bridges, NEVER                 │
+│   implements — only coordinates)                         │
+└──────┬──────────────────┬──────────────┬────────────────┘
+       │                  │              │
+  ┌────┴────┐       ┌────┴────┐    ┌────┴────┐
+  │ Claude  │       │ Codex   │    │ Gemini  │
+  │ Native  │◄─────►│ Workers │◄──►│ Workers │
+  │ Team    │       │         │    │         │
+  └────┬────┘       └────┬────┘    └────┬────┘
+       │                  │              │
+  SendMessage        adapter-based    message queue
+  TaskList           (appserver/      (enqueueMessage →
+  (peer-to-peer)      exec/tmux)      auto-drain)
 ```
 
 ## Steps
@@ -133,8 +133,8 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   1. Break into INDEPENDENT work streams
   2. Each stream: scope (files), worker type, model tier, dependencies
   3. Identify coordination points
-  4. Recommend team size (max 5 Claude + 2 Codex)
-  Rules: Codex for algorithms/large refactoring, Claude for standard impl/UI/tests
+  4. Recommend team size (max 5 Claude + 2 Codex + 2 Gemini)
+  Rules: Codex for algorithms/large refactoring, Claude for standard impl/tests, Gemini for visual/multimodal/creative tasks
   Prior learnings: <formatWisdomForPrompt()>
   Task: <user_request>")
 ```
@@ -418,6 +418,22 @@ tmux new-session -d -s "athena-<slug>-codex-<N>" -c "<worktreePath>"
 tmux send-keys -t "athena-<slug>-codex-<N>" "\"$CODEX_BIN\" <approval-flag> exec \"<implementation prompt>\"" Enter
 ```
 
+**Gemini workers** (for visual/multimodal tasks — spawned via adapter):
+
+The adapter is selected automatically based on detected capabilities (highest priority first):
+- **gemini-acp adapter** (preferred): Multi-turn JSON-RPC 2.0 via `gemini --acp`. Session lifecycle, message queue for team communication. Requires `hasGeminiAcp`.
+- **gemini-exec adapter**: Single-turn `gemini --output-format json -p` via child_process.spawn. Requires `hasGeminiCli`.
+- **tmux adapter** (fallback): Legacy tmux-based `gemini -p`. Used when neither ACP nor exec is available.
+
+```bash
+# Adapter auto-selected: gemini-acp > gemini-exec > tmux
+# <approval-flag> mirrors Claude's permission level (resolved by gemini-approval.mjs)
+# Override: set gemini.approval in .ao/autonomy.json to "default", "auto_edit", "yolo", or "plan"
+GEMINI_BIN=$(which gemini 2>/dev/null || echo /opt/homebrew/bin/gemini)
+tmux new-session -d -s "athena-<slug>-gemini-<N>" -c "<worktreePath>"
+tmux send-keys -t "athena-<slug>-gemini-<N>" "\"$GEMINI_BIN\" <approval-flag> -p \"$(cat \"${safeFile}\")\"; rm -f \"${safeFile}\"" Enter
+```
+
 Workers must commit their changes to their branch before signalling completion.
 
 **Inbox/Outbox** (Claude workers only):
@@ -426,6 +442,7 @@ Workers must commit their changes to their branch before signalling completion.
 .ao/teams/<slug>/<worker>/outbox/   — messages FROM Claude worker
 ```
 Note: Codex workers do NOT read inbox — they are batch executors. Use task chaining for iterative work.
+Note: Gemini ACP workers receive messages via `enqueueMessage()` → auto-drain on turn completion. Gemini exec/tmux workers are batch executors like Codex.
 
 ```
 saveCheckpoint('athena', {
@@ -815,46 +832,58 @@ Report: PRD stories (N/N), per-worker summary, files changed, coordination log, 
 
 ## Team_Sizing
 
-| Scope | Claude | Codex | Total |
-|-------|--------|-------|-------|
-| 2-3 files | 2 | 0 | 2 |
-| 4-6 files | 2-3 | 1 | 3-4 |
-| 7-15 files | 3-4 | 1 | 4-5 |
-| 15+ files | 4-5 | 2 | 6-7 |
+| Scope | Claude | Codex | Gemini | Total |
+|-------|--------|-------|--------|-------|
+| 2-3 files | 2 | 0 | 0 | 2 |
+| 4-6 files | 2-3 | 1 | 0-1 | 3-5 |
+| 7-15 files | 3-4 | 1 | 0-1 | 4-6 |
+| 15+ files | 4-5 | 2 | 0-2 | 6-9 |
+
+Gemini workers are assigned when `teamWorkerType: "gemini"` is set in model-routing config (visual-engineering, design-review, artistry routes).
 
 ## Worker_Types
 
-| Work | Agent | Model |
-|------|-------|-------|
-| API/backend | executor | sonnet |
-| UI/frontend | designer | sonnet |
-| Business logic | executor | sonnet/opus |
-| Algorithm | **codex** | — |
-| Tests | test-engineer | sonnet |
-| Large refactor | **codex** | — |
-| Docs | writer | haiku |
-| Security-critical | executor | opus |
+| Work | Agent | Model | Worker Type |
+|------|-------|-------|-------------|
+| API/backend | executor | sonnet | claude |
+| UI/frontend | designer | sonnet | claude or **gemini** |
+| Business logic | executor | sonnet/opus | claude |
+| Algorithm | **codex** | — | codex |
+| Tests | test-engineer | sonnet | claude |
+| Large refactor | **codex** | — | codex |
+| Visual/multimodal | designer | sonnet | **gemini** |
+| Design review | aphrodite | sonnet | **gemini** |
+| Creative/art | designer | sonnet | **gemini** |
+| Docs | writer | haiku | claude |
+| Security-critical | executor | opus | claude |
 
 ## Communication_Protocol
 
 **Claude ↔ Claude**: `SendMessage(to="worker", content="...")`
+
 **Codex** communication depends on the adapter:
-- **codex-appserver**: True bidirectional — `turn/steer` injects input mid-execution, `turn/interrupt` aborts.
+- **codex-appserver**: True bidirectional — `steerTurn()` injects input mid-execution, `turn/interrupt` aborts.
 - **codex-exec / tmux**: Batch executor — one-shot tasks, no mid-execution communication.
 
+**Gemini** communication depends on the adapter:
+- **gemini-acp**: Message queue — `enqueueMessage(handle, msg, { from })` queues messages during active turns, auto-drains as new turns on completion. Failed messages retry once then dead-letter.
+- **gemini-exec / tmux**: Batch executor — one-shot tasks, no mid-execution communication.
+
 **Claude → Codex**: With app-server, use `steerTurn()` for live input. With exec/tmux, include all context in spawn prompt or use **task chaining** (below).
-**Codex → Claude**: Orchestrator reads Codex output (via adapter), relays to Claude workers via SendMessage.
+**Claude → Gemini**: With ACP, use `enqueueMessage(handle, message, { from: workerName })`. Messages delivered after current turn completes.
+**Codex/Gemini → Claude**: Orchestrator reads output (via adapter), relays to Claude workers via SendMessage.
 
 ### Adapter Selection
-Codex workers are spawned via the adapter that matches runtime capabilities (priority order):
-- **codex-appserver** (preferred): Multi-turn JSON-RPC 2.0 — thread/turn lifecycle, live steering, structured errors
-- **codex-exec**: Single-turn `codex exec --json` — structured JSONL events, no tmux needed
-- **tmux** (fallback): legacy tmux-based `codex exec` — used when neither app-server nor exec-json is available
+Workers are spawned via the adapter that matches runtime capabilities (priority order):
+
+**Codex**: codex-appserver > codex-exec > tmux
+**Gemini**: gemini-acp > gemini-exec > tmux
+**Claude**: claude-cli > tmux
 
 The adapter is selected automatically by `selectAdapter(worker, capabilities)` in `worker-spawn.mjs`.
 
 ### Task Chaining (pseudo-bidirectional for exec/tmux adapters)
-For codex-exec and tmux adapters (which cannot receive messages mid-execution), multi-step work uses sequential calls:
+For codex-exec, gemini-exec, and tmux adapters (which cannot receive messages mid-execution), multi-step work uses sequential calls:
 ```
 exec #1: "Design the API schema" → Result A
 Orchestrator: merges Result A + Claude worker feedback

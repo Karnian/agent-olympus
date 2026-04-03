@@ -6,7 +6,7 @@ This file provides guidance for Claude Code when working in this repository.
 
 Agent Olympus is a standalone Claude Code plugin that provides two self-driving AI orchestrators:
 - **Atlas** — sub-agent based (hub-and-spoke): one brain delegates to many specialized agents
-- **Athena** — team based (peer-to-peer): multiple agents collaborate via SendMessage + Codex via tmux
+- **Athena** — team based (peer-to-peer): multiple agents collaborate via SendMessage + Codex/Gemini workers
 
 Both orchestrators autonomously loop until the task is fully complete (build passes, tests pass, reviews approved).
 
@@ -20,7 +20,7 @@ scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-ou
               wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
               worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts,
-              session-registry, codex-approval)
+              session-registry, codex-approval, gemini-exec, gemini-acp, gemini-approval)
 scripts/test → node:test based unit tests (821+ tests, 44 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
@@ -127,13 +127,13 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 
 ## Worker Adapter System
 
-Workers (Codex and Claude) are spawned via a strategy-pattern adapter system (`selectAdapter()`):
+Workers (Codex, Claude, and Gemini) are spawned via a strategy-pattern adapter system (`selectAdapter()`):
 
 ### Adapter Priority (highest → lowest)
 
 **Codex workers** (`type: 'codex'`):
 1. **codex-appserver** — Multi-turn JSON-RPC 2.0 over stdio (`codex app-server`)
-   - Thread/turn lifecycle, live steering, structured errors
+   - Thread/turn lifecycle, live steering via `steerTurn()`, structured errors
    - Requires `hasCodexAppServer` capability (codex ≥ 0.116.0 + app-server subcommand)
 2. **codex-exec** — Single-turn JSONL via `child_process.spawn` (`codex exec --json`)
    - 5 event types, error classification, SIGTERM→SIGKILL shutdown
@@ -145,37 +145,69 @@ Workers (Codex and Claude) are spawned via a strategy-pattern adapter system (`s
    - Binary auto-discovered from versioned install paths (macOS/Linux)
    - Requires `hasClaudeCli` capability
 
+**Gemini workers** (`type: 'gemini'`):
+4. **gemini-acp** — Multi-turn JSON-RPC 2.0 over stdio (`gemini --acp`)
+   - ACP (Agent Communication Protocol): newSession/prompt/cancel/setSessionMode lifecycle
+   - camelCase method names (sessionStarted, promptCompleted, etc.)
+   - Message queue for team communication: `enqueueMessage()` → auto-drain on turn completion
+   - No mid-turn injection (unlike Codex `steerTurn()`) — messages queued between turns
+   - Requires `hasGeminiAcp` capability (gemini CLI with `--acp` flag support)
+5. **gemini-exec** — Single-turn JSON via `child_process.spawn` (`gemini --output-format json -p`)
+   - Single JSON object output, error classification, SIGTERM→SIGKILL shutdown
+   - Requires `hasGeminiCli` capability
+
 **All workers**:
-4. **tmux** — Legacy fallback, works for all worker types
+6. **tmux** — Legacy fallback, works for all worker types
    - `tmux new-session` + `tmux send-keys` + `tmux capture-pane`
    - Always available when tmux is installed
 
 ### Permission Mirroring
-Codex approval mode is automatically determined from Claude's permission level:
+
+**Codex** approval mode is automatically determined from Claude's permission level:
 - `Bash(*) + Write(*)` in Claude settings → `--full-auto`
 - `Write(*)` or `Edit(*)` only → `--auto-edit`
 - Otherwise → no flag (suggest/read-only)
+
+**Gemini** approval mode follows the same detection logic, mapped to Gemini modes:
+- `Bash(*) + Write(*)` → `--approval-mode yolo`
+- `Write(*)` or `Edit(*)` only → `--approval-mode auto_edit`
+- Otherwise → no flag (Gemini default interactive mode)
 
 Detection checks (in priority order): project `.claude/settings.local.json` → user `~/.claude/settings.local.json` → user `~/.claude/settings.json`
 
 Override via `.ao/autonomy.json`:
 ```json
-{ "codex": { "approval": "full-auto" } }
+{
+  "codex": { "approval": "full-auto" },
+  "gemini": { "approval": "yolo" }
+}
 ```
-Valid values: `auto` (default, detect from Claude), `suggest`, `auto-edit`, `full-auto`
+Codex values: `auto` (default), `suggest`, `auto-edit`, `full-auto`
+Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
 
 ### Key Files
-- `scripts/lib/codex-appserver.mjs` — App-server JSON-RPC client (thread/turn/steer/interrupt)
-- `scripts/lib/codex-exec.mjs` — Exec JSONL adapter (spawn/monitor/collect/shutdown)
+- `scripts/lib/codex-appserver.mjs` — Codex app-server JSON-RPC client (thread/turn/steer/interrupt)
+- `scripts/lib/codex-exec.mjs` — Codex exec JSONL adapter (spawn/monitor/collect/shutdown)
 - `scripts/lib/claude-cli.mjs` — Claude CLI adapter (spawn/monitor/collect/shutdown via stream-json)
+- `scripts/lib/gemini-acp.mjs` — Gemini ACP JSON-RPC client (session/prompt/cancel + message queue)
+- `scripts/lib/gemini-exec.mjs` — Gemini exec JSON adapter (spawn/monitor/collect/shutdown)
+- `scripts/lib/gemini-approval.mjs` — Claude permission detection → Gemini approval mode mirroring
 - `scripts/lib/worker-spawn.mjs` — Adapter router (`selectAdapter`, `spawnTeam`, `monitorTeam`)
-- `scripts/lib/resolve-binary.mjs` — Binary resolution with caching + `resolveClaudeBinary()`
-- `scripts/lib/preflight.mjs` — Capability detection (`hasCodexAppServer`, `hasCodexExecJson`, `hasClaudeCli`)
+- `scripts/lib/resolve-binary.mjs` — Binary resolution with caching + `buildEnhancedPath()`
+- `scripts/lib/preflight.mjs` — Capability detection (`hasCodexAppServer`, `hasCodexExecJson`, `hasClaudeCli`, `hasGeminiCli`, `hasGeminiAcp`)
 - `scripts/lib/codex-approval.mjs` — Claude permission detection → Codex approval mode mirroring
+- `scripts/lib/cost-estimate.mjs` — Token-based cost estimation (Claude + Gemini pricing)
 
 ### Session Naming
-- tmux sessions: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
+- tmux sessions: `atlas-codex-<N>`, `atlas-gemini-<N>`, `athena-<slug>-codex-<N>`, `athena-<slug>-gemini-<N>`
 - Cross-validation: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex-xval-<story-id>`
+
+### Gemini Team Communication
+Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), Gemini ACP only accepts new prompts between turns. Team communication uses a message queue pattern:
+- `enqueueMessage(handle, message, { from, priority })` — queues messages during active turns
+- Messages auto-drain as sequential turns when current turn completes
+- Failed messages retry once, then move to dead letters (`handle._deadLetters`)
+- Queue capped at `MAX_QUEUE_DEPTH=200` to prevent memory leaks
 
 ## Known Limitations
 
@@ -185,7 +217,7 @@ Valid values: `auto` (default, detect from Claude), `suggest`, `auto-edit`, `ful
 ## Testing
 
 ```bash
-# Run unit tests (821+ tests, 44 files)
+# Run unit tests (870+ tests, 47 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script
@@ -203,6 +235,7 @@ grep -r '\.omc/' scripts/ skills/ agents/                   # should return noth
 ## Dependencies
 
 - **Runtime**: Node.js ≥ 20.0.0 (for ESM support)
-- **Optional**: tmux (required for Codex integration and Athena team mode)
-- **Optional**: codex CLI (`npm install -g @openai/codex`) for multi-model execution
+- **Optional**: tmux (required for legacy worker fallback and Athena team mode)
+- **Optional**: codex CLI (`npm install -g @openai/codex`) for Codex worker execution
+- **Optional**: gemini CLI (`npm install -g @google/gemini-cli`) for Gemini worker execution
 - **npm packages**: None (zero runtime dependencies)
