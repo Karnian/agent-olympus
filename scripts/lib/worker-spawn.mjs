@@ -423,7 +423,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
         continue;
       }
 
-      const command = buildWorkerCommand(worker);
+      const command = buildWorkerCommand(worker, { cwd: session?.worktreePath || cwd });
       const env = {
         AO_TEAM_NAME: teamName,
         AO_WORKER_NAME: worker.name,

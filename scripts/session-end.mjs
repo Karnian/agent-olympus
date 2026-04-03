@@ -7,8 +7,9 @@
  */
 
 import { readStdin } from './lib/stdin.mjs';
-import { readdirSync, statSync, unlinkSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, unlinkSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { atomicWriteFileSync } from './lib/fs-atomic.mjs';
 import { finalizeSession, getCurrentSessionId, pruneSessions } from './lib/session-registry.mjs';
 
 const STALE_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -60,8 +61,15 @@ async function main() {
       finalizeSession(sessionId, { status: 'ended' });
     }
 
-    // Prune old session records (10% chance per run to avoid overhead)
-    if (Math.random() < 0.1) {
+    // Prune old session records every 10th invocation (deterministic)
+    const counterFile = join(stateDir, 'ao-session-end-counter.json');
+    let counter = 0;
+    try {
+      counter = JSON.parse(readFileSync(counterFile, 'utf-8')).count || 0;
+    } catch { /* first run or corrupt — start at 0 */ }
+    counter++;
+    try { atomicWriteFileSync(counterFile, JSON.stringify({ count: counter })); } catch {}
+    if (counter % 10 === 0) {
       pruneSessions();
     }
 

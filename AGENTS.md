@@ -1,7 +1,7 @@
 # Agent Olympus
 
 Standalone multi-model orchestrator plugin for Claude Code.
-Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 18 specialized agents, 24 skills, Claude + Codex multi-model execution, and tmux-based team infrastructure.
+Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 18 specialized agents, 26 skills, Claude + Codex multi-model execution, and tmux-based team infrastructure.
 
 ## Architecture
 
@@ -45,7 +45,7 @@ agent-olympus/
 │   ├── explore.md                — Fast codebase scanner (Haiku)
 │   ├── writer.md                 — Documentation writer (Haiku)
 │   └── hephaestus.md             — Codex deep worker (Sonnet)
-├── skills/                       — 24 user-facing skills (workflow recipes)
+├── skills/                       — 26 user-facing skills (workflow recipes)
 │   ├── atlas/SKILL.md            — /atlas: autonomous sub-agent pipeline
 │   ├── athena/SKILL.md           — /athena: autonomous team pipeline
 │   ├── plan/SKILL.md             — /plan: forward/reverse product planning
@@ -74,7 +74,7 @@ agent-olympus/
 │   ├── concurrency-release.mjs   — PostToolUse: release task from concurrency pool
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (390 tests, 25 files)
+│   ├── test/                     — node:test unit tests (821 tests, 44 files)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
@@ -88,7 +88,19 @@ agent-olympus/
 │       ├── worktree.mjs          — Git worktree isolation for Athena parallel workers
 │       ├── fs-atomic.mjs         — Atomic write helpers (tmp+rename pattern)
 │       ├── provider-detect.mjs   — Shared detectProvider() for concurrency hooks
-│       └── config-validator.mjs  — Schema validation for model-routing.jsonc
+│       ├── config-validator.mjs  — Schema validation for model-routing.jsonc
+│       ├── autonomy.mjs          — Ship policy config loader/validator (.ao/autonomy.json)
+│       ├── cost-estimate.mjs     — Token cost estimation before long runs
+│       ├── changelog.mjs         — CHANGELOG.md auto-generation
+│       ├── pr-create.mjs         — GitHub PR creation via gh CLI
+│       ├── ci-watch.mjs          — CI status polling and auto-fix loop
+│       ├── notify.mjs            — OS desktop notifications (macOS/Linux/terminal bell)
+│       ├── input-guard.mjs       — Large input auto-summarization for sub-agents
+│       ├── preflight.mjs         — Stale pointer file detection and cleanup
+│       ├── stuck-recovery.mjs    — Detect and recover from stuck worker states
+│       ├── run-artifacts.mjs     — Per-run event log, summary, and verification storage
+│       ├── session-registry.mjs  — Cross-session metadata tracking and crash recovery
+│       └── codex-approval.mjs    — Claude permission detection → Codex approval mode mirroring
 ├── config/
 │   └── model-routing.jsonc       — Intent→model routing configuration
 └── hooks/

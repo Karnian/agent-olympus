@@ -411,10 +411,11 @@ The adapter is selected automatically based on detected capabilities (highest pr
 
 ```bash
 # Adapter auto-selected: codex-appserver > codex-exec > tmux
+# <approval-flag> mirrors Claude's permission level (resolved by codex-approval.mjs)
 # tmux fallback resolves binary + injects PATH for worktree shells:
 CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "athena-<slug>-codex-<N>" -c "<worktreePath>"
-tmux send-keys -t "athena-<slug>-codex-<N>" "\"$CODEX_BIN\" exec \"<implementation prompt>\"" Enter
+tmux send-keys -t "athena-<slug>-codex-<N>" "\"$CODEX_BIN\" <approval-flag> exec \"<implementation prompt>\"" Enter
 ```
 
 Workers must commit their changes to their branch before signalling completion.
@@ -576,7 +577,7 @@ Task(subagent_type="agent-olympus:executor", model="sonnet",
 # CRITICAL: resolve binary path first — worktree shells may not inherit full PATH
 CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "athena-<slug>-codex-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "athena-<slug>-codex-xval-<story-id>" "\"$CODEX_BIN\" exec \"Cross-validate implementation of <US-ID> (<story title>). Files changed in merged tree: <post-merge files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or 'none'>. Check: (1) all acceptance criteria met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings.\"" Enter
+tmux send-keys -t "athena-<slug>-codex-xval-<story-id>" "\"$CODEX_BIN\" <approval-flag> exec \"Cross-validate implementation of <US-ID> (<story title>). Files changed in merged tree: <post-merge files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or 'none'>. Check: (1) all acceptance criteria met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings.\"" Enter
 # Poll: tmux capture-pane -pt "athena-<slug>-codex-xval-<story-id>" -S -200 (every 15s)
 # Cleanup: tmux kill-session -t "athena-<slug>-codex-xval-<story-id>"
 ```

@@ -18,7 +18,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
-import { writeFileSync, mkdirSync, existsSync, utimesSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, utimesSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -291,6 +291,36 @@ describe('session-end: output format when cleanup occurred', () => {
       assert.equal(output.suppressOutput, true, 'suppressOutput should be true');
       assert.ok(typeof output._debug === 'string', '_debug should be a string');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deterministic pruning counter
+// ---------------------------------------------------------------------------
+
+describe('session-end: deterministic pruning counter', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('creates counter file after first invocation', () => {
+    runHook(tmpDir);
+    const counterPath = path.join(tmpDir, '.ao', 'state', 'ao-session-end-counter.json');
+    assert.ok(existsSync(counterPath), 'counter file should exist after first run');
+    const data = JSON.parse(readFileSync(counterPath, 'utf-8'));
+    assert.ok(data.count >= 1, 'counter should be at least 1');
+  });
+
+  it('increments counter on subsequent invocations', () => {
+    const counterPath = path.join(tmpDir, '.ao', 'state', 'ao-session-end-counter.json');
+    const before = JSON.parse(readFileSync(counterPath, 'utf-8')).count;
+    runHook(tmpDir);
+    const after = JSON.parse(readFileSync(counterPath, 'utf-8')).count;
+    assert.equal(after, before + 1, 'counter should increment by 1');
   });
 });
 

@@ -43,8 +43,8 @@ sleep 5
 tmux capture-pane -pt "$SESSION" -S -200
 ```
 
-Model binaries:
-- codex → `codex exec "<prompt>"`
+Model binaries (codex approval flag mirrors Claude's permission level via codex-approval.mjs):
+- codex → `codex <approval-flag> exec "<prompt>"`
 - gemini → `gemini "<prompt>"`
 
 ### 3. Collect and save result

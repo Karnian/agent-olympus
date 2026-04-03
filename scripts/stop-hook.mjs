@@ -15,7 +15,7 @@
 
 import { readStdin } from './lib/stdin.mjs';
 import { loadCheckpoint } from './lib/checkpoint.mjs';
-import { execSync, execFileSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { basename } from 'path';
 
 /**
@@ -35,9 +35,9 @@ function buildWipMessage(phase, stagedOutput) {
     // Get name-status for richer info (A=added, M=modified, D=deleted)
     let nameStatus;
     try {
-      nameStatus = execSync('git diff --cached --name-status', {
+      nameStatus = execFileSync('git', ['diff', '--cached', '--name-status'], {
         encoding: 'utf-8',
-        stdio: 'pipe',
+        stdio: ['pipe', 'pipe', 'pipe'],
       }).trim();
     } catch {
       nameStatus = '';
@@ -106,16 +106,16 @@ async function main() {
 
     // 1. Confirm we are inside a git repo
     try {
-      execSync('git rev-parse --git-dir', { stdio: 'pipe' });
+      execFileSync('git', ['rev-parse', '--git-dir'], { stdio: 'pipe' });
     } catch {
       process.stdout.write('{}');
       process.exit(0);
     }
 
     // 2. Check for any uncommitted changes
-    const status = execSync('git status --porcelain', {
+    const status = execFileSync('git', ['status', '--porcelain'], {
       encoding: 'utf-8',
-      stdio: 'pipe',
+      stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
 
     if (!status) {
@@ -142,12 +142,12 @@ async function main() {
     const fileCount = status.split('\n').filter(Boolean).length;
 
     // Stage everything
-    execSync('git add -A', { stdio: 'pipe' });
+    execFileSync('git', ['add', '-A'], { stdio: 'pipe' });
 
     // Verify something is actually staged (edge case: all changes were untrackable)
-    const staged = execSync('git diff --cached --name-only', {
+    const staged = execFileSync('git', ['diff', '--cached', '--name-only'], {
       encoding: 'utf-8',
-      stdio: 'pipe',
+      stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
 
     if (!staged) {

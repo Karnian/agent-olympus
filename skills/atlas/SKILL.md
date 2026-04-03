@@ -201,9 +201,11 @@ If `NEEDS_CODEX`, simultaneously spawn Codex (batch executor — adapter auto-se
 #   codex-appserver (preferred) → multi-turn JSON-RPC, live steering
 #   codex-exec → single-turn JSONL
 #   tmux (fallback) → legacy pane capture, resolves binary + injects PATH
+# Codex approval mode mirrors Claude's permission level automatically (codex-approval.mjs).
+# Override: set codex.approval in .ao/autonomy.json to "suggest", "auto-edit", or "full-auto".
 CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-analyze" -c "<cwd>"
-tmux send-keys -t "atlas-codex-analyze" "\"$CODEX_BIN\" exec \"<analysis prompt>\"" Enter
+tmux send-keys -t "atlas-codex-analyze" "\"$CODEX_BIN\" <approval-flag> exec \"<analysis prompt>\"" Enter
 ```
 
 **[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
@@ -450,7 +452,7 @@ Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...
 # tmux fallback resolves binary + injects PATH:
 CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-<N>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-<N>" "\"$CODEX_BIN\" exec \"<implementation prompt>\"" Enter
+tmux send-keys -t "atlas-codex-<N>" "\"$CODEX_BIN\" <approval-flag> exec \"<implementation prompt>\"" Enter
 # Monitor: tmux capture-pane -pt "atlas-codex-<N>" -S -200
 # Cleanup: tmux kill-session -t "atlas-codex-<N>"
 ```
@@ -506,7 +508,7 @@ If story is a pure refactor / docs / config change (no runtime behavior change):
 # CRITICAL: resolve binary path first — worktree shells may not inherit full PATH
 CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
 tmux new-session -d -s "atlas-codex-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-xval-<story-id>" "\"$CODEX_BIN\" exec \"Cross-validate implementation of <US-ID> (<story title>). Files changed: <files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or 'none'>. Check: (1) all acceptance criteria genuinely met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings.\"" Enter
+tmux send-keys -t "atlas-codex-xval-<story-id>" "\"$CODEX_BIN\" <approval-flag> exec \"Cross-validate implementation of <US-ID> (<story title>). Files changed: <files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or 'none'>. Check: (1) all acceptance criteria genuinely met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings.\"" Enter
 # Poll: tmux capture-pane -pt "atlas-codex-xval-<story-id>" -S -200 (every 15s)
 # Cleanup: tmux kill-session -t "atlas-codex-xval-<story-id>"
 ```

@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.9.5] - 2026-04-04
+
+### Added — Codex Permission Mirroring
+
+Claude 권한 수준에 따라 Codex approval 모드 자동 결정.
+
+#### Codex Approval Module (`scripts/lib/codex-approval.mjs`) *(new)*
+- `detectClaudePermissionLevel()` — Claude settings 파일에서 권한 감지 (project > user 우선순위)
+  - `Bash(*) + Write(*)` → `full-auto`, `Write(*) or Edit(*)` → `auto-edit`, 그 외 → `suggest`
+- `resolveCodexApproval()` — autonomy.json 설정 또는 자동 감지로 approval 모드 결정
+- `codexApprovalFlag()` — approval 모드를 CLI 플래그로 변환
+
+#### Autonomy Config 확장 (`scripts/lib/autonomy.mjs`)
+- `codex.approval` 설정 추가 (값: `auto` | `suggest` | `auto-edit` | `full-auto`, 기본값: `auto`)
+- 유효성 검증 추가
+
+#### Worker Command 연동 (`scripts/lib/tmux-session.mjs`)
+- `buildWorkerCommand()` — codex 워커에 approval 플래그 자동 주입
+
+#### Skill 템플릿 업데이트
+- `atlas/SKILL.md`, `athena/SKILL.md`, `ask/SKILL.md` — codex exec 명령에 `<approval-flag>` 반영
+
+#### Bug Fix (Codex 교차검증에서 발견)
+- `worker-spawn.mjs` — `buildWorkerCommand()` 호출 시 `cwd` 미전달 → worktree 경로 전달로 수정
+
+#### New Test Coverage
+- `scripts/test/codex-approval.test.mjs` *(new)* — 24 tests: codexApprovalFlag (5), detectClaudePermissionLevel project/user/no-settings/priority (11, bare Bash 포함), resolveCodexApproval (8, auto+실제 settings 포함)
+
+### Fixed — Code Quality & Documentation Hygiene
+
+Claude(Opus 4.6) + Codex(GPT-5.4) 교차 평가에서 발견된 이슈 수정.
+Codex 계획 검증 (109K tokens) + 구현 후 교차검증.
+
+#### Shell Execution Safety
+- `stop-hook.mjs` — 모든 `execSync()` → `execFileSync()` 마이그레이션 (5건). shell injection 벡터 제거
+- `session-registry.mjs` — 모든 `execSync()` → `execFileSync()` 마이그레이션 (3건). args 배열 패턴 통일
+- `ci-watch.mjs` — `run()` 헬퍼에 `timeout: 30000` 추가. `gh` CLI 무한 대기 방지
+
+#### Deterministic Session Cleanup
+- `session-end.mjs` — `Math.random() < 0.1` → 카운터 기반 결정적 pruning (매 10회차). 원자적 카운터 파일 `ao-session-end-counter.json` 사용. 테스트 가능한 설계
+
+#### Documentation Sync
+- `README.md` / `README.ko.md` — 스킬 수 **25 → 26**, 테스트 수 **424+ → 600+**, 파일 수 **28 → 39**, Skills 섹션 **24 → 26**, Testing 섹션 수치 업데이트
+- `AGENTS.md` — 스킬 수 **24 → 26**, 테스트 수 **390 → 601**, 파일 수 **25 → 39**
+
+#### New Test Coverage
+- `scripts/test/notify.test.mjs` *(new)* — 19 tests: detectPlatform, IS_TEST guard, notifyOrchestrator 8개 이벤트 템플릿, 특수 문자 처리
+- `scripts/test/run.test.mjs` *(new)* — 7 tests: no-args exit, valid target, non-existent fallback, exit code propagation, version cache fallback
+- `scripts/test/session-end.test.mjs` — 2 tests 추가: 결정적 카운터 생성 및 증분 검증
+
+#### Stats
+- Test count: **739 → 821** (+82 new tests, including v0.9.4 base)
+- Test files: **39 → 44** (+5: `notify.test.mjs`, `run.test.mjs`, `codex-approval.test.mjs` + v0.9.4 adapters)
+- Lib coverage: **23/24 → 25/25** (100%): `notify.mjs`, `codex-approval.mjs` 추가
+- Hook coverage: **11/12 → 12/12** (100%): `run.cjs` 추가
+- `execSync` in production code: **8 → 0** (전부 `execFileSync`로 전환)
+
 ## [0.9.4] - 2026-04-02
 
 ### Added — G#5 "Codex를 진짜 팀원으로" 4-Phase Worker Adapter System

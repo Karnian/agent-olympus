@@ -4,6 +4,8 @@ import { randomUUID } from 'crypto';
 import { dirname } from 'path';
 import { createWorkerWorktree } from './worktree.mjs';
 import { resolveBinary, resolveClaudeBinary, SEARCH_PATHS } from './resolve-binary.mjs';
+import { resolveCodexApproval, codexApprovalFlag } from './codex-approval.mjs';
+import { loadAutonomyConfig } from './autonomy.mjs';
 
 // Re-export for backward compatibility with callers that import from tmux-session
 export { resolveBinary } from './resolve-binary.mjs';
@@ -250,7 +252,7 @@ export function listTeamSessions(teamName) {
   }
 }
 
-export function buildWorkerCommand(worker) {
+export function buildWorkerCommand(worker, opts = {}) {
   // Write the prompt to a temp file to avoid shell injection via inline quoting.
   // The command reads the file contents and passes them to the CLI via stdin
   // where possible, or via a subshell cat when the CLI only accepts a positional
@@ -259,9 +261,15 @@ export function buildWorkerCommand(worker) {
   const safeFile = sanitizeForShellArg(promptFile);
 
   switch (worker.type) {
-    case 'codex':
-      // `codex exec` reads the prompt as a positional argument; pipe via stdin.
-      return `"${resolveBinary('codex')}" exec "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
+    case 'codex': {
+      // Mirror Claude's permission level to Codex approval mode.
+      // Detect from autonomy.json config or Claude settings files.
+      const autonomyConfig = opts.autonomyConfig || loadAutonomyConfig(opts.cwd || process.cwd());
+      const approval = resolveCodexApproval(autonomyConfig, { cwd: opts.cwd });
+      const flag = codexApprovalFlag(approval);
+      const flagPart = flag ? ` ${flag}` : '';
+      return `"${resolveBinary('codex')}"${flagPart} exec "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
+    }
     case 'gemini':
       return `"${resolveBinary('gemini')}" "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
     case 'claude':

@@ -20,7 +20,7 @@ import { execFileSync } from 'child_process';
  */
 function run(cmd, args) {
   try {
-    return execFileSync(cmd, args, { encoding: 'utf8' }).trim();
+    return execFileSync(cmd, args, { encoding: 'utf8', timeout: 30_000 }).trim();
   } catch {
     return null;
   }

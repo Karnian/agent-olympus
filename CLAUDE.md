@@ -20,8 +20,8 @@ scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-ou
               wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
               worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts,
-              session-registry)
-scripts/test → node:test based unit tests (739+ tests, 39 files)
+              session-registry, codex-approval)
+scripts/test → node:test based unit tests (821+ tests, 44 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -150,6 +150,20 @@ Workers (Codex and Claude) are spawned via a strategy-pattern adapter system (`s
    - `tmux new-session` + `tmux send-keys` + `tmux capture-pane`
    - Always available when tmux is installed
 
+### Permission Mirroring
+Codex approval mode is automatically determined from Claude's permission level:
+- `Bash(*) + Write(*)` in Claude settings → `--full-auto`
+- `Write(*)` or `Edit(*)` only → `--auto-edit`
+- Otherwise → no flag (suggest/read-only)
+
+Detection checks (in priority order): project `.claude/settings.local.json` → user `~/.claude/settings.local.json` → user `~/.claude/settings.json`
+
+Override via `.ao/autonomy.json`:
+```json
+{ "codex": { "approval": "full-auto" } }
+```
+Valid values: `auto` (default, detect from Claude), `suggest`, `auto-edit`, `full-auto`
+
 ### Key Files
 - `scripts/lib/codex-appserver.mjs` — App-server JSON-RPC client (thread/turn/steer/interrupt)
 - `scripts/lib/codex-exec.mjs` — Exec JSONL adapter (spawn/monitor/collect/shutdown)
@@ -157,6 +171,7 @@ Workers (Codex and Claude) are spawned via a strategy-pattern adapter system (`s
 - `scripts/lib/worker-spawn.mjs` — Adapter router (`selectAdapter`, `spawnTeam`, `monitorTeam`)
 - `scripts/lib/resolve-binary.mjs` — Binary resolution with caching + `resolveClaudeBinary()`
 - `scripts/lib/preflight.mjs` — Capability detection (`hasCodexAppServer`, `hasCodexExecJson`, `hasClaudeCli`)
+- `scripts/lib/codex-approval.mjs` — Claude permission detection → Codex approval mode mirroring
 
 ### Session Naming
 - tmux sessions: `atlas-codex-<N>` or `athena-<slug>-codex-<N>`
@@ -170,7 +185,7 @@ Workers (Codex and Claude) are spawned via a strategy-pattern adapter system (`s
 ## Testing
 
 ```bash
-# Run unit tests (739+ tests, 38+ files)
+# Run unit tests (821+ tests, 44 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

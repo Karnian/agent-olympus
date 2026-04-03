@@ -14,7 +14,7 @@
 
 import { readFileSync, readdirSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 
 const SESSIONS_DIR = join('.ao', 'sessions');
@@ -33,7 +33,7 @@ const MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
  */
 function resolveProjectRoot() {
   try {
-    const commonDir = execSync('git rev-parse --path-format=absolute --git-common-dir', {
+    const commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
@@ -50,7 +50,7 @@ function resolveProjectRoot() {
  */
 function getCurrentBranch() {
   try {
-    return execSync('git rev-parse --abbrev-ref HEAD', {
+    return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim() || null;
@@ -65,7 +65,7 @@ function getCurrentBranch() {
  */
 function getHeadSha() {
   try {
-    return execSync('git rev-parse --short HEAD', {
+    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim() || null;
