@@ -13,10 +13,10 @@
 | A~D. Core Automation + Comms + Context + Harness | 14 | 14 | 0 |
 | E. Source-Informed (v0.9) | 10 | 4 | 0 (4 merged, 2 done via G) |
 | F. Hook System (v0.9.1) | 4 | 4 | 0 |
-| G. Consolidated Backlog (v0.9.2~v0.9.5) | 5+1 | 4 | 1 blocked + 1 independent |
+| G. Consolidated Backlog (v0.9.2~v0.9.6) | 5+1 | 5 | 1 independent |
 | H. Cross-Session (v0.9.3) | 1 | 1 | 0 |
 | I. Superpowers Methodology (v0.10) | 18 | 16 | 1 partial + 1 not started |
-| **Total** | **53** | **43** | **4** |
+| **Total** | **53** | **44** | **3** |
 
 ---
 
@@ -86,12 +86,12 @@
 
 ---
 
-## Remaining: G — Blocked & Independent
+## Remaining: G — Independent
 
-### G#4. Native Agent Teams — 🔒 Blocked
+### G#4. Native Agent Teams — ✅ Done (v0.9.6)
 
-- **핵심**: Athena를 네이티브 팀 API 위의 래퍼로 전환
-- **의존성**: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` 졸업 대기
+- **구현**: `hasNativeTeamTools` env var 런타임 감지, SKILL.md Path A/B 분기, Gemini 통합
+- **스펙**: `docs/plans/native-agent-teams/spec.md`
 
 ### G+. Pragmatic Memory — 🔄 Independent (Low)
 
