@@ -126,7 +126,7 @@ export function meetsMinVersion(versionStr, minMajor, minMinor, minPatch) {
  *   hasGeminiCli: boolean,
  *   hasGeminiAcp: boolean,
  *   hasGitWorktree: boolean,
- *   hasTeamTools: boolean,
+ *   hasNativeTeamTools: boolean,
  *   hasPreviewMCP: boolean
  * }>}
  */
@@ -238,18 +238,18 @@ export async function detectCapabilities() {
     // git worktree not available
   }
 
-  // Native Claude Code tools are always available
-  const hasTeamTools = true;
+  // Native Agent Teams require experimental env var
+  const hasNativeTeamTools = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
 
   // Preview MCP is available if .claude/launch.json exists
   const hasPreviewMCP = existsSync('.claude/launch.json');
 
-  return { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGeminiCli, hasGeminiAcp, hasGitWorktree, hasTeamTools, hasPreviewMCP };
+  return { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGeminiCli, hasGeminiAcp, hasGitWorktree, hasNativeTeamTools, hasPreviewMCP };
 }
 
 /**
  * Format capability report for human-readable display.
- * @param {{ hasTmux: boolean, hasCodex: boolean, hasGitWorktree: boolean, hasTeamTools: boolean, hasPreviewMCP: boolean }} caps
+ * @param {{ hasTmux: boolean, hasCodex: boolean, hasClaudeCli: boolean, hasGeminiCli: boolean, hasGitWorktree: boolean, hasNativeTeamTools: boolean, hasPreviewMCP: boolean }} caps
  * @returns {string}
  */
 export function formatCapabilityReport(caps) {
@@ -261,7 +261,7 @@ export function formatCapabilityReport(caps) {
     fmt(caps.hasClaudeCli, 'claude-cli ', 'headless Claude Code workers'),
     fmt(caps.hasGeminiCli, 'gemini-cli ', 'Gemini CLI workers'),
     fmt(caps.hasGitWorktree, 'git worktree', 'isolated parallel workspaces'),
-    fmt(caps.hasTeamTools, 'team tools ', 'native Claude Code team management'),
+    fmt(caps.hasNativeTeamTools, 'Native Agent Teams', 'peer-to-peer team orchestration (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)'),
     fmt(caps.hasPreviewMCP, 'preview MCP', caps.hasPreviewMCP
       ? 'visual verification'
       : 'visual verification (no .claude/launch.json)'),

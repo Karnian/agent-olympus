@@ -65,7 +65,7 @@ Athena = many brains collaborating.
 Before starting any work:
 1. Check for an interrupted session: `loadCheckpoint('athena')`
 2. If found, present to user: "[formatCheckpoint output]. Resume or restart?"
-   - **Resume** → skip to saved phase, restore `completedStories` and `activeWorkers` from checkpoint
+   - **Resume** → re-run `runPreflight()` to re-evaluate `hasNativeTeamTools` (do NOT cache from crashed session), then skip to saved phase, restore `completedStories` and `activeWorkers` from checkpoint
    - **Restart** → `clearCheckpoint('athena')`, proceed normally
 
 #### Load Prior Wisdom
@@ -104,12 +104,14 @@ test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSI
 saveCheckpoint('athena', { phase: 0, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
 Output: "[athena] Phase 0: TRIAGE & TEAM DESIGN started (checkpoint saved)"
 
-// Step 2: Clean stale .ao/ state
+// Step 2: Clean stale .ao/ state + detect capabilities
 import { runPreflight } from './scripts/lib/preflight.mjs';
 const preflightReport = await runPreflight();
 for (const action of preflightReport.actions) {
   Output: "[athena] Preflight: " + action;
 }
+const { hasNativeTeamTools } = preflightReport.capabilities;
+Output: "[athena] Native Agent Teams: " + (hasNativeTeamTools ? "enabled" : "disabled")
 
 // Step 3: Guard input size
 import { prepareSubAgentInput, checkInputSize } from './scripts/lib/input-guard.mjs';
@@ -377,9 +379,17 @@ const worktrees = {
 };
 ```
 
-**Claude workers** (native team):
+**Claude workers** — dispatch depends on runtime capabilities:
+
+#### Path A: Native Agent Teams (`hasNativeTeamTools === true`)
+
+When `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is set, use native team tools directly:
+
 ```
 TeamCreate("athena-<slug>")
+// If TeamCreate fails (tool unavailable, error response) → fall back to Path B for ALL workers.
+// Log wisdom: "Native teams unavailable at runtime — fell back to adapter chain"
+addEvent(runId, { type: 'native_team_created', detail: { teamName: "athena-<slug>" } })
 
 For each Claude worker:
   1. createWorkerWorktree(cwd, "<slug>", "<worker>") → { worktreePath, branchName }
@@ -400,7 +410,29 @@ For each Claude worker:
        ## Harness Constraints
        Follow these golden principles: <harness_context>
        Respect dependency layers defined in docs/ARCHITECTURE.md.")
+  3. addEvent(runId, { type: 'native_teammate_spawned', detail: { worker: "<worker>", agentType: "<agentType>" } })
 ```
+
+#### Path B: Fallback (`hasNativeTeamTools === false` or TeamCreate failed)
+
+When native teams are unavailable, Claude workers are spawned as independent subagents:
+
+```
+For each Claude worker:
+  1. createWorkerWorktree(cwd, "<slug>", "<worker>") → { worktreePath, branchName }
+  2. Agent(subagent_type="agent-olympus:<agentType>", model="<model>",
+       prompt="You are <worker>.
+       YOUR SCOPE: <files>
+       YOUR TASK: <stories>
+       YOUR WORKTREE: <worktreePath>  (work only inside this directory)
+       PROTOCOL: Commit your progress to branch <branchName> before completion.
+       CONSTRAINT: Do NOT edit files outside your scope or worktree.
+       TDD_INSTRUCTION: (same as Path A)
+       [If harness_context exists:] (same as Path A)")
+```
+
+Note: In Path B, Claude workers are independent batch executors — no inter-worker SendMessage.
+The orchestrator bridges communication by reading worker outputs and injecting context into subsequent tasks.
 
 **Codex workers** (batch executors — spawned via adapter):
 
@@ -475,13 +507,25 @@ saveCheckpoint('athena', {
   `[athena] ⚠ ui-worker stuck in 'implementing' for 3 iterations`
 
 ```
-┌─→ Check TaskList for Claude worker status
-│   Check Codex worker output (via adapter — codex-exec JSONL or tmux pane)
-│   ├─ Claude completes something Codex needs → include in next task chain prompt
-│   ├─ Codex completes something Claude needs → SendMessage to Claude worker
-│   ├─ Codex worker fails (auth/rate-limit/crash/timeout) → reassign to Claude executor
-│   ├─ Worker blocked → unblock or escalate
-│   └─ All done? → proceed to Phase 4
+┌─→ MONITOR LOOP (adapts to spawn path used)
+│
+│   IF Path A (native teams):
+│     Check TaskList("athena-<slug>") for Claude worker status [LLM tool call]
+│     If TaskList shows a worker with no progress for 5+ minutes → treat as stalled
+│
+│   IF Path B (fallback):
+│     Claude workers are independent agents — check if they returned results
+│     No TaskList available — rely on agent completion signals
+│
+│   ALWAYS (both paths):
+│     Check Codex worker output (via adapter — codex-exec JSONL or tmux pane)
+│     ├─ Claude completes something Codex needs → include in next task chain prompt
+│     ├─ Codex completes something Claude needs →
+│     │     Path A: SendMessage to Claude worker
+│     │     Path B: include in next agent prompt (no SendMessage available)
+│     ├─ Codex worker fails (auth/rate-limit/crash/timeout) → reassign to Claude executor
+│     ├─ Worker blocked → unblock or escalate
+│     └─ All done? → proceed to Phase 4
 └── Loop (max 10 monitor iterations)
 ```
 
@@ -812,10 +856,16 @@ Prune wisdom to prevent unbounded growth:
 Clean up:
 - `clearTeamStatus(teamName)` — delete `.ao/teams/<slug>/status.jsonl` (import from `scripts/lib/worker-status.mjs`)
 - `clearCheckpoint('athena')`
-- TeamDelete("athena-<slug>")
+- IF Path A (native teams):
+  - `TeamDelete("athena-<slug>")` — if TeamDelete fails, log warning but don't block
+  - `addEvent(runId, { type: 'native_team_deleted', detail: { teamName: "athena-<slug>" } })`
+- Shut down Codex workers properly via adapter lifecycle:
+  ```javascript
+  import { shutdownTeam } from './scripts/lib/worker-spawn.mjs';
+  await shutdownTeam(teamSlug);  // graceful adapter shutdown (appserver interrupt, exec SIGTERM, tmux kill)
+  ```
 - Remove `.ao/teams/<slug>/`
 - Remove `.ao/state/athena-state.json`, `.ao/prd.json`
-- Kill tmux sessions: `tmux kill-session -t "athena-<slug>-*"`
 - Clean up any remaining worktrees:
   ```javascript
   import { cleanupTeamWorktrees } from './scripts/lib/worktree.mjs';
@@ -859,7 +909,8 @@ Gemini workers are assigned when `teamWorkerType: "gemini"` is set in model-rout
 
 ## Communication_Protocol
 
-**Claude ↔ Claude**: `SendMessage(to="worker", content="...")`
+**Claude ↔ Claude** (Path A — native teams): `SendMessage(to="worker", content="...")`
+**Claude ↔ Claude** (Path B — fallback): No direct messaging. Orchestrator reads agent output and injects context into subsequent agent prompts (orchestrator-mediated relay).
 
 **Codex** communication depends on the adapter:
 - **codex-appserver**: True bidirectional — `steerTurn()` injects input mid-execution, `turn/interrupt` aborts.
@@ -871,7 +922,8 @@ Gemini workers are assigned when `teamWorkerType: "gemini"` is set in model-rout
 
 **Claude → Codex**: With app-server, use `steerTurn()` for live input. With exec/tmux, include all context in spawn prompt or use **task chaining** (below).
 **Claude → Gemini**: With ACP, use `enqueueMessage(handle, message, { from: workerName })`. Messages delivered after current turn completes.
-**Codex/Gemini → Claude**: Orchestrator reads output (via adapter), relays to Claude workers via SendMessage.
+**Codex/Gemini → Claude** (Path A): Orchestrator reads output (via adapter), relays to Claude workers via SendMessage.
+**Codex/Gemini → Claude** (Path B): Orchestrator reads output, includes in next agent prompt to Claude worker.
 
 ### Adapter Selection
 Workers are spawned via the adapter that matches runtime capabilities (priority order):

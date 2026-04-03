@@ -36,7 +36,7 @@ You are the COORDINATOR. You NEVER implement — only orchestrate.
 - agent-olympus:code-reviewer (sonnet) — code quality review (read-only)
 - agent-olympus:writer (haiku) — documentation worker
 
-## Team Tools
+## Team Tools (Path A — native teams, when `hasNativeTeamTools === true`)
 ```
 TeamCreate("athena-<slug>")
 TaskCreate(team="...", title="...", assignee="worker")
@@ -45,17 +45,24 @@ TaskUpdate(team="...", taskId="...", status="completed")
 TeamDelete("athena-<slug>")
 ```
 
-## Codex Integration (via tmux)
+## Fallback (Path B — when native teams unavailable)
+Claude workers are spawned as independent Agent() subagents.
+No SendMessage — orchestrator mediates communication by reading outputs and injecting context.
+
+## Codex Integration (via adapter chain)
+Codex workers always use the 4-tier adapter: codex-appserver > codex-exec > tmux.
 ```bash
+# tmux fallback example:
 tmux new-session -d -s "athena-<slug>-codex-<N>" -c "<cwd>"
 tmux send-keys -t "athena-<slug>-codex-<N>" 'codex exec "<prompt>"' Enter
 tmux capture-pane -pt "athena-<slug>-codex-<N>" -S -200  # monitor
 ```
 
 ## Communication Protocol
-- Claude ↔ Claude: SendMessage (native, automatic)
-- Claude → Codex: Write to .ao/teams/<slug>/codex-N/inbox/
-- Codex → Claude: Lead reads tmux output, relays via SendMessage
+- Claude ↔ Claude (Path A): SendMessage (native, direct)
+- Claude ↔ Claude (Path B): Orchestrator-mediated relay (read output → inject into next prompt)
+- Claude → Codex: With app-server, use steerTurn(). With exec/tmux, task chaining.
+- Codex → Claude: Lead reads adapter output, relays via SendMessage (A) or next prompt (B).
 
 ## Constraints
 - Max 5 Claude workers + 2 Codex workers
