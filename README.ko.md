@@ -44,7 +44,7 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **UI/UX 디자인 리뷰** *(v0.8.3)*: Aphrodite 에이전트 + 5개 디자인 스킬 — 디자인 비평(Nielsen+Gestalt), 접근성 감사(WCAG 2.2 AA), 디자인 시스템 감사(토큰 누수), UX 카피 리뷰, 통합 UI 리뷰
 - **L-scale 안정성** *(v0.8.8)*: `input-guard` 라이브러리로 대용량 문서에서 sub-agent 무음 실패 방지 — story ID와 수용 기준(GIVEN/WHEN/THEN)을 보존하며 입력을 자동 요약. `preflight` 라이브러리로 실행 전 `.ao/` 내 stale 포인터 파일 자동 감지 및 정리
 - **Codex 권한 미러링** *(v0.9.5)*: Claude의 권한 수준을 자동 감지하여 Codex approval 모드에 반영 (`full-auto`, `auto-edit`, `suggest`). `.ao/autonomy.json`의 `codex.approval`로 설정 가능 (기본값: `auto` = Claude settings에서 자동 감지)
-- **821개+ 단위 테스트**: `node:test` 기반 44개 파일의 종합 테스트 스위트
+- **1000개+ 단위 테스트**: `node:test` 기반 47개 파일의 종합 테스트 스위트
 - **페일-세이프 아키텍처**: 훅이 Claude Code를 절대 차단하지 않음; 에러 시 우아한 저하
 
 ## 설치
@@ -512,7 +512,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## 테스트
 
-`node:test` 기반 테스트 스위트 (44개 파일, 821개+ 테스트)가 핵심 훅 라이브러리를 커버합니다:
+`node:test` 기반 테스트 스위트 (47개 파일, 1000개+ 테스트)가 핵심 훅 라이브러리를 커버합니다:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'

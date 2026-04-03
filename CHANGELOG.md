@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.9.6] - 2026-04-04
+
+### Added — G#4 Native Agent Teams
+
+Athena에 네이티브 팀 API 런타임 감지 및 이중 제어 평면(Path A/B) 추가.
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 설정 시 Path A 활성화.
+
+#### Feature Detection (`scripts/lib/preflight.mjs`)
+- `hasTeamTools` (하드코딩 `true`) → `hasNativeTeamTools` (env var `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` 감지)
+- `formatCapabilityReport()` JSDoc에 `hasClaudeCli`, `hasGeminiCli` 추가
+- 기존 `hasTeamTools` 참조 전부 `hasNativeTeamTools`로 일괄 리네임
+
+#### SKILL.md 이중 제어 평면 (`skills/athena/SKILL.md`)
+- **Phase 0**: `preflightReport.capabilities.hasNativeTeamTools` 추출 + 로그
+- **Phase 2 Path A** (native teams): `TeamCreate` → `Task(team_name=...)` → `addEvent(native_team_created/native_teammate_spawned)`
+- **Phase 2 Path B** (fallback): `Agent(subagent_type=...)` 독립 subagent — 기존 동작 100% 동일
+- **Phase 3**: 하이브리드 모니터링 — Path A `TaskList`, Path B agent completion, Codex/Gemini adapter 폴링
+- **Phase 3 Gemini**: Gemini 워커 에러 감지 + Claude 폴백 경로 추가
+- **COMPLETION**: `TeamDelete` + `addEvent(native_team_deleted)`, `shutdownTeam()` (Codex + Gemini adapter 정리)
+- 체크포인트 복구 시 `hasNativeTeamTools` 재평가 (크래시 세션 캐시 방지)
+
+#### Agent Persona 업데이트 (`agents/athena.md`)
+- Gemini Integration 섹션 추가 (gemini-acp > gemini-exec > tmux)
+- Communication Protocol에 Path A/B + Gemini 행 추가
+- Constraints: Max 5 Claude + 2 Codex + 2 Gemini workers
+
+#### Spec & Docs
+- `docs/plans/native-agent-teams/spec.md` *(new)* — G#4 v2 스펙 (7 User Stories, 교차검증 결과 포함)
+- `docs/plans/improvements.md` — G#4 Done, Superpowers 16/18 반영, 완료 항목 정리
+
+#### Test Coverage
+- `preflight.test.mjs` — `hasNativeTeamTools` subprocess 격리 env var 테스트
+- `detectCapabilities` 테스트 3개: 10개 전체 boolean 필드 검증 (기존 5개에서 확대)
+- `formatCapabilityReport` 테스트: 7개 capability 표시 행 검증
+- **1002/1002 tests pass** (zero regression)
+
+#### Cross-Validation
+- Code-reviewer agent × 2 (preflight + SKILL.md) — 7 findings 발견, blocking 3 + medium 1 수정
+- Gemini 호환성 리뷰 — Phase 3 모니터링 누락 + athena.md 누락 수정
+
 ## [0.9.5] - 2026-04-04
 
 ### Added — Codex Permission Mirroring
