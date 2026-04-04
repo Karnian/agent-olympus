@@ -78,6 +78,16 @@
             "async": true
           }
         ]
+      },
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/plan-execute-gate.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/plan-execute-gate.mjs",
+            "timeout": 3000
+          }
+        ]
       }
     ],
     "SubagentStop": [

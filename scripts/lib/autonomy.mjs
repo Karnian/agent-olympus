@@ -50,6 +50,7 @@ export const DEFAULT_AUTONOMY_CONFIG = {
     approval: 'auto',
   },
   nativeTeams: false,
+  planExecution: 'ask',
 };
 
 /**
@@ -258,6 +259,17 @@ export function validateAutonomyConfig(config) {
       errors.push(
         'config.nativeTeams must be a boolean; received: ' + JSON.stringify(config.nativeTeams)
       );
+    }
+
+    // --- planExecution ---
+    if (config.planExecution !== undefined) {
+      const validModes = ['solo', 'ask', 'atlas', 'athena'];
+      if (typeof config.planExecution !== 'string' || !validModes.includes(config.planExecution)) {
+        errors.push(
+          'config.planExecution must be one of: solo, ask, atlas, athena; received: ' +
+          JSON.stringify(config.planExecution)
+        );
+      }
     }
 
     if (errors.length > 0) {

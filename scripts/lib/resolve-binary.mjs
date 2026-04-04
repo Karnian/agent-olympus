@@ -21,28 +21,41 @@ export const SEARCH_PATHS = [
  * @returns {string[]} Combined static + dynamic paths
  */
 let _dynamicPaths = null;
+let _npmPrefixResolved = false;
 export function getDynamicSearchPaths() {
-  if (_dynamicPaths) return _dynamicPaths;
-  const paths = [...SEARCH_PATHS];
+  if (_dynamicPaths && _npmPrefixResolved) return _dynamicPaths;
+  if (!_dynamicPaths) {
+    const paths = [...SEARCH_PATHS];
+    try {
+      // process.execPath is the running node binary — its parent dir has npm global bins
+      const nodeBinDir = dirname(process.execPath);
+      if (nodeBinDir && !paths.includes(nodeBinDir)) {
+        paths.push(nodeBinDir);
+      }
+    } catch {}
+    _dynamicPaths = paths;
+  }
+  return _dynamicPaths;
+}
+
+/**
+ * Lazily resolve `npm prefix -g` and append to dynamic paths.
+ * Called only when `which` fails for a binary — avoids the 200-500ms
+ * subprocess cost on the hot path when binaries are already on PATH.
+ */
+export function ensureNpmPrefixResolved() {
+  if (_npmPrefixResolved) return;
+  _npmPrefixResolved = true;
   try {
-    // process.execPath is the running node binary — its parent dir has npm global bins
-    const nodeBinDir = dirname(process.execPath);
-    if (nodeBinDir && !paths.includes(nodeBinDir)) {
-      paths.push(nodeBinDir);
-    }
-  } catch {}
-  try {
-    // Also try npm prefix/bin for cases where node and npm global differ
     const npmPrefix = execFileSync('npm', ['prefix', '-g'], {
       stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
     }).trim();
     if (npmPrefix) {
       const npmBin = `${npmPrefix}/bin`;
+      const paths = getDynamicSearchPaths();
       if (!paths.includes(npmBin)) paths.push(npmBin);
     }
   } catch {}
-  _dynamicPaths = paths;
-  return paths;
 }
 
 export const _binCache = new Map();
@@ -62,6 +75,14 @@ export function resolveBinary(name) {
   } catch {}
 
   // Fallback: scan known paths (static + dynamic node/npm bin dirs)
+  // First pass: try without npm prefix (fast)
+  for (const dir of getDynamicSearchPaths()) {
+    const candidate = `${dir}/${name}`;
+    if (existsSync(candidate)) { _binCache.set(name, candidate); return candidate; }
+  }
+
+  // Second pass: resolve npm prefix lazily and retry if new paths were added
+  ensureNpmPrefixResolved();
   for (const dir of getDynamicSearchPaths()) {
     const candidate = `${dir}/${name}`;
     if (existsSync(candidate)) { _binCache.set(name, candidate); return candidate; }
@@ -79,6 +100,7 @@ export function resolveBinary(name) {
 export function clearBinCache() {
   _binCache.clear();
   _dynamicPaths = null;
+  _npmPrefixResolved = false;
 }
 
 /**

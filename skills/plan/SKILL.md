@@ -586,7 +586,48 @@ Spec saved to:
 - `.ao/` (working copy for Atlas/Athena)
 ```
 
-If scale is M or L, ask: "Ready to proceed to execution? Say `/atlas` or `/athena`, or ask questions first."
+### Phase 5 — EXECUTE (auto-routing)
+
+After presenting the summary, route execution based on `.ao/autonomy.json` `planExecution` setting:
+
+```
+import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
+const config = loadAutonomyConfig(process.cwd());
+const mode = config.planExecution || 'ask';
+```
+
+**Complexity check** — determine if the plan is simple enough to skip orchestration:
+
+```
+const isSimple = detected_scale === 'S' || userStoryCount <= 2;
+```
+
+If `isSimple` AND `mode === 'ask'`: skip the prompt, execute solo (no orchestrator needed for trivial plans).
+
+Otherwise, route by mode:
+
+| `planExecution` | Behavior |
+|-----------------|----------|
+| `"solo"` | Proceed with direct Claude execution. No orchestrator. |
+| `"ask"` | Present choice to user (see below). |
+| `"atlas"` | Output: "[plan] Auto-routing to Atlas..." then invoke `Skill(skill="agent-olympus:atlas")` |
+| `"athena"` | Output: "[plan] Auto-routing to Athena..." then invoke `Skill(skill="agent-olympus:athena")` |
+
+**When `mode === "ask"`** — present execution options:
+
+```markdown
+### How would you like to execute?
+
+1. **Solo** — Claude executes directly (fastest, no overhead)
+2. **Atlas** — Sub-agent orchestrator with autonomous loop (recommended for M/L scale)
+3. **Athena** — Peer-to-peer team with parallel workers (recommended for L scale)
+
+> Tip: Set `planExecution` in `.ao/autonomy.json` to skip this prompt next time.
+```
+
+Wait for user selection, then invoke the chosen skill or proceed solo.
+
+**Important:** The spec is already written to `.ao/prd.json` — Atlas/Athena will read it automatically. No need to pass the spec content in the prompt.
 
 ---
 
@@ -919,7 +960,8 @@ Spec saved to:
 - `.ao/` (working copy for Atlas/Athena)
 ```
 
-Ask: "Want to act on any of these improvements? Say `/atlas` or `/athena` to start, or pick specific items to plan."
+Then proceed to **Phase 5 — EXECUTE** (same as forward mode) to auto-route execution.
+For reverse mode, the prompt says "Act on improvements?" instead of "Execute plan?".
 
 ## Integration_With_Atlas_Athena
 
