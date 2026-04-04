@@ -190,11 +190,13 @@ Override via `.ao/autonomy.json`:
 ```json
 {
   "codex": { "approval": "full-auto" },
-  "gemini": { "approval": "yolo" }
+  "gemini": { "approval": "yolo" },
+  "nativeTeams": true
 }
 ```
 Codex values: `auto` (default), `suggest`, `auto-edit`, `full-auto`
 Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
+`nativeTeams`: `true` enables Native Agent Teams without env var (fallback when `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is not set in hook environment)
 
 ### Key Files
 - `scripts/lib/codex-appserver.mjs` — Codex app-server JSON-RPC client (thread/turn/steer/interrupt)

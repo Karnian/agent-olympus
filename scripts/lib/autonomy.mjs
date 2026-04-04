@@ -46,6 +46,10 @@ export const DEFAULT_AUTONOMY_CONFIG = {
   codex: {
     approval: 'auto',
   },
+  gemini: {
+    approval: 'auto',
+  },
+  nativeTeams: false,
 };
 
 /**
@@ -226,6 +230,34 @@ export function validateAutonomyConfig(config) {
           }
         }
       }
+    }
+
+    // --- gemini ---
+    if (config.gemini !== undefined) {
+      if (!config.gemini || typeof config.gemini !== 'object' || Array.isArray(config.gemini)) {
+        errors.push(
+          'config.gemini must be a non-null object; received: ' +
+          (config.gemini === null ? 'null' : typeof config.gemini)
+        );
+      } else {
+        const approval = config.gemini.approval;
+        if (approval !== undefined) {
+          const validApprovals = ['auto', 'default', 'auto_edit', 'yolo', 'plan'];
+          if (typeof approval !== 'string' || !validApprovals.includes(approval)) {
+            errors.push(
+              'config.gemini.approval must be one of: auto, default, auto_edit, yolo, plan; received: ' +
+              JSON.stringify(approval)
+            );
+          }
+        }
+      }
+    }
+
+    // --- nativeTeams ---
+    if (config.nativeTeams !== undefined && typeof config.nativeTeams !== 'boolean') {
+      errors.push(
+        'config.nativeTeams must be a boolean; received: ' + JSON.stringify(config.nativeTeams)
+      );
     }
 
     if (errors.length > 0) {

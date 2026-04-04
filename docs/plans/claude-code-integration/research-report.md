@@ -2,7 +2,7 @@
 
 **Date**: 2026-04-04
 **Team**: Hermes (source), Apollo (external), Prometheus (gap analysis), Momus (validation)
-**Platform**: Claude Code v2.1.91 | Agent Olympus v0.9.7
+**Platform**: Claude Code v2.1.91 | Agent Olympus v0.9.8
 
 ---
 
@@ -20,9 +20,9 @@ Athena's cross-model orchestration (Claude + Codex + Gemini) remains a unique di
 
 | # | Issue | Module | Fix | Effort |
 |---|-------|--------|-----|--------|
-| 1 | Claude CLI workers hardcode `--dangerously-skip-permissions` | `worker-spawn.mjs:392` | Pass `permissionMode: detectClaudePermissionLevel({ cwd })` at spawn call site. Infrastructure already exists in `claude-cli.mjs`. | S |
+| 1 | ~~Claude CLI workers hardcode `--dangerously-skip-permissions`~~ | `worker-spawn.mjs:392` | ~~Pass `permissionMode: detectClaudePermissionLevel({ cwd })` at spawn call site.~~ | S |
 
-**Momus-validated**: Fix location is `worker-spawn.mjs` line 392 (the call site), not `claude-cli.mjs` itself. The `opts.permissionMode` path already exists but is never triggered.
+**✅ Fixed in v0.9.8**: `permission-detect.mjs` 통합 모듈로 해결. Claude CLI workers가 호스트 세션의 permission level을 자동 감지하여 미러링.
 
 ---
 

@@ -12,6 +12,39 @@ export const SEARCH_PATHS = [
   '/home/linuxbrew/.linuxbrew/bin', // Linuxbrew
 ];
 
+/**
+ * Get dynamic search paths by discovering node's bin directory.
+ * npm global installs (codex, gemini) live alongside the node binary,
+ * which may be outside SEARCH_PATHS (e.g. nvm, volta, fnm, mise).
+ * Cached after first call.
+ *
+ * @returns {string[]} Combined static + dynamic paths
+ */
+let _dynamicPaths = null;
+export function getDynamicSearchPaths() {
+  if (_dynamicPaths) return _dynamicPaths;
+  const paths = [...SEARCH_PATHS];
+  try {
+    // process.execPath is the running node binary — its parent dir has npm global bins
+    const nodeBinDir = dirname(process.execPath);
+    if (nodeBinDir && !paths.includes(nodeBinDir)) {
+      paths.push(nodeBinDir);
+    }
+  } catch {}
+  try {
+    // Also try npm prefix/bin for cases where node and npm global differ
+    const npmPrefix = execFileSync('npm', ['prefix', '-g'], {
+      stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
+    }).trim();
+    if (npmPrefix) {
+      const npmBin = `${npmPrefix}/bin`;
+      if (!paths.includes(npmBin)) paths.push(npmBin);
+    }
+  } catch {}
+  _dynamicPaths = paths;
+  return paths;
+}
+
 export const _binCache = new Map();
 
 /**
@@ -28,8 +61,8 @@ export function resolveBinary(name) {
     if (resolved) { _binCache.set(name, resolved); return resolved; }
   } catch {}
 
-  // Fallback: scan known paths
-  for (const dir of SEARCH_PATHS) {
+  // Fallback: scan known paths (static + dynamic node/npm bin dirs)
+  for (const dir of getDynamicSearchPaths()) {
     const candidate = `${dir}/${name}`;
     if (existsSync(candidate)) { _binCache.set(name, candidate); return candidate; }
   }
@@ -45,6 +78,7 @@ export function resolveBinary(name) {
  */
 export function clearBinCache() {
   _binCache.clear();
+  _dynamicPaths = null;
 }
 
 /**
@@ -152,8 +186,8 @@ export function buildEnhancedPath() {
     }
   }
 
-  // Add known search paths that actually exist
-  for (const p of SEARCH_PATHS) {
+  // Add known search paths that actually exist (static + dynamic)
+  for (const p of getDynamicSearchPaths()) {
     try { if (existsSync(p)) dirs.add(p); } catch {}
   }
 
@@ -187,7 +221,7 @@ export function buildEnhancedPath() {
  * @param {function} deps.stat   - (path) => boolean (existsSync substitute)
  * @param {string[]} [deps.searchPaths] - override SEARCH_PATHS
  */
-export function _createResolver({ which, stat, searchPaths = SEARCH_PATHS } = {}) {
+export function _createResolver({ which, stat, searchPaths = getDynamicSearchPaths() } = {}) {
   const cache = new Map();
   return {
     cache,

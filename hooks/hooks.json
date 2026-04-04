@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/session-start.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/session-start.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/session-start.mjs",
             "timeout": 5000
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/intent-gate.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/intent-gate.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/intent-gate.mjs",
             "timeout": 3000
           }
         ]
@@ -30,12 +30,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-gate.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-gate.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-gate.mjs",
             "timeout": 3000
           },
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/model-router.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/model-router.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/model-router.mjs",
             "timeout": 3000
           }
         ]
@@ -45,12 +45,12 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-gate.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-gate.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-gate.mjs",
             "timeout": 3000
           },
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/model-router.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/model-router.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/model-router.mjs",
             "timeout": 3000
           }
         ]
@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-release.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-release.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-release.mjs",
             "timeout": 3000,
             "async": true
           }
@@ -73,7 +73,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-release.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-release.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-release.mjs",
             "timeout": 3000,
             "async": true
           }
@@ -85,7 +85,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/subagent-stop.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/subagent-stop.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/subagent-stop.mjs",
             "timeout": 3000,
             "async": true
           }
@@ -97,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/subagent-start.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/subagent-start.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/subagent-start.mjs",
             "timeout": 3000
           }
         ]
@@ -108,7 +108,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/session-end.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/session-end.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/session-end.mjs",
             "timeout": 5000,
             "async": true
           }
@@ -121,7 +121,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/notification.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/notification.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/notification.mjs",
             "timeout": 3000,
             "async": true
           }
@@ -132,7 +132,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/notification.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/notification.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/notification.mjs",
             "timeout": 3000,
             "async": true
           }
@@ -144,7 +144,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/stop-hook.mjs",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/stop-hook.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/stop-hook.mjs",
             "timeout": 10000
           }
         ]

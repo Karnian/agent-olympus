@@ -90,11 +90,11 @@ test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSI
 
 - **HARNESS_FOUND**: Read `docs/golden-principles.md` and `docs/ARCHITECTURE.md` (if exists).
   Store as `<harness_context>` — inject inline into each worker prompt in Phase 2 spawn.
-  Log: `[athena] Harness loaded: <N> golden principles, architecture layers defined.`
+  Log: `[Athena] Harness loaded: <N> golden principles, architecture layers defined.`
 
 - **HARNESS_MISSING**:
   - For `complex` or `architectural` tasks → suggest to user:
-    `"[athena] Harness not initialized. Run /harness-init for full setup (recommended). Proceeding without it."`
+    `"[Athena] Harness not initialized. Run /harness-init for full setup (recommended). Proceeding without it."`
   - For trivial/moderate tasks → skip silently, proceed.
 
 **Phase Guard — early checkpoint + preflight:**
@@ -102,31 +102,31 @@ test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSI
 ```javascript
 // Step 1: Early checkpoint BEFORE any sub-agent call
 saveCheckpoint('athena', { phase: 0, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
-Output: "[athena] Phase 0: TRIAGE & TEAM DESIGN started (checkpoint saved)"
+Output: "[Athena] Phase 0: TRIAGE & TEAM DESIGN started (checkpoint saved)"
 
 // Step 2: Clean stale .ao/ state + detect capabilities
 import { runPreflight } from './scripts/lib/preflight.mjs';
 const preflightReport = await runPreflight();
 for (const action of preflightReport.actions) {
-  Output: "[athena] Preflight: " + action;
+  Output: "[Athena] Preflight: " + action;
 }
 const { hasNativeTeamTools } = preflightReport.capabilities;
-Output: "[athena] Native Agent Teams: " + (hasNativeTeamTools ? "enabled" : "disabled")
+Output: "[Athena] Native Agent Teams: " + (hasNativeTeamTools ? "enabled" : "disabled")
 
 // Step 3: Guard input size
 import { prepareSubAgentInput, checkInputSize } from './scripts/lib/input-guard.mjs';
 const inputCheck = checkInputSize(<combined_input>, 'opus');
 if (!inputCheck.safe) {
-  Output: "[athena] L-scale input detected (" + inputCheck.lines + " lines, ~" + inputCheck.tokens + " tokens)"
+  Output: "[Athena] L-scale input detected (" + inputCheck.lines + " lines, ~" + inputCheck.tokens + " tokens)"
   const prepared = prepareSubAgentInput(<combined_input>, 'opus', <source_file_path>);
-  Output: "[athena] Structural summary: " + prepared.originalLines + " → " + countLines(prepared.text) + " lines"
+  Output: "[Athena] Structural summary: " + prepared.originalLines + " → " + countLines(prepared.text) + " lines"
   <metis_input> = prepared.text
 } else {
   <metis_input> = <combined_input>
 }
 ```
 
-Output: "[athena] Spawning Metis for team design..."
+Output: "[Athena] Spawning Metis for team design..."
 
 Analyze task and design team:
 ```
@@ -148,7 +148,7 @@ After Metis returns, validate before proceeding:
 metis_output = <result from Metis Task() call above>
 
 If metis_output is empty OR does not contain worker/stream assignments:
-  Output: "[athena] ⚠ Metis returned empty/invalid team design. Retrying with reduced input..."
+  Output: "[Athena] ⚠ Metis returned empty/invalid team design. Retrying with reduced input..."
 
   // Force-summarize and retry with sonnet (more resilient to long inputs)
   import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
@@ -157,8 +157,8 @@ If metis_output is empty OR does not contain worker/stream assignments:
     prompt="Design a team for this task. Break into independent streams with worker type and scope.\nTask summary: " + summary)
 
   If metis_output is STILL empty:
-    Output: "[athena] ✗ Phase 0 FAILED — Metis could not design team after retry."
-    Output: "[athena] Try: (1) split into per-phase tasks, or (2) use /atlas for sequential execution."
+    Output: "[Athena] ✗ Phase 0 FAILED — Metis could not design team after retry."
+    Output: "[Athena] Try: (1) split into per-phase tasks, or (2) use /atlas for sequential execution."
     import { addWisdom } from './scripts/lib/wisdom.mjs';
     await addWisdom({
       category: 'debug',
@@ -167,7 +167,7 @@ If metis_output is empty OR does not contain worker/stream assignments:
     });
     STOP — do not proceed to Phase 0.5.
 
-Output: "[athena] Metis team design complete — <N> workers proposed."
+Output: "[Athena] Metis team design complete — <N> workers proposed."
 ```
 
 **[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
@@ -194,7 +194,7 @@ saveCheckpoint('athena', { phase: 1, completedStories: [], activeWorkers: [], st
 
 ### Phase 0.5 — SPEC GATE (Hermes validation/creation)
 
-Output: "[athena] Phase 0.5: SPEC GATE — validating/creating specification..."
+Output: "[Athena] Phase 0.5: SPEC GATE — validating/creating specification..."
 
 Before team planning, ensure a structured spec exists. Hermes acts as the quality gate between triage and execution planning.
 
@@ -261,21 +261,21 @@ Task(subagent_type="agent-olympus:hermes", model="opus",
 hermes_output = <result from Hermes Task() call above>
 
 If hermes_output is empty OR hermes_output.length < 50:
-  Output: "[athena] ⚠ Hermes spec creation returned empty. Retrying with reduced input..."
+  Output: "[Athena] ⚠ Hermes spec creation returned empty. Retrying with reduced input..."
   import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
   const { summary } = extractStructuralSummary(<user_request>, 100);
   hermes_output = Task(subagent_type="agent-olympus:hermes", model="sonnet",
     prompt="Create a product spec for: " + summary)
 
   If hermes_output is STILL empty:
-    Output: "[athena] ✗ Spec Gate FAILED — Hermes could not create spec after retry."
-    Output: "[athena] Try: (1) run /plan first, or (2) provide a smaller task scope."
+    Output: "[Athena] ✗ Spec Gate FAILED — Hermes could not create spec after retry."
+    Output: "[Athena] Try: (1) run /plan first, or (2) provide a smaller task scope."
     await addWisdom({ category: 'debug', lesson: 'Athena Spec Gate failed: Hermes empty output.', confidence: 'high' });
     STOP — do not proceed.
 ```
 
 Write Hermes output to `.ao/spec.md` and `.ao/prd.json`.
-Output: "[athena] Spec gate passed — <N> user stories ready for team planning."
+Output: "[Athena] Spec gate passed — <N> user stories ready for team planning."
 
 #### After Spec Gate
 
@@ -283,7 +283,7 @@ Proceed to Phase 1 with a guaranteed spec. Prometheus now receives structured re
 
 ### Phase 1 — PLAN
 
-Output: "[athena] Phase 1: PLAN — creating execution plan..."
+Output: "[Athena] Phase 1: PLAN — creating execution plan..."
 
 **[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
 ```
@@ -356,7 +356,7 @@ saveCheckpoint('athena', { phase: 2, prdSnapshot: <prd.json contents>, completed
 
 ### Phase 2 — SPAWN TEAM
 
-Output: "[athena] Phase 2: SPAWN TEAM — creating worktrees and launching workers..."
+Output: "[Athena] Phase 2: SPAWN TEAM — creating worktrees and launching workers..."
 
 **Worktree isolation** (before spawning any worker):
 
@@ -501,10 +501,10 @@ saveCheckpoint('athena', {
   └─────────────────────────────────────────────────
   ```
 - Log each worker state transition:
-  `[athena] api-worker: implementing → testing`
-  `[athena] codex-1: ✓ done (3m 42s)`
+  `[Athena] api-worker: implementing → testing`
+  `[Athena] codex-1: ✓ done (3m 42s)`
 - If any worker is in the same state for 3+ iterations, flag it:
-  `[athena] ⚠ ui-worker stuck in 'implementing' for 3 iterations`
+  `[Athena] ⚠ ui-worker stuck in 'implementing' for 3 iterations`
 
 ```
 ┌─→ MONITOR LOOP (adapts to spawn path used)
@@ -669,7 +669,7 @@ tmux send-keys -t "athena-<slug>-codex-xval-<story-id>" "\"$CODEX_BIN\" <approva
 ```
 - **PASS** → `addVerification(runId, { story_id, verdict: 'pass', evidence: 'codex xval passed', verifiedBy: 'codex' })` → mark `passes: true`, proceed.
 - **FAIL** → `addVerification(runId, { story_id, verdict: 'fail', evidence: '<specific findings>', verifiedBy: 'codex' })` → route findings back to the responsible worker via inbox for fix, re-validate (max 2 cycles).
-- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'codex <reason>: cross-validation skipped', verifiedBy: 'athena' })`. Log: `[athena] Codex cross-validation skipped for <story-id>: <reason>.`
+- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'codex <reason>: cross-validation skipped', verifiedBy: 'athena' })`. Log: `[Athena] Codex cross-validation skipped for <story-id>: <reason>.`
 - **Note**: Run xval against post-merge file paths, not per-worker file paths, to catch violations introduced during conflict resolution.
 
 > **IMPORTANT**: "skip silently" does NOT mean "do nothing". Every story MUST have a verification record — pass, fail, or explicit skip. The PR verification gate will block if any story lacks a record.
@@ -806,14 +806,14 @@ if (!gate.gatePass) {
   // Re-check — if STILL failing, STOP (addVerification may have silently failed)
   const recheck = checkVerificationGate(runId, storyIds);
   if (!recheck.gatePass) {
-    console.error(`[athena] VERIFICATION GATE FAILED — ${recheck.missing.length} stories still lack records: ${recheck.missing.join(', ')}`);
-    console.error(`[athena] Cannot create PR until all stories have verification records.`);
+    console.error(`[Athena] VERIFICATION GATE FAILED — ${recheck.missing.length} stories still lack records: ${recheck.missing.join(', ')}`);
+    console.error(`[Athena] Cannot create PR until all stories have verification records.`);
     // STOP — do not proceed to PR creation
   }
 }
 
 if (gate.skipped.length > 0) {
-  console.log(`[athena] ${gate.skipped.length} stories had Codex xval skipped — results included in PR body`);
+  console.log(`[Athena] ${gate.skipped.length} stories had Codex xval skipped — results included in PR body`);
 }
 ```
 

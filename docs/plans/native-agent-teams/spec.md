@@ -1,6 +1,6 @@
 # G#4: Native Agent Teams — Specification (v2, Post Cross-Validation)
 
-**Status**: Draft v2
+**Status**: Draft v2 (updated v0.9.8: autonomy.json fallback)
 **Created**: 2026-04-04
 **Tracks**: Improvement Tracker G#4
 **Version Target**: v0.10.0
@@ -62,7 +62,7 @@ SKILL.md Phase 4 — INTEGRATE
 
 ## Goals
 
-- G1: 런타임에 네이티브 팀 가용성 감지 (`hasNativeTeamTools` in preflight)
+- G1: 런타임에 네이티브 팀 가용성 감지 (`hasNativeTeamTools` in preflight — env var `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` 또는 `.ao/autonomy.json` `nativeTeams: true`)
 - G2: SKILL.md에 명시적 native/fallback 분기 추가 (Phase 2, 3, COMPLETION)
 - G3: Codex 워커는 기존 4-tier adapter 유지 (변경 없음)
 - G4: 워크트리는 항상 수동 생성 (네이티브 자동 관리 가정하지 않음)

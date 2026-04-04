@@ -2,7 +2,7 @@
 
 > 전체 개선 항목의 구현 현황을 추적하는 문서. 완료 항목은 요약만, 남은 항목은 상세 유지.
 
-**Last Updated**: 2026-04-04
+**Last Updated**: 2026-04-05
 
 ---
 
@@ -131,6 +131,19 @@
 
 ---
 
+## v0.9.8 — Platform Robustness
+
+| # | 항목 | 상태 |
+|---|------|------|
+| J1 | Hook Node Resolution — `run.sh` 래퍼 + `run.sh \|\| node run.cjs` 패턴 | ✅ |
+| J2 | Dynamic binary discovery — `getDynamicSearchPaths()` (nvm/volta/fnm/mise) | ✅ |
+| J3 | Enhanced PATH injection — `buildEnhancedPath()` in `detectCapabilities()` | ✅ |
+| J4 | Native Teams config fallback — `.ao/autonomy.json` `nativeTeams: true` | ✅ |
+| J5 | Gemini approval validation — `gemini.approval` in autonomy.mjs | ✅ |
+| J6 | Orchestrator branding — `[Athena]`/`[Atlas]` capitalized prefixes | ✅ |
+
+---
+
 ## Cross-Validation History
 
 | 일시 | 대상 | 결과 |
@@ -140,6 +153,7 @@
 | v0.9.2 | G#1~#3 spec | MODIFY (4 Critical, 3 Medium) |
 | v0.9.3 | H1 코드 리뷰 | CRITICAL 1, HIGH 2, MEDIUM 1 |
 | v0.10 | US-012, US-016 최종 처분 | Codex+Gemini 합의: US-012 ABSORB(Themis), US-016 DROP |
+| v0.9.8 | J1~J6 코드 리뷰 | Gemini PASS, Codex PASS (P1 Windows fallback + P2 검색순서 반영) |
 
 ## References
 
