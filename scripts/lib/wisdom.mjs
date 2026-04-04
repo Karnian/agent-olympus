@@ -4,11 +4,30 @@
  */
 
 import { promises as fs } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { atomicWriteFile } from './fs-atomic.mjs';
 
-const WISDOM_PATH = path.join(process.cwd(), '.ao', 'wisdom.jsonl');
-const PROGRESS_PATH = path.join(process.cwd(), '.ao', 'progress.txt');
+/**
+ * Resolve the project root directory.
+ * Uses git's common-dir to handle worktree scenarios correctly.
+ * Falls back to process.cwd() if git is not available.
+ * @returns {string}
+ */
+function resolveProjectRoot() {
+  try {
+    const commonDir = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    return path.resolve(commonDir, '..');
+  } catch {
+    return process.cwd();
+  }
+}
+
+const PROJECT_ROOT = resolveProjectRoot();
+const WISDOM_PATH = path.join(PROJECT_ROOT, '.ao', 'wisdom.jsonl');
+const PROGRESS_PATH = path.join(PROJECT_ROOT, '.ao', 'progress.txt');
 const MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
 /**

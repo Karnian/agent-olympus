@@ -22,6 +22,7 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import { resolveClaudeBinary, buildEnhancedPath } from './resolve-binary.mjs';
+import { detectClaudePermissionLevel, claudePermissionModeFlag } from './permission-detect.mjs';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -168,12 +169,19 @@ export function spawn(prompt, opts = {}) {
     args.push('--no-session-persistence');
   }
 
-  // Permission mode
+  // Permission mode — auto-detect from Claude settings if not explicitly provided.
+  // SECURITY: never default to --dangerously-skip-permissions; always mirror the
+  // host session's permission level so workers cannot exceed the user's grants.
   if (opts.permissionMode) {
     args.push('--permission-mode', opts.permissionMode);
   } else {
-    // Default: bypass permissions for automated workers
-    args.push('--dangerously-skip-permissions');
+    try {
+      const level = detectClaudePermissionLevel({ cwd: opts.cwd });
+      args.push('--permission-mode', claudePermissionModeFlag(level));
+    } catch {
+      // Detection failed — fall back to safest mode
+      args.push('--permission-mode', 'default');
+    }
   }
 
   // Model override
@@ -226,6 +234,7 @@ export function spawn(prompt, opts = {}) {
     _usage: null,
     _exitCode: null,
     _stderrChunks: [],
+    _toolCalls: [],
     totalCostUsd: null,
     _adapterName: 'claude-cli',
     _resultEvent: null,
@@ -290,7 +299,7 @@ function _processEvent(handle, event) {
     }
 
     case 'assistant': {
-      // Assistant response — extract text from content blocks
+      // Assistant response — extract text and tool_use from content blocks
       const message = event.message;
       if (!message) break;
 
@@ -303,6 +312,14 @@ function _processEvent(handle, event) {
         for (const block of message.content) {
           if (block.type === 'text' && block.text) {
             handle._output += block.text;
+          } else if (block.type === 'tool_use') {
+            // Track tool calls for progress monitoring
+            if (!handle._toolCalls) handle._toolCalls = [];
+            handle._toolCalls.push({
+              id: block.id || null,
+              name: block.name || 'unknown',
+              input: block.input || {},
+            });
           }
         }
       }

@@ -10,7 +10,7 @@
  */
 
 import { promises as fs } from 'node:fs';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { resolveBinary } from './tmux-session.mjs';
@@ -18,6 +18,46 @@ import { resolveClaudeBinary } from './resolve-binary.mjs';
 
 const AO_DIR = '.ao';
 const STATE_DIR = path.join(AO_DIR, 'state');
+const CAPABILITY_CACHE_PATH = path.join(STATE_DIR, 'ao-capabilities.json');
+const CAPABILITY_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Read cached capabilities if still valid (within TTL).
+ * @returns {object|null} Cached capabilities or null if expired/missing
+ */
+function readCapabilityCache() {
+  try {
+    const stat = statSync(CAPABILITY_CACHE_PATH);
+    const ageMs = Date.now() - stat.mtimeMs;
+    if (ageMs > CAPABILITY_CACHE_TTL_MS) return null;
+
+    const raw = readFileSync(CAPABILITY_CACHE_PATH, 'utf-8');
+    const cached = JSON.parse(raw);
+    // Validate shape — must have at least hasTmux key
+    if (typeof cached.hasTmux !== 'boolean') return null;
+    // Re-check environment-sensitive fields that are instant to compute
+    const currentNativeTeam = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
+    const currentPreviewMCP = existsSync('.claude/launch.json');
+    if (cached.hasNativeTeamTools !== currentNativeTeam) return null;
+    if (cached.hasPreviewMCP !== currentPreviewMCP) return null;
+    return cached;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write capabilities to cache file.
+ * @param {object} capabilities
+ */
+function writeCapabilityCache(capabilities) {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(CAPABILITY_CACHE_PATH, JSON.stringify(capabilities), { mode: 0o600 });
+  } catch {
+    // Non-critical — caching failure doesn't affect functionality
+  }
+}
 
 /**
  * Detect if file content is a stale pointer (from a previous project).
@@ -131,6 +171,10 @@ export function meetsMinVersion(versionStr, minMajor, minMinor, minPatch) {
  * }>}
  */
 export async function detectCapabilities() {
+  // Check file-based cache first (hooks are separate processes, so in-memory cache doesn't work)
+  const cached = readCapabilityCache();
+  if (cached) return cached;
+
   let hasTmux = false;
   try {
     // Use resolveBinary which checks PATH + fallback paths (homebrew, /usr/local, etc.)
@@ -244,7 +288,9 @@ export async function detectCapabilities() {
   // Preview MCP is available if .claude/launch.json exists
   const hasPreviewMCP = existsSync('.claude/launch.json');
 
-  return { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGeminiCli, hasGeminiAcp, hasGitWorktree, hasNativeTeamTools, hasPreviewMCP };
+  const capabilities = { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGeminiCli, hasGeminiAcp, hasGitWorktree, hasNativeTeamTools, hasPreviewMCP };
+  writeCapabilityCache(capabilities);
+  return capabilities;
 }
 
 /**
@@ -372,3 +418,5 @@ export function formatPreflightReport(report) {
   }
   return parts.join('\n');
 }
+
+export { readCapabilityCache as _readCapabilityCache, writeCapabilityCache as _writeCapabilityCache };

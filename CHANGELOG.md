@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.9.8] - 2026-04-05
+
+### Security — Claude CLI Permission Mirroring (P0)
+
+Claude CLI workers는 기존에 `--dangerously-skip-permissions`를 하드코딩하여 사용자의 permission 설정을 무시했음.
+이제 모든 Claude worker가 호스트 세션의 permission level을 자동 감지하여 미러링함.
+
+- **`scripts/lib/permission-detect.mjs`** (NEW): 통합 permission 감지 모듈. allow/deny list 지원, deny는 모든 settings 파일에서 병합(any deny overrides allow)
+- **`scripts/lib/claude-cli.mjs`**: `--dangerously-skip-permissions` 제거 → `detectClaudePermissionLevel()` 자동 감지 + `--permission-mode` 사용
+- **`scripts/lib/worker-spawn.mjs`**: Claude worker spawn 시 `permissionMode` 명시적 전달
+- **`scripts/lib/codex-approval.mjs`**: 중복 permission 감지 코드 제거 → `permission-detect.mjs`에 위임
+- **`scripts/lib/gemini-approval.mjs`**: 중복 permission 감지 코드 제거 → `permission-detect.mjs`에 위임
+
+### Added — Platform Alignment (P1)
+
+Claude Code v2.1.49–v2.1.91에서 도입된 플랫폼 기능 활용.
+
+#### Notification Hook — 스톨 감지
+- **`scripts/notification.mjs`** (NEW): `idle_prompt`, `permission_prompt` 이벤트 로깅
+- **`hooks/hooks.json`**: Notification hook 등록 (async, non-blocking)
+- `.ao/state/ao-notifications.json`에 FIFO 50개 캡으로 기록
+
+#### Capability Caching — 프리플라이트 성능 개선
+- **`scripts/lib/preflight.mjs`**: 파일 기반 capability 캐시 (5분 TTL)
+- `.ao/state/ao-capabilities.json`에 캐시 저장 (hook은 별도 프로세스이므로 in-process 캐시 불가)
+- 환경 민감 필드(`hasNativeTeamTools`, `hasPreviewMCP`)는 캐시 읽기 시 재검증
+
+#### Wisdom — 프로젝트 루트 일관성
+- **`scripts/lib/wisdom.mjs`**: `process.cwd()` → `git rev-parse --git-common-dir` 기반 `resolveProjectRoot()`
+- worktree 내부에서 실행해도 항상 메인 프로젝트의 `.ao/wisdom.jsonl` 참조
+
+#### SubagentStart — 타입별 지혜 필터링
+- **`scripts/subagent-start.mjs`**: `subagent_type`에 따라 관련 wisdom 카테고리만 주입
+- 예: `test-engineer` → test/build/debug wisdom, `designer` → pattern/architecture wisdom
+
+#### Claude CLI — tool_use 블록 파싱
+- **`scripts/lib/claude-cli.mjs`**: stream-json assistant 메시지에서 `tool_use` content block 추출
+- `handle._toolCalls` 배열로 실시간 worker 진행 상황 추적 가능
+
+### Fixed — Stop Hook 안전성
+
+- **`scripts/stop-hook.mjs`**: `git add -A` → `git add -u` + 선택적 untracked 파일 스테이징
+- `.env`, `.ao/state/`, `.ao/teams/`, credentials, secrets, `.key`, `.pem` 파일 자동 제외
+
+### Documentation
+
+- **`docs/plans/claude-code-integration/research-report.md`** (NEW): Claude Code 플랫폼 통합 리서치 보고서
+  - 25개 hook 이벤트 중 8개 사용 현황 분석
+  - P0–P3 우선순위별 22개 개선 권고사항
+  - 경쟁 환경 분석 (Native Teams vs Community Tools vs AO)
+  - v0.9.8 → v0.11.0 구현 로드맵
+- **`CLAUDE.md`**: permission-detect.mjs, capability caching, notification hook, 안전한 스테이징 등 반영
+
 ## [0.9.7] - 2026-04-04
 
 ### Added — C3-R Pragmatic Memory + Full Project Audit Fixes
