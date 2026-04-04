@@ -218,7 +218,14 @@ Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
 
 ### Session Naming
 - tmux sessions: `atlas-codex-<N>`, `atlas-gemini-<N>`, `athena-<slug>-codex-<N>`, `athena-<slug>-gemini-<N>`
-- Cross-validation: `atlas-codex-xval-<story-id>` or `athena-<slug>-codex-xval-<story-id>`
+- Cross-validation: `atlas-codex-xval-<story-id>`, `atlas-gemini-xval-<story-id>`, `athena-<slug>-codex-xval-<story-id>`, `athena-<slug>-gemini-xval-<story-id>`
+
+### Multi-Model Auto-Routing
+Atlas/Athena automatically detect available capabilities via `runPreflight()` and pass them to Metis:
+- Metis receives `Available capabilities: Codex: AVAILABLE/NOT AVAILABLE, Gemini: ...`
+- Team design and `MULTI_MODEL` classification are capability-aware — no phantom worker assignment
+- Cross-validation priority: Codex → Gemini fallback → skip with explicit record
+- Trivial tasks automatically use Claude-only (no external model overhead)
 
 ### Gemini Team Communication
 Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), Gemini ACP only accepts new prompts between turns. Team communication uses a message queue pattern:
