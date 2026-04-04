@@ -26,7 +26,7 @@ User Request
 
 ```
 agent-olympus/
-├── .claude-plugin/plugin.json    — Plugin manifest (v0.8.3)
+├── hooks/hooks.json              — Hook event registrations
 ├── agents/                       — 18 agent personas (role definitions)
 │   ├── atlas.md                  — Self-driving sub-agent orchestrator (Opus)
 │   ├── athena.md                 — Self-driving team orchestrator (Opus)
@@ -44,7 +44,8 @@ agent-olympus/
 │   ├── code-reviewer.md          — Code quality review, read-only (Sonnet)
 │   ├── explore.md                — Fast codebase scanner (Haiku)
 │   ├── writer.md                 — Documentation writer (Haiku)
-│   └── hephaestus.md             — Codex deep worker (Sonnet)
+│   ├── hephaestus.md             — Codex deep worker (Sonnet)
+│   └── themis.md                 — Quality gate: tests/lint/AC verification (Sonnet)
 ├── skills/                       — 26 user-facing skills (workflow recipes)
 │   ├── atlas/SKILL.md            — /atlas: autonomous sub-agent pipeline
 │   ├── athena/SKILL.md           — /athena: autonomous team pipeline
@@ -74,7 +75,7 @@ agent-olympus/
 │   ├── concurrency-release.mjs   — PostToolUse: release task from concurrency pool
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (1000+ tests, 47 files)
+│   ├── test/                     — node:test unit tests (1000+ tests, 50 files)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
@@ -100,7 +101,14 @@ agent-olympus/
 │       ├── stuck-recovery.mjs    — Detect and recover from stuck worker states
 │       ├── run-artifacts.mjs     — Per-run event log, summary, and verification storage
 │       ├── session-registry.mjs  — Cross-session metadata tracking and crash recovery
-│       └── codex-approval.mjs    — Claude permission detection → Codex approval mode mirroring
+│       ├── codex-approval.mjs    — Claude permission detection → Codex approval mode mirroring
+│       ├── gemini-approval.mjs   — Claude permission detection → Gemini approval mode mirroring
+│       ├── gemini-exec.mjs       — Gemini exec adapter (single-turn JSON spawn)
+│       ├── gemini-acp.mjs        — Gemini ACP adapter (multi-turn JSON-RPC 2.0)
+│       ├── claude-cli.mjs        — Claude CLI adapter (headless stream-json)
+│       ├── codex-exec.mjs        — Codex exec adapter (single-turn JSONL)
+│       ├── codex-appserver.mjs   — Codex app-server adapter (multi-turn JSON-RPC 2.0)
+│       └── resolve-binary.mjs   — Binary resolution with caching + buildEnhancedPath()
 ├── config/
 │   └── model-routing.jsonc       — Intent→model routing configuration
 └── hooks/
@@ -139,6 +147,7 @@ agent-olympus/
 | **aphrodite** | UI/UX design critique — Nielsen heuristics, Gestalt principles, WCAG 2.2 AA |
 | **security-reviewer** | OWASP Top 10, secrets, injection |
 | **code-reviewer** | Logic defects, SOLID, DRY, AI slop |
+| **themis** | Quality gate: tests, lint, namespace, frontmatter, per-AC verification |
 
 ### Utility
 | Agent | Role |
@@ -218,8 +227,8 @@ agent-olympus/
 | `.ao/state/athena-state.json` | Athena phase tracking | Created on start, deleted on completion |
 | `.ao/prd.json` | User stories with acceptance criteria | Created in Plan phase, deleted on completion |
 | `.ao/wisdom.jsonl` | Cross-iteration learnings (JSONL format) | Accumulated, NEVER deleted (survives cancel) |
-| `.ao/state/checkpoint-atlas.json` | Atlas session recovery checkpoint | Auto-expires after 24h |
-| `.ao/state/checkpoint-athena.json` | Athena session recovery checkpoint | Auto-expires after 24h |
+| `.ao/state/checkpoint-atlas[-sessionId].json` | Atlas session recovery checkpoint (session-scoped) | Auto-expires after 24h |
+| `.ao/state/checkpoint-athena[-sessionId].json` | Athena session recovery checkpoint (session-scoped) | Auto-expires after 24h |
 | `.ao/state/ao-intent.json` | Last classified intent | Updated per prompt |
 | `.ao/state/ao-concurrency.json` | Active task tracking | Updated per task spawn/complete |
 | `.ao/teams/<slug>/` | Inbox/outbox for Codex workers | Created by Athena, cleaned on completion |
@@ -232,14 +241,15 @@ agent-olympus/
 | Claude Haiku | explore, writer | Fast scans, documentation |
 | Claude Sonnet | executor, designer, aphrodite, debugger, reviewers, hephaestus | Standard implementation and review |
 | Claude Opus | atlas, athena, metis, prometheus, momus, hermes, architect | Orchestration, analysis, planning |
-| OpenAI Codex | hephaestus (via tmux) | Algorithms, large refactoring, deep exploration |
+| OpenAI Codex | hephaestus (via adapter) | Algorithms, large refactoring, deep exploration |
+| Google Gemini | (via adapter) | Cross-validation, alternative perspective |
 
 ## Key Design Decisions
 
 1. **Self-driving loop** — Atlas/Athena never stop early. They loop until all PRD stories pass, build succeeds, tests pass, and reviews approve. Max 15 iterations before escalating.
 2. **PRD quality enforcement** — Generic acceptance criteria ("works correctly") are forbidden. Every criterion must be specific and testable.
 3. **Progress persistence** — `.ao/wisdom.jsonl` accumulates learnings across iterations and survives cancellation, so future sessions start smarter.
-4. **Codex via tmux** — No omc dependency. Codex is spawned directly as tmux sessions, monitored via `capture-pane`, and cleaned up on completion.
+4. **Multi-adapter worker system** — Workers spawn via ADAPTER_REGISTRY strategy table: codex-appserver > codex-exec > tmux for Codex; gemini-acp > gemini-exec > tmux for Gemini; claude-cli > tmux for Claude. Adding a new adapter requires one registry entry.
 5. **External skill awareness** — Atlas/Athena can invoke any installed plugin skill (anthropic-skills, ui-ux-pro-max, etc.) when it fits better than a generic executor.
 6. **Zero runtime dependencies** — All scripts use Node.js built-ins only. No npm packages.
 7. **Athena worktree isolation** — Each parallel Athena worker runs in a dedicated git worktree (`.ao/worktrees/<slug>/<worker>/`), preventing silent file overwrites and merge conflicts between concurrent workers.

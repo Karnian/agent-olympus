@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.9.7] - 2026-04-04
+
+### Added — C3-R Pragmatic Memory + Full Project Audit Fixes
+
+전체 프로젝트 3자 교차 검토(Claude+Codex+Gemini) 후 발견된 P0/P1/P2 수정.
+개선 트래커 53/53 (100%) 완료.
+
+#### C3-R Pragmatic Memory (`scripts/lib/wisdom.mjs`)
+- 토큰 정규화: 47개 stop words 제거 + 13개 접미사 규칙 (min stem ≥4 chars)
+- 다차원 스코링: 5축 가중 스코어 (recency/confidence/category/intent/filePattern)
+- Export/Import: `exportWisdom()` / `importWisdom(json, { merge })` with Jaccard dedup
+- 레거시 호환: string/null queryWisdom 호출은 기존 동작 유지
+
+#### PID Reuse Guard (P0 — 3/3 교차 검토 합의)
+- `codex-exec.mjs`, `codex-appserver.mjs`, `gemini-acp.mjs` shutdown에 `_exitCode` 2중 가드 추가
+- 5개 어댑터 shutdown 함수 일관성 확보 (claude-cli.mjs, gemini-exec.mjs 패턴과 동일)
+
+#### Gemini ACP Session Setup (P1 — 3/3 합의)
+- `setSessionMode`/`setSessionModel`을 fire-and-forget에서 await + resp.error 체크로 변경
+- `handle._warnings` 배열에 실패 기록, `monitor()` 통해 소비자에게 전달
+
+#### reassignToClaude Live Handle (P1 — 3/3 합의)
+- `opts.liveState` 파라미터 추가 — in-memory handle 전달 시 adapter-specific graceful shutdown 가능
+- 기존 disk-loaded 경로에서 `_liveHandle` undefined → dead code 문제 해결
+
+#### ADAPTER_REGISTRY Refactor (P2 — 3/3 합의)
+- `worker-spawn.mjs`에 전략 테이블 도입: 5개 어댑터 × { loader, handleKey, monitorFn, shutdownFn, statusMap }
+- 5개 monitor helper → 1개 generic `monitorAdapterWorker()` 통합
+- 5개 loader → 1개 `loadRequiredAdapters()` 통합
+- `monitorTeam`, `collectResults`, `shutdownTeam`, `reassignToClaude` dispatch 체인 → registry lookup
+- Net -43 lines. 새 어댑터 추가 = 레지스트리 1개 엔트리
+
+#### Session-Scoped Checkpoints (P2 — 3/3 합의)
+- `checkpoint-${orch}-${sessionId}.json` 형식으로 동시 Atlas 실행 시 충돌 방지
+- `loadCheckpoint` scan: sessionId 우선 → legacy → 전체 스캔(최신 선택)
+- `clearCheckpoint` 세션별 삭제, `tryLoadCheckpointFile` TTL 헬퍼 추출
+
+#### US-012 Quality-Gate Agent — Themis 흡수
+- `agents/themis.md` Check #7: `.ao/prd.json` AC 라인별 PASS/FAIL + MANUAL_REVIEW_NEEDED
+
+#### US-016 Plan-Brainstorm Integration — DROP
+- Codex+Gemini 합의: 현재 "invoke or ask" 패턴이 올바른 UX
+
+#### Documentation
+- `CLAUDE.md` 테스트 파일 수 47→50, 테스트 수 870+→1000+ 수정
+- `AGENTS.md` 누락 에이전트(themis), 라이브러리(7개), Gemini 지원 추가
+- `docs/plans/improvements.md` → 53/53 완료
+
+#### Cross-Validation
+- 전체 프로젝트 리뷰: Claude 8-9/10, Codex 8/10, Gemini 82/100
+- 교차 리뷰 후 합의 점수: 7.5~8/10
+- 6건 수정 → 3자 PASS (Gemini Fix 4 1회 REJECT → resp.error 수정 → PASS)
+- 4건 DROP (wisdom cwd, stop-hook, Atlas SKILL.md 크기, concurrency TOCTOU)
+
 ## [0.9.6] - 2026-04-04
 
 ### Added — G#4 Native Agent Teams
