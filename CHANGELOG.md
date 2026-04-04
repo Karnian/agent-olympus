@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.9.9] - 2026-04-05
+
+### Performance — Session Startup Optimization (P0)
+
+세션 시작 시 1.6~3.9초 걸리던 초기화를 120~400ms로 단축.
+
+- **`scripts/lib/preflight.mjs`**: capability cache TTL 5분→60분, `runStateCleanup()` 분리 (SessionStart에서 capability detection 제거), `detectCapabilities()` 병렬화 (`execFileSync` → `execFile` + `Promise.all`), dead import 제거
+- **`scripts/lib/resolve-binary.mjs`**: `npm prefix -g` 호출을 `which` 실패 시에만 lazy fallback으로 지연 (`ensureNpmPrefixResolved()`)
+- **`scripts/lib/session-registry.mjs`**: 3개의 `git rev-parse` 호출을 `resolveGitMeta()` 캐싱으로 통합 (프로세스 수명 동안 1회 실행)
+- **`scripts/lib/wisdom.mjs`**: 모듈 로드 시 `PROJECT_ROOT` 즉시 평가 → lazy getter `getProjectRoot()`로 전환 (import 시 subprocess 제거)
+- **`scripts/session-start.mjs`**: `runPreflight()` → `runStateCleanup()` 사용 (capability report 미출력, 가벼운 시작)
+
+### Added — Plan Execution Auto-Routing (P1)
+
+Plan 승인 후 자동으로 Atlas/Athena orchestrator를 활용하도록 라우팅.
+
+- **`scripts/lib/autonomy.mjs`**: `planExecution` 필드 추가 (기본값 `"ask"`, allowlist: `solo`, `ask`, `atlas`, `athena`)
+- **`skills/plan/SKILL.md`**: Phase 5: EXECUTE 추가 — complexity check 후 자동 라우팅 (S-scale 또는 스토리 ≤2개면 자동 solo)
+- **`scripts/plan-execute-gate.mjs`** (NEW): PostToolUse ExitPlanMode 훅. native plan mode 사용 시 fallback 라우팅
+- **`hooks/hooks.json`**: PostToolUse에 ExitPlanMode matcher 등록
+- **`scripts/session-start.mjs`**: marker 파일 `ao-plan-pending.json` fallback (context-clear 대응)
+
+### Configuration
+
+`.ao/autonomy.json`에 `planExecution` 설정 추가:
+
+| 값 | 동작 |
+|---|------|
+| `"ask"` (기본) | 복잡한 계획 시 Solo/Atlas/Athena 선택지 제시, 간단한 계획은 자동 solo |
+| `"solo"` | 항상 Claude 단독 실행 |
+| `"atlas"` | 항상 Atlas 자동 실행 |
+| `"athena"` | 항상 Athena 자동 실행 |
+
 ## [0.9.8] - 2026-04-05
 
 ### Security — Claude CLI Permission Mirroring (P0)

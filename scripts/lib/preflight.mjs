@@ -11,8 +11,11 @@
 
 import { promises as fs } from 'node:fs';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import path from 'node:path';
+
+const execFileAsync = promisify(execFile);
 import { resolveBinary } from './tmux-session.mjs';
 import { resolveClaudeBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
@@ -20,7 +23,7 @@ import { loadAutonomyConfig } from './autonomy.mjs';
 const AO_DIR = '.ao';
 const STATE_DIR = path.join(AO_DIR, 'state');
 const CAPABILITY_CACHE_PATH = path.join(STATE_DIR, 'ao-capabilities.json');
-const CAPABILITY_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const CAPABILITY_CACHE_TTL_MS = 60 * 60 * 1000; // 60 minutes (binaries rarely change mid-session)
 
 /**
  * Read cached capabilities if still valid (within TTL).
@@ -177,121 +180,90 @@ export function meetsMinVersion(versionStr, minMajor, minMinor, minPatch) {
  *   hasPreviewMCP: boolean
  * }>}
  */
+/**
+ * Async helper: run a command and return stdout, or null on failure.
+ */
+async function tryExecAsync(cmd, args, opts) {
+  try {
+    const { stdout } = await execFileAsync(cmd, args, opts);
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
 export async function detectCapabilities() {
   // Check file-based cache first (hooks are separate processes, so in-memory cache doesn't work)
   const cached = readCapabilityCache();
   if (cached) return cached;
 
-  // Build enhanced env with all known binary dirs in PATH.
-  // Node.js CLI tools (codex, gemini) use #!/usr/bin/env node — if the hook
-  // environment has a restricted PATH, `env node` fails. Passing the enhanced
-  // PATH to execFileSync ensures child processes can find node and other deps.
   const enhancedEnv = { ...process.env, PATH: buildEnhancedPath() };
-  const execOpts = { stdio: 'pipe', encoding: 'utf-8', timeout: 5000, env: enhancedEnv };
+  const execOpts = { encoding: 'utf-8', timeout: 5000, env: enhancedEnv };
 
-  let hasTmux = false;
-  try {
-    const tmuxBin = resolveBinary('tmux');
-    if (tmuxBin && tmuxBin !== 'tmux') {
-      hasTmux = true;
-    } else {
-      execFileSync('which', ['tmux'], { ...execOpts, stdio: 'ignore' });
-      hasTmux = true;
-    }
-  } catch {
-    // tmux not found
-  }
+  // --- Wave 1: parallel binary existence checks ---
+  const [tmuxBin, codexBin, geminiBin, claudePath, gitWorktreeOut] = await Promise.all([
+    // tmux
+    (async () => {
+      const bin = resolveBinary('tmux');
+      return (bin && bin !== 'tmux') ? bin : null;
+    })(),
+    // codex
+    (async () => {
+      const bin = resolveBinary('codex');
+      return (bin && bin !== 'codex') ? bin : null;
+    })(),
+    // gemini
+    (async () => {
+      const bin = resolveBinary('gemini');
+      return (bin && bin !== 'gemini') ? bin : null;
+    })(),
+    // claude
+    (async () => {
+      const bin = resolveClaudeBinary();
+      return (bin && bin !== 'claude') ? bin : null;
+    })(),
+    // git worktree
+    tryExecAsync('git', ['worktree', 'list'], execOpts),
+  ]);
 
-  let hasCodex = false;
-  try {
-    const codexBin = resolveBinary('codex');
-    if (codexBin && codexBin !== 'codex') {
-      hasCodex = true;
-    } else {
-      execFileSync('which', ['codex'], { ...execOpts, stdio: 'ignore' });
-      hasCodex = true;
-    }
-  } catch {
-    // codex not found
-  }
+  const hasTmux = !!tmuxBin;
+  const hasCodex = !!codexBin;
+  const hasGeminiCli = !!geminiBin;
+  const hasClaudeCli = !!claudePath;
+  const hasGitWorktree = gitWorktreeOut !== null;
 
-  // Detect codex exec --json support (requires codex-cli >= 0.116.0)
+  // --- Wave 2: dependent version/feature checks (parallel where independent) ---
+  const [codexVersionOut, geminiHelpOut] = await Promise.all([
+    hasCodex
+      ? tryExecAsync(resolveBinary('codex'), ['--version'], execOpts)
+      : Promise.resolve(null),
+    hasGeminiCli
+      ? tryExecAsync(resolveBinary('gemini'), ['--help'], execOpts)
+      : Promise.resolve(null),
+  ]);
+
   let hasCodexExecJson = false;
   let hasCodexAppServer = false;
-  try {
-    const codexVersion = execFileSync(resolveBinary('codex'), ['--version'], execOpts).trim();
-    hasCodexExecJson = meetsMinVersion(codexVersion, 0, 116, 0);
-    if (hasCodexExecJson) {
-      try {
-        execFileSync(resolveBinary('codex'), ['app-server', '--help'], execOpts);
-        hasCodexAppServer = true;
-      } catch {
-        hasCodexAppServer = false;
-      }
-    }
-  } catch {
-    hasCodexExecJson = false;
-    hasCodexAppServer = false;
+  if (codexVersionOut) {
+    hasCodexExecJson = meetsMinVersion(codexVersionOut.trim(), 0, 116, 0);
   }
 
-  // Detect Gemini CLI
-  let hasGeminiCli = false;
-  let hasGeminiAcp = false;
-  try {
-    const geminiBin = resolveBinary('gemini');
-    if (geminiBin && geminiBin !== 'gemini') {
-      hasGeminiCli = true;
-    } else {
-      execFileSync('which', ['gemini'], { ...execOpts, stdio: 'ignore' });
-      hasGeminiCli = true;
-    }
-  } catch {
-    // gemini not found
+  const hasGeminiAcp = geminiHelpOut ? /--acp|--experimental-acp/i.test(geminiHelpOut) : false;
+
+  // --- Wave 3: codex app-server (depends on Wave 2) ---
+  if (hasCodexExecJson) {
+    const appServerOut = await tryExecAsync(resolveBinary('codex'), ['app-server', '--help'], execOpts);
+    hasCodexAppServer = appServerOut !== null;
   }
 
-  if (hasGeminiCli) {
-    try {
-      const helpOutput = execFileSync(resolveBinary('gemini'), ['--help'], execOpts);
-      hasGeminiAcp = /--acp|--experimental-acp/i.test(helpOutput);
-    } catch {
-      hasGeminiAcp = false;
-    }
-  }
-
-  // Detect Claude CLI (claude -p mode for headless worker execution)
-  let hasClaudeCli = false;
-  try {
-    const claudePath = resolveClaudeBinary();
-    if (claudePath && claudePath !== 'claude') {
-      hasClaudeCli = true;
-    } else {
-      execFileSync(claudePath, ['--version'], execOpts);
-      hasClaudeCli = true;
-    }
-  } catch {
-    hasClaudeCli = false;
-  }
-
-  let hasGitWorktree = false;
-  try {
-    execFileSync('git', ['worktree', 'list'], { ...execOpts, stdio: 'ignore' });
-    hasGitWorktree = true;
-  } catch {
-    // git worktree not available
-  }
-
-  // Native Agent Teams: check env var first, then .ao/autonomy.json fallback
+  // Instant checks (no subprocess)
   let hasNativeTeamTools = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
   if (!hasNativeTeamTools) {
     try {
       const autonomy = loadAutonomyConfig(process.cwd());
       if (autonomy.nativeTeams === true) hasNativeTeamTools = true;
-    } catch {
-      // fail-safe
-    }
+    } catch {}
   }
-
-  // Preview MCP is available if .claude/launch.json exists
   const hasPreviewMCP = existsSync('.claude/launch.json');
 
   const capabilities = { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGeminiCli, hasGeminiAcp, hasGitWorktree, hasNativeTeamTools, hasPreviewMCP };
@@ -324,12 +296,12 @@ export function formatCapabilityReport(caps, opts) {
 }
 
 /**
- * Validate .ao/ directory state before orchestrator execution.
- * Returns a report of issues found and actions taken.
+ * Lightweight state cleanup — runs at SessionStart.
+ * Does NOT detect capabilities (deferred to first orchestrator call).
  *
- * @returns {Promise<{ valid: boolean, actions: string[], warnings: string[], capabilities: object }>}
+ * @returns {Promise<{ valid: boolean, actions: string[], warnings: string[] }>}
  */
-export async function runPreflight() {
+export async function runStateCleanup() {
   const actions = [];
   const warnings = [];
 
@@ -365,8 +337,6 @@ export async function runPreflight() {
       try {
         const raw = await fs.readFile(statePath, 'utf-8');
         const state = JSON.parse(raw);
-        // If team state is > 2h old and phase is still 'spawning' or 'running',
-        // it's likely orphaned
         const started = new Date(state.startedAt).getTime();
         if (!Number.isNaN(started) && (Date.now() - started) > 2 * 60 * 60 * 1000) {
           if (state.phase === 'spawning' || state.phase === 'running') {
@@ -374,7 +344,6 @@ export async function runPreflight() {
           }
         }
       } catch {
-        // corrupt state file
         warnings.push(`Corrupt team state file: ${file}`);
       }
     }
@@ -391,19 +360,23 @@ export async function runPreflight() {
     }
   } catch (e) {
     if (e.code !== 'ENOENT') {
-      // File exists but can't be parsed
       warnings.push('.ao/prd.json exists but is not valid JSON — will be overwritten');
     }
   }
 
-  const capabilities = await detectCapabilities();
+  return { valid: warnings.length === 0, actions, warnings };
+}
 
-  return {
-    valid: warnings.length === 0,
-    actions,
-    warnings,
-    capabilities,
-  };
+/**
+ * Full preflight — state cleanup + capability detection.
+ * Called by orchestrator skills (atlas/athena) before Phase 0, NOT at SessionStart.
+ *
+ * @returns {Promise<{ valid: boolean, actions: string[], warnings: string[], capabilities: object }>}
+ */
+export async function runPreflight() {
+  const { valid, actions, warnings } = await runStateCleanup();
+  const capabilities = await detectCapabilities();
+  return { valid, actions, warnings, capabilities };
 }
 
 /**

@@ -8,11 +8,14 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync, unlinkSync } from 'node:fs';
+import path from 'node:path';
 import { readStdin } from './lib/stdin.mjs';
 import { queryWisdom } from './lib/wisdom.mjs';
 import { loadCheckpoint, formatCheckpoint } from './lib/checkpoint.mjs';
-import { runPreflight, formatPreflightReport } from './lib/preflight.mjs';
+import { runStateCleanup } from './lib/preflight.mjs';
 import { registerSession, recoverCrashedSession } from './lib/session-registry.mjs';
+import { loadAutonomyConfig } from './lib/autonomy.mjs';
 
 async function main() {
   try {
@@ -40,15 +43,45 @@ async function main() {
       // session registry failure is non-fatal
     }
 
-    // 0c. Preflight — clean stale state before loading anything
+    // 0c. State cleanup — clean stale state before loading anything
+    // NOTE: capability detection is deferred to first orchestrator call (lazy)
     try {
-      const preflightReport = await runPreflight();
-      const preflightText = formatPreflightReport(preflightReport);
-      if (preflightText) {
-        sections.push(`## Preflight\n${preflightText}`);
+      const cleanup = await runStateCleanup();
+      const parts = [];
+      if (cleanup.actions.length > 0) {
+        parts.push('Cleanup:\n' + cleanup.actions.map(a => `  ✓ ${a}`).join('\n'));
+      }
+      if (cleanup.warnings.length > 0) {
+        parts.push('Warnings:\n' + cleanup.warnings.map(w => `  ⚠ ${w}`).join('\n'));
+      }
+      if (parts.length > 0) {
+        sections.push(`## State Cleanup\n${parts.join('\n')}`);
       }
     } catch {
-      // preflight failure is non-fatal
+      // cleanup failure is non-fatal
+    }
+
+    // 0d. Plan execution fallback — check for unhandled plan approval
+    // (covers the case where PostToolUse didn't fire due to context-clear)
+    try {
+      const markerPath = path.join(_data.cwd || process.cwd(), '.ao', 'state', 'ao-plan-pending.json');
+      const markerRaw = readFileSync(markerPath, 'utf-8');
+      const marker = JSON.parse(markerRaw);
+      if (marker && !marker.handled) {
+        const config = loadAutonomyConfig(_data.cwd || process.cwd());
+        const mode = config.planExecution || 'ask';
+        if (mode === 'ask') {
+          sections.push(`## Plan Pending\nA plan was approved but execution was not started (session was cleared).\n\n### How would you like to execute?\n1. **Solo** — Execute directly\n2. **Atlas** — Sub-agent orchestrator\n3. **Athena** — Peer-to-peer team\n\nOr say \`/cancel\` to dismiss.`);
+        } else if (mode === 'atlas') {
+          sections.push(`## Plan Pending\nA plan was approved. Auto-routing to Atlas as configured. Invoke /atlas now.`);
+        } else if (mode === 'athena') {
+          sections.push(`## Plan Pending\nA plan was approved. Auto-routing to Athena as configured. Invoke /athena now.`);
+        }
+        // Mark as handled
+        try { unlinkSync(markerPath); } catch {}
+      }
+    } catch {
+      // No marker or parse error — normal, no pending plan
     }
 
     // 1. Checkpoint state — resume interrupted Atlas or Athena sessions

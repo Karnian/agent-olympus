@@ -25,9 +25,22 @@ function resolveProjectRoot() {
   }
 }
 
-const PROJECT_ROOT = resolveProjectRoot();
-const WISDOM_PATH = path.join(PROJECT_ROOT, '.ao', 'wisdom.jsonl');
-const PROGRESS_PATH = path.join(PROJECT_ROOT, '.ao', 'progress.txt');
+// Capture cwd at module load for git fallback (tests chdir before import).
+// The git call itself is deferred until first use to avoid subprocess on import.
+const _moduleCwd = process.cwd();
+let _projectRoot = null;
+function getProjectRoot() {
+  if (!_projectRoot) {
+    // Use captured cwd for fallback if git rev-parse fails (e.g. in tmp test dirs)
+    const saved = process.cwd();
+    try { process.chdir(_moduleCwd); } catch {}
+    _projectRoot = resolveProjectRoot();
+    try { process.chdir(saved); } catch {}
+  }
+  return _projectRoot;
+}
+function getWisdomPath() { return path.join(getProjectRoot(), '.ao', 'wisdom.jsonl'); }
+function getProgressPath() { return path.join(getProjectRoot(), '.ao', 'progress.txt'); }
 const MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
 /**
@@ -111,7 +124,7 @@ function jaccardSimilarity(a, b) {
  */
 async function readAllEntries() {
   try {
-    const content = await fs.readFile(WISDOM_PATH, 'utf-8');
+    const content = await fs.readFile(getWisdomPath(), 'utf-8');
     return content
       .split('\n')
       .filter(line => line.trim())
@@ -131,7 +144,7 @@ async function readAllEntries() {
  */
 async function writeAllEntries(entries) {
   const content = entries.map(e => JSON.stringify(e)).join('\n') + (entries.length ? '\n' : '');
-  await atomicWriteFile(WISDOM_PATH, content);
+  await atomicWriteFile(getWisdomPath(), content);
 }
 
 /**
@@ -167,8 +180,8 @@ export async function addWisdom(entry) {
       ...(entry.intent ? { intent: entry.intent } : {}),
     };
 
-    await fs.mkdir(path.dirname(WISDOM_PATH), { recursive: true, mode: 0o700 });
-    await fs.appendFile(WISDOM_PATH, JSON.stringify(record) + '\n', { encoding: 'utf-8', mode: 0o600 });
+    await fs.mkdir(path.dirname(getWisdomPath()), { recursive: true, mode: 0o700 });
+    await fs.appendFile(getWisdomPath(), JSON.stringify(record) + '\n', { encoding: 'utf-8', mode: 0o600 });
 
     // Auto-prune when file grows beyond threshold (every ~50 entries check)
     if (existing.length > 0 && existing.length % 50 === 0) {
@@ -376,7 +389,7 @@ export async function migrateProgressTxt() {
   try {
     // Skip if already migrated
     try {
-      await fs.access(WISDOM_PATH);
+      await fs.access(getWisdomPath());
       return; // wisdom.jsonl exists, already migrated
     } catch {
       // wisdom.jsonl does not exist, proceed
@@ -385,7 +398,7 @@ export async function migrateProgressTxt() {
     // Check if progress.txt exists
     let content;
     try {
-      content = await fs.readFile(PROGRESS_PATH, 'utf-8');
+      content = await fs.readFile(getProgressPath(), 'utf-8');
     } catch {
       return; // no progress.txt to migrate
     }
@@ -425,7 +438,7 @@ export async function migrateProgressTxt() {
     }
 
     // Rename progress.txt → progress.txt.bak
-    await fs.rename(PROGRESS_PATH, PROGRESS_PATH + '.bak');
+    await fs.rename(getProgressPath(), getProgressPath() + '.bak');
   } catch {
     // fail-safe: no-op
   }
@@ -509,7 +522,7 @@ export async function importWisdom(jsonString, { merge = true } = {}) {
     imported++;
   }
 
-  await fs.mkdir(path.dirname(WISDOM_PATH), { recursive: true, mode: 0o700 });
+  await fs.mkdir(path.dirname(getWisdomPath()), { recursive: true, mode: 0o700 });
   await writeAllEntries(existing);
   return { imported, duplicatesSkipped };
 }

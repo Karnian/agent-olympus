@@ -26,52 +26,54 @@ const MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Cached git metadata — resolved lazily, individual calls to avoid
+// git rev-parse output ordering issues with combined flags.
+let _gitMeta = null;
+
+const GIT_OPTS = { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] };
+
 /**
- * Resolve the project root — walks up from cwd to find the real .git directory
- * (not a worktree .git file). Falls back to cwd.
- * @returns {string}
+ * Resolve project root, branch, and HEAD SHA.
+ * Uses two git calls (commonDir + branch/sha) instead of three.
+ * Caches result for process lifetime.
+ * @returns {{ projectRoot: string, branch: string|null, headSha: string|null }}
  */
+function resolveGitMeta() {
+  if (_gitMeta) return _gitMeta;
+  let projectRoot = process.cwd();
+  let branch = null;
+  let headSha = null;
+  try {
+    const commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], GIT_OPTS).trim();
+    projectRoot = dirname(commonDir);
+  } catch {}
+  try {
+    branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], GIT_OPTS).trim() || null;
+  } catch {}
+  try {
+    headSha = execFileSync('git', ['rev-parse', '--short', 'HEAD'], GIT_OPTS).trim() || null;
+  } catch {}
+  _gitMeta = { projectRoot, branch, headSha };
+  return _gitMeta;
+}
+
 function resolveProjectRoot() {
-  try {
-    const commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    // commonDir is e.g. /project/.git → parent is project root
-    return dirname(commonDir);
-  } catch {
-    return process.cwd();
-  }
+  return resolveGitMeta().projectRoot;
 }
 
-/**
- * Get the current git branch name.
- * @returns {string|null}
- */
 function getCurrentBranch() {
-  try {
-    return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() || null;
-  } catch {
-    return null;
-  }
+  return resolveGitMeta().branch;
+}
+
+function getHeadSha() {
+  return resolveGitMeta().headSha;
 }
 
 /**
- * Get the current HEAD commit SHA (short).
- * @returns {string|null}
+ * Invalidate cached git metadata (for testing or when HEAD changes).
  */
-function getHeadSha() {
-  try {
-    return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim() || null;
-  } catch {
-    return null;
-  }
+export function _clearGitMetaCache() {
+  _gitMeta = null;
 }
 
 /**
@@ -162,6 +164,8 @@ export function finalizeSession(sessionId, data = {}) {
 
     record.endedAt = new Date().toISOString();
     record.status = data.status || 'ended';
+    // Get fresh HEAD SHA at finalize time (not cached from session start)
+    _gitMeta = null;
     record.headSha = getHeadSha();
 
     atomicWriteFileSync(filePath, JSON.stringify(record, null, 2));

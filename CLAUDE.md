@@ -52,6 +52,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - **SubagentStart** (`scripts/subagent-start.mjs`) — fires when a subagent is spawned; injects wisdom context via `additionalContext`, filtered by `subagent_type` relevance
 - **Notification** (`scripts/notification.mjs`) — fires on `idle_prompt` and `permission_prompt` events; logs to `.ao/state/ao-notifications.json` for stall detection (async, non-blocking)
 - **SubagentStop** (`scripts/subagent-stop.mjs`) — fires when a subagent completes; captures results to `.ao/state/ao-subagent-results.json` (async, non-blocking)
+- **PlanExecuteGate** (`scripts/plan-execute-gate.mjs`) — fires on PostToolUse ExitPlanMode; reads `planExecution` from autonomy.json and injects execution routing (solo/ask/atlas/athena); writes marker `.ao/state/ao-plan-pending.json` for SessionStart fallback
 - **SessionEnd** (`scripts/session-end.mjs`) — fires on session termination; cleans up stale state files older than 24h (async, non-blocking)
 - **Stop** (`scripts/stop-hook.mjs`) — fires at session end; auto-commits any uncommitted work as a WIP commit so nothing is lost; uses selective staging (excludes `.env`, secrets, `.ao/state/`, `.ao/teams/`)
 
@@ -73,6 +74,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/state/ao-current-session.json` — active session pointer (sessionId + startedAt); used for crash recovery
 - `.ao/state/ao-capabilities.json` — cached capability detection results (5-min TTL, file-based since hooks run as separate processes)
 - `.ao/state/ao-notifications.json` — logged idle/permission prompt notifications for stall detection (capped at 50 entries, FIFO)
+- `.ao/state/ao-plan-pending.json` — marker for plan execution routing fallback (created by PlanExecuteGate, consumed by SessionStart)
 - `.ao/state/*.json` — transient state files (deleted on completion or cleaned by SessionEnd after 24h)
 - `.ao/sessions/<sessionId>.json` — per-session metadata (branch, cwd, status, linked runIds); shared across worktrees; 90-day TTL
 - `.ao/artifacts/runs/<runId>/` — per-run artifacts (events.jsonl, summary.json, verification.jsonl)
@@ -191,12 +193,14 @@ Override via `.ao/autonomy.json`:
 {
   "codex": { "approval": "full-auto" },
   "gemini": { "approval": "yolo" },
-  "nativeTeams": true
+  "nativeTeams": true,
+  "planExecution": "ask"
 }
 ```
 Codex values: `auto` (default), `suggest`, `auto-edit`, `full-auto`
 Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
 `nativeTeams`: `true` enables Native Agent Teams without env var (fallback when `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is not set in hook environment)
+`planExecution`: `ask` (default) presents Solo/Atlas/Athena choice after plan approval; `solo` skips orchestration; `atlas`/`athena` auto-routes. Simple plans (S-scale or ≤2 stories) auto-skip to solo.
 
 ### Key Files
 - `scripts/lib/codex-appserver.mjs` — Codex app-server JSON-RPC client (thread/turn/steer/interrupt)
@@ -208,7 +212,7 @@ Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
 - `scripts/lib/gemini-approval.mjs` — Gemini approval mode mapping (delegates to permission-detect)
 - `scripts/lib/worker-spawn.mjs` — Adapter router (`selectAdapter`, `spawnTeam`, `monitorTeam`)
 - `scripts/lib/resolve-binary.mjs` — Binary resolution with caching + `buildEnhancedPath()`
-- `scripts/lib/preflight.mjs` — Capability detection (`hasCodexAppServer`, `hasCodexExecJson`, `hasClaudeCli`, `hasGeminiCli`, `hasGeminiAcp`)
+- `scripts/lib/preflight.mjs` — `runStateCleanup()` (lightweight, SessionStart) + `runPreflight()` (full, orchestrators) + `detectCapabilities()` (parallel, cached 60min)
 - `scripts/lib/codex-approval.mjs` — Claude permission detection → Codex approval mode mirroring
 - `scripts/lib/cost-estimate.mjs` — Token-based cost estimation (Claude + Gemini pricing)
 
