@@ -110,8 +110,9 @@ const preflightReport = await runPreflight();
 for (const action of preflightReport.actions) {
   Output: "[Athena] Preflight: " + action;
 }
-const { hasNativeTeamTools } = preflightReport.capabilities;
-Output: "[Athena] Native Agent Teams: " + (hasNativeTeamTools ? "enabled" : "disabled")
+const { hasNativeTeamTools, hasCodex, hasCodexAppServer, hasCodexExecJson, hasGeminiCli, hasGeminiAcp, hasTmux } = preflightReport.capabilities;
+import { formatCapabilityReport } from './scripts/lib/preflight.mjs';
+Output: formatCapabilityReport(preflightReport.capabilities, { orchestrator: 'Athena' })
 
 // Step 3: Guard input size
 import { prepareSubAgentInput, checkInputSize } from './scripts/lib/input-guard.mjs';
@@ -135,8 +136,24 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   1. Break into INDEPENDENT work streams
   2. Each stream: scope (files), worker type, model tier, dependencies
   3. Identify coordination points
-  4. Recommend team size (max 5 Claude + 2 Codex + 2 Gemini)
-  Rules: Codex for algorithms/large refactoring, Claude for standard impl/tests, Gemini for visual/multimodal/creative tasks
+  4. Recommend team size based on AVAILABLE capabilities below
+
+  Available capabilities:
+  - Codex: <hasCodex ? 'AVAILABLE (app-server: ' + hasCodexAppServer + ', exec: ' + hasCodexExecJson + ')' : 'NOT AVAILABLE — do not assign Codex workers'>
+  - Gemini: <hasGeminiCli ? 'AVAILABLE (ACP: ' + hasGeminiAcp + ')' : 'NOT AVAILABLE — do not assign Gemini workers'>
+  - tmux: <hasTmux ? 'available' : 'NOT available — parallel workers need native teams'>
+  - Native Teams: <hasNativeTeamTools ? 'enabled (SendMessage available)' : 'disabled (orchestrator-mediated relay)'>
+  Max workers: <hasCodex ? '5 Claude + 2 Codex' : '5 Claude'> + <hasGeminiCli ? '2 Gemini' : '0 Gemini'>
+
+  Worker assignment rules:
+  - ONLY assign Codex workers if Codex is AVAILABLE above
+  - ONLY assign Gemini workers if Gemini is AVAILABLE above
+  - If unavailable, assign those tasks to Claude instead (universal fallback)
+  - Codex best for: algorithms, large refactoring, batch code transformations, cross-validation
+  - Gemini best for: visual/multimodal, design review, creative tasks
+  - Trivial tasks: Claude only, no external models needed
+  - Claude handles everything else
+
   Prior learnings: <formatWisdomForPrompt()>
   Task: <user_request>")
 ```
@@ -154,7 +171,7 @@ If metis_output is empty OR does not contain worker/stream assignments:
   import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
   const { summary } = extractStructuralSummary(<combined_input>, 100);
   metis_output = Task(subagent_type="agent-olympus:metis", model="sonnet",
-    prompt="Design a team for this task. Break into independent streams with worker type and scope.\nTask summary: " + summary)
+    prompt="Design a team. Available: Codex=" + hasCodex + ", Gemini=" + hasGeminiCli + ". Only assign available worker types.\nBreak into independent streams with worker type and scope.\nTask summary: " + summary)
 
   If metis_output is STILL empty:
     Output: "[Athena] ✗ Phase 0 FAILED — Metis could not design team after retry."
@@ -669,7 +686,14 @@ tmux send-keys -t "athena-<slug>-codex-xval-<story-id>" "\"$CODEX_BIN\" <approva
 ```
 - **PASS** → `addVerification(runId, { story_id, verdict: 'pass', evidence: 'codex xval passed', verifiedBy: 'codex' })` → mark `passes: true`, proceed.
 - **FAIL** → `addVerification(runId, { story_id, verdict: 'fail', evidence: '<specific findings>', verifiedBy: 'codex' })` → route findings back to the responsible worker via inbox for fix, re-validate (max 2 cycles).
-- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'codex <reason>: cross-validation skipped', verifiedBy: 'athena' })`. Log: `[Athena] Codex cross-validation skipped for <story-id>: <reason>.`
+- **Codex unavailable BUT Gemini available** → use Gemini as alternative cross-validator:
+```bash
+GEMINI_BIN=$(which gemini 2>/dev/null || echo /opt/homebrew/bin/gemini)
+tmux new-session -d -s "athena-<slug>-gemini-xval-<story-id>" -c "<cwd>"
+tmux send-keys -t "athena-<slug>-gemini-xval-<story-id>" "\"$GEMINI_BIN\" <approval-flag> -p \"Cross-validate implementation of <US-ID>. Files: <files>. Criteria: <criteria>. Reply PASS or FAIL with findings.\"" Enter
+```
+  Record: `addVerification(runId, { story_id, verdict: 'pass'|'fail', evidence: '<findings>', verifiedBy: 'gemini' })`
+- **Neither Codex nor Gemini available** → **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'no external validator available: cross-validation skipped', verifiedBy: 'athena' })`. Log: `[Athena] Cross-validation skipped for <story-id>: no external validator available.`
 - **Note**: Run xval against post-merge file paths, not per-worker file paths, to catch violations introduced during conflict resolution.
 
 > **IMPORTANT**: "skip silently" does NOT mean "do nothing". Every story MUST have a verification record — pass, fail, or explicit skip. The PR verification gate will block if any story lacks a record.
@@ -914,7 +938,12 @@ Report: PRD stories (N/N), per-worker summary, files changed, coordination log, 
 | 7-15 files | 3-4 | 1 | 0-1 | 4-6 |
 | 15+ files | 4-5 | 2 | 0-2 | 6-9 |
 
-Gemini workers are assigned when `teamWorkerType: "gemini"` is set in model-routing config (visual-engineering, design-review, artistry routes).
+**Capability-aware sizing**: The table above shows MAXIMUM worker counts. Metis adjusts based on actual capabilities detected at runtime:
+- If Codex unavailable: Codex slots reassigned to Claude workers
+- If Gemini unavailable: Gemini slots reassigned to Claude workers
+- If neither external model available: pure Claude team (existing behavior preserved)
+
+Gemini workers are assigned when the task involves visual/multimodal work, or when `teamWorkerType: "gemini"` is set in model-routing config.
 
 ## Worker_Types
 
