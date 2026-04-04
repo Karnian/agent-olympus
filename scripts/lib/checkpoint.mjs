@@ -18,21 +18,66 @@ export const PHASE_NAMES = {
 };
 
 /**
- * Save checkpoint after each phase transition.
+ * Build the checkpoint filename, optionally scoped to a session.
  * @param {'atlas'|'athena'} orchestrator
- * @param {{ phase: number, prdSnapshot?: object, completedStories?: string[], activeWorkers?: string[], worktrees?: Object.<string, {path: string, branch: string}>, startedAt?: string, taskDescription?: string }} data
+ * @param {string|null} sessionId
+ * @returns {string} filename (not full path)
+ */
+function checkpointFilename(orchestrator, sessionId) {
+  return sessionId
+    ? `checkpoint-${orchestrator}-${sessionId}.json`
+    : `checkpoint-${orchestrator}.json`;
+}
+
+/**
+ * Try to load and validate a single checkpoint file.
+ * Returns the checkpoint object if valid and not expired, null otherwise.
+ * Deletes expired files as a side effect.
+ * @param {string} filePath
+ * @returns {Promise<object|null>}
+ */
+async function tryLoadCheckpointFile(filePath) {
+  try {
+    const raw = await fs.readFile(filePath, 'utf-8');
+    const checkpoint = JSON.parse(raw);
+
+    const savedAt = new Date(checkpoint.savedAt).getTime();
+    if (Number.isNaN(savedAt)) {
+      await fs.unlink(filePath).catch(() => {});
+      return null;
+    }
+
+    if (Date.now() - savedAt > TTL_MS) {
+      await fs.unlink(filePath).catch(() => {});
+      return null;
+    }
+
+    return checkpoint;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save checkpoint after each phase transition.
+ * When data.sessionId is provided, the checkpoint is scoped to that session,
+ * allowing concurrent Atlas/Athena runs without overwriting each other.
+ *
+ * @param {'atlas'|'athena'} orchestrator
+ * @param {{ phase: number, sessionId?: string, prdSnapshot?: object, completedStories?: string[], activeWorkers?: string[], worktrees?: Object.<string, {path: string, branch: string}>, startedAt?: string, taskDescription?: string }} data
  */
 export async function saveCheckpoint(orchestrator, data) {
   try {
     await fs.mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
 
+    const sessionId = data.sessionId || null;
     const checkpoint = {
       orchestrator,
       ...data,
       savedAt: new Date().toISOString(),
     };
 
-    const filePath = path.join(STATE_DIR, `checkpoint-${orchestrator}.json`);
+    const filePath = path.join(STATE_DIR, checkpointFilename(orchestrator, sessionId));
 
     // Emit events to active run if one exists (US-002 + US-003)
     const activeRunId = getActiveRunId(orchestrator);
@@ -77,29 +122,57 @@ export async function saveCheckpoint(orchestrator, data) {
 
 /**
  * Load existing checkpoint if < 24h old.
+ * When opts.sessionId is provided, looks for that session's checkpoint first.
+ * Without sessionId, finds the most recent valid checkpoint (legacy or session-scoped).
+ *
  * @param {'atlas'|'athena'} orchestrator
+ * @param {{ sessionId?: string }} [opts]
  * @returns {Promise<object|null>}
  */
-export async function loadCheckpoint(orchestrator) {
+export async function loadCheckpoint(orchestrator, opts = {}) {
   try {
-    const filePath = path.join(STATE_DIR, `checkpoint-${orchestrator}.json`);
-    const raw = await fs.readFile(filePath, 'utf-8');
-    const checkpoint = JSON.parse(raw);
+    const sessionId = opts.sessionId || null;
 
-    const savedAt = new Date(checkpoint.savedAt).getTime();
-    if (Number.isNaN(savedAt)) {
-      await fs.unlink(filePath).catch(() => {});
-      return null;
-    }
-    const age = Date.now() - savedAt;
-
-    if (age > TTL_MS) {
-      // Expired — delete silently and return null
-      await fs.unlink(filePath).catch(() => {});
-      return null;
+    // 1. If sessionId provided, try exact match first
+    if (sessionId) {
+      const exact = await tryLoadCheckpointFile(
+        path.join(STATE_DIR, checkpointFilename(orchestrator, sessionId))
+      );
+      if (exact) return exact;
     }
 
-    return checkpoint;
+    // 2. Try legacy singleton file
+    const legacy = await tryLoadCheckpointFile(
+      path.join(STATE_DIR, checkpointFilename(orchestrator, null))
+    );
+    if (legacy) return legacy;
+
+    // 3. Scan for any session-scoped checkpoint files, return newest valid
+    const prefix = `checkpoint-${orchestrator}-`;
+    let entries;
+    try {
+      entries = await fs.readdir(STATE_DIR);
+    } catch {
+      return null;
+    }
+
+    const candidates = entries.filter(f => f.startsWith(prefix) && f.endsWith('.json'));
+
+    let newest = null;
+    let newestTime = 0;
+
+    for (const file of candidates) {
+      const cp = await tryLoadCheckpointFile(path.join(STATE_DIR, file));
+      if (cp) {
+        const t = new Date(cp.savedAt).getTime();
+        if (t > newestTime) {
+          newest = cp;
+          newestTime = t;
+        }
+      }
+    }
+
+    return newest;
   } catch {
     return null;
   }
@@ -107,9 +180,12 @@ export async function loadCheckpoint(orchestrator) {
 
 /**
  * Delete checkpoint on clean completion.
+ * When opts.sessionId is provided, only deletes that session's checkpoint.
+ *
  * @param {'atlas'|'athena'} orchestrator
+ * @param {{ sessionId?: string }} [opts]
  */
-export async function clearCheckpoint(orchestrator) {
+export async function clearCheckpoint(orchestrator, opts = {}) {
   try {
     // Emit checkpoint_cleared event if active run exists (US-002)
     const activeRunId = getActiveRunId(orchestrator);
@@ -120,7 +196,8 @@ export async function clearCheckpoint(orchestrator) {
       });
     }
 
-    const filePath = path.join(STATE_DIR, `checkpoint-${orchestrator}.json`);
+    const sessionId = opts?.sessionId || null;
+    const filePath = path.join(STATE_DIR, checkpointFilename(orchestrator, sessionId));
     await fs.unlink(filePath);
   } catch {
     // fail-safe: no-op on error
