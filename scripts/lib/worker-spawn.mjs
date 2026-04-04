@@ -35,6 +35,70 @@ const CODEX_ERROR_PATTERNS = [
   { pattern: /fatal error|unhandled exception|panic:|SIGSEGV|SIGABRT|segmentation fault/i, reason: 'crash' },
 ];
 
+// ─── Adapter registry (strategy table) ─────────────────────────────────────
+// Maps adapter name → { loader, handleKey, monitorFn, shutdownFn, statusMap, errorLabel }
+// Adding a new adapter requires only one new entry here.
+
+const ADAPTER_REGISTRY = {
+  'codex-appserver': {
+    loader: () => import('./codex-appserver.mjs'),
+    handleKey: '_liveHandle',
+    monitorFn: 'monitor',
+    shutdownFn: 'shutdownServer',
+    statusMap: { ready: 'running' },
+    errorLabel: 'Codex app-server',
+  },
+  'codex-exec': {
+    loader: () => import('./codex-exec.mjs'),
+    handleKey: '_liveHandle',
+    monitorFn: 'monitor',
+    shutdownFn: 'shutdown',
+    statusMap: null,
+    errorLabel: 'Codex exec',
+  },
+  'claude-cli': {
+    loader: () => import('./claude-cli.mjs'),
+    handleKey: '_liveHandle',
+    monitorFn: 'monitor',
+    shutdownFn: 'shutdown',
+    statusMap: null,
+    errorLabel: 'Claude CLI',
+  },
+  'gemini-acp': {
+    loader: () => import('./gemini-acp.mjs'),
+    handleKey: '_liveHandle',
+    monitorFn: 'monitor',
+    shutdownFn: 'shutdownServer',
+    statusMap: null,
+    errorLabel: 'Gemini ACP',
+  },
+  'gemini-exec': {
+    loader: () => import('./gemini-exec.mjs'),
+    handleKey: '_liveHandle',
+    monitorFn: 'monitor',
+    shutdownFn: 'shutdown',
+    statusMap: null,
+    errorLabel: 'Gemini exec',
+  },
+};
+
+/**
+ * Lazily load adapter modules needed by the given adapter names.
+ * @param {string[]} adapterNames
+ * @returns {Promise<Object.<string, Object>>} Map of adapter name -> loaded module
+ */
+async function loadRequiredAdapters(adapterNames) {
+  const modules = {};
+  const unique = [...new Set(adapterNames)];
+  for (const name of unique) {
+    const entry = ADAPTER_REGISTRY[name];
+    if (entry) {
+      modules[name] = await entry.loader();
+    }
+  }
+  return modules;
+}
+
 // ─── State persistence ──────────────────────────────────────────────────────
 
 function saveTeamState(teamName, state) {
@@ -85,89 +149,37 @@ export function selectAdapter(worker, capabilities = {}) {
   return 'tmux';
 }
 
-/**
- * Lazily load the codex-exec adapter module.
- * @returns {Promise<Object>} The codex-exec module
- */
-async function loadCodexExecAdapter() {
-  return import('./codex-exec.mjs');
-}
+// ─── Generic adapter monitor helper ────────────────────────────────────────
 
 /**
- * Lazily load the codex-appserver adapter module.
- * @returns {Promise<Object>} The codex-appserver module
- */
-async function loadCodexAppServerAdapter() {
-  return import('./codex-appserver.mjs');
-}
-
-/**
- * Lazily load the claude-cli adapter module.
- * @returns {Promise<Object>} The claude-cli module
- */
-async function loadClaudeCliAdapter() {
-  return import('./claude-cli.mjs');
-}
-
-/**
- * Lazily load the gemini-exec adapter module.
- * @returns {Promise<Object>} The gemini-exec module
- */
-async function loadGeminiExecAdapter() {
-  return import('./gemini-exec.mjs');
-}
-
-/**
- * Lazily load the gemini-acp adapter module.
- * @returns {Promise<Object>} The gemini-acp module
- */
-async function loadGeminiAcpAdapter() {
-  return import('./gemini-acp.mjs');
-}
-
-// ─── Gemini adapter monitor helpers ─────────────────────────────────────────
-
-/**
- * Monitor a gemini-exec-based worker via the gemini-exec adapter.
- * @param {Object} worker - Worker state with _handle (live GeminiHandle)
- * @param {Object} geminiExec - The loaded gemini-exec module
+ * Monitor a non-tmux worker via its adapter module.
+ * Replaces the 5 per-adapter monitor functions with a single generic one.
+ *
+ * @param {Object} worker - Worker state from team state
+ * @param {Object} adapterModule - The loaded adapter module
+ * @param {Object} registryEntry - The ADAPTER_REGISTRY entry for this adapter
  * @returns {{ status: string, output: string, error?: { category: string, message: string } }}
  */
-function monitorGeminiExecWorker(worker, geminiExec) {
-  if (!worker._handle) {
-    return { status: 'failed', output: '', error: { category: 'crash', message: 'No gemini-exec handle' } };
+function monitorAdapterWorker(worker, adapterModule, registryEntry) {
+  const handle = worker[registryEntry.handleKey];
+  if (!handle) {
+    return { status: 'failed', output: '', error: { category: 'crash', message: `No ${registryEntry.errorLabel} handle` } };
   }
   try {
-    const snapshot = geminiExec.monitor(worker._handle);
-    const result = { status: snapshot.status, output: snapshot.output || '' };
-    if (snapshot.error) {
-      // snapshot.error can be a string category or an object — normalize
-      const category = typeof snapshot.error === 'string' ? snapshot.error
-        : (snapshot.error.category || 'unknown');
-      result.error = { category, message: `Gemini exec error: ${category}` };
+    const snapshot = adapterModule[registryEntry.monitorFn](handle);
+    let status = snapshot.status;
+    if (registryEntry.statusMap && registryEntry.statusMap[status]) {
+      status = registryEntry.statusMap[status];
     }
-    return result;
-  } catch {
-    return { status: worker.status || 'running', output: '' };
-  }
-}
-
-/**
- * Monitor a gemini-acp-based worker via the gemini-acp adapter.
- * @param {Object} worker - Worker state with _liveHandle (GeminiAcpHandle)
- * @param {Object} geminiAcp - The loaded gemini-acp module
- * @returns {{ status: string, output: string, error?: { category: string, message: string } }}
- */
-function monitorGeminiAcpWorker(worker, geminiAcp) {
-  if (!worker._liveHandle) {
-    return { status: 'failed', output: '', error: { category: 'crash', message: 'No gemini-acp handle' } };
-  }
-  try {
-    const snapshot = geminiAcp.monitor(worker._liveHandle);
-    const result = { status: snapshot.status, output: snapshot.output || '' };
+    const result = { status, output: (snapshot.output || '').slice(-500) };
     if (snapshot.error) {
-      const category = typeof snapshot.error === 'string' ? snapshot.error : snapshot.error.category || 'unknown';
-      result.error = { category, message: `Gemini ACP error: ${category}` };
+      const category = typeof snapshot.error === 'string'
+        ? snapshot.error
+        : (snapshot.error.category || 'unknown');
+      const message = typeof snapshot.error === 'object' && snapshot.error.message
+        ? snapshot.error.message
+        : `${registryEntry.errorLabel} error: ${category}`;
+      result.error = { category, message };
     }
     return result;
   } catch {
@@ -212,75 +224,6 @@ function monitorTmuxWorker(worker) {
     };
   }
 
-  return result;
-}
-
-/**
- * Monitor a codex-exec-based worker via the codex-exec adapter.
- * Returns a MonitorResult-shaped object.
- *
- * @param {Object} worker - Worker state object with _handle
- * @param {Object} codexExec - The loaded codex-exec module
- * @returns {{ status: string, output: string, error?: { category: string, message: string }, stalled?: boolean, stalledMs?: number }}
- */
-function monitorCodexExecWorker(worker, codexExec) {
-  if (!worker._handle) {
-    return { status: 'failed', output: '', error: { category: 'crash', message: 'No codex-exec handle' } };
-  }
-  const mr = codexExec.monitor(worker._handle);
-  const result = {
-    status: mr.status,
-    output: (mr.output || '').slice(-500),
-  };
-  if (mr.error) {
-    result.error = mr.error;
-  }
-  return result;
-}
-
-/**
- * Monitor a codex-appserver-based worker via the codex-appserver adapter.
- * Returns a MonitorResult-shaped object.
- *
- * @param {Object} worker - Worker state object with _liveHandle
- * @param {Object} appserver - The loaded codex-appserver module
- * @returns {{ status: string, output: string, error?: { category: string, message: string }, stalled?: boolean, stalledMs?: number }}
- */
-function monitorCodexAppServerWorker(worker, appserver) {
-  if (!worker._liveHandle) {
-    return { status: 'failed', output: '', error: { category: 'crash', message: 'No app-server handle' } };
-  }
-  const mr = appserver.monitor(worker._liveHandle);
-  const result = {
-    status: mr.status === 'ready' ? 'running' : mr.status,
-    output: (mr.output || '').slice(-500),
-  };
-  if (mr.error) {
-    result.error = mr.error;
-  }
-  return result;
-}
-
-/**
- * Monitor a claude-cli-based worker via the claude-cli adapter.
- * Returns a MonitorResult-shaped object.
- *
- * @param {Object} worker - Worker state object with _liveHandle
- * @param {Object} claudeCli - The loaded claude-cli module
- * @returns {{ status: string, output: string, error?: { category: string, message: string }, stalled?: boolean, stalledMs?: number }}
- */
-function monitorClaudeCliWorker(worker, claudeCli) {
-  if (!worker._liveHandle) {
-    return { status: 'failed', output: '', error: { category: 'crash', message: 'No claude-cli handle' } };
-  }
-  const mr = claudeCli.monitor(worker._liveHandle);
-  const result = {
-    status: mr.status,
-    output: (mr.output || '').slice(-500),
-  };
-  if (mr.error) {
-    result.error = mr.error;
-  }
   return result;
 }
 
@@ -337,36 +280,14 @@ export async function reassignToClaude(teamName, workerName, originalPrompt, fai
     // _liveHandle is ephemeral (non-serializable) — only present when state is in-memory
     const liveHandle = worker?._liveHandle || worker?._handle;
 
-    if (adapterName === 'codex-appserver' && liveHandle) {
-      // Shutdown via codex-appserver adapter
+    const registryEntry = ADAPTER_REGISTRY[adapterName];
+    if (registryEntry && liveHandle) {
       try {
-        const appserver = await loadCodexAppServerAdapter();
-        await appserver.shutdownServer(liveHandle);
-      } catch {}
-    } else if (adapterName === 'claude-cli' && liveHandle) {
-      // Shutdown via claude-cli adapter
-      try {
-        const cli = await loadClaudeCliAdapter();
-        await cli.shutdown(liveHandle);
-      } catch {}
-    } else if (adapterName === 'codex-exec' && liveHandle) {
-      // Shutdown via codex-exec adapter
-      try {
-        const codexExec = await loadCodexExecAdapter();
-        await codexExec.shutdown(liveHandle);
-      } catch {}
-    } else if (adapterName === 'gemini-acp' && liveHandle) {
-      try {
-        const geminiAcp = await loadGeminiAcpAdapter();
-        await geminiAcp.shutdownServer(liveHandle);
-      } catch {}
-    } else if (adapterName === 'gemini-exec' && liveHandle) {
-      try {
-        const geminiExec = await loadGeminiExecAdapter();
-        await geminiExec.shutdown(liveHandle);
+        const adapterModule = await registryEntry.loader();
+        await adapterModule[registryEntry.shutdownFn](liveHandle);
       } catch {}
     } else {
-      // Shutdown via tmux (default — also used when _liveHandle is unavailable from disk-loaded state)
+      // Fallback: tmux cleanup (also used when _liveHandle is unavailable from disk-loaded state)
       const session = sessionOverride || sessionName(teamName, workerName);
       try { killSession(session); } catch {}
     }
@@ -392,27 +313,13 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
     throw new Error('tmux is not installed. Run: brew install tmux');
   }
 
-  // Lazy-load adapters as needed
-  let codexExec = null;
-  let codexAppServer = null;
-  let claudeCli = null;
-  let geminiExec = null;
-  let geminiAcp = null;
-  if (adapterNames.includes('codex-exec')) {
-    codexExec = await loadCodexExecAdapter();
-  }
-  if (adapterNames.includes('codex-appserver')) {
-    codexAppServer = await loadCodexAppServerAdapter();
-  }
-  if (adapterNames.includes('claude-cli')) {
-    claudeCli = await loadClaudeCliAdapter();
-  }
-  if (adapterNames.includes('gemini-exec')) {
-    geminiExec = await loadGeminiExecAdapter();
-  }
-  if (adapterNames.includes('gemini-acp')) {
-    geminiAcp = await loadGeminiAcpAdapter();
-  }
+  // Lazy-load adapters as needed via registry
+  const adapterModules = await loadRequiredAdapters(adapterNames.filter(a => a !== 'tmux'));
+  const codexExec = adapterModules['codex-exec'] || null;
+  const codexAppServer = adapterModules['codex-appserver'] || null;
+  const claudeCli = adapterModules['claude-cli'] || null;
+  const geminiExec = adapterModules['gemini-exec'] || null;
+  const geminiAcp = adapterModules['gemini-acp'] || null;
 
   const state = {
     teamName,
@@ -593,12 +500,14 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
   const state = loadTeamState(teamName);
   if (!state) return null;
 
-  // Lazy-loaded adapter modules (passed in or null)
-  const codexExec = _codexExecModule || null;
-  const codexAppServer = _codexAppServerModule || null;
-  const claudeCli = _claudeCliModule || null;
-  const geminiExec = _geminiExecModule || null;
-  const geminiAcp = _geminiAcpModule || null;
+  // Build adapter modules map from positional args (backward-compatible signature)
+  const adapterModules = {
+    'codex-exec': _codexExecModule || null,
+    'codex-appserver': _codexAppServerModule || null,
+    'claude-cli': _claudeCliModule || null,
+    'gemini-exec': _geminiExecModule || null,
+    'gemini-acp': _geminiAcpModule || null,
+  };
 
   const status = {
     teamName,
@@ -613,18 +522,13 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
     const worker = state.workers[i];
     const adapterName = worker._adapterName || 'tmux';
 
-    // ─── Dispatch monitoring to correct adapter ───
+    // ─── Dispatch monitoring to correct adapter via registry ───
     let monitorResult;
-    if (adapterName === 'codex-appserver' && codexAppServer && worker._liveHandle) {
-      monitorResult = monitorCodexAppServerWorker(worker, codexAppServer);
-    } else if (adapterName === 'claude-cli' && claudeCli && worker._liveHandle) {
-      monitorResult = monitorClaudeCliWorker(worker, claudeCli);
-    } else if (adapterName === 'codex-exec' && codexExec && worker._liveHandle) {
-      monitorResult = monitorCodexExecWorker({ ...worker, _handle: worker._liveHandle }, codexExec);
-    } else if (adapterName === 'gemini-acp' && geminiAcp && worker._liveHandle) {
-      monitorResult = monitorGeminiAcpWorker(worker, geminiAcp);
-    } else if (adapterName === 'gemini-exec' && geminiExec && worker._liveHandle) {
-      monitorResult = monitorGeminiExecWorker({ ...worker, _handle: worker._liveHandle }, geminiExec);
+    const registryEntry = ADAPTER_REGISTRY[adapterName];
+    const adapterModule = registryEntry ? adapterModules[adapterName] : null;
+
+    if (registryEntry && adapterModule && worker[registryEntry.handleKey]) {
+      monitorResult = monitorAdapterWorker(worker, adapterModule, registryEntry);
     } else {
       monitorResult = monitorTmuxWorker(worker);
     }
@@ -726,22 +630,9 @@ export function collectResults(teamName) {
 
       const adapter = worker._adapterName || 'tmux';
 
-      if (adapter === 'codex-appserver' && worker._liveHandle) {
-        // App-server: output is in the live handle
-        const output = worker._liveHandle._output;
-        if (output) results[worker.name] = output;
-      } else if (adapter === 'claude-cli' && worker._liveHandle) {
-        // Claude CLI: output is in the live handle
-        const output = worker._liveHandle._output;
-        if (output) results[worker.name] = output;
-      } else if (adapter === 'codex-exec' && worker._liveHandle) {
-        // Codex-exec: output is in the live handle
-        const output = worker._liveHandle._output;
-        if (output) results[worker.name] = output;
-      } else if (adapter === 'gemini-acp' && worker._liveHandle) {
-        const output = worker._liveHandle._output;
-        if (output) results[worker.name] = output;
-      } else if (adapter === 'gemini-exec' && worker._liveHandle) {
+      // All non-tmux adapters store output in _liveHandle._output
+      const registryEntry = ADAPTER_REGISTRY[adapter];
+      if (registryEntry && worker._liveHandle) {
         const output = worker._liveHandle._output;
         if (output) results[worker.name] = output;
       } else if (worker.session) {
@@ -771,25 +662,14 @@ export async function shutdownTeam(teamName, cwd) {
   if (state) {
     for (const worker of state.workers) {
       const adapter = worker._adapterName || 'tmux';
-      try {
-        if (adapter === 'codex-appserver' && worker._liveHandle) {
-          const appserver = await loadCodexAppServerAdapter();
-          await appserver.shutdownServer(worker._liveHandle);
-        } else if (adapter === 'claude-cli' && worker._liveHandle) {
-          const cli = await loadClaudeCliAdapter();
-          await cli.shutdown(worker._liveHandle);
-        } else if (adapter === 'codex-exec' && worker._liveHandle) {
-          const codexExec = await loadCodexExecAdapter();
-          await codexExec.shutdown(worker._liveHandle);
-        } else if (adapter === 'gemini-acp' && worker._liveHandle) {
-          const geminiAcp = await loadGeminiAcpAdapter();
-          await geminiAcp.shutdownServer(worker._liveHandle);
-        } else if (adapter === 'gemini-exec' && worker._liveHandle) {
-          const geminiExec = await loadGeminiExecAdapter();
-          await geminiExec.shutdown(worker._liveHandle);
+      const registryEntry = ADAPTER_REGISTRY[adapter];
+      if (registryEntry && worker._liveHandle) {
+        try {
+          const adapterModule = await registryEntry.loader();
+          await adapterModule[registryEntry.shutdownFn](worker._liveHandle);
+        } catch {
+          // Best-effort cleanup
         }
-      } catch {
-        // Best-effort cleanup
       }
     }
   }
