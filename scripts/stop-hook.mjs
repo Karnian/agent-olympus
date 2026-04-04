@@ -141,8 +141,34 @@ async function main() {
     const phase = cp ? `phase-${cp.phase}` : 'manual';
     const fileCount = status.split('\n').filter(Boolean).length;
 
-    // Stage everything
-    execFileSync('git', ['add', '-A'], { stdio: 'pipe' });
+    // Stage tracked modified/deleted files (safer than git add -A)
+    // This avoids staging: .env, secrets, .ao/state/ files
+    execFileSync('git', ['add', '-u'], { stdio: 'pipe' });
+
+    // Also stage new files, but exclude sensitive patterns
+    const untrackedRaw = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
+      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    if (untrackedRaw) {
+      const EXCLUDE_PATTERNS = [
+        /^\.env/,
+        /^\.ao\/state\//,
+        /^\.ao\/teams\//,
+        /credentials/i,
+        /secret/i,
+        /\.key$/,
+        /\.pem$/,
+      ];
+
+      const safeFiles = untrackedRaw.split('\n').filter(f => {
+        return f && !EXCLUDE_PATTERNS.some(pat => pat.test(f));
+      });
+
+      if (safeFiles.length > 0) {
+        execFileSync('git', ['add', '--', ...safeFiles], { stdio: 'pipe' });
+      }
+    }
 
     // Verify something is actually staged (edge case: all changes were untrackable)
     const staged = execFileSync('git', ['diff', '--cached', '--name-only'], {

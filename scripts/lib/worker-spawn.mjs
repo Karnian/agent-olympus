@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import { buildRecoveryStrategy } from './stuck-recovery.mjs';
+import { detectClaudePermissionLevel, claudePermissionModeFlag } from './permission-detect.mjs';
 
 const STATE_DIR = '.ao/state';
 const ARTIFACTS_DIR = '.ao/artifacts';
@@ -389,11 +390,13 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
     } else if (adapterNames[i] === 'claude-cli') {
       // Spawn via claude-cli adapter (headless Claude Code -p mode)
       try {
+        const permLevel = detectClaudePermissionLevel({ cwd });
         const handle = claudeCli.spawn(worker.prompt, {
           cwd,
           model: worker.model,
           appendSystemPrompt: worker.systemPrompt,
           maxBudgetUsd: worker.maxBudgetUsd,
+          permissionMode: claudePermissionModeFlag(permLevel),
         });
         state.workers[i].status = 'running';
         state.workers[i].startedAt = new Date().toISOString();

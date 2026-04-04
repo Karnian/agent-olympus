@@ -17,85 +17,13 @@
  * Zero npm dependencies — uses Node.js built-ins only.
  */
 
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { detectClaudePermissions } from './permission-detect.mjs';
+
+// Re-export for backward compatibility
+export { detectClaudePermissions as _detectClaudePermissions };
 
 /** Valid Gemini approval modes. */
 const VALID_MODES = ['default', 'auto_edit', 'yolo', 'plan'];
-
-/**
- * Read and parse a JSON file, returning null on any error.
- * @param {string} filePath
- * @returns {object|null}
- */
-function readJson(filePath) {
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Extract the permissions.allow array from a Claude settings file.
- * Returns an empty array if the file doesn't exist or is malformed.
- *
- * @param {string} filePath
- * @returns {string[]}
- */
-function getAllowList(filePath) {
-  const data = readJson(filePath);
-  if (!data?.permissions?.allow || !Array.isArray(data.permissions.allow)) {
-    return [];
-  }
-  return data.permissions.allow;
-}
-
-/**
- * Detect Claude Code's permission level from settings files and return
- * the corresponding Gemini approval mode.
- *
- * Checks (in priority order):
- *   1. Project-level: `<cwd>/.claude/settings.local.json`
- *   2. User-level: `~/.claude/settings.local.json`
- *   3. User-level: `~/.claude/settings.json`
- *
- * The first file with a non-empty allow list wins.
- *
- * @param {object} [opts]
- * @param {string} [opts.cwd] - Project root (default: process.cwd())
- * @param {string} [opts.home] - Home directory override (for testing)
- * @returns {{ hasBashStar: boolean, hasWriteStar: boolean, hasEditStar: boolean }}
- */
-export function _detectClaudePermissions(opts = {}) {
-  try {
-    const cwd = opts.cwd || process.cwd();
-    const home = opts.home || process.env.HOME || process.env.USERPROFILE || '';
-
-    const sources = [
-      join(cwd, '.claude', 'settings.local.json'),
-      join(home, '.claude', 'settings.local.json'),
-      join(home, '.claude', 'settings.json'),
-    ];
-
-    let allowList = [];
-    for (const src of sources) {
-      const list = getAllowList(src);
-      if (list.length > 0) {
-        allowList = list;
-        break;
-      }
-    }
-
-    const hasBashStar = allowList.some(p => p === 'Bash(*)' || p === 'Bash');
-    const hasWriteStar = allowList.some(p => p === 'Write(*)' || p === 'Write');
-    const hasEditStar = allowList.some(p => p === 'Edit(*)' || p === 'Edit');
-
-    return { hasBashStar, hasWriteStar, hasEditStar };
-  } catch {
-    return { hasBashStar: false, hasWriteStar: false, hasEditStar: false };
-  }
-}
 
 /**
  * Resolve the Gemini approval mode from autonomy config + Claude detection.
@@ -116,7 +44,7 @@ export function resolveGeminiApproval(autonomyConfig, opts = {}) {
     }
 
     // "auto" or unset → detect from Claude permissions
-    const { hasBashStar, hasWriteStar, hasEditStar } = _detectClaudePermissions(opts);
+    const { hasBashStar, hasWriteStar, hasEditStar } = detectClaudePermissions(opts);
 
     // Bash(*) + Write(*) → equivalent to full autonomy
     if (hasBashStar && hasWriteStar) {

@@ -20,7 +20,8 @@ scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-ou
               wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
               worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts,
-              session-registry, codex-approval, gemini-exec, gemini-acp, gemini-approval)
+              session-registry, permission-detect, codex-approval, gemini-exec, gemini-acp,
+              gemini-approval)
 scripts/test → node:test based unit tests (1000+ tests, 50 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
@@ -48,10 +49,11 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - Hooks never block Claude Code — they fail open on any error
 - Hooks can set `"async": true` to run in the background without blocking Claude's execution
 - **SessionStart** (`scripts/session-start.mjs`) — fires at session start; injects prior wisdom and any interrupted checkpoint context into the conversation
-- **SubagentStart** (`scripts/subagent-start.mjs`) — fires when a subagent is spawned; injects wisdom context via `additionalContext`
+- **SubagentStart** (`scripts/subagent-start.mjs`) — fires when a subagent is spawned; injects wisdom context via `additionalContext`, filtered by `subagent_type` relevance
+- **Notification** (`scripts/notification.mjs`) — fires on `idle_prompt` and `permission_prompt` events; logs to `.ao/state/ao-notifications.json` for stall detection (async, non-blocking)
 - **SubagentStop** (`scripts/subagent-stop.mjs`) — fires when a subagent completes; captures results to `.ao/state/ao-subagent-results.json` (async, non-blocking)
 - **SessionEnd** (`scripts/session-end.mjs`) — fires on session termination; cleans up stale state files older than 24h (async, non-blocking)
-- **Stop** (`scripts/stop-hook.mjs`) — fires at session end; auto-commits any uncommitted work as a WIP commit so nothing is lost
+- **Stop** (`scripts/stop-hook.mjs`) — fires at session end; auto-commits any uncommitted work as a WIP commit so nothing is lost; uses selective staging (excludes `.env`, secrets, `.ao/state/`, `.ao/teams/`)
 
 ### Skill vs Agent
 - **Skill** (`skills/*/SKILL.md`) = workflow recipe with steps. User-facing, triggered by `/command` or keyword matching
@@ -69,6 +71,8 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/state/ao-active-run-{atlas|athena}.json` — active run identity pointer (links checkpoint ↔ run-artifacts)
 - `.ao/state/ao-subagent-results.json` — captured subagent outputs (capped at 50, FIFO); also emits `subagent_completed` events to active run
 - `.ao/state/ao-current-session.json` — active session pointer (sessionId + startedAt); used for crash recovery
+- `.ao/state/ao-capabilities.json` — cached capability detection results (5-min TTL, file-based since hooks run as separate processes)
+- `.ao/state/ao-notifications.json` — logged idle/permission prompt notifications for stall detection (capped at 50 entries, FIFO)
 - `.ao/state/*.json` — transient state files (deleted on completion or cleaned by SessionEnd after 24h)
 - `.ao/sessions/<sessionId>.json` — per-session metadata (branch, cwd, status, linked runIds); shared across worktrees; 90-day TTL
 - `.ao/artifacts/runs/<runId>/` — per-run artifacts (events.jsonl, summary.json, verification.jsonl)
@@ -163,17 +167,24 @@ Workers (Codex, Claude, and Gemini) are spawned via a strategy-pattern adapter s
 
 ### Permission Mirroring
 
-**Codex** approval mode is automatically determined from Claude's permission level:
+All worker types (Codex, Claude, Gemini) mirror the host session's permission level via `scripts/lib/permission-detect.mjs`. This shared module eliminates duplication between adapter-specific approval modules.
+
+**Detection** reads allow/deny lists from (in priority order): project `.claude/settings.local.json` → user `~/.claude/settings.local.json` → user `~/.claude/settings.json`. Deny lists are merged from ALL files (any deny overrides any allow).
+
+**Codex** approval mode:
 - `Bash(*) + Write(*)` in Claude settings → `--full-auto`
 - `Write(*)` or `Edit(*)` only → `--auto-edit`
 - Otherwise → no flag (suggest/read-only)
+
+**Claude** workers now auto-detect permission level (no longer default to `--dangerously-skip-permissions`):
+- `Bash(*) + Write(*)` → `--permission-mode bypassPermissions`
+- `Write(*)` or `Edit(*)` → `--permission-mode acceptEdits`
+- Otherwise → `--permission-mode default`
 
 **Gemini** approval mode follows the same detection logic, mapped to Gemini modes:
 - `Bash(*) + Write(*)` → `--approval-mode yolo`
 - `Write(*)` or `Edit(*)` only → `--approval-mode auto_edit`
 - Otherwise → no flag (Gemini default interactive mode)
-
-Detection checks (in priority order): project `.claude/settings.local.json` → user `~/.claude/settings.local.json` → user `~/.claude/settings.json`
 
 Override via `.ao/autonomy.json`:
 ```json
@@ -191,7 +202,8 @@ Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
 - `scripts/lib/claude-cli.mjs` — Claude CLI adapter (spawn/monitor/collect/shutdown via stream-json)
 - `scripts/lib/gemini-acp.mjs` — Gemini ACP JSON-RPC client (session/prompt/cancel + message queue)
 - `scripts/lib/gemini-exec.mjs` — Gemini exec JSON adapter (spawn/monitor/collect/shutdown)
-- `scripts/lib/gemini-approval.mjs` — Claude permission detection → Gemini approval mode mirroring
+- `scripts/lib/permission-detect.mjs` — Unified permission detection (shared by all worker adapters)
+- `scripts/lib/gemini-approval.mjs` — Gemini approval mode mapping (delegates to permission-detect)
 - `scripts/lib/worker-spawn.mjs` — Adapter router (`selectAdapter`, `spawnTeam`, `monitorTeam`)
 - `scripts/lib/resolve-binary.mjs` — Binary resolution with caching + `buildEnhancedPath()`
 - `scripts/lib/preflight.mjs` — Capability detection (`hasCodexAppServer`, `hasCodexExecJson`, `hasClaudeCli`, `hasGeminiCli`, `hasGeminiAcp`)

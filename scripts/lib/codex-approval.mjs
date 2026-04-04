@@ -17,101 +17,16 @@
  * Zero npm dependencies — uses Node.js built-ins only.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  detectClaudePermissions,
+  detectClaudePermissionLevel,
+} from './permission-detect.mjs';
+
+// Re-export for backward compatibility
+export { detectClaudePermissionLevel };
 
 /** Valid Codex approval modes. */
 const VALID_MODES = ['suggest', 'auto-edit', 'full-auto'];
-
-/**
- * Read and parse a JSON file, returning null on any error.
- * @param {string} filePath
- * @returns {object|null}
- */
-function readJson(filePath) {
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Extract the permissions.allow array from a Claude settings file.
- * Returns an empty array if the file doesn't exist or is malformed.
- *
- * @param {string} filePath
- * @returns {string[]}
- */
-function getAllowList(filePath) {
-  const data = readJson(filePath);
-  if (!data?.permissions?.allow || !Array.isArray(data.permissions.allow)) {
-    return [];
-  }
-  return data.permissions.allow;
-}
-
-/**
- * Detect Claude Code's permission level from settings files.
- *
- * Checks (in priority order):
- *   1. Project-level: `<cwd>/.claude/settings.local.json`
- *   2. User-level: `~/.claude/settings.local.json`
- *   3. User-level: `~/.claude/settings.json`
- *
- * The first file with a non-empty allow list wins.
- *
- * @param {object} [opts]
- * @param {string} [opts.cwd] - Project root (default: process.cwd())
- * @param {string} [opts.home] - Home directory override (for testing)
- * @returns {'full-auto' | 'auto-edit' | 'suggest'}
- */
-export function detectClaudePermissionLevel(opts = {}) {
-  try {
-    const cwd = opts.cwd || process.cwd();
-    const home = opts.home || process.env.HOME || process.env.USERPROFILE || '';
-
-    // Collect allow entries from all settings files (project-level first)
-    const sources = [
-      join(cwd, '.claude', 'settings.local.json'),
-      join(home, '.claude', 'settings.local.json'),
-      join(home, '.claude', 'settings.json'),
-    ];
-
-    let allowList = [];
-    for (const src of sources) {
-      const list = getAllowList(src);
-      if (list.length > 0) {
-        allowList = list;
-        break;
-      }
-    }
-
-    if (allowList.length === 0) {
-      return 'suggest';
-    }
-
-    // Check for broad permissions
-    const hasBash = allowList.some(p => p === 'Bash(*)' || p === 'Bash');
-    const hasWrite = allowList.some(p => p === 'Write(*)' || p === 'Write');
-    const hasEdit = allowList.some(p => p === 'Edit(*)' || p === 'Edit');
-
-    // Bash(*) + Write(*) → equivalent to full autonomy
-    if (hasBash && hasWrite) {
-      return 'full-auto';
-    }
-
-    // Write or Edit permissions → can modify files but not arbitrary shell
-    if (hasWrite || hasEdit) {
-      return 'auto-edit';
-    }
-
-    // Read-only or restricted permissions
-    return 'suggest';
-  } catch {
-    return 'suggest';
-  }
-}
 
 /**
  * Resolve the Codex approval mode from autonomy config + Claude detection.
