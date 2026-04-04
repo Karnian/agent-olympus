@@ -117,12 +117,14 @@ test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSI
 saveCheckpoint('atlas', { phase: 0, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
 Output: "[Atlas] Phase 0: TRIAGE started (checkpoint saved)"
 
-// Step 2: Clean stale .ao/ state
-import { runPreflight } from './scripts/lib/preflight.mjs';
+// Step 2: Clean stale .ao/ state + detect capabilities
+import { runPreflight, formatCapabilityReport } from './scripts/lib/preflight.mjs';
 const preflightReport = await runPreflight();
 for (const action of preflightReport.actions) {
   Output: "[Atlas] Preflight: " + action;
 }
+const { hasCodex, hasCodexAppServer, hasCodexExecJson, hasGeminiCli, hasGeminiAcp, hasTmux } = preflightReport.capabilities;
+Output: formatCapabilityReport(preflightReport.capabilities, { orchestrator: 'Atlas' })
 
 // Step 3: Guard input size
 import { prepareSubAgentInput, checkInputSize } from './scripts/lib/input-guard.mjs';
@@ -150,7 +152,25 @@ Agent B (deep): Task(subagent_type="agent-olympus:metis", model="opus",
   prompt="Classify this task:
   COMPLEXITY: trivial / moderate / complex / architectural
   SCOPE: single-file / multi-file / cross-system
-  NEEDS_CODEX: yes/no
+  MULTI_MODEL: recommend which external models to use (if any)
+
+  Available capabilities:
+  - Codex: <hasCodex ? 'AVAILABLE (app-server: ' + hasCodexAppServer + ', exec: ' + hasCodexExecJson + ')' : 'NOT AVAILABLE'>
+  - Gemini: <hasGeminiCli ? 'AVAILABLE (ACP: ' + hasGeminiAcp + ')' : 'NOT AVAILABLE'>
+  - tmux: <hasTmux ? 'available' : 'NOT available'>
+
+  Multi-model guidelines:
+  - Codex excels at: algorithms, large refactoring, batch code transformations, cross-validation
+  - Gemini excels at: visual/multimodal, design review, creative tasks, alternative cross-validation
+  - Use external models ONLY when the task genuinely benefits (NOT for trivial fixes)
+  - If a model is NOT AVAILABLE above, do not recommend it
+  - When both available: use Codex for cross-validation, Gemini for visual/creative tasks
+
+  Output format:
+  COMPLEXITY: <value>
+  SCOPE: <value>
+  MULTI_MODEL: { codex: yes/no (reason), gemini: yes/no (reason) }
+
   Prior learnings: <formatWisdomForPrompt()>
   Task: <user_request>")
 ```
@@ -167,7 +187,7 @@ If metis_output is empty OR does not contain COMPLEXITY classification:
   import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
   const { summary } = extractStructuralSummary(<combined_input>, 100);
   metis_output = Task(subagent_type="agent-olympus:metis", model="sonnet",
-    prompt="Classify this task: COMPLEXITY (trivial/moderate/complex/architectural), SCOPE, NEEDS_CODEX.\nTask: " + summary)
+    prompt="Classify this task: COMPLEXITY, SCOPE, MULTI_MODEL.\nAvailable: Codex=" + hasCodex + ", Gemini=" + hasGeminiCli + ". Only recommend available models.\nTask: " + summary)
 
   If metis_output is STILL empty:
     Output: "[Atlas] ✗ Phase 0 FAILED — triage could not complete after retry."
@@ -532,7 +552,14 @@ tmux send-keys -t "atlas-codex-xval-<story-id>" "\"$CODEX_BIN\" <approval-flag> 
 ```
 - **PASS** → `addVerification(runId, { story_id, verdict: 'pass', evidence: 'codex xval passed', verifiedBy: 'codex' })` → mark `passes: true`, proceed.
 - **FAIL** → `addVerification(runId, { story_id, verdict: 'fail', evidence: '<specific findings>', verifiedBy: 'codex' })` → fix the specific violation, re-run acceptance criteria, re-validate (max 2 cycles).
-- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'codex <reason>: cross-validation skipped', verifiedBy: 'atlas' })`. Log: `[Atlas] Codex cross-validation skipped for <story-id>: <reason>.`
+- **Codex unavailable BUT Gemini available** → use Gemini as alternative cross-validator:
+```bash
+GEMINI_BIN=$(which gemini 2>/dev/null || echo /opt/homebrew/bin/gemini)
+tmux new-session -d -s "atlas-gemini-xval-<story-id>" -c "<cwd>"
+tmux send-keys -t "atlas-gemini-xval-<story-id>" "\"$GEMINI_BIN\" <approval-flag> -p \"Cross-validate implementation of <US-ID>. Files: <files>. Criteria: <criteria>. Reply PASS or FAIL with findings.\"" Enter
+```
+  Record: `addVerification(runId, { story_id, verdict: 'pass'|'fail', evidence: '<findings>', verifiedBy: 'gemini' })`
+- **Neither Codex nor Gemini available** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'no external validator available: cross-validation skipped', verifiedBy: 'atlas' })`. Log: `[Atlas] Cross-validation skipped for <story-id>: no external validator available.`
 
 > **IMPORTANT**: "skip silently" does NOT mean "do nothing". Every story MUST have a verification record — pass, fail, or explicit skip. The PR verification gate will block if any story lacks a record.
 
