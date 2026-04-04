@@ -39,6 +39,29 @@ Claude Code v2.1.49–v2.1.91에서 도입된 플랫폼 기능 활용.
 - **`scripts/lib/claude-cli.mjs`**: stream-json assistant 메시지에서 `tool_use` content block 추출
 - `handle._toolCalls` 배열로 실시간 worker 진행 상황 추적 가능
 
+### Fixed — Hook Node Resolution (P0)
+
+Hook 환경에서 PATH가 `/usr/bin:/bin:/usr/sbin:/sbin`으로 제한되어 `node`를 찾지 못하는 문제 해결.
+
+- **`scripts/run.sh`** (NEW): POSIX 셸 래퍼. nvm/volta/fnm/mise → system paths 순서로 node 탐색
+- **`hooks/hooks.json`**: `run.sh ... || node run.cjs ...` 패턴으로 POSIX/Windows 양쪽 지원
+- **`scripts/lib/resolve-binary.mjs`**: `getDynamicSearchPaths()` 추가 — `process.execPath` parent dir + `npm prefix -g` bin을 동적 탐색
+- **`scripts/lib/preflight.mjs`**: `detectCapabilities()`의 모든 `execFileSync`에 `buildEnhancedPath()` PATH 주입. `#!/usr/bin/env node` shebang 기반 CLI(codex, gemini)가 restricted PATH에서도 실행 가능
+
+### Added — Native Teams Config Fallback (P1)
+
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` env var가 hook 환경에 전달되지 않는 경우를 위한 파일 기반 fallback.
+
+- **`scripts/lib/autonomy.mjs`**: `nativeTeams: boolean` 필드 추가 + `gemini.approval` 검증
+- **`scripts/lib/preflight.mjs`**: env var 없으면 `.ao/autonomy.json`의 `nativeTeams: true`도 체크. capability cache 재검증에도 반영
+- `.ao/autonomy.json`에 `"nativeTeams": true` 설정으로 env var 없이 Native Teams 활성화 가능
+
+### Changed — Orchestrator Branding (P2)
+
+- **`skills/athena/SKILL.md`**: `[athena]` → `[Athena]` (26곳)
+- **`skills/atlas/SKILL.md`**: `[atlas]` → `[Atlas]` (25곳)
+- **`scripts/lib/preflight.mjs`**: `formatCapabilityReport(caps, { orchestrator })` 및 `formatPreflightReport(report, { orchestrator })` 옵션 추가
+
 ### Fixed — Stop Hook 안전성
 
 - **`scripts/stop-hook.mjs`**: `git add -A` → `git add -u` + 선택적 untracked 파일 스테이징

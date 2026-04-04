@@ -44,7 +44,10 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **UI/UX design review** *(v0.8.3)*: Aphrodite agent + 5 design skills — critique (Nielsen+Gestalt), a11y audit (WCAG 2.2 AA), design system audit (token leaks), UX copy review, unified UI review
 - **L-scale resilience** *(v0.8.8)*: `input-guard` library prevents sub-agent silent failures on large documents — auto-summarizes oversized inputs while preserving story IDs and acceptance criteria. `preflight` library detects and clears stale pointer files in `.ao/` before each run
 - **Codex permission mirroring** *(v0.9.5)*: Automatically detects Claude's permission level and mirrors it to Codex's approval mode (`full-auto`, `auto-edit`, `suggest`). Configurable via `.ao/autonomy.json` `codex.approval` (default: `auto` = auto-detect from Claude settings)
-- **1000+ unit tests**: Comprehensive test suite using `node:test` across 47 test files
+- **Robust hook execution** *(v0.9.8)*: `run.sh` shell wrapper resolves node from nvm/volta/fnm/mise in restricted PATH hook environments; `run.sh || node run.cjs` fallback for Windows; `buildEnhancedPath()` injected into all capability detection child processes
+- **Native Teams config fallback** *(v0.9.8)*: `.ao/autonomy.json` `nativeTeams: true` enables Native Agent Teams without `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` env var
+- **Gemini permission mirroring** *(v0.9.8)*: `.ao/autonomy.json` `gemini.approval` — auto-detect or override Gemini approval mode (`yolo`, `auto_edit`, `plan`, `default`)
+- **1000+ unit tests**: Comprehensive test suite using `node:test` across 50 test files
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation

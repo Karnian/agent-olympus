@@ -14,7 +14,8 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'no
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { resolveBinary } from './tmux-session.mjs';
-import { resolveClaudeBinary } from './resolve-binary.mjs';
+import { resolveClaudeBinary, buildEnhancedPath } from './resolve-binary.mjs';
+import { loadAutonomyConfig } from './autonomy.mjs';
 
 const AO_DIR = '.ao';
 const STATE_DIR = path.join(AO_DIR, 'state');
@@ -36,7 +37,13 @@ function readCapabilityCache() {
     // Validate shape — must have at least hasTmux key
     if (typeof cached.hasTmux !== 'boolean') return null;
     // Re-check environment-sensitive fields that are instant to compute
-    const currentNativeTeam = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
+    let currentNativeTeam = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
+    if (!currentNativeTeam) {
+      try {
+        const autonomy = loadAutonomyConfig(process.cwd());
+        if (autonomy.nativeTeams === true) currentNativeTeam = true;
+      } catch {}
+    }
     const currentPreviewMCP = existsSync('.claude/launch.json');
     if (cached.hasNativeTeamTools !== currentNativeTeam) return null;
     if (cached.hasPreviewMCP !== currentPreviewMCP) return null;
@@ -175,15 +182,20 @@ export async function detectCapabilities() {
   const cached = readCapabilityCache();
   if (cached) return cached;
 
+  // Build enhanced env with all known binary dirs in PATH.
+  // Node.js CLI tools (codex, gemini) use #!/usr/bin/env node — if the hook
+  // environment has a restricted PATH, `env node` fails. Passing the enhanced
+  // PATH to execFileSync ensures child processes can find node and other deps.
+  const enhancedEnv = { ...process.env, PATH: buildEnhancedPath() };
+  const execOpts = { stdio: 'pipe', encoding: 'utf-8', timeout: 5000, env: enhancedEnv };
+
   let hasTmux = false;
   try {
-    // Use resolveBinary which checks PATH + fallback paths (homebrew, /usr/local, etc.)
     const tmuxBin = resolveBinary('tmux');
     if (tmuxBin && tmuxBin !== 'tmux') {
       hasTmux = true;
     } else {
-      // bare name returned — try running it to see if the OS can find it
-      execFileSync('which', ['tmux'], { stdio: 'ignore' });
+      execFileSync('which', ['tmux'], { ...execOpts, stdio: 'ignore' });
       hasTmux = true;
     }
   } catch {
@@ -196,7 +208,7 @@ export async function detectCapabilities() {
     if (codexBin && codexBin !== 'codex') {
       hasCodex = true;
     } else {
-      execFileSync('which', ['codex'], { stdio: 'ignore' });
+      execFileSync('which', ['codex'], { ...execOpts, stdio: 'ignore' });
       hasCodex = true;
     }
   } catch {
@@ -207,20 +219,13 @@ export async function detectCapabilities() {
   let hasCodexExecJson = false;
   let hasCodexAppServer = false;
   try {
-    const codexVersion = execFileSync(resolveBinary('codex'), ['--version'], {
-      stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
-    }).trim();
+    const codexVersion = execFileSync(resolveBinary('codex'), ['--version'], execOpts).trim();
     hasCodexExecJson = meetsMinVersion(codexVersion, 0, 116, 0);
-    // app-server is available in the same version range as exec --json
-    // Detect by checking if 'codex app-server --help' succeeds
     if (hasCodexExecJson) {
       try {
-        execFileSync(resolveBinary('codex'), ['app-server', '--help'], {
-          stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
-        });
+        execFileSync(resolveBinary('codex'), ['app-server', '--help'], execOpts);
         hasCodexAppServer = true;
       } catch {
-        // app-server subcommand not available in this build
         hasCodexAppServer = false;
       }
     }
@@ -237,7 +242,7 @@ export async function detectCapabilities() {
     if (geminiBin && geminiBin !== 'gemini') {
       hasGeminiCli = true;
     } else {
-      execFileSync('which', ['gemini'], { stdio: 'ignore' });
+      execFileSync('which', ['gemini'], { ...execOpts, stdio: 'ignore' });
       hasGeminiCli = true;
     }
   } catch {
@@ -246,10 +251,7 @@ export async function detectCapabilities() {
 
   if (hasGeminiCli) {
     try {
-      // Detect ACP support by checking if --acp flag is mentioned in help
-      const helpOutput = execFileSync(resolveBinary('gemini'), ['--help'], {
-        stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
-      });
+      const helpOutput = execFileSync(resolveBinary('gemini'), ['--help'], execOpts);
       hasGeminiAcp = /--acp|--experimental-acp/i.test(helpOutput);
     } catch {
       hasGeminiAcp = false;
@@ -261,13 +263,9 @@ export async function detectCapabilities() {
   try {
     const claudePath = resolveClaudeBinary();
     if (claudePath && claudePath !== 'claude') {
-      // Binary found via versioned path discovery
       hasClaudeCli = true;
     } else {
-      // Try running --version to verify it works
-      execFileSync(claudePath, ['--version'], {
-        stdio: 'pipe', encoding: 'utf-8', timeout: 5000,
-      });
+      execFileSync(claudePath, ['--version'], execOpts);
       hasClaudeCli = true;
     }
   } catch {
@@ -276,14 +274,22 @@ export async function detectCapabilities() {
 
   let hasGitWorktree = false;
   try {
-    execFileSync('git', ['worktree', 'list'], { stdio: 'ignore' });
+    execFileSync('git', ['worktree', 'list'], { ...execOpts, stdio: 'ignore' });
     hasGitWorktree = true;
   } catch {
     // git worktree not available
   }
 
-  // Native Agent Teams require experimental env var
-  const hasNativeTeamTools = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
+  // Native Agent Teams: check env var first, then .ao/autonomy.json fallback
+  let hasNativeTeamTools = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
+  if (!hasNativeTeamTools) {
+    try {
+      const autonomy = loadAutonomyConfig(process.cwd());
+      if (autonomy.nativeTeams === true) hasNativeTeamTools = true;
+    } catch {
+      // fail-safe
+    }
+  }
 
   // Preview MCP is available if .claude/launch.json exists
   const hasPreviewMCP = existsSync('.claude/launch.json');
@@ -296,12 +302,14 @@ export async function detectCapabilities() {
 /**
  * Format capability report for human-readable display.
  * @param {{ hasTmux: boolean, hasCodex: boolean, hasClaudeCli: boolean, hasGeminiCli: boolean, hasGitWorktree: boolean, hasNativeTeamTools: boolean, hasPreviewMCP: boolean }} caps
+ * @param {{ orchestrator?: string }} [opts] - Optional display options
  * @returns {string}
  */
-export function formatCapabilityReport(caps) {
+export function formatCapabilityReport(caps, opts) {
+  const label = opts?.orchestrator || 'Capabilities';
   const fmt = (flag, name, desc) => `  ${flag ? '✓' : '✗'} ${name} — ${desc}`;
   const lines = [
-    'Capabilities:',
+    `[${label}] Capabilities:`,
     fmt(caps.hasTmux, 'tmux       ', 'parallel worker sessions'),
     fmt(caps.hasCodex, 'codex      ', 'cross-validation & multi-model'),
     fmt(caps.hasClaudeCli, 'claude-cli ', 'headless Claude Code workers'),
@@ -401,20 +409,22 @@ export async function runPreflight() {
 /**
  * Format preflight report for prompt injection.
  * @param {{ valid: boolean, actions: string[], warnings: string[] }} report
+ * @param {{ orchestrator?: string }} [opts] - Optional display options (passed to capability report)
  * @returns {string}
  */
-export function formatPreflightReport(report) {
+export function formatPreflightReport(report, opts) {
+  const prefix = opts?.orchestrator ? `[${opts.orchestrator}] ` : '';
   const parts = [];
   if (report.actions.length > 0) {
-    parts.push('Preflight actions:\n' + report.actions.map(a => `  ✓ ${a}`).join('\n'));
+    parts.push(`${prefix}Preflight actions:\n` + report.actions.map(a => `  ✓ ${a}`).join('\n'));
   }
   if (report.warnings.length > 0) {
-    parts.push('Preflight warnings:\n' + report.warnings.map(w => `  ⚠ ${w}`).join('\n'));
+    parts.push(`${prefix}Preflight warnings:\n` + report.warnings.map(w => `  ⚠ ${w}`).join('\n'));
   }
   // Always include capability report when available — orchestrators need this
   // at startup to choose fallback paths
   if (report.capabilities) {
-    parts.push(formatCapabilityReport(report.capabilities));
+    parts.push(formatCapabilityReport(report.capabilities, opts));
   }
   return parts.join('\n');
 }

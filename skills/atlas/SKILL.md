@@ -103,11 +103,11 @@ test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSI
 
 - **HARNESS_FOUND**: Read `docs/golden-principles.md` and `docs/ARCHITECTURE.md` (if exists).
   Store as `<harness_context>` — inject into every executor prompt in Phase 3.
-  Log: `[atlas] Harness loaded: <N> golden principles, architecture layers defined.`
+  Log: `[Atlas] Harness loaded: <N> golden principles, architecture layers defined.`
 
 - **HARNESS_MISSING**:
   - For `complex` or `architectural` tasks → suggest to user:
-    `"[atlas] Harness not initialized. Run /harness-init for full setup (recommended). Proceeding without it."`
+    `"[Atlas] Harness not initialized. Run /harness-init for full setup (recommended). Proceeding without it."`
   - For trivial/moderate tasks → skip silently, proceed.
 
 **Phase Guard — early checkpoint + preflight:**
@@ -115,22 +115,22 @@ test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSI
 ```javascript
 // Step 1: Early checkpoint BEFORE any sub-agent call
 saveCheckpoint('atlas', { phase: 0, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
-Output: "[atlas] Phase 0: TRIAGE started (checkpoint saved)"
+Output: "[Atlas] Phase 0: TRIAGE started (checkpoint saved)"
 
 // Step 2: Clean stale .ao/ state
 import { runPreflight } from './scripts/lib/preflight.mjs';
 const preflightReport = await runPreflight();
 for (const action of preflightReport.actions) {
-  Output: "[atlas] Preflight: " + action;
+  Output: "[Atlas] Preflight: " + action;
 }
 
 // Step 3: Guard input size
 import { prepareSubAgentInput, checkInputSize } from './scripts/lib/input-guard.mjs';
 const inputCheck = checkInputSize(<combined_input>, 'opus');
 if (!inputCheck.safe) {
-  Output: "[atlas] L-scale input detected (" + inputCheck.lines + " lines, ~" + inputCheck.tokens + " tokens)"
+  Output: "[Atlas] L-scale input detected (" + inputCheck.lines + " lines, ~" + inputCheck.tokens + " tokens)"
   const prepared = prepareSubAgentInput(<combined_input>, 'opus', <source_file_path>);
-  Output: "[atlas] Structural summary: " + prepared.originalLines + " → " + countLines(prepared.text) + " lines"
+  Output: "[Atlas] Structural summary: " + prepared.originalLines + " → " + countLines(prepared.text) + " lines"
   <metis_input> = prepared.text
 } else {
   <metis_input> = <combined_input>
@@ -140,7 +140,7 @@ if (!inputCheck.safe) {
 Classify and pick strategy. Spawn **simultaneously**:
 
 ```
-Output: "[atlas] Spawning Explore + Metis agents..."
+Output: "[Atlas] Spawning Explore + Metis agents..."
 
 Agent A (fast): Task(subagent_type="agent-olympus:explore", model="haiku",
   prompt="Scan codebase: architecture, relevant files, tech stack, test framework.
@@ -163,20 +163,20 @@ metis_output = <result from Metis Task() call>
 explore_output = <result from Explore Task() call>
 
 If metis_output is empty OR does not contain COMPLEXITY classification:
-  Output: "[atlas] ⚠ Metis returned empty/invalid classification. Retrying with reduced input..."
+  Output: "[Atlas] ⚠ Metis returned empty/invalid classification. Retrying with reduced input..."
   import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
   const { summary } = extractStructuralSummary(<combined_input>, 100);
   metis_output = Task(subagent_type="agent-olympus:metis", model="sonnet",
     prompt="Classify this task: COMPLEXITY (trivial/moderate/complex/architectural), SCOPE, NEEDS_CODEX.\nTask: " + summary)
 
   If metis_output is STILL empty:
-    Output: "[atlas] ✗ Phase 0 FAILED — triage could not complete after retry."
-    Output: "[atlas] Try: provide a simpler task description or use /plan first."
+    Output: "[Atlas] ✗ Phase 0 FAILED — triage could not complete after retry."
+    Output: "[Atlas] Try: provide a simpler task description or use /plan first."
     import { addWisdom } from './scripts/lib/wisdom.mjs';
     await addWisdom({ category: 'debug', lesson: 'Atlas Phase 0 failed: Metis empty output on L-scale input.', confidence: 'high' });
     STOP — do not proceed.
 
-Output: "[atlas] Triage complete — complexity: <complexity>, scope: <scope>"
+Output: "[Atlas] Triage complete — complexity: <complexity>, scope: <scope>"
 ```
 
 **Trivial tasks**: Skip phases 1-2, execute directly (Atlas CAN implement simple things itself).
@@ -228,7 +228,7 @@ Inject the returned markdown brief as `<external_context>` into the Phase 2 prom
 
 ### Phase 1.5 — SPEC GATE (Hermes validation/creation)
 
-Output: "[atlas] Phase 1.5: SPEC GATE — validating/creating specification..."
+Output: "[Atlas] Phase 1.5: SPEC GATE — validating/creating specification..."
 
 Before implementation planning, ensure a structured spec exists. Hermes acts as the quality gate between analysis and execution planning.
 
@@ -301,21 +301,21 @@ Task(subagent_type="agent-olympus:hermes", model="opus",
 hermes_output = <result from Hermes Task() call above>
 
 If hermes_output is empty OR hermes_output.length < 50:
-  Output: "[atlas] ⚠ Hermes spec creation returned empty. Retrying with reduced input..."
+  Output: "[Atlas] ⚠ Hermes spec creation returned empty. Retrying with reduced input..."
   import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
   const { summary } = extractStructuralSummary(<user_request>, 100);
   hermes_output = Task(subagent_type="agent-olympus:hermes", model="sonnet",
     prompt="Create a product spec for: " + summary)
 
   If hermes_output is STILL empty:
-    Output: "[atlas] ✗ Spec Gate FAILED — Hermes could not create spec after retry."
-    Output: "[atlas] Try: (1) run /plan first, or (2) provide a smaller task scope."
+    Output: "[Atlas] ✗ Spec Gate FAILED — Hermes could not create spec after retry."
+    Output: "[Atlas] Try: (1) run /plan first, or (2) provide a smaller task scope."
     await addWisdom({ category: 'debug', lesson: 'Atlas Spec Gate failed: Hermes empty output.', confidence: 'high' });
     STOP — do not proceed.
 ```
 
 Write Hermes output to `.ao/spec.md` and `.ao/prd.json`.
-Output: "[atlas] Spec gate passed — <N> user stories ready for planning."
+Output: "[Atlas] Spec gate passed — <N> user stories ready for planning."
 
 #### After Spec Gate
 
@@ -323,7 +323,7 @@ Proceed to Phase 2 with a guaranteed spec. Prometheus now receives structured re
 
 ### Phase 2 — PLAN + VALIDATE (skip for trivial)
 
-Output: "[atlas] Phase 2: PLAN + VALIDATE — creating execution plan..."
+Output: "[Atlas] Phase 2: PLAN + VALIDATE — creating execution plan..."
 
 **[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
 ```
@@ -419,10 +419,10 @@ saveCheckpoint('atlas', { phase: 3, prdSnapshot: <prd.json contents>, completedS
   └─────────────────────────────────────────────────
   ```
 - Also output a brief line when each individual story starts and finishes:
-  `[atlas] US-001 "Add auth endpoint" → executor (sonnet) started`
-  `[atlas] US-001 ✓ passed (2m 15s)`
+  `[Atlas] US-001 "Add auth endpoint" → executor (sonnet) started`
+  `[Atlas] US-001 ✓ passed (2m 15s)`
 - If any story takes longer than 5 minutes, output a reminder:
-  `[atlas] US-004 still in progress (7m elapsed)...`
+  `[Atlas] US-004 still in progress (7m elapsed)...`
 
 For each story in prd.json with `passes: false`, execute and verify:
 
@@ -532,7 +532,7 @@ tmux send-keys -t "atlas-codex-xval-<story-id>" "\"$CODEX_BIN\" <approval-flag> 
 ```
 - **PASS** → `addVerification(runId, { story_id, verdict: 'pass', evidence: 'codex xval passed', verifiedBy: 'codex' })` → mark `passes: true`, proceed.
 - **FAIL** → `addVerification(runId, { story_id, verdict: 'fail', evidence: '<specific findings>', verifiedBy: 'codex' })` → fix the specific violation, re-run acceptance criteria, re-validate (max 2 cycles).
-- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'codex <reason>: cross-validation skipped', verifiedBy: 'atlas' })`. Log: `[atlas] Codex cross-validation skipped for <story-id>: <reason>.`
+- **Codex unavailable** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'codex <reason>: cross-validation skipped', verifiedBy: 'atlas' })`. Log: `[Atlas] Codex cross-validation skipped for <story-id>: <reason>.`
 
 > **IMPORTANT**: "skip silently" does NOT mean "do nothing". Every story MUST have a verification record — pass, fail, or explicit skip. The PR verification gate will block if any story lacks a record.
 
@@ -600,7 +600,7 @@ If changed files include frontend code (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css
    preview_start(name="<dev-server-name>")
    ```
    If `.claude/launch.json` doesn't exist or preview server fails to start → skip with warning:
-   `[atlas] Visual verification skipped: no preview server configured.`
+   `[Atlas] Visual verification skipped: no preview server configured.`
 
 3. **Capture screenshots** of affected pages:
    ```
@@ -732,14 +732,14 @@ if (!gate.gatePass) {
   // Re-check — if STILL failing, STOP (addVerification may have silently failed)
   const recheck = checkVerificationGate(runId, storyIds);
   if (!recheck.gatePass) {
-    console.error(`[atlas] VERIFICATION GATE FAILED — ${recheck.missing.length} stories still lack records: ${recheck.missing.join(', ')}`);
-    console.error(`[atlas] Cannot create PR until all stories have verification records.`);
+    console.error(`[Atlas] VERIFICATION GATE FAILED — ${recheck.missing.length} stories still lack records: ${recheck.missing.join(', ')}`);
+    console.error(`[Atlas] Cannot create PR until all stories have verification records.`);
     // STOP — do not proceed to PR creation
   }
 }
 
 if (gate.skipped.length > 0) {
-  console.log(`[atlas] ${gate.skipped.length} stories had Codex xval skipped — results included in PR body`);
+  console.log(`[Atlas] ${gate.skipped.length} stories had Codex xval skipped — results included in PR body`);
 }
 ```
 

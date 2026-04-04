@@ -329,6 +329,31 @@ test('detectCapabilities: hasNativeTeamTools follows CLAUDE_CODE_EXPERIMENTAL_AG
   assert.equal(JSON.parse(out2.trim()).hasNativeTeamTools, false);
 });
 
+test('detectCapabilities: hasNativeTeamTools true when .ao/autonomy.json has nativeTeams:true (no env var)', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const tmpDir = await makeTmpDir();
+  try {
+    // Create .ao/autonomy.json with nativeTeams: true
+    await fs.mkdir(path.join(tmpDir, '.ao'), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, '.ao', 'autonomy.json'), JSON.stringify({ nativeTeams: true }));
+
+    const preflightUrl = new URL('../../scripts/lib/preflight.mjs', import.meta.url).href;
+    const script = `const mod = await import(${JSON.stringify(preflightUrl)}); const caps = await mod.detectCapabilities(); console.log(JSON.stringify({ hasNativeTeamTools: caps.hasNativeTeamTools }));`;
+
+    // No env var, but autonomy.json has nativeTeams: true
+    const env = { ...process.env };
+    delete env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+      env,
+      encoding: 'utf-8',
+      cwd: tmpDir,
+    });
+    assert.equal(JSON.parse(out.trim()).hasNativeTeamTools, true);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
 test('detectCapabilities: handles command failures gracefully (all binary checks return boolean)', async () => {
   const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
   // Even if binaries are missing, the function should never throw
@@ -407,9 +432,30 @@ test('formatPreflightReport: includes capability report when capabilities presen
     capabilities: { hasTmux: true, hasCodex: false, hasClaudeCli: false, hasGeminiCli: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false },
   };
   const formatted = formatPreflightReport(report);
-  assert.ok(formatted.includes('Capabilities:'), 'should include Capabilities header');
+  assert.ok(formatted.includes('[Capabilities] Capabilities:'), 'should include Capabilities header');
   assert.ok(formatted.includes('tmux'), 'should include tmux capability');
   assert.ok(formatted.includes('Native Agent Teams'), 'should include Native Agent Teams capability');
+});
+
+test('formatPreflightReport: uses orchestrator name when opts provided', async () => {
+  const { formatPreflightReport } = await import('../../scripts/lib/preflight.mjs');
+  const report = {
+    valid: true,
+    actions: ['Removed stale pointer: .ao/spec.md'],
+    warnings: ['Orphaned team: team-old.json'],
+    capabilities: { hasTmux: true, hasCodex: false, hasClaudeCli: false, hasGeminiCli: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false },
+  };
+  const formatted = formatPreflightReport(report, { orchestrator: 'Athena' });
+  assert.ok(formatted.includes('[Athena] Preflight actions:'), 'actions should have [Athena] prefix');
+  assert.ok(formatted.includes('[Athena] Preflight warnings:'), 'warnings should have [Athena] prefix');
+  assert.ok(formatted.includes('[Athena] Capabilities:'), 'capabilities should have [Athena] header');
+});
+
+test('formatCapabilityReport: uses orchestrator name when opts provided', async () => {
+  const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
+  const caps = { hasTmux: true, hasCodex: false, hasClaudeCli: false, hasGeminiCli: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false };
+  const report = formatCapabilityReport(caps, { orchestrator: 'Atlas' });
+  assert.ok(report.startsWith('[Atlas] Capabilities:'), 'should start with [Atlas] Capabilities:');
 });
 
 // ---------------------------------------------------------------------------
