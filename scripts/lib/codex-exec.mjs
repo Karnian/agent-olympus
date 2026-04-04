@@ -297,11 +297,19 @@ const SHUTDOWN_GRACE_MS = 5000;
 export function shutdown(handle, graceMs = SHUTDOWN_GRACE_MS) {
   if (!handle.process || handle.process.killed) return Promise.resolve();
 
+  // If the process already exited, no need to send signals (avoids PID reuse risk)
+  if (handle._exitCode !== null) return Promise.resolve();
+
   // Send SIGTERM
   handle.kill('SIGTERM');
 
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
+      // Double-check exit code before SIGKILL to prevent PID reuse
+      if (handle._exitCode !== null) {
+        resolve();
+        return;
+      }
       // Escalate: SIGKILL the entire process group
       try { process.kill(-handle.pid, 'SIGKILL'); } catch {}
       // Fallback: kill just the process if group kill fails

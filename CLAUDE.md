@@ -21,7 +21,7 @@ scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-ou
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
               worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts,
               session-registry, codex-approval, gemini-exec, gemini-acp, gemini-approval)
-scripts/test → node:test based unit tests (1000+ tests, 47 files)
+scripts/test → node:test based unit tests (1000+ tests, 50 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -217,7 +217,7 @@ Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), G
 ## Testing
 
 ```bash
-# Run unit tests (870+ tests, 47 files)
+# Run unit tests (1000+ tests, 50 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

@@ -314,50 +314,59 @@ export function detectCodexError(output) {
  * descriptor for the orchestrator to spawn a Claude fallback.
  * Adapter-aware: calls the correct shutdown method based on _adapterName.
  *
+ * IMPORTANT: `_liveHandle` is an in-memory process reference that cannot survive
+ * JSON serialization. When loading team state from disk, `_liveHandle` will always
+ * be undefined. Callers with an in-process reference to the live team state should
+ * pass it via `opts.liveState` to enable adapter-specific graceful shutdown.
+ * Without it, falls back to tmux session cleanup.
+ *
  * @param {string} teamName
  * @param {string} workerName
  * @param {string} originalPrompt
  * @param {string} failureReason
  * @param {string} [sessionOverride] - tmux session name override
+ * @param {{ liveState?: object }} [opts] - Optional in-memory state with live handles
  * @returns {Promise<{ fallbackNeeded: boolean, teamName: string, workerName: string, prompt: string, reason: string }>}
  */
-export async function reassignToClaude(teamName, workerName, originalPrompt, failureReason, sessionOverride) {
+export async function reassignToClaude(teamName, workerName, originalPrompt, failureReason, sessionOverride, opts = {}) {
   try {
-    // Load team state to find the worker's adapter
-    const state = loadTeamState(teamName);
+    // Prefer in-memory live state (has _liveHandle), fall back to disk-loaded state
+    const state = opts.liveState || loadTeamState(teamName);
     const worker = state?.workers?.find(w => w.name === workerName);
     const adapterName = worker?._adapterName || 'tmux';
+    // _liveHandle is ephemeral (non-serializable) — only present when state is in-memory
+    const liveHandle = worker?._liveHandle || worker?._handle;
 
-    if (adapterName === 'codex-appserver' && worker?._liveHandle) {
+    if (adapterName === 'codex-appserver' && liveHandle) {
       // Shutdown via codex-appserver adapter
       try {
         const appserver = await loadCodexAppServerAdapter();
-        await appserver.shutdownServer(worker._liveHandle);
+        await appserver.shutdownServer(liveHandle);
       } catch {}
-    } else if (adapterName === 'claude-cli' && worker?._liveHandle) {
+    } else if (adapterName === 'claude-cli' && liveHandle) {
       // Shutdown via claude-cli adapter
       try {
         const cli = await loadClaudeCliAdapter();
-        await cli.shutdown(worker._liveHandle);
+        await cli.shutdown(liveHandle);
       } catch {}
-    } else if (adapterName === 'codex-exec' && worker?._handle) {
+    } else if (adapterName === 'codex-exec' && liveHandle) {
       // Shutdown via codex-exec adapter
       try {
         const codexExec = await loadCodexExecAdapter();
-        codexExec.shutdown(worker._handle);
+        await codexExec.shutdown(liveHandle);
       } catch {}
-    } else if (adapterName === 'gemini-acp' && worker?._liveHandle) {
+    } else if (adapterName === 'gemini-acp' && liveHandle) {
       try {
         const geminiAcp = await loadGeminiAcpAdapter();
-        await geminiAcp.shutdownServer(worker._liveHandle);
+        await geminiAcp.shutdownServer(liveHandle);
       } catch {}
-    } else if (adapterName === 'gemini-exec' && worker?._liveHandle) {
+    } else if (adapterName === 'gemini-exec' && liveHandle) {
       try {
         const geminiExec = await loadGeminiExecAdapter();
-        geminiExec.shutdown(worker._liveHandle);
+        await geminiExec.shutdown(liveHandle);
       } catch {}
     } else {
-      // Shutdown via tmux (default)
+      // Shutdown via tmux (default — also used when _liveHandle is unavailable from disk-loaded state)
       const session = sessionOverride || sessionName(teamName, workerName);
       try { killSession(session); } catch {}
     }

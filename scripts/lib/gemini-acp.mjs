@@ -595,13 +595,23 @@ export async function createSession(handle, opts = {}) {
   const sessionId = response.result?.sessionId;
   if (sessionId) handle._sessionId = sessionId;
 
-  // Optionally configure approval mode and model right after session creation
+  // Configure approval mode and model before returning — await to ensure
+  // the worker operates in the intended permission mode from the first prompt.
+  // Note: sendRequest never rejects — it resolves with { error } on failure,
+  // so we check response.error instead of using try/catch.
   if (sessionId && opts.approvalMode) {
-    // Fire-and-forget — errors here are non-fatal
-    sendRequest(handle, 'setSessionMode', { sessionId, mode: opts.approvalMode }).catch(() => {});
+    const resp = await sendRequest(handle, 'setSessionMode', { sessionId, mode: opts.approvalMode });
+    if (resp.error) {
+      handle._warnings = handle._warnings || [];
+      handle._warnings.push(`setSessionMode("${opts.approvalMode}") failed: ${resp.error.message || 'unknown error'} — worker may use default mode`);
+    }
   }
   if (sessionId && opts.model) {
-    sendRequest(handle, 'unstable_setSessionModel', { sessionId, model: opts.model }).catch(() => {});
+    const resp = await sendRequest(handle, 'unstable_setSessionModel', { sessionId, model: opts.model });
+    if (resp.error) {
+      handle._warnings = handle._warnings || [];
+      handle._warnings.push(`unstable_setSessionModel("${opts.model}") failed: ${resp.error.message || 'unknown error'} — worker may use default model`);
+    }
   }
 
   return { sessionId };
@@ -743,6 +753,11 @@ export function monitor(handle) {
       message,
       exitCode: handle._exitCode,
     };
+  }
+
+  // Surface warnings from session setup (e.g., failed setSessionMode)
+  if (handle._warnings && handle._warnings.length > 0) {
+    result.warnings = [...handle._warnings];
   }
 
   return result;
@@ -953,9 +968,17 @@ export function getQueueState(handle) {
 export function shutdownServer(handle, graceMs = SHUTDOWN_GRACE_MS) {
   if (!handle.process || handle.process.killed) return Promise.resolve();
 
+  // If the process already exited, no need to send signals (avoids PID reuse risk)
+  if (handle._exitCode !== null) return Promise.resolve();
+
   return new Promise((resolve) => {
     // Register exit listener FIRST to avoid missing an immediate exit
     const timer = setTimeout(() => {
+      // Double-check exit code before SIGKILL to prevent PID reuse
+      if (handle._exitCode !== null) {
+        resolve();
+        return;
+      }
       // Escalate: kill the entire detached process group
       try { process.kill(-handle.pid, 'SIGKILL'); } catch {}
       // Fallback: kill just the process
