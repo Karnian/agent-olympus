@@ -22,6 +22,13 @@ Plan 승인 후 자동으로 Atlas/Athena orchestrator를 활용하도록 라우
 - **`hooks/hooks.json`**: PostToolUse에 ExitPlanMode matcher 등록
 - **`scripts/session-start.mjs`**: marker 파일 `ao-plan-pending.json` fallback (context-clear 대응)
 
+### Added — Capability-Aware Multi-Model Auto-Routing (P1)
+
+Atlas/Athena가 Codex/Gemini 가용 여부를 Metis에게 자동 전달하여, 사용자 요청 없이도 적절한 경우 멀티모델 자동 활용.
+
+- **`skills/atlas/SKILL.md`**: `NEEDS_CODEX` → `MULTI_MODEL` 전환. Metis가 capability 기반으로 모델 추천. Gemini cross-validation fallback 추가 (Codex 없을 때). Phase 0에서 capability report 출력
+- **`skills/athena/SKILL.md`**: 전체 capability 추출 (`hasCodex`, `hasGeminiCli` 등). Metis 팀 설계에 available worker types 주입. 동적 max workers. Gemini cross-validation fallback. Team_Sizing 문서에 capability-aware 노트 추가
+
 ### Configuration
 
 `.ao/autonomy.json`에 `planExecution` 설정 추가:
