@@ -49,7 +49,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - Hooks never block Claude Code — they fail open on any error
 - Hooks can set `"async": true` to run in the background without blocking Claude's execution
 - **SessionStart** (`scripts/session-start.mjs`) — fires at session start; injects prior wisdom and any interrupted checkpoint context into the conversation
-- **SubagentStart** (`scripts/subagent-start.mjs`) — fires when a subagent is spawned; injects wisdom context via `additionalContext`, filtered by `subagent_type` relevance
+- **SubagentStart** (`scripts/subagent-start.mjs`) — fires when a subagent is spawned; injects token efficiency directive (non-haiku agents only) + wisdom context via `additionalContext`, filtered by `subagent_type` relevance
 - **Notification** (`scripts/notification.mjs`) — fires on `idle_prompt` and `permission_prompt` events; logs to `.ao/state/ao-notifications.json` for stall detection (async, non-blocking)
 - **SubagentStop** (`scripts/subagent-stop.mjs`) — fires when a subagent completes; captures results to `.ao/state/ao-subagent-results.json` (async, non-blocking)
 - **PlanExecuteGate** (`scripts/plan-execute-gate.mjs`) — fires on PostToolUse ExitPlanMode; reads `planExecution` from autonomy.json and injects execution routing (solo/ask/atlas/athena); `ask` mode instructs Claude to use `AskUserQuestion` interactive UI with text fallback; writes marker `.ao/state/ao-plan-pending.json` for SessionStart fallback (marker preserved as `handled: true`, cleaned by SessionEnd after 24h)

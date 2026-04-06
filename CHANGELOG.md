@@ -11,7 +11,7 @@ Codex/Gemini 교차검증 피드백 반영 (폴백, 페이로드 통일, 마커 
 - **`scripts/session-start.mjs`**: Plan Pending 분기에 동일한 `AskUserQuestion` payload 적용. `unlinkSync` → `writeFileSync({ handled: true })` 로 마커 보존 (조기 삭제 방지, SessionEnd 24h cleanup에 위임)
 - **`skills/plan/SKILL.md`**: Phase 5 EXECUTE에서 동일한 `AskUserQuestion` 호출 예시로 교체 + 폴백 안내
 - **`scripts/test/plan-execute-gate.test.mjs`** (NEW): 11개 테스트 — DISABLE_AO, solo/ask/atlas/athena 모드, 복잡도 휴리스틱, JSON payload 파싱, 마커 파일 생성, 기본 모드 fallback
-- **`package.json`**: 버전 `0.9.9` → `1.0.0`
+- **`package.json`**: 버전 `0.9.10` → `1.0.0`
 
 ### Cross-Validation Summary
 
@@ -21,6 +21,24 @@ Codex/Gemini 교차검증 피드백 반영 (폴백, 페이로드 통일, 마커 
 | Codex | ⚠️ REQUEST CHANGES | 마커 조기 삭제, 폴백 부재, 페이로드 불일치, 테스트 미비 |
 
 모든 피드백 반영 완료.
+
+## [0.9.10] - 2026-04-06
+
+### Performance — Token Efficiency Optimization
+
+에이전트 실행 시 토큰 소비를 줄이기 위한 최적화. claude-token-efficient 기법 적용 + 3-way 교차검증(Codex/Gemini/Claude).
+
+- **`scripts/subagent-start.mjs`**: Universal token efficiency directive 주입 (non-haiku 에이전트 한정). "No sycophancy, no narration, structured output, minimum viable output" 지침으로 출력 토큰 30-60% 감소 기대
+- **`agents/atlas.md`**: tmux bash 블록 제거 (adapter chain이 처리), 에이전트 리스트를 `name (model) — role` 형식으로 간결화
+- **`agents/athena.md`**: tmux bash 블록 제거, Communication Protocol 비대칭 방향 반영, 에이전트 리스트 간결화
+- **`agents/aphrodite.md`**: Nielsen heuristics 2-4단어 cue로 축약, Gestalt 1줄화, a11y 체크리스트 15→10 (LLM 자체 recall 가능한 5개 제거), READ-ONLY 중복 제거
+- **`agents/hermes.md`**: Core Philosophy 1줄화, Forward/Reverse 출력형식 통합, Untestable Words 축약
+- **`agents/designer.md`**: Expertise 8항목→2줄, Rules 10→7 (중복 제거), Mental Models 7→4 (핵심만 유지)
+- **`agents/code-reviewer.md`**: `<grounding_rules>` 4줄→2줄 축약 (XML 태그 구조는 유지)
+- **`agents/debugger.md`**: systematic-debug 관계 설명 4줄→1줄
+- **`scripts/test/subagent-start.test.mjs`**: Token efficiency directive 주입 테스트 3건 추가 (haiku skip, non-haiku inject, wisdom+directive 순서)
+
+총 입력 토큰 절감: ~2,800 tokens/orchestrator cycle
 
 ## [0.9.9] - 2026-04-05
 

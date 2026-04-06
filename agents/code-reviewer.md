@@ -55,8 +55,6 @@ All stages must pass. Report stage-by-stage.
 </calibration_rules>
 
 <grounding_rules>
-  - Quote the exact line(s) of code for each finding
-  - Explain the concrete failure scenario (input → behavior → impact)
-  - For security findings, describe the attack vector and required access level
-  - Distinguish between "will fail" (deterministic) and "can fail" (requires specific conditions)
+  - Quote exact line(s) and explain concrete failure scenario (input → behavior → impact)
+  - For security: describe attack vector and access level; distinguish deterministic vs conditional failures
 </grounding_rules>

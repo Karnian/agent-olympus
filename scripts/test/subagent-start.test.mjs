@@ -74,9 +74,11 @@ describe('subagent-start: no wisdom.jsonl → outputs {}', () => {
   });
   after(async () => { await removeTmpDir(tmpDir); });
 
-  it('outputs {} when no wisdom file exists', () => {
+  it('outputs Token Efficiency directive when no wisdom file exists (non-haiku default)', () => {
     const output = runHook({}, tmpDir);
-    assert.deepEqual(output, {});
+    assert.ok(typeof output.additionalContext === 'string', 'should have additionalContext');
+    assert.ok(output.additionalContext.includes('Token Efficiency'), 'should contain Token Efficiency directive');
+    assert.ok(!output.additionalContext.includes('Prior Learnings'), 'should NOT contain Prior Learnings');
   });
 });
 
@@ -88,9 +90,11 @@ describe('subagent-start: empty wisdom.jsonl → outputs {}', () => {
   });
   after(async () => { await removeTmpDir(tmpDir); });
 
-  it('outputs {} when wisdom file is empty', () => {
+  it('outputs Token Efficiency directive when wisdom file is empty (non-haiku default)', () => {
     const output = runHook({}, tmpDir);
-    assert.deepEqual(output, {});
+    assert.ok(typeof output.additionalContext === 'string', 'should have additionalContext');
+    assert.ok(output.additionalContext.includes('Token Efficiency'), 'should contain Token Efficiency directive');
+    assert.ok(!output.additionalContext.includes('Prior Learnings'), 'should NOT contain Prior Learnings');
   });
 });
 
@@ -173,9 +177,11 @@ describe('subagent-start: low-confidence wisdom is excluded', () => {
   });
   after(async () => { await removeTmpDir(tmpDir); });
 
-  it('outputs {} when only low-confidence entries exist', () => {
+  it('outputs only Token Efficiency (no wisdom) when only low-confidence entries exist', () => {
     const output = runHook({}, tmpDir);
-    assert.deepEqual(output, {});
+    assert.ok(typeof output.additionalContext === 'string', 'should have additionalContext');
+    assert.ok(output.additionalContext.includes('Token Efficiency'), 'should contain Token Efficiency directive');
+    assert.ok(!output.additionalContext.includes('Prior Learnings'), 'should NOT contain wisdom');
   });
 });
 
@@ -274,5 +280,82 @@ describe('subagent-start: fail-safe — always valid JSON', () => {
       timeout: 10000,
     });
     assert.doesNotThrow(() => JSON.parse(raw.trim()), 'output should be valid JSON for empty stdin');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Token Efficiency directive injection
+// ---------------------------------------------------------------------------
+
+describe('subagent-start: non-haiku agent gets Token Efficiency directive even without wisdom', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    // No .ao directory — no wisdom file
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('injects Token Efficiency directive for executor even with no wisdom', () => {
+    const output = runHook({ subagent_type: 'agent-olympus:executor' }, tmpDir);
+    assert.ok(
+      typeof output.additionalContext === 'string',
+      'additionalContext should be present',
+    );
+    assert.ok(
+      output.additionalContext.includes('Token Efficiency'),
+      'additionalContext should contain Token Efficiency directive',
+    );
+  });
+});
+
+describe('subagent-start: haiku agent (explore) does NOT get Token Efficiency directive', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    // No .ao directory — no wisdom file
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('outputs {} for explore agent with no wisdom', () => {
+    const output = runHook({ subagent_type: 'agent-olympus:explore' }, tmpDir);
+    assert.deepEqual(output, {});
+  });
+});
+
+describe('subagent-start: non-haiku agent with wisdom gets both Token Efficiency and Prior Learnings', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    writeWisdom(tmpDir, [
+      {
+        timestamp: new Date().toISOString(),
+        project: 'test',
+        category: 'pattern',
+        lesson: 'Use dependency injection to decouple modules',
+        confidence: 'high',
+      },
+    ]);
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('additionalContext contains both Token Efficiency and Prior Learnings', () => {
+    const output = runHook({ subagent_type: 'agent-olympus:executor' }, tmpDir);
+    assert.ok(
+      output.additionalContext.includes('Token Efficiency'),
+      'additionalContext should contain Token Efficiency directive',
+    );
+    assert.ok(
+      output.additionalContext.includes('Prior Learnings'),
+      'additionalContext should contain Prior Learnings section',
+    );
+  });
+
+  it('Token Efficiency directive appears before Prior Learnings', () => {
+    const output = runHook({ subagent_type: 'agent-olympus:executor' }, tmpDir);
+    const teIdx = output.additionalContext.indexOf('Token Efficiency');
+    const plIdx = output.additionalContext.indexOf('Prior Learnings');
+    assert.ok(teIdx !== -1, 'Token Efficiency directive must be present');
+    assert.ok(plIdx !== -1, 'Prior Learnings section must be present');
+    assert.ok(teIdx < plIdx, 'Token Efficiency must appear before Prior Learnings');
   });
 });
