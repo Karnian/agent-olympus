@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.1] - 2026-04-06
+
+### Fix — Concurrency Slot Zombie Bug
+
+에이전트 에러 종료 시 concurrency slot이 해제되지 않아 좀비 엔트리가 남고, 10분 stale cleanup까지 새 Codex/Gemini 호출이 블록되던 버그 수정.
+
+- **`scripts/concurrency-release.mjs`**: 3단계 release 전략 도입 — (1) task_id 매칭 (2) provider 매칭 (3) SubagentStop safety net (가장 오래된 태스크 강제 해제). stale timeout 10분→3분으로 단축
+- **`scripts/concurrency-gate.mjs`**: stale timeout 10분→3분으로 동기화
+- **`hooks/hooks.json`**: SubagentStop에 concurrency-release 등록 (PostToolUse만으로는 에러 시 누락 가능)
+- **`scripts/test/concurrency-release.test.mjs`**: SubagentStop release 테스트 2건 추가, stale threshold 시간값 조정 (3분 기준)
+- **`scripts/test/concurrency-gate.test.mjs`**: 테스트 설명 업데이트
+
 ## [1.0.0] - 2026-04-06
 
 ### UX — Interactive Plan Execution Routing

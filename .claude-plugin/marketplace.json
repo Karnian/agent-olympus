@@ -9,7 +9,7 @@
     {
       "name": "agent-olympus",
       "description": "Self-driving AI orchestrator — Atlas (hub-and-spoke) + Athena (peer-to-peer), 18 agents, 26 skills, Claude + Codex + Gemini multi-model, zero npm dependencies",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "author": {
         "name": "Karnian"
       },
@@ -27,5 +27,5 @@
       ]
     }
   ],
-  "version": "1.0.0"
+  "version": "1.0.1"
 }

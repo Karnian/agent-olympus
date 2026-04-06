@@ -14,7 +14,7 @@ import { atomicWriteFileSync } from './lib/fs-atomic.mjs';
 const STATE_DIR = join(process.cwd(), '.ao', 'state');
 const STATE_FILE = join(STATE_DIR, 'ao-concurrency.json');
 
-const STALE_TASK_MS = 10 * 60 * 1000; // 10 minutes
+const STALE_TASK_MS = 3 * 60 * 1000; // 3 minutes (aligned with concurrency-release)
 
 function readState() {
   try {

@@ -162,9 +162,9 @@ describe('concurrency-release: releases oldest matching claude task', () => {
   before(async () => {
     tmpDir = await makeTmpDir();
     writeState(tmpDir, [
-      makeTask('claude-old', 'claude', -5 * 60 * 1000),  // 5 min ago (oldest)
+      makeTask('claude-old', 'claude', -2 * 60 * 1000),  // 2 min ago (oldest, within 3min threshold)
       makeTask('claude-new', 'claude', -1 * 60 * 1000),  // 1 min ago
-      makeTask('codex-task', 'codex',  -2 * 60 * 1000),  // unrelated provider
+      makeTask('codex-task', 'codex',  -90 * 1000),       // unrelated provider
     ]);
   });
   after(async () => { await removeTmpDir(tmpDir); });
@@ -227,14 +227,14 @@ describe('concurrency-release: does not release tasks for a different provider',
 // Stale tasks are pruned regardless of provider
 // ---------------------------------------------------------------------------
 
-describe('concurrency-release: prunes stale tasks (>10 min)', () => {
+describe('concurrency-release: prunes stale tasks (>3 min)', () => {
   let tmpDir;
   before(async () => {
     tmpDir = await makeTmpDir();
     writeState(tmpDir, [
-      makeTask('stale-1', 'claude',  -11 * 60 * 1000), // 11 min ago — stale
-      makeTask('stale-2', 'gemini',  -15 * 60 * 1000), // 15 min ago — stale
-      makeTask('fresh-1', 'codex',    -3 * 60 * 1000), // 3 min ago — keep
+      makeTask('stale-1', 'claude',  -4 * 60 * 1000), // 4 min ago — stale
+      makeTask('stale-2', 'gemini',  -5 * 60 * 1000), // 5 min ago — stale
+      makeTask('fresh-1', 'codex',    -1 * 60 * 1000), // 1 min ago — keep
     ]);
   });
   after(async () => { await removeTmpDir(tmpDir); });
@@ -266,10 +266,10 @@ describe('concurrency-release: prunes stale and releases matching in one pass', 
   before(async () => {
     tmpDir = await makeTmpDir();
     writeState(tmpDir, [
-      makeTask('stale-claude',  'claude', -12 * 60 * 1000), // stale — pruned
+      makeTask('stale-claude',  'claude', -4 * 60 * 1000), // stale — pruned
       makeTask('fresh-claude',  'claude',  -2 * 60 * 1000), // released (oldest remaining)
       makeTask('fresh-claude2', 'claude',  -1 * 60 * 1000), // kept
-      makeTask('stale-codex',   'codex',  -11 * 60 * 1000), // stale — pruned
+      makeTask('stale-codex',   'codex',  -5 * 60 * 1000), // stale — pruned
     ]);
   });
   after(async () => { await removeTmpDir(tmpDir); });
@@ -374,5 +374,60 @@ describe('concurrency-release: provider detection via model field', () => {
     const state = readState(tmpDir);
     const claudeTasks = state.activeTasks.filter(t => t.provider === 'claude');
     assert.equal(claudeTasks.length, 1, 'claude task should be retained');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SubagentStop event triggers release (safety net)
+// ---------------------------------------------------------------------------
+
+describe('concurrency-release: SubagentStop releases a task', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    writeState(tmpDir, [
+      makeTask('claude-task', 'claude', -1 * 60 * 1000),
+      makeTask('codex-task', 'codex', -30 * 1000),
+    ]);
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('releases a task via SubagentStop event with subagent_id', () => {
+    runHook(
+      { event: 'SubagentStop', subagent_id: 'some-id', tool_input: { subagent_type: 'agent-olympus:executor' } },
+      tmpDir,
+    );
+    const state = readState(tmpDir);
+    // Should release the oldest claude task (provider match)
+    const claudeTasks = state.activeTasks.filter(t => t.provider === 'claude');
+    assert.equal(claudeTasks.length, 0, 'claude task should be released via SubagentStop');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SubagentStop safety net: releases oldest task when no provider match
+// ---------------------------------------------------------------------------
+
+describe('concurrency-release: SubagentStop safety net releases oldest when no match', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    writeState(tmpDir, [
+      makeTask('codex-old', 'codex', -2 * 60 * 1000),
+      makeTask('codex-new', 'codex', -30 * 1000),
+    ]);
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('releases oldest task when SubagentStop has no matching provider', () => {
+    // SubagentStop with empty tool_input → detectProvider returns 'claude'
+    // But no claude tasks exist → safety net kicks in, removes oldest
+    runHook(
+      { event: 'SubagentStop', subagent_id: 'crashed-agent', tool_input: {} },
+      tmpDir,
+    );
+    const state = readState(tmpDir);
+    assert.equal(state.activeTasks.length, 1, 'one task should remain');
+    assert.equal(state.activeTasks[0].id, 'codex-new', 'newest task should survive');
   });
 });

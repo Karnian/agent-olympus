@@ -98,6 +98,12 @@
             "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/subagent-stop.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/subagent-stop.mjs",
             "timeout": 3000,
             "async": true
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PLUGIN_ROOT\"/scripts/run.sh \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-release.mjs || node \"$CLAUDE_PLUGIN_ROOT\"/scripts/run.cjs \"$CLAUDE_PLUGIN_ROOT\"/scripts/concurrency-release.mjs",
+            "timeout": 3000,
+            "async": true
           }
         ]
       }

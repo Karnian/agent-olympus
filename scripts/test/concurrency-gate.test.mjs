@@ -2,7 +2,7 @@
  * Tests for concurrency-adjacent state helpers:
  *   - atomicWriteFileSync / atomicMoveSync from fs-atomic.mjs
  *   - pruneWisdom deduplication (ensures concurrent-duplicate entries are cleaned up)
- *   - worker-status pruneStale (removes tasks stale for > 10 min)
+ *   - worker-status pruneStale (removes tasks stale for > threshold)
  *
  * Uses node:test — zero npm dependencies.
  * All I/O uses temporary directories; the real .ao/ directory is never touched.
