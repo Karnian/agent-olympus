@@ -53,17 +53,31 @@ function buildContext(mode, isSimple) {
     if (isSimple) return null; // Don't ask for trivial plans
 
     return `[PLAN EXECUTION ROUTING]
-The plan has been approved. Based on project configuration (planExecution: "ask"), present execution options to the user:
+The plan has been approved. Use AskUserQuestion to present execution options as an interactive selection UI.
 
-### How would you like to execute this plan?
+Call AskUserQuestion with exactly this payload:
+{
+  "questions": [{
+    "question": "플랜이 승인되었습니다. 실행 방식을 선택해주세요.",
+    "header": "실행 방식",
+    "multiSelect": false,
+    "options": [
+      { "label": "Solo (Recommended)", "description": "직접 실행 — 가장 빠르고 오버헤드 없음" },
+      { "label": "Atlas", "description": "서브에이전트 오케스트레이터 — 복잡한 작업에 적합" },
+      { "label": "Athena", "description": "병렬 팀 워커 (Claude+Codex+Gemini) — 대규모 작업에 적합" }
+    ]
+  }]
+}
 
-1. **Solo** — Execute directly (fastest, no overhead)
-2. **Atlas** — Sub-agent orchestrator with autonomous loop (recommended for complex tasks)
-3. **Athena** — Peer-to-peer team with parallel workers (recommended for large-scale tasks)
+If AskUserQuestion is not available in this environment, fall back to presenting the same three options as a numbered markdown list and wait for user reply.
 
-> Tip: Set \`planExecution\` in \`.ao/autonomy.json\` to skip this prompt next time.
+After user selects:
+- "Solo" → proceed with direct execution
+- "Atlas" → invoke Skill(skill="agent-olympus:atlas")
+- "Athena" → invoke Skill(skill="agent-olympus:athena")
+- Other (custom text) → interpret user intent and route accordingly
 
-Wait for the user's choice before proceeding.`;
+> Tip: Set \`planExecution\` in \`.ao/autonomy.json\` to skip this prompt next time.`;
   }
 
   if (mode === 'atlas') {

@@ -8,7 +8,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { readStdin } from './lib/stdin.mjs';
 import { queryWisdom } from './lib/wisdom.mjs';
@@ -71,14 +71,21 @@ async function main() {
         const config = loadAutonomyConfig(_data.cwd || process.cwd());
         const mode = config.planExecution || 'ask';
         if (mode === 'ask') {
-          sections.push(`## Plan Pending\nA plan was approved but execution was not started (session was cleared).\n\n### How would you like to execute?\n1. **Solo** — Execute directly\n2. **Atlas** — Sub-agent orchestrator\n3. **Athena** — Peer-to-peer team\n\nOr say \`/cancel\` to dismiss.`);
+          sections.push(`## Plan Pending\nA plan was approved but execution was not started (session was cleared).\n\nUse AskUserQuestion to present execution options:\n{\n  "questions": [{\n    "question": "이전에 승인된 플랜이 있습니다. 실행 방식을 선택해주세요.",\n    "header": "실행 방식",\n    "multiSelect": false,\n    "options": [\n      { "label": "Solo (Recommended)", "description": "직접 실행 — 가장 빠르고 오버헤드 없음" },\n      { "label": "Atlas", "description": "서브에이전트 오케스트레이터 — 복잡한 작업에 적합" },\n      { "label": "Athena", "description": "병렬 팀 워커 (Claude+Codex+Gemini) — 대규모 작업에 적합" }\n    ]\n  }]\n}\n\nIf AskUserQuestion is not available, fall back to a numbered markdown list.\n\nAfter selection: Solo → direct execution, Atlas → invoke /atlas, Athena → invoke /athena, Other → interpret user intent.`);
         } else if (mode === 'atlas') {
           sections.push(`## Plan Pending\nA plan was approved. Auto-routing to Atlas as configured. Invoke /atlas now.`);
         } else if (mode === 'athena') {
           sections.push(`## Plan Pending\nA plan was approved. Auto-routing to Athena as configured. Invoke /athena now.`);
         }
-        // Mark as handled
-        try { unlinkSync(markerPath); } catch {}
+        // Mark as handled (preserve marker so it can be re-checked if Claude
+        // ignores the routing prompt; SessionEnd cleanup will remove stale files)
+        try {
+          writeFileSync(markerPath, JSON.stringify({
+            ...marker,
+            handled: true,
+            handledAt: new Date().toISOString(),
+          }), { mode: 0o600 });
+        } catch {}
       }
     } catch {
       // No marker or parse error — normal, no pending plan

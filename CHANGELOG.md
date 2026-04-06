@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.0.0] - 2026-04-06
+
+### UX — Interactive Plan Execution Routing
+
+플랜 승인 후 Solo/Atlas/Athena 실행 방식 선택을 텍스트 기반에서 `AskUserQuestion` 인터랙티브 UI로 전환.
+Codex/Gemini 교차검증 피드백 반영 (폴백, 페이로드 통일, 마커 보존, 테스트 커버리지).
+
+- **`scripts/plan-execute-gate.mjs`**: `additionalContext`에 `AskUserQuestion` JSON payload 삽입 + 텍스트 폴백 지시. 3곳 옵션 description 통일
+- **`scripts/session-start.mjs`**: Plan Pending 분기에 동일한 `AskUserQuestion` payload 적용. `unlinkSync` → `writeFileSync({ handled: true })` 로 마커 보존 (조기 삭제 방지, SessionEnd 24h cleanup에 위임)
+- **`skills/plan/SKILL.md`**: Phase 5 EXECUTE에서 동일한 `AskUserQuestion` 호출 예시로 교체 + 폴백 안내
+- **`scripts/test/plan-execute-gate.test.mjs`** (NEW): 11개 테스트 — DISABLE_AO, solo/ask/atlas/athena 모드, 복잡도 휴리스틱, JSON payload 파싱, 마커 파일 생성, 기본 모드 fallback
+- **`package.json`**: 버전 `0.9.10` → `1.0.0`
+
+### Cross-Validation Summary
+
+| Reviewer | Verdict | Key Feedback |
+|----------|---------|-------------|
+| Gemini | ✅ APPROVE | 폴백 추가 권장, 페이로드 일관성 확인 |
+| Codex | ⚠️ REQUEST CHANGES | 마커 조기 삭제, 폴백 부재, 페이로드 불일치, 테스트 미비 |
+
+모든 피드백 반영 완료.
+
 ## [0.9.10] - 2026-04-06
 
 ### Performance — Token Efficiency Optimization
