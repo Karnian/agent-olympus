@@ -613,19 +613,30 @@ Otherwise, route by mode:
 | `"atlas"` | Output: "[plan] Auto-routing to Atlas..." then invoke `Skill(skill="agent-olympus:atlas")` |
 | `"athena"` | Output: "[plan] Auto-routing to Athena..." then invoke `Skill(skill="agent-olympus:athena")` |
 
-**When `mode === "ask"`** — present execution options:
+**When `mode === "ask"`** — use AskUserQuestion tool for interactive selection:
 
-```markdown
-### How would you like to execute?
-
-1. **Solo** — Claude executes directly (fastest, no overhead)
-2. **Atlas** — Sub-agent orchestrator with autonomous loop (recommended for M/L scale)
-3. **Athena** — Peer-to-peer team with parallel workers (recommended for L scale)
-
-> Tip: Set `planExecution` in `.ao/autonomy.json` to skip this prompt next time.
+```
+AskUserQuestion({
+  questions: [{
+    question: "플랜이 승인되었습니다. 실행 방식을 선택해주세요.",
+    header: "실행 방식",
+    multiSelect: false,
+    options: [
+      { label: "Solo (Recommended)", description: "직접 실행 — 가장 빠르고 오버헤드 없음" },
+      { label: "Atlas", description: "서브에이전트 오케스트레이터 — 복잡한 작업에 적합" },
+      { label: "Athena", description: "병렬 팀 워커 (Claude+Codex+Gemini) — 대규모 작업에 적합" }
+    ]
+  }]
+})
 ```
 
-Wait for user selection, then invoke the chosen skill or proceed solo.
+If AskUserQuestion is not available in this environment, fall back to presenting the same three options as a numbered markdown list and wait for user reply.
+
+After user selects:
+- "Solo" → proceed with direct execution
+- "Atlas" → invoke `Skill(skill="agent-olympus:atlas")`
+- "Athena" → invoke `Skill(skill="agent-olympus:athena")`
+- Other (custom text) → interpret user intent and route accordingly
 
 **Important:** The spec is already written to `.ao/prd.json` — Atlas/Athena will read it automatically. No need to pass the spec content in the prompt.
 
