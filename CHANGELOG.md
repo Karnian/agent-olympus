@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.10] - 2026-04-06
+
+### Performance — Token Efficiency Optimization
+
+에이전트 실행 시 토큰 소비를 줄이기 위한 최적화. claude-token-efficient 기법 적용 + 3-way 교차검증(Codex/Gemini/Claude).
+
+- **`scripts/subagent-start.mjs`**: Universal token efficiency directive 주입 (non-haiku 에이전트 한정). "No sycophancy, no narration, structured output, minimum viable output" 지침으로 출력 토큰 30-60% 감소 기대
+- **`agents/atlas.md`**: tmux bash 블록 제거 (adapter chain이 처리), 에이전트 리스트를 `name (model) — role` 형식으로 간결화
+- **`agents/athena.md`**: tmux bash 블록 제거, Communication Protocol 비대칭 방향 반영, 에이전트 리스트 간결화
+- **`agents/aphrodite.md`**: Nielsen heuristics 2-4단어 cue로 축약, Gestalt 1줄화, a11y 체크리스트 15→10 (LLM 자체 recall 가능한 5개 제거), READ-ONLY 중복 제거
+- **`agents/hermes.md`**: Core Philosophy 1줄화, Forward/Reverse 출력형식 통합, Untestable Words 축약
+- **`agents/designer.md`**: Expertise 8항목→2줄, Rules 10→7 (중복 제거), Mental Models 7→4 (핵심만 유지)
+- **`agents/code-reviewer.md`**: `<grounding_rules>` 4줄→2줄 축약 (XML 태그 구조는 유지)
+- **`agents/debugger.md`**: systematic-debug 관계 설명 4줄→1줄
+- **`scripts/test/subagent-start.test.mjs`**: Token efficiency directive 주입 테스트 3건 추가 (haiku skip, non-haiku inject, wisdom+directive 순서)
+
+총 입력 토큰 절감: ~2,800 tokens/orchestrator cycle
+
 ## [0.9.9] - 2026-04-05
 
 ### Performance — Session Startup Optimization (P0)

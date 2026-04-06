@@ -3,11 +3,21 @@
  * SubagentStart hook — injects wisdom context into spawning subagents.
  * Reads recent learnings from .ao/wisdom.jsonl and provides them as additionalContext.
  * Filters wisdom by relevant categories when the subagent type is known.
+ * Also injects a token efficiency directive for all non-haiku agents.
  * Never blocks: always exits 0.
  */
 
 import { readStdin } from './lib/stdin.mjs';
 import { queryWisdom, formatWisdomForPrompt } from './lib/wisdom.mjs';
+
+// Agents assigned to haiku-tier models — skip token efficiency directive for these
+const HAIKU_AGENTS = new Set(['explore', 'writer']);
+
+const TOKEN_EFFICIENCY_DIRECTIVE = `## Token Efficiency
+- No sycophantic openers/closers. No narration ("Now I will...", "Let me...").
+- No restating the task. Lead with answer/action.
+- Structured output (bullets/tables/JSON) over prose.
+- Minimum viable output. Prefer targeted edits over rewrites.`;
 
 async function main() {
   try {
@@ -63,20 +73,30 @@ async function main() {
       entries = await queryWisdom({ minConfidence: 'medium', limit: 10 });
     }
 
-    if (!entries || entries.length === 0) {
-      process.stdout.write('{}');
+    const isHaiku = HAIKU_AGENTS.has(agentName);
+
+    // Resolve wisdom context (may be empty)
+    let wisdomContext = '';
+    if (entries && entries.length > 0) {
+      wisdomContext = formatWisdomForPrompt(entries);
+    }
+
+    // Haiku agents: inject wisdom only (or nothing if no wisdom)
+    if (isHaiku) {
+      if (!wisdomContext.trim()) {
+        process.stdout.write('{}');
+        process.exit(0);
+      }
+      process.stdout.write(JSON.stringify({ additionalContext: wisdomContext }));
       process.exit(0);
     }
 
-    const wisdomContext = formatWisdomForPrompt(entries);
-    if (!wisdomContext.trim()) {
-      process.stdout.write('{}');
-      process.exit(0);
-    }
+    // Non-haiku agents: always inject token efficiency directive; append wisdom when present
+    const additionalContext = wisdomContext.trim()
+      ? TOKEN_EFFICIENCY_DIRECTIVE + '\n\n' + wisdomContext
+      : TOKEN_EFFICIENCY_DIRECTIVE;
 
-    process.stdout.write(JSON.stringify({
-      additionalContext: wisdomContext,
-    }));
+    process.stdout.write(JSON.stringify({ additionalContext }));
   } catch {
     process.stdout.write('{}');
   }
