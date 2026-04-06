@@ -200,7 +200,7 @@ Override via `.ao/autonomy.json`:
 Codex values: `auto` (default), `suggest`, `auto-edit`, `full-auto`
 Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
 `nativeTeams`: `true` enables Native Agent Teams without env var (fallback when `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is not set in hook environment)
-`planExecution`: `ask` (default) presents Solo/Atlas/Athena choice after plan approval; `solo` skips orchestration; `atlas`/`athena` auto-routes. Simple plans (S-scale or ≤2 stories) auto-skip to solo.
+`planExecution`: `ask` (default) presents Solo/Atlas/Athena choice via `AskUserQuestion` interactive UI after plan approval (text fallback for non-Desktop environments); `solo` skips orchestration; `atlas`/`athena` auto-routes. Simple plans (S-scale or ≤2 stories) auto-skip to solo.
 
 ### Key Files
 - `scripts/lib/codex-appserver.mjs` — Codex app-server JSON-RPC client (thread/turn/steer/interrupt)
