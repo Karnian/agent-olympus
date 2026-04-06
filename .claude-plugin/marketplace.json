@@ -8,8 +8,8 @@
   "plugins": [
     {
       "name": "agent-olympus",
-      "description": "Self-driving AI orchestrator — Atlas (hub-and-spoke) + Athena (peer-to-peer), 18 specialized agents, 26 workflow skills, zero npm dependencies",
-      "version": "0.9.9",
+      "description": "Self-driving AI orchestrator — Atlas (hub-and-spoke) + Athena (peer-to-peer), 18 agents, 26 skills, Claude + Codex + Gemini multi-model, zero npm dependencies",
+      "version": "1.0.0",
       "author": {
         "name": "Karnian"
       },
@@ -22,9 +22,10 @@
         "atlas",
         "athena",
         "codex",
+        "gemini",
         "zero-dependency"
       ]
     }
   ],
-  "version": "0.9.9"
+  "version": "1.0.0"
 }
