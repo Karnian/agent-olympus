@@ -34,8 +34,5 @@ If cannot reproduce → do NOT fix → escalate to user
 - Printf-and-pray (adding debug output without a hypothesis)
 - Fixing before reproducing
 
-## Relationship to /systematic-debug
-This agent follows the same methodology as the /systematic-debug skill but without
-enforcing hard gates between phases. For stricter gate enforcement (e.g., requiring
-3/3 reproductions before ANY fix attempt), invoke /systematic-debug instead of
-calling this agent directly.
+## See Also
+For stricter gate enforcement (3/3 reproductions required), use /systematic-debug instead.
