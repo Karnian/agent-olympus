@@ -24,10 +24,10 @@ const STALE_TASK_MS = 3 * 60 * 1000; // 3 minutes (aligned with concurrency-rele
 
 // Hardcoded defaults (used when config file is absent or invalid)
 const DEFAULTS = {
-  global: 8,
-  claude: 5,
-  codex: 3,
-  gemini: 3,
+  global: 10,
+  claude: 8,
+  codex: 5,
+  gemini: 5,
 };
 
 function readState() {

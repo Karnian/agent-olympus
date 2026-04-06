@@ -96,13 +96,13 @@
   // -----------------------------------------------------------------------
   "concurrency": {
     // Maximum total parallel Task/Agent invocations
-    "maxParallelTasks": 8,
+    "maxParallelTasks": 10,
     // Maximum parallel Claude sub-agent workers
-    "maxClaudeWorkers": 5,
+    "maxClaudeWorkers": 8,
     // Maximum parallel Codex team workers
-    "maxCodexWorkers": 3,
+    "maxCodexWorkers": 5,
     // Maximum parallel Gemini team workers
-    "maxGeminiWorkers": 3
+    "maxGeminiWorkers": 5
   },
 
   // -----------------------------------------------------------------------
