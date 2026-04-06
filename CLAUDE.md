@@ -74,7 +74,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/state/ao-active-run-{atlas|athena}.json` — active run identity pointer (links checkpoint ↔ run-artifacts)
 - `.ao/state/ao-subagent-results.json` — captured subagent outputs (capped at 50, FIFO); also emits `subagent_completed` events to active run
 - `.ao/state/ao-current-session.json` — active session pointer (sessionId + startedAt); used for crash recovery
-- `.ao/state/ao-capabilities.json` — cached capability detection results (5-min TTL, file-based since hooks run as separate processes)
+- `.ao/state/ao-capabilities.json` — cached capability detection results (60-min TTL, file-based since hooks run as separate processes). To force refresh after installing codex/gemini mid-session, delete this file manually
 - `.ao/state/ao-notifications.json` — logged idle/permission prompt notifications for stall detection (capped at 50 entries, FIFO)
 - `.ao/state/ao-plan-pending.json` — marker for plan execution routing fallback (created by PlanExecuteGate, consumed by SessionStart)
 - `.ao/state/*.json` — transient state files (deleted on completion or cleaned by SessionEnd after 24h)

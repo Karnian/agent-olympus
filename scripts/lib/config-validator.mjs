@@ -11,7 +11,7 @@
  * @type {{
  *   version: string,
  *   routes: Record<string, { agent: string, model: string }>,
- *   concurrency: { maxParallelTasks: number, maxGeminiWorkers: number, maxCodexWorkers: number },
+ *   concurrency: { maxParallelTasks: number, maxClaudeWorkers: number, maxCodexWorkers: number, maxGeminiWorkers: number },
  *   thresholds: { minConfidence: number, highConfidence: number }
  * }}
  */

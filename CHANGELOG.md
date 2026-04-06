@@ -7,7 +7,7 @@
 에이전트 에러 종료 시 concurrency slot이 해제되지 않아 좀비 엔트리가 남고, 10분 stale cleanup까지 새 Codex/Gemini 호출이 블록되던 버그 수정. 동시에 concurrency 제한을 config 파일에서 실제로 읽도록 연결하고 기본값 상향.
 
 - **`scripts/concurrency-release.mjs`**: 3단계 release 전략 도입 — (1) task_id 매칭 (2) provider 매칭 (3) SubagentStop safety net (가장 오래된 태스크 강제 해제). stale timeout 10분→3분으로 단축
-- **`scripts/concurrency-gate.mjs`**: `config/model-routing.jsonc`의 concurrency 섹션을 실제로 읽도록 연결. 우선순위: env var > config file > hardcoded defaults. stale timeout 10분→3분으로 동기화. 기본값 상향 (global 5→8, claude 3→5, codex 2→3, gemini 2→3)
+- **`scripts/concurrency-gate.mjs`**: `config/model-routing.jsonc`의 concurrency 섹션을 실제로 읽도록 연결. 우선순위: env var > config file > hardcoded defaults. stale timeout 10분→3분으로 동기화. 기본값 상향 (global 10, claude 8, codex 5, gemini 5)
 - **`config/model-routing.jsonc`**: concurrency 섹션에 `maxClaudeWorkers` 추가, 전체 값 상향 (maxParallelTasks 3→8, maxClaudeWorkers 5 신규, maxCodexWorkers 2→3, maxGeminiWorkers 2→3). 주석에 "informational" 제거, env var override 안내 추가
 - **`scripts/lib/config-validator.mjs`**: DEFAULT_ROUTING_CONFIG concurrency 값 동기화
 - **`hooks/hooks.json`**: SubagentStop에 concurrency-release 등록 (PostToolUse만으로는 에러 시 누락 가능)

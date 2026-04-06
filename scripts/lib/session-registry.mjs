@@ -165,7 +165,7 @@ export function finalizeSession(sessionId, data = {}) {
     record.endedAt = new Date().toISOString();
     record.status = data.status || 'ended';
     // Get fresh HEAD SHA at finalize time (not cached from session start)
-    _gitMeta = null;
+    _clearGitMetaCache();
     record.headSha = getHeadSha();
 
     atomicWriteFileSync(filePath, JSON.stringify(record, null, 2));
