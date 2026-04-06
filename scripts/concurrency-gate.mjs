@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 /**
- * PreToolUse hook for Task tool - enforces concurrency limits
- * Tracks active sub-agent tasks and blocks when limits are exceeded.
+ * PreToolUse hook for Task/Agent — enforces concurrency limits.
+ *
+ * Reads limits from config/model-routing.jsonc (concurrency section),
+ * with env var overrides (AO_CONCURRENCY_*) taking highest priority.
+ *
+ * Priority: env var > config file > hardcoded defaults
+ *
+ * Never blocks the hook chain on error: always exits 0.
  */
 
 import { readStdin } from './lib/stdin.mjs';
@@ -15,6 +21,14 @@ const STATE_DIR = join(process.cwd(), '.ao', 'state');
 const STATE_FILE = join(STATE_DIR, 'ao-concurrency.json');
 
 const STALE_TASK_MS = 3 * 60 * 1000; // 3 minutes (aligned with concurrency-release)
+
+// Hardcoded defaults (used when config file is absent or invalid)
+const DEFAULTS = {
+  global: 8,
+  claude: 5,
+  codex: 3,
+  gemini: 3,
+};
 
 function readState() {
   try {
@@ -52,12 +66,54 @@ function parseIntSafe(envVar, defaultVal) {
   return Number.isInteger(num) && num > 0 ? num : defaultVal;
 }
 
+/**
+ * Strip JSONC-style comments (// and /* ... * /) from a string.
+ * @param {string} source
+ * @returns {string}
+ */
+function stripJsoncComments(source) {
+  let result = source.replace(/\/\*[\s\S]*?\*\//g, '');
+  result = result.replace(/\/\/[^\n]*/g, '');
+  return result;
+}
+
+/**
+ * Load concurrency limits from config/model-routing.jsonc.
+ * Falls back to DEFAULTS on any error.
+ * @returns {{ global: number, claude: number, codex: number, gemini: number }}
+ */
+function loadConfigLimits() {
+  try {
+    const pluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+    if (!pluginRoot) return { ...DEFAULTS };
+
+    const configPath = join(pluginRoot, 'config', 'model-routing.jsonc');
+    const raw = readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(stripJsoncComments(raw));
+    const c = parsed?.concurrency;
+    if (!c || typeof c !== 'object') return { ...DEFAULTS };
+
+    return {
+      global: typeof c.maxParallelTasks === 'number' && c.maxParallelTasks > 0 ? c.maxParallelTasks : DEFAULTS.global,
+      claude: typeof c.maxClaudeWorkers === 'number' && c.maxClaudeWorkers > 0 ? c.maxClaudeWorkers : DEFAULTS.claude,
+      codex: typeof c.maxCodexWorkers === 'number' && c.maxCodexWorkers > 0 ? c.maxCodexWorkers : DEFAULTS.codex,
+      gemini: typeof c.maxGeminiWorkers === 'number' && c.maxGeminiWorkers > 0 ? c.maxGeminiWorkers : DEFAULTS.gemini,
+    };
+  } catch {
+    return { ...DEFAULTS };
+  }
+}
+
+/**
+ * Get concurrency limits. Priority: env var > config file > hardcoded defaults.
+ */
 function getLimits() {
+  const fromConfig = loadConfigLimits();
   return {
-    global: parseIntSafe('AO_CONCURRENCY_GLOBAL', 5),
-    claude: parseIntSafe('AO_CONCURRENCY_CLAUDE', 3),
-    codex: parseIntSafe('AO_CONCURRENCY_CODEX', 2),
-    gemini: parseIntSafe('AO_CONCURRENCY_GEMINI', 2),
+    global: parseIntSafe('AO_CONCURRENCY_GLOBAL', fromConfig.global),
+    claude: parseIntSafe('AO_CONCURRENCY_CLAUDE', fromConfig.claude),
+    codex: parseIntSafe('AO_CONCURRENCY_CODEX', fromConfig.codex),
+    gemini: parseIntSafe('AO_CONCURRENCY_GEMINI', fromConfig.gemini),
   };
 }
 

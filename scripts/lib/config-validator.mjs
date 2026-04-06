@@ -26,7 +26,7 @@ export const DEFAULT_ROUTING_CONFIG = {
     'planning':           { agent: 'agent-olympus:prometheus', model: 'opus', fallbackChain: ['opus', 'sonnet'], teamWorkerType: null },
     'unknown':            { agent: 'agent-olympus:executor', model: 'sonnet', fallbackChain: ['sonnet', 'haiku'], teamWorkerType: null },
   },
-  concurrency: { maxParallelTasks: 3, maxGeminiWorkers: 2, maxCodexWorkers: 2 },
+  concurrency: { maxParallelTasks: 8, maxClaudeWorkers: 5, maxCodexWorkers: 3, maxGeminiWorkers: 3 },
   thresholds: { minConfidence: 0.15, highConfidence: 0.70 },
 };
 

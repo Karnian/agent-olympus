@@ -91,15 +91,18 @@
   },
 
   // -----------------------------------------------------------------------
-  // Concurrency limits (informational — enforced by concurrency-gate.mjs)
+  // Concurrency limits — enforced by concurrency-gate.mjs (PreToolUse)
+  // Env var overrides: AO_CONCURRENCY_GLOBAL, AO_CONCURRENCY_CLAUDE, etc.
   // -----------------------------------------------------------------------
   "concurrency": {
-    // Maximum parallel Task invocations before queuing
-    "maxParallelTasks": 3,
-    // Maximum parallel Gemini team workers
-    "maxGeminiWorkers": 2,
+    // Maximum total parallel Task/Agent invocations
+    "maxParallelTasks": 8,
+    // Maximum parallel Claude sub-agent workers
+    "maxClaudeWorkers": 5,
     // Maximum parallel Codex team workers
-    "maxCodexWorkers": 2
+    "maxCodexWorkers": 3,
+    // Maximum parallel Gemini team workers
+    "maxGeminiWorkers": 3
   },
 
   // -----------------------------------------------------------------------
