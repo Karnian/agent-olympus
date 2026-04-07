@@ -70,6 +70,11 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/spec.md` — human-readable spec (ephemeral working copy)
 - `.ao/wisdom.jsonl` — structured cross-iteration learnings in JSONL format (NEVER delete, survives /cancel)
 - `.ao/progress.txt` — legacy format, auto-migrated to wisdom.jsonl on first run
+- `.ao/memory/` — **[v1.0.2+] durable long-lived memory namespace; EXEMPT from SessionEnd 24h cleanup; shared across all worktrees via git-common-dir resolution**
+  - `.ao/memory/design-identity.json` — brand colors, typography tokens, spacing scale, component library (schemaVersion: 1); populated by `/teach-design`
+  - `.ao/memory/taste.jsonl` — aesthetic preference accumulation (schemaVersion: 1 per line); populated by `/taste`; capped at 200 entries (FIFO)
+  - Loader rule: any file with `schemaVersion > 1` is refused and the loader returns the empty default (fail-safe forward-compat)
+  - Opt-out: `autonomy.json { memory: { disabled: true } }` causes all memory loaders to return empty defaults without touching disk
 - `.ao/state/checkpoint-{atlas|athena}.json` — session recovery checkpoints (auto-expire 24h); emits events to active run on save/clear
 - `.ao/state/ao-active-run-{atlas|athena}.json` — active run identity pointer (links checkpoint ↔ run-artifacts)
 - `.ao/state/ao-subagent-results.json` — captured subagent outputs (capped at 50, FIFO); also emits `subagent_completed` events to active run
@@ -77,14 +82,31 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/state/ao-capabilities.json` — cached capability detection results (60-min TTL, file-based since hooks run as separate processes). To force refresh after installing codex/gemini mid-session, delete this file manually
 - `.ao/state/ao-notifications.json` — logged idle/permission prompt notifications for stall detection (capped at 50 entries, FIFO)
 - `.ao/state/ao-plan-pending.json` — marker for plan execution routing fallback (created by PlanExecuteGate, consumed by SessionStart)
+- `.ao/state/browser-handoff.json` — [v1.0.2+] browser pause state (sessionId + sanitized URL + sanitized breadcrumb); 24h TTL; created by US-006 browser-handoff.mjs; read by `/resume-handoff`
 - `.ao/state/*.json` — transient state files (deleted on completion or cleaned by SessionEnd after 24h)
 - `.ao/sessions/<sessionId>.json` — per-session metadata (branch, cwd, status, linked runIds); shared across worktrees; 90-day TTL
 - `.ao/artifacts/runs/<runId>/` — per-run artifacts (events.jsonl, summary.json, verification.jsonl)
+  - `.ao/artifacts/runs/<runId>/ui-remediation.json` — [v1.0.2+] sequential remediation chain results (schemaVersion: 1); written by `/ui-remediate`
+- `.ao/artifacts/pipe/` — **[v1.0.2+] cascade artifact ARCHIVAL pipe (NOT prompt-history isolation); swept by SessionEnd after 24h**
+  - `.ao/artifacts/pipe/<runId>/<stage>/outbox/` — stage output archives written by orchestrators
+  - `.ao/artifacts/pipe/<runId>/<stage>/inbox/` — prior-stage handoff manifests for current stage
+  - Canonical stage names: `plan`, `decompose`, `execute`, `verify`, `review`, `finish` (schema-validated; free-form names rejected)
+  - Per-file cap: 100KB (tail-truncation warning on exceed); per-run cap: 10MB (drops + warning on exceed)
+  - ARCHIVAL ONLY: continuous-session orchestrators cannot deliver strict prompt-history isolation; isolation requires fresh-process stage runners (out of scope v1.0.2, per spec.md N12)
 - `.ao/teams/` — tmux worker inbox/outbox directories (Athena only)
 - `.ao/worktrees/<teamSlug>/<workerName>/` — isolated git worktrees for Athena parallel workers (Athena only; cleaned up after team completion)
 - `docs/plans/` — git-tracked permanent plan storage (survives sessions, shared with team)
 - `docs/plans/README.md` — auto-generated index of all plans
 - `docs/plans/<slug>/CHANGELOG.md` — per-plan change history
+
+### schemaVersion Convention (v1.0.2+)
+
+Every new persisted file format introduced in v1.0.2 carries `schemaVersion: 1`:
+- **JSON files**: top-level field (`{ "schemaVersion": 1, ... }`)
+- **JSONL files**: per-line field (`{"schemaVersion":1,"id":"..."}`)
+- **Loader rule**: if `schemaVersion > 1` (unknown future format), the loader MUST return the empty default (`{}` or `[]`) and emit a clear error to stderr (suppressOutput). Never throw or block.
+- **Writer rule**: callers are responsible for including `schemaVersion: 1` in data passed to memory.mjs writers and artifact writers.
+- **Migration policy**: when schemaVersion increments in a future release, the new loader MUST include a migration path or a clear upgrade message.
 
 ## How to Add a New Agent
 
