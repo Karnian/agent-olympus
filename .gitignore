@@ -12,3 +12,4 @@ node_modules/
 
 # Claude Code local
 .claude/settings.local.json
+.claude/worktrees/
