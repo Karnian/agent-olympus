@@ -14,6 +14,26 @@ import { finalizeSession, getCurrentSessionId, pruneSessions } from './lib/sessi
 
 const STALE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+// v1.0.2 B-X1 + AC-X2 fix: Names under .ao/state/ or .ao/teams/ that must
+// NEVER be swept, even if stale. These are durable memory / telemetry files
+// that live outside .ao/state/ in v1.0.2+ (.ao/memory/) but we also keep an
+// explicit allow-list here as belt-and-suspenders in case future features
+// drop files into .ao/state/ with durable intent.
+//
+// Durable memory (v1.0.2+) lives under .ao/memory/ which is a SEPARATE
+// directory NOT scanned by cleanStaleFiles; see resolveMemoryDir() in
+// scripts/lib/memory.mjs. The allow-list below guards against regressions
+// where a future hook writes into .ao/state/ by accident.
+const PROTECTED_NAMES = new Set([
+  // Never delete durable memory filenames even if found in .ao/state/
+  'design-identity.json',
+  'taste.jsonl',
+  'tthw-history.jsonl',       // reserved for v1.0.3
+  // Wisdom lives at .ao/wisdom.jsonl (outside .ao/state/) but guard the name
+  // in case anyone ever writes a legacy copy under .ao/state/.
+  'wisdom.jsonl',
+]);
+
 /**
  * Remove entries in `dir` whose mtime exceeds STALE_MS.
  * Directories are removed recursively; files are unlinked.
@@ -28,6 +48,9 @@ function cleanStaleFiles(dir, now) {
   try {
     const entries = readdirSync(dir);
     for (const entry of entries) {
+      // v1.0.2 B-X1: protect durable-memory filenames even if they somehow
+      // end up in .ao/state/ (defensive; primary storage is .ao/memory/).
+      if (PROTECTED_NAMES.has(entry)) continue;
       const fullPath = join(dir, entry);
       try {
         const stat = statSync(fullPath);
