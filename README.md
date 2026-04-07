@@ -556,6 +556,22 @@ This project was inspired by and references ideas from:
 - [Oh My OpenAgent](https://github.com/code-yeongyu/oh-my-openagent) — Batteries-included agent harness with multi-model orchestration
 - [Kimoring AI Skills](https://github.com/codefactory-co/kimoring-ai-skills) — SessionStart/Stop hook patterns, coverage gap detection concept
 - [Superpowers](https://github.com/obra/superpowers) — TDD discipline, systematic debugging methodology, brainstorm-first gate, verification-before-completion iron law, two-stage code review protocol (v0.7.0)
+- [claw-code](https://github.com/instructkr/claw-code) — Claude Code Python clean-room rewrite; source structure analysis informed v0.9 module design (plugins/hooks/skills/services)
+
+### Inspiration
+
+Additional projects and patterns researched during planning that influenced design decisions, even where no code was directly adapted:
+
+- **Happy Coder** — phone push notifications and remote approval for long-running agent tasks
+- **CC Notify** — lightweight desktop notification hooks for Claude Code
+- **Ralph Loop** (awesome-ralph) — autonomous restart pattern with intelligent exit detection and circuit breakers
+- **Trail of Bits Security Skills** — CodeQL/Semgrep integration beyond pure LLM-based security review
+- **Claude Squad** — terminal UI for managing multiple agent sessions in parallel
+- **Container Use** — Docker-isolated execution environments for parallel agents
+- **Compound Engineering Plugin** — structured mistake-to-lesson pipeline (compared against our wisdom system)
+- **Claude-Mem** — cross-session long-term memory with semantic retrieval
+- **Ruflo** — vector-based multi-layered memory for agent swarms
+- **anthropics/claude-plugins-official** and curated lists (awesome-claude-code, ccplugins) — broader Claude Code plugin ecosystem reference
 
 ## License
 
