@@ -548,6 +548,22 @@ Agent Olympus는 세 가지 핵심 원칙을 구현합니다:
 - [Oh My OpenAgent](https://github.com/code-yeongyu/oh-my-openagent) — 멀티 모델 오케스트레이션을 지원하는 에이전트 하네스
 - [Kimoring AI Skills](https://github.com/codefactory-co/kimoring-ai-skills) — SessionStart/Stop 훅 패턴, 커버리지 갭 탐지 아이디어
 - [Superpowers](https://github.com/obra/superpowers) — TDD 규율, 체계적 디버깅 방법론, 브레인스토밍 우선 게이트, 검증 철칙, 2단계 코드 리뷰 프로토콜 (v0.7.0)
+- [claw-code](https://github.com/instructkr/claw-code) — Claude Code Python clean-room rewrite. 소스 구조 분석을 통해 v0.9 모듈 설계(plugins/hooks/skills/services)에 영향
+
+### 영감 (Inspiration)
+
+기획 단계에서 조사하여 설계 결정에 영향을 준 추가 프로젝트 및 패턴 (직접 코드를 차용하지는 않았습니다):
+
+- **Happy Coder** — 장시간 실행되는 에이전트 작업을 위한 폰 푸시 알림 및 원격 승인
+- **CC Notify** — Claude Code용 경량 데스크톱 알림 훅
+- **Ralph Loop** (awesome-ralph) — 지능형 종료 감지 및 서킷 브레이커가 포함된 자율 재시작 패턴
+- **Trail of Bits Security Skills** — 순수 LLM 기반 보안 리뷰를 넘어선 CodeQL/Semgrep 통합
+- **Claude Squad** — 여러 에이전트 세션을 병렬 관리하는 터미널 UI
+- **Container Use** — 병렬 에이전트를 위한 Docker 격리 실행 환경
+- **Compound Engineering Plugin** — 구조화된 실수→교훈 파이프라인 (wisdom 시스템 비교 대상)
+- **Claude-Mem** — 시멘틱 검색 기반 크로스 세션 장기 메모리
+- **Ruflo** — 에이전트 스웜을 위한 벡터 기반 다계층 메모리
+- **anthropics/claude-plugins-official** 및 curated lists (awesome-claude-code, ccplugins) — Claude Code 플러그인 생태계 전반 참고
 
 ## 라이선스
 
