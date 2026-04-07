@@ -1,0 +1,51 @@
+// Agent Olympus v1.0.2 — UI Anti-Pattern Registry (US-001)
+//
+// Copy this file to `config/design-blacklist.jsonc` to OPT IN to the
+// ui-smell-scan gate in /finish-branch. When this file is absent, the
+// scan is skipped silently (no-op).
+//
+// Mode is controlled by `.ao/autonomy.json`:
+//   { "uiSmellScan": "warn" }   — default: log violations, continue  (v1.0.2 recommended)
+//   { "uiSmellScan": "block" }  — opt-in stricter: fail finish-branch on any violation
+//
+// The five canonical LLM UI slop patterns detected below were identified
+// by the pbakaus/impeccable project and the Agent Olympus 3-way cross-review.
+// Each rule has: id, category, description, and a `pattern` regex.
+//
+// Per-project exceptions live in `.ao/memory/design-identity.json` under
+// `allowedFonts: ["Inter", ...]`. Those entries suppress font rule hits.
+{
+  "schemaVersion": 1,
+  "rules": [
+    {
+      "id": "llm-default-font-inter-system",
+      "category": "typography",
+      "description": "Inter / system fonts are the LLM-default fallback and rarely match a real brand. Define a project font via /teach-design.",
+      "pattern": "font-family\\s*:\\s*['\"]?(Inter|system-ui|-apple-system|BlinkMacSystemFont|sans-serif)['\"]?"
+    },
+    {
+      "id": "llm-pure-black-background",
+      "category": "color",
+      "description": "Pure #000 / rgb(0,0,0) black backgrounds are a cheap LLM default. Prefer a tinted neutral from the design-identity palette.",
+      "pattern": "(background(-color)?|bg-color)\\s*:\\s*(#000\\b|#000000\\b|rgb\\(\\s*0\\s*,\\s*0\\s*,\\s*0\\s*\\)|black)"
+    },
+    {
+      "id": "llm-card-soup-nested",
+      "category": "layout",
+      "description": "Nested cards (rounded-lg + border + shadow + padding inside another card) collapse visual hierarchy.",
+      "pattern": "(rounded-(lg|xl|2xl)[^\"']*border[^\"']*shadow|shadow[^\"']*rounded[^\"']*border)"
+    },
+    {
+      "id": "llm-bounce-easing",
+      "category": "motion",
+      "description": "cubic-bezier bounce / elasticOut / spring overshoot easing is a generic animation default that rarely matches brand motion.",
+      "pattern": "(cubic-bezier\\s*\\(\\s*0\\.68\\s*,\\s*-0\\.55|ease-bounce|elasticOut|elastic-out|bounceOut|bounce-out)"
+    },
+    {
+      "id": "llm-gray-on-color",
+      "category": "color",
+      "description": "Gray text on a saturated background (gray-400/500 on blue/purple/indigo) fails WCAG AA and is a canonical LLM default.",
+      "pattern": "(text-gray-[345]00[^\"']*bg-(blue|indigo|purple|violet)-|bg-(blue|indigo|purple|violet)-[^\"']*text-gray-[345]00)"
+    }
+  ]
+}

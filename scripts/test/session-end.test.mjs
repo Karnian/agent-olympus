@@ -325,6 +325,69 @@ describe('session-end: deterministic pruning counter', () => {
 });
 
 // ---------------------------------------------------------------------------
+// v1.0.2 F-002: .ao/memory/ is NEVER touched by session-end
+// ---------------------------------------------------------------------------
+
+describe('session-end: v1.0.2 F-002 — .ao/memory/ is never swept', () => {
+  let tmpDir;
+  let oldMemoryFile;
+  let oldMemoryJsonl;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    // Create .ao/memory/ with files older than 24h
+    const memDir = path.join(tmpDir, '.ao', 'memory');
+    mkdirSync(memDir, { recursive: true, mode: 0o700 });
+    oldMemoryFile = path.join(memDir, 'design-identity.json');
+    writeFileSync(oldMemoryFile, '{"schemaVersion":1}', { encoding: 'utf-8', mode: 0o600 });
+    setMtime(oldMemoryFile, STALE_MS + 2 * 60 * 60 * 1000); // 26h old
+
+    oldMemoryJsonl = path.join(memDir, 'taste.jsonl');
+    writeFileSync(oldMemoryJsonl, '{"schemaVersion":1,"id":"x"}\n', { encoding: 'utf-8', mode: 0o600 });
+    setMtime(oldMemoryJsonl, STALE_MS + 2 * 60 * 60 * 1000);
+
+    // Also ensure a stale state file is cleaned to prove session-end still runs
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    createFile(stateDir, 'ao-sentinel-stale.json', STALE_MS + 60 * 1000);
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('does NOT delete stale files under .ao/memory/', () => {
+    runHook(tmpDir);
+    assert.ok(existsSync(oldMemoryFile), '.ao/memory/design-identity.json must survive');
+    assert.ok(existsSync(oldMemoryJsonl), '.ao/memory/taste.jsonl must survive');
+  });
+
+  it('still cleans stale .ao/state/ files (control)', () => {
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    // The sentinel should already be gone from the previous run
+    const sentinel = path.join(stateDir, 'ao-sentinel-stale.json');
+    assert.ok(!existsSync(sentinel), 'stale state sentinel should have been cleaned');
+  });
+});
+
+describe('session-end: PROTECTED_NAMES allow-list defense', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    // Create stale files in .ao/state/ using protected names —
+    // even in the wrong location they must survive.
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    createFile(stateDir, 'design-identity.json', STALE_MS + 60 * 1000);
+    createFile(stateDir, 'taste.jsonl', STALE_MS + 60 * 1000);
+    createFile(stateDir, 'wisdom.jsonl', STALE_MS + 60 * 1000);
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('preserves protected-name files even when stale and misplaced', () => {
+    runHook(tmpDir);
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    assert.ok(existsSync(path.join(stateDir, 'design-identity.json')));
+    assert.ok(existsSync(path.join(stateDir, 'taste.jsonl')));
+    assert.ok(existsSync(path.join(stateDir, 'wisdom.jsonl')));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fail-safe — always valid JSON
 // ---------------------------------------------------------------------------
 

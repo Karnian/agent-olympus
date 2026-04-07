@@ -309,24 +309,32 @@ test('detectCapabilities: returns object with all boolean fields', async () => {
 
 test('detectCapabilities: hasNativeTeamTools follows CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var', async () => {
   const { execFileSync } = await import('node:child_process');
-  const preflightUrl = new URL('../../scripts/lib/preflight.mjs', import.meta.url).href;
-  const script = `const mod = await import(${JSON.stringify(preflightUrl)}); const caps = await mod.detectCapabilities(); console.log(JSON.stringify({ hasNativeTeamTools: caps.hasNativeTeamTools }));`;
+  // Isolate cwd so we don't pick up the project's .ao/autonomy.json (which may have nativeTeams:true)
+  const tmpDir = await makeTmpDir();
+  try {
+    const preflightUrl = new URL('../../scripts/lib/preflight.mjs', import.meta.url).href;
+    const script = `const mod = await import(${JSON.stringify(preflightUrl)}); const caps = await mod.detectCapabilities(); console.log(JSON.stringify({ hasNativeTeamTools: caps.hasNativeTeamTools }));`;
 
-  // With env var set to '1' → true
-  const out1 = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
-    env: { ...process.env, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' },
-    encoding: 'utf-8',
-  });
-  assert.equal(JSON.parse(out1.trim()).hasNativeTeamTools, true);
+    // With env var set to '1' → true
+    const out1 = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+      env: { ...process.env, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' },
+      encoding: 'utf-8',
+      cwd: tmpDir,
+    });
+    assert.equal(JSON.parse(out1.trim()).hasNativeTeamTools, true);
 
-  // With env var unset → false
-  const env2 = { ...process.env };
-  delete env2.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
-  const out2 = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
-    env: env2,
-    encoding: 'utf-8',
-  });
-  assert.equal(JSON.parse(out2.trim()).hasNativeTeamTools, false);
+    // With env var unset → false
+    const env2 = { ...process.env };
+    delete env2.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+    const out2 = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+      env: env2,
+      encoding: 'utf-8',
+      cwd: tmpDir,
+    });
+    assert.equal(JSON.parse(out2.trim()).hasNativeTeamTools, false);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
 });
 
 test('detectCapabilities: hasNativeTeamTools true when .ao/autonomy.json has nativeTeams:true (no env var)', async () => {

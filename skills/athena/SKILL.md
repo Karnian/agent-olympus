@@ -704,7 +704,7 @@ Run **simultaneously**: build, tests, linter.
 
 **[OPTIONAL] Visual Verification** — if any worker's branch includes frontend file changes (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`):
 
-1. Detect frontend changes: `git diff --name-only main...HEAD | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'`
+1. Detect frontend changes: `BASE=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo main); git diff --name-only "origin/$BASE...HEAD" | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'`
 2. If found AND `.claude/launch.json` exists:
    - `preview_start(name="<dev-server>")` → `preview_screenshot()` → evaluate for blank pages, layout breakage, console errors
    - `preview_console_logs(level="error")` to detect runtime errors
@@ -743,23 +743,48 @@ saveCheckpoint('athena', { phase: 5, prdSnapshot: <prd.json>, completedStories, 
 
 ### Phase 5 — REVIEW (loop until approved)
 
-Spawn reviewers **simultaneously**:
-```
-agent-olympus:architect (opus) — completeness
-agent-olympus:security-reviewer (sonnet) — security
-agent-olympus:code-reviewer (sonnet) — quality
-agent-olympus:aphrodite (sonnet) — UI/UX design review [CONDITIONAL: frontend files only]
+**Step 5.0 — Consult review router (US-005)**
+
+Before fanning out, call `scripts/lib/review-router.mjs` → `routeReviewers()`
+to compute the minimal reviewer set for the actual diff scope. Cuts 60-80% of
+reviewer overhead while still catching security-relevant code via the
+`securityPatterns` regex set.
+
+```bash
+node -e '
+  import("./scripts/lib/review-router.mjs").then(async (m) => {
+    const { execSync } = await import("node:child_process");
+    // Use full branch diff vs origin/HEAD (not just HEAD~1) so multi-commit branches route correctly.
+    const base = (() => {
+      try { return execSync("git symbolic-ref refs/remotes/origin/HEAD", { encoding: "utf-8" }).trim().replace(/^refs\/remotes\/origin\//, ""); }
+      catch { return "main"; }
+    })();
+    const range = `origin/${base}...HEAD`;
+    const paths = execSync(`git diff --name-only ${range}`, { encoding: "utf-8" })
+      .split("\n").filter(Boolean);
+    const content = execSync(`git diff ${range}`, { encoding: "utf-8" });
+    const r = m.routeReviewers({ diffPaths: paths, diffContent: content });
+    console.log(JSON.stringify(r, null, 2));
+  });
+'
 ```
 
-**Aphrodite is conditional**: Only spawn if changeset includes frontend files
-(`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`).
-Skip silently if no frontend files changed.
+Spawn ONLY the reviewers in `r.reviewers`, in parallel.
+
+**Step 5.1 — Handle reviewer escalation**
+
+If any reviewer emits `{type: 'RE-REVIEW-REQUESTED', additionalReviewer, reason}`,
+call `handleEscalation(currentSet, flag)` and spawn the requested reviewer in the
+**same iteration** (not the next loop).
 
 ```
 ┌─→ ALL APPROVED → DONE ✓
+│   ANY ESCALATION → spawn additional reviewer same iteration
 │   ANY REJECTED → fix, re-review
 └── Loop (max 3 rounds)
 ```
+
+**Rollback**: `.ao/autonomy.json` → `{ "reviewRouter": { "disabled": true } }`.
 
 ### Phase 5b — SLOP CLEAN + COMMIT
 
