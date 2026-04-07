@@ -557,6 +557,8 @@ This project was inspired by and references ideas from:
 - [Kimoring AI Skills](https://github.com/codefactory-co/kimoring-ai-skills) — SessionStart/Stop hook patterns, coverage gap detection concept
 - [Superpowers](https://github.com/obra/superpowers) — TDD discipline, systematic debugging methodology, brainstorm-first gate, verification-before-completion iron law, two-stage code review protocol (v0.7.0)
 - [claw-code](https://github.com/instructkr/claw-code) — Claude Code Python clean-room rewrite; source structure analysis informed v0.9 module design (plugins/hooks/skills/services)
+- [impeccable](https://github.com/pbakaus/impeccable) — Apache 2.0 — modular design reference pack (7 domains), executable anti-pattern registry, project-specific design briefing, and precision style-pass micro-skills; basis for v1.0.2 design-quality stories US-001 through US-004 and US-008
+- [gstack](https://github.com/garrytan/gstack) — MIT — change-aware review router, browser handoff/resume, cascade artifact pipe, taste memory, and TTHW benchmarking; basis for v1.0.2 orchestration efficiency stories US-005 through US-007, US-009, and US-010
 
 ### Inspiration
 
