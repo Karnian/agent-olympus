@@ -143,7 +143,13 @@ async function main() {
 
     // Stage tracked modified/deleted files (safer than git add -A)
     // This avoids staging: .env, secrets, .ao/state/ files
-    execFileSync('git', ['add', '-u'], { stdio: 'pipe' });
+    // Pathspec excludes .claude/worktrees/* gitlinks (HEAD pointer noise from
+    // Claude Code worktrees that change every session but aren't real work)
+    execFileSync(
+      'git',
+      ['add', '-u', '--', '.', ':(exclude,glob).claude/worktrees/**'],
+      { stdio: 'pipe' }
+    );
 
     // Also stage new files, but exclude sensitive patterns
     const untrackedRaw = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
@@ -155,6 +161,7 @@ async function main() {
         /^\.env/,
         /^\.ao\/state\//,
         /^\.ao\/teams\//,
+        /^\.claude\/worktrees\//,
         /credentials/i,
         /secret/i,
         /\.key$/,
