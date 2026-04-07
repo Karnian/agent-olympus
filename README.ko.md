@@ -549,6 +549,8 @@ Agent Olympus는 세 가지 핵심 원칙을 구현합니다:
 - [Kimoring AI Skills](https://github.com/codefactory-co/kimoring-ai-skills) — SessionStart/Stop 훅 패턴, 커버리지 갭 탐지 아이디어
 - [Superpowers](https://github.com/obra/superpowers) — TDD 규율, 체계적 디버깅 방법론, 브레인스토밍 우선 게이트, 검증 철칙, 2단계 코드 리뷰 프로토콜 (v0.7.0)
 - [claw-code](https://github.com/instructkr/claw-code) — Claude Code Python clean-room rewrite. 소스 구조 분석을 통해 v0.9 모듈 설계(plugins/hooks/skills/services)에 영향
+- [impeccable](https://github.com/pbakaus/impeccable) — Apache 2.0 — 7개 도메인 모듈러 디자인 레퍼런스 팩, 실행 가능한 안티패턴 레지스트리, 프로젝트별 디자인 브리핑, 정밀 스타일 패스 마이크로 스킬. v1.0.2 디자인 품질 스토리 US-001~US-004, US-008의 기반
+- [gstack](https://github.com/garrytan/gstack) — MIT — 변경 인식 리뷰 라우터, 브라우저 핸드오프/재개, 캐스케이드 아티팩트 파이프, 테이스트 메모리, TTHW 벤치마킹. v1.0.2 오케스트레이션 효율 스토리 US-005~US-007, US-009, US-010의 기반
 
 ### 영감 (Inspiration)
 

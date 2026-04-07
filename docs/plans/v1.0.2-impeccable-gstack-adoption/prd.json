@@ -1,0 +1,239 @@
+{
+  "projectName": "v1.0.2-impeccable-gstack-adoption",
+  "scale": "M",
+  "createdAt": "2026-04-07T00:00:00.000Z",
+  "status": "draft",
+  "version": "1.0.2",
+  "problemStatement": "Agent Olympus has strong design-review coverage but suffers from three concrete gaps: (1) generic LLM UI defaults that even Aphrodite cannot prevent without explicit negative constraints and project-specific brand context; (2) always-on reviewer overhead in Atlas/Athena that wastes 60-80% of reviewer tokens on diffs irrelevant to most agents; (3) brownfield stalls where finish-branch assumes a test harness exists and browser-based QA hits CAPTCHA/auth walls with no handoff path. A 3-way cross-review by Claude+Codex+Gemini against pbakaus/impeccable and garrytan/gstack reached unanimous consensus on five concrete adoptions plus five additional 2-of-3 consensus items.",
+  "targetUsers": "Solo AI developers running /atlas or /athena on UI-heavy projects; small teams wanting design-system discipline auto-enforced; brownfield rescuers adopting Olympus on legacy repos with no tests.",
+  "goals": [
+    "Eliminate generic LLM UI defaults via executable anti-pattern registry as a finish-branch gate",
+    "Make designer/aphrodite project-aware via /teach-design captured to .ao/state/design-identity.json and auto-injected through subagent-start hook",
+    "Replace monolithic design prompts with seven modular reference packs (typography, color-and-contrast, spatial-design, motion-design, interaction-design, responsive-design, ux-writing) lazy-loaded by ui-review",
+    "Add precision style-pass micro-skills (/normalize, /polish, /typeset, /arrange) for surgical UI iteration",
+    "Cut Athena reviewer overhead 40-80% via change-aware review router based on diff scope",
+    "Add browser handoff/resume so autonomous QA can pause for CAPTCHA/auth and continue from exact session state",
+    "Formalize cascade artifact pipe (.ao/artifacts/pipe/<runId>/<stage>/) with strict inbox/outbox per orchestrator stage",
+    "Add deterministic frontend remediation chain (audit -> normalize -> polish -> harden) recorded in .ao/artifacts/runs/<runId>/",
+    "Add taste memory (.ao/state/taste.jsonl) for aesthetic preference accumulation distinct from wisdom",
+    "Add TTHW benchmarking so finish-branch tracks clone-to-running-tests latency",
+    "All existing tests continue to pass",
+    "Standalone operation without impeccable or gstack installed"
+  ],
+  "nonGoals": [
+    "Port impeccable's full 20-command surface (only 4 highest-leverage micro-skills)",
+    "Port gstack's /learn (wisdom covers it) or /autoplan (Atlas/Athena cover it)",
+    "Port gstack's GStack Browser binary or Pretext layout engine",
+    "Introduce new npm dependencies",
+    "Modify hook signatures or run.cjs entry point",
+    "Break the autonomy.json schema",
+    "Implement STRIDE security review or test bootstrap (deferred to v1.0.3)",
+    "Implement /freeze, /careful, /guard, /canary, or /overdrive (deferred to v1.1.0)",
+    "Change Greek mythology agent persona structure"
+  ],
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Anti-pattern registry + executable UI smell scan",
+      "asA": "frontend developer running /finish-branch",
+      "iWantTo": "have an automated scanner block merge if the diff introduces canonical LLM UI slop (Inter/system fonts, pure black, card-nesting, bounce easing, gray-on-color)",
+      "soThat": "my project never ships visually-default AI output that all reviewers would call generic",
+      "acceptanceCriteria": [
+        "GIVEN config/design-blacklist.jsonc exists with anti-pattern rules WHEN ui-smell-scan.mjs runs THEN it loads the rules and reports each detection with file:line, rule id, and matched substring",
+        "GIVEN a known-bad seed fixture with all 5 canonical slop patterns WHEN scan runs THEN it detects at least 3 of the 5",
+        "GIVEN a project sets allowedFonts in design-identity.json WHEN scan encounters that font THEN it does not flag",
+        "GIVEN finish-branch runs WHEN ui-smell-scan finds violations THEN finish-branch fails with structured error listing all violations",
+        "GIVEN scan finds zero violations WHEN finish-branch continues THEN it logs the clean result to .ao/artifacts/runs/<runId>/"
+      ],
+      "requiresTDD": true,
+      "complexity": "M",
+      "parallelGroup": "A",
+      "source": "impeccable",
+      "consensus": "3/3"
+    },
+    {
+      "id": "US-002",
+      "title": "Modular design reference pack (7 lazy-loaded modules)",
+      "asA": "designer or aphrodite agent reviewing UI",
+      "iWantTo": "load only the relevant design reference module (typography, color-and-contrast, spatial-design, motion-design, interaction-design, responsive-design, ux-writing) for the current critique",
+      "soThat": "my context window is not bloated by all 7 domains when only 1-2 apply",
+      "acceptanceCriteria": [
+        "GIVEN skills/ui-review/reference/ contains 7 markdown files (one per domain) WHEN ui-review skill runs THEN it parses the diff scope and loads only the relevant 1-3 modules",
+        "GIVEN a CSS-only diff WHEN ui-review runs THEN it loads color-and-contrast + spatial-design + responsive-design at minimum",
+        "GIVEN a copy-only diff (label/error message changes) WHEN ui-review runs THEN it loads only ux-writing",
+        "GIVEN no module match WHEN ui-review runs THEN it falls back to loading all 7 modules with a warning",
+        "GIVEN each reference module WHEN inspected THEN it contains: domain definition, top 5 principles, top 5 anti-patterns, 1 worked example"
+      ],
+      "requiresTDD": true,
+      "complexity": "S",
+      "parallelGroup": "A",
+      "source": "impeccable",
+      "consensus": "3/3"
+    },
+    {
+      "id": "US-003",
+      "title": "/teach-design identity briefing + auto-injection via subagent-start",
+      "asA": "developer setting up Olympus on a new frontend project",
+      "iWantTo": "run /teach-design once to capture brand colors, typography tokens, spacing scale, component library, and design conventions into .ao/state/design-identity.json",
+      "soThat": "every subsequent designer/aphrodite/ui-review invocation references my project-specific taste rather than re-deriving generic 'good design'",
+      "acceptanceCriteria": [
+        "GIVEN /teach-design is invoked WHEN the skill runs THEN it interviews the user (or auto-detects from package.json/tailwind.config/theme files) to populate brand colors, fonts, spacing tokens, and design conventions",
+        "GIVEN /teach-design completes WHEN saved THEN .ao/state/design-identity.json contains schema-validated fields: brand.colors, typography.fonts, spacing.scale, components.library, allowedFonts, conventions.notes",
+        "GIVEN design-identity.json exists WHEN subagent-start.mjs fires for designer/aphrodite/ui-review subagent THEN it injects the identity as additionalContext",
+        "GIVEN subagent without design-identity.json WHEN subagent-start fires THEN it injects nothing extra (no error)",
+        "GIVEN identity is updated WHEN /teach-design re-runs THEN existing fields are merged, not overwritten silently; user is shown the diff",
+        "GIVEN identity is corrupted WHEN subagent-start tries to load it THEN hook fails open (writes {}, exit 0) per existing fail-safe convention"
+      ],
+      "requiresTDD": true,
+      "complexity": "M",
+      "parallelGroup": "B",
+      "source": "impeccable",
+      "consensus": "3/3"
+    },
+    {
+      "id": "US-004",
+      "title": "Precision style-pass micro-skills (/normalize, /polish, /typeset, /arrange)",
+      "asA": "developer iterating on a UI component",
+      "iWantTo": "invoke a surgical micro-skill that fixes one specific concern (token alignment, final polish, typography only, layout/spacing only) without re-generating the whole component",
+      "soThat": "I can iterate in 10% shifts instead of full redesigns, preserving layout stability",
+      "acceptanceCriteria": [
+        "GIVEN /normalize is invoked on a target file or component WHEN it runs THEN it replaces hardcoded values with design tokens, leaves layout untouched, reports a diff summary",
+        "GIVEN /polish is invoked WHEN it runs THEN it applies final-pass refinements (alignment, spacing rhythm, micro-detail) without changing structure or copy",
+        "GIVEN /typeset is invoked WHEN it runs THEN it adjusts font choices, hierarchy, sizing, weight only — touches no other CSS",
+        "GIVEN /arrange is invoked WHEN it runs THEN it adjusts layout, spacing, visual rhythm only — touches no typography or color",
+        "GIVEN any micro-skill completes WHEN it finishes THEN it reports: files touched, lines changed, scope confirmation (e.g. '0 typography changes' for /arrange)",
+        "GIVEN any micro-skill is invoked WHEN it routes THEN it uses the designer agent at sonnet tier (not opus) for cost efficiency"
+      ],
+      "requiresTDD": false,
+      "complexity": "M",
+      "parallelGroup": "C",
+      "source": "impeccable",
+      "consensus": "3/3"
+    },
+    {
+      "id": "US-005",
+      "title": "Change-aware review router for Atlas/Athena reviewer fan-out",
+      "asA": "Atlas or Athena orchestrator about to spawn reviewers",
+      "iWantTo": "consult a router that maps the current diff scope to the minimal set of relevant reviewer agents",
+      "soThat": "I do not waste 60-80% of reviewer tokens running architect/security on a CSS-only diff or aphrodite on a backend refactor",
+      "acceptanceCriteria": [
+        "GIVEN config/review-routing.jsonc contains diff-scope rules (frontend/backend/infra/docs/test/auth) WHEN review-router.mjs is called with a diff THEN it returns the list of reviewer agents to invoke",
+        "GIVEN a CSS-only diff WHEN router is called THEN it returns [aphrodite, designer] (not architect/security/code-reviewer)",
+        "GIVEN a backend-only diff WHEN router is called THEN it returns [code-reviewer, architect, security-reviewer] (not aphrodite/designer)",
+        "GIVEN an auth/security-touching diff (matches: jwt, session, password, oauth, cookie) WHEN router is called THEN it always includes security-reviewer regardless of other rules",
+        "GIVEN routing.alwaysInclude contains an agent WHEN router is called THEN that agent is always included",
+        "GIVEN router has no rule match WHEN called THEN it falls back to the full reviewer set with a warning logged",
+        "GIVEN Atlas Phase 4 verification runs WHEN router is consulted THEN reviewer fan-out uses only the returned set",
+        "GIVEN Athena worker integration runs WHEN router is consulted THEN cross-validation uses only the returned set"
+      ],
+      "requiresTDD": true,
+      "complexity": "M",
+      "parallelGroup": "B",
+      "source": "gstack",
+      "consensus": "3/3"
+    },
+    {
+      "id": "US-006",
+      "title": "Browser handoff/resume protocol for autonomous QA",
+      "asA": "developer running autonomous browser-based QA via Atlas/Athena",
+      "iWantTo": "have the agent pause when it hits CAPTCHA/auth/MFA, hand off to a visible Chrome session for me to solve, and resume from the exact context",
+      "soThat": "self-driving QA does not stall on real-world auth gates",
+      "acceptanceCriteria": [
+        "GIVEN agent encounters a recognized auth/captcha pattern (DOM markers: recaptcha, hcaptcha, 'verify you are human', login form) WHEN handoff is triggered THEN it persists session ID + current URL + breadcrumb to .ao/state/browser-handoff.json and emits a notification",
+        "GIVEN handoff state exists WHEN user runs /resume-handoff THEN agent reads the state, navigates to the persisted URL, and continues from the breadcrumb step",
+        "GIVEN handoff state is older than 24h WHEN /resume-handoff is invoked THEN it warns about staleness and asks for confirmation",
+        "GIVEN handoff persistence WHEN inspected THEN it contains NO cookies, headers, or credentials — only session ID, URL, and breadcrumb",
+        "GIVEN no browser provider available WHEN handoff is triggered THEN it logs the URL and instructs user to manually complete; never blocks indefinitely",
+        "GIVEN handoff resume succeeds WHEN orchestrator continues THEN the run artifact records both the pause and resume events"
+      ],
+      "requiresTDD": true,
+      "complexity": "L",
+      "parallelGroup": "D",
+      "source": "gstack",
+      "consensus": "Codex+Gemini"
+    },
+    {
+      "id": "US-007",
+      "title": "Cascade artifact pipe with strict inbox/outbox per orchestrator stage",
+      "asA": "Atlas or Athena orchestrator running a multi-stage workflow",
+      "iWantTo": "write each stage's outputs to .ao/artifacts/pipe/<runId>/<stage>/outbox/ and have the next stage read only from its inbox/",
+      "soThat": "stages do not carry forward bloated history or hallucination from earlier prompts",
+      "acceptanceCriteria": [
+        "GIVEN scripts/lib/artifact-pipe.mjs exposes writeOutbox(runId, stage, name, payload) and readInbox(runId, stage) WHEN orchestrator stages call these THEN files are written to .ao/artifacts/pipe/<runId>/<stage>/{inbox,outbox}/",
+        "GIVEN stage N completes WHEN stage N+1 starts THEN it reads only from .ao/artifacts/pipe/<runId>/<stageN+1>/inbox/, populated by symlinks/copies from stage N outbox",
+        "GIVEN a stage produces too much data WHEN written THEN payloads are capped at 100KB per file with a tail-truncation warning",
+        "GIVEN a run completes successfully WHEN cleanup runs THEN pipe directory is preserved for 24h (matching existing run-artifact retention) then deleted by SessionEnd",
+        "GIVEN Atlas/Athena are updated WHEN they spawn the next stage THEN they pass the inbox path explicitly in the prompt instead of dumping prior history",
+        "GIVEN a stage fails WHEN debugging THEN .ao/artifacts/pipe/<runId>/ is human-readable for postmortem"
+      ],
+      "requiresTDD": true,
+      "complexity": "L",
+      "parallelGroup": "D",
+      "source": "gstack",
+      "consensus": "Claude+Gemini"
+    },
+    {
+      "id": "US-008",
+      "title": "Sequential frontend remediation chain (audit -> normalize -> polish -> harden)",
+      "asA": "developer who just received a ui-review report",
+      "iWantTo": "invoke /ui-remediate to run a fixed audit -> normalize -> polish -> harden pipeline with each stage's result recorded",
+      "soThat": "frontend fixes are deterministic and auditable instead of ad-hoc 'make it nicer' loops",
+      "acceptanceCriteria": [
+        "GIVEN /ui-remediate is invoked on a target WHEN it runs THEN it executes audit (ui-review), normalize, polish, harden in strict order",
+        "GIVEN any stage fails WHEN detected THEN the chain halts, records the failure, does not advance",
+        "GIVEN each stage completes WHEN the next starts THEN it receives only the prior stage's structured outbox payload (not full conversation history)",
+        "GIVEN the chain finishes WHEN it writes results THEN .ao/artifacts/runs/<runId>/ui-remediation.json contains: stage, status, files touched, time elapsed, summary for each step",
+        "GIVEN the chain is invoked from finish-branch WHEN integrated THEN finish-branch waits for chain completion before continuing",
+        "GIVEN the chain depends on US-004 micro-skills (/normalize, /polish) WHEN they are missing THEN /ui-remediate fails fast with a clear error"
+      ],
+      "requiresTDD": true,
+      "complexity": "M",
+      "parallelGroup": "C",
+      "source": "impeccable",
+      "consensus": "Codex+Gemini",
+      "dependsOn": ["US-004"]
+    },
+    {
+      "id": "US-009",
+      "title": "Taste memory — aesthetic preference accumulation distinct from wisdom",
+      "asA": "developer who gives feedback like 'I prefer minimal layouts' or 'no rounded corners'",
+      "iWantTo": "have those preferences accumulated in .ao/state/taste.jsonl and replayed to designer/aphrodite",
+      "soThat": "my UI agent learns my taste over time without me re-stating it every session",
+      "acceptanceCriteria": [
+        "GIVEN scripts/lib/taste-memory.mjs exposes recordTaste(entry) and loadTaste(limit) WHEN called THEN entries are appended to .ao/state/taste.jsonl in JSONL format",
+        "GIVEN a taste entry WHEN written THEN it contains: timestamp, source (user/auto), category (typography/color/layout/motion/copy), preference, anti-preference (optional)",
+        "GIVEN designer/aphrodite/ui-review subagent fires WHEN subagent-start.mjs runs THEN it injects the most recent 20 taste entries as additionalContext",
+        "GIVEN taste.jsonl exceeds 200 entries WHEN appended THEN oldest entries are pruned (FIFO) to stay under cap",
+        "GIVEN the user runs the sessions skill WHEN they request 'taste prune' THEN they can remove specific entries by ID or category",
+        "GIVEN taste-memory is corrupted WHEN loaded THEN function returns [] (fail-safe, never blocks)",
+        "GIVEN wisdom and taste are siblings WHEN inspected THEN they live in separate files; wisdom records facts, taste records aesthetics"
+      ],
+      "requiresTDD": true,
+      "complexity": "S",
+      "parallelGroup": "B",
+      "source": "gstack",
+      "consensus": "Claude+Gemini"
+    },
+    {
+      "id": "US-010",
+      "title": "TTHW (Time To Hello World) benchmarking on finish-branch",
+      "asA": "developer or team lead tracking project devex health",
+      "iWantTo": "have finish-branch optionally measure clone-to-first-passing-tests latency and append to .ao/state/tthw-history.jsonl",
+      "soThat": "I can see if changes are introducing onboarding friction over time",
+      "acceptanceCriteria": [
+        "GIVEN scripts/lib/tthw-bench.mjs exposes measureTTHW({repo, testCmd}) WHEN called THEN it clones to a temp dir, runs install + test command, reports total seconds",
+        "GIVEN finish-branch.skill is configured to run TTHW WHEN the branch is ready to merge THEN it triggers measurement async, never blocking the merge",
+        "GIVEN measureTTHW completes WHEN appended THEN .ao/state/tthw-history.jsonl contains: timestamp, branch, commit, seconds, install seconds, test seconds, status",
+        "GIVEN TTHW doubles vs the rolling 30-day median WHEN detected THEN finish-branch logs a warning (does not fail)",
+        "GIVEN TTHW measurement fails (network, missing test cmd) WHEN detected THEN it records the error and continues (fail-safe)",
+        "GIVEN tthw-history.jsonl exceeds 365 entries WHEN appended THEN oldest entries are pruned (FIFO)",
+        "GIVEN TTHW config is absent from autonomy.json WHEN finish-branch runs THEN it skips TTHW silently (opt-in)"
+      ],
+      "requiresTDD": true,
+      "complexity": "M",
+      "parallelGroup": "E",
+      "source": "gstack",
+      "consensus": "Claude+Gemini"
+    }
+  ]
+}

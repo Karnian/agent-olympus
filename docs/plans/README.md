@@ -14,3 +14,4 @@ Auto-generated index of all project specifications.
 | [C3-R Pragmatic Memory](./c3r-pragmatic-memory/spec.md) | S | forward | 3 stories (US-C3R-001~003) | plan (R1) | 2026-04-04 |
 | [Improvement Tracker](./improvements.md) | — | — | 53+6 items | 53 done + J1~J6 (v0.9.8) | 2026-04-05 |
 | [Claude Code Integration Research](./claude-code-integration/research-report.md) | L | forward | 22 recommendations (P0~P3) | P0 fixed (v0.9.8) | 2026-04-05 |
+| [v1.0.2 Impeccable & gstack Adoption](./v1.0.2-impeccable-gstack-adoption/spec.md) | M | forward | 10 stories (US-001~010, 5 unanimous + 5 majority) | draft | 2026-04-07 |
