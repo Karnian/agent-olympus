@@ -393,6 +393,110 @@ describe('stop-hook: descriptive message with many files uses count format', () 
 });
 
 // ---------------------------------------------------------------------------
+// .claude/worktrees/ exclusion — pure noise from Claude Code worktree gitlinks
+// ---------------------------------------------------------------------------
+
+describe('stop-hook: excludes untracked .claude/worktrees/ files from staging', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    mkdirSync(path.join(tmpDir, '.claude', 'worktrees'), { recursive: true });
+    // Untracked HEAD pointer file under .claude/worktrees/
+    writeFileSync(path.join(tmpDir, '.claude', 'worktrees', 'angry-williamson'), 'ref: refs/heads/foo\n', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('does not create a WIP commit when only .claude/worktrees/ files are dirty', () => {
+    const beforeCount = commitCount(tmpDir);
+    runHook(tmpDir);
+    const afterCount = commitCount(tmpDir);
+    assert.equal(afterCount, beforeCount, 'should not commit pure .claude/worktrees/ noise');
+  });
+});
+
+describe('stop-hook: excludes tracked .claude/worktrees/ gitlink modifications', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    // Simulate tracked gitlink (mode 160000) under .claude/worktrees/
+    // Use a real commit sha (HEAD of the temp repo) as the gitlink target
+    const headSha = execSync('git rev-parse HEAD', {
+      encoding: 'utf-8', cwd: tmpDir, stdio: 'pipe',
+    }).trim();
+    execSync(
+      `git update-index --add --cacheinfo 160000,${headSha},.claude/worktrees/quirky-albattani`,
+      { cwd: tmpDir, stdio: 'pipe' },
+    );
+    execSync('git commit -m "add fake gitlink"', { cwd: tmpDir, stdio: 'pipe' });
+    // Make a second commit to get a different sha, then mutate the gitlink to it
+    writeFileSync(path.join(tmpDir, 'sentinel.txt'), 'one', 'utf-8');
+    execSync('git add sentinel.txt && git commit -m "sentinel"', { cwd: tmpDir, stdio: 'pipe' });
+    const otherSha = execSync('git rev-parse HEAD', {
+      encoding: 'utf-8', cwd: tmpDir, stdio: 'pipe',
+    }).trim();
+    execSync(
+      `git update-index --cacheinfo 160000,${otherSha},.claude/worktrees/quirky-albattani`,
+      { cwd: tmpDir, stdio: 'pipe' },
+    );
+    // Reset index entry back to unstaged so the hook sees it as a working-tree change
+    execSync('git reset HEAD .claude/worktrees/quirky-albattani', { cwd: tmpDir, stdio: 'pipe' });
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('does not include .claude/worktrees/ gitlink changes in WIP commit', () => {
+    const beforeCount = commitCount(tmpDir);
+    runHook(tmpDir);
+    const afterCount = commitCount(tmpDir);
+    // Either no commit (only worktree noise) or, if other changes exist, none mention worktrees
+    if (afterCount > beforeCount) {
+      const fullMsg = execSync('git log -1 --format=%B', {
+        encoding: 'utf-8',
+        cwd: tmpDir,
+        stdio: 'pipe',
+      }).trim();
+      assert.ok(
+        !fullMsg.includes('quirky-albattani'),
+        `WIP commit should not reference .claude/worktrees/ gitlinks, got: ${fullMsg}`,
+      );
+    } else {
+      assert.equal(afterCount, beforeCount, 'no commit expected when only worktree gitlink changed');
+    }
+  });
+});
+
+describe('stop-hook: still commits real changes alongside .claude/worktrees/ noise', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    mkdirSync(path.join(tmpDir, '.claude', 'worktrees'), { recursive: true });
+    writeFileSync(path.join(tmpDir, '.claude', 'worktrees', 'angry-williamson'), 'ref: refs/heads/foo\n', 'utf-8');
+    writeFileSync(path.join(tmpDir, 'real-work.js'), 'const real = true;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('creates a WIP commit containing only real-work.js', () => {
+    const beforeCount = commitCount(tmpDir);
+    runHook(tmpDir);
+    const afterCount = commitCount(tmpDir);
+    assert.equal(afterCount, beforeCount + 1, 'a WIP commit should be created for real-work.js');
+
+    const stagedFiles = execSync('git show --name-only --format=', {
+      encoding: 'utf-8',
+      cwd: tmpDir,
+      stdio: 'pipe',
+    }).trim();
+    assert.ok(stagedFiles.includes('real-work.js'), `commit should contain real-work.js, got: ${stagedFiles}`);
+    assert.ok(
+      !stagedFiles.includes('.claude/worktrees/'),
+      `commit should NOT contain .claude/worktrees/ files, got: ${stagedFiles}`,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // execFileSync is used — verify by checking the commit was created
 // (If exec were used with shell injection risk, we just verify the commit exists)
 // ---------------------------------------------------------------------------
