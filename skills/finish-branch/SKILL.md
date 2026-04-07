@@ -178,6 +178,29 @@ UI_FILES="$UI_FILES" AO_RUN_ID="${AO_RUN_ID:-}" node -e '
 
 **Rollback**: Delete `config/design-blacklist.jsonc` to disable the scan entirely.
 
+### Step 2.7 — UI REMEDIATE (v1.0.2 US-008, optional)
+
+If `/ui-remediate` was invoked during this session and a remediation chain is
+in progress, finish-branch waits for chain completion before continuing.
+
+```javascript
+// Finish-branch checks for a pending remediation run
+const remediationPending = existsSync('.ao/state/ao-ui-remediation-pending.json');
+if (remediationPending) {
+  // Wait for runChain() to resolve — it is already running as an awaited async task
+  // The skill handles the wait; finish-branch does NOT spawn a new chain here.
+  // If the chain already completed, read the result from:
+  //   .ao/artifacts/runs/<runId>/ui-remediation.json
+  // Check result.ok — if false: STOP and report to user
+  // If ok or if file doesn't exist: continue to Step 3
+}
+```
+
+**Gate (if remediation was run)**: `result.ok === true`. A halted or regressed
+remediation chain causes finish-branch to STOP and report.
+
+**Gate (if remediation was NOT run)**: Skip silently, continue to Step 3.
+
 ### Step 3 — COVERAGE
 
 Invoke verify-coverage to detect gaps:
