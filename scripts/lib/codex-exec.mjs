@@ -1,5 +1,9 @@
 import { spawn as nodeSpawn } from 'child_process';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
+import { buildCodexExecArgs } from './codex-approval.mjs';
+
+/** Valid resolved permission levels (mirrors codex-approval VALID_LEVELS). */
+const VALID_SPAWN_LEVELS = new Set(['suggest', 'auto-edit', 'full-auto']);
 
 /**
  * @typedef {Object} CodexHandle
@@ -79,24 +83,69 @@ export function mapJsonlErrorToCategory(errorText) {
 }
 
 /**
+ * Build the Codex CLI argv for `spawn()`. Exposed for hermetic testing.
+ *
+ * Permission mirroring: when `opts.level` is set, approval flags are derived
+ * via `buildCodexExecArgs(level)` and placed BEFORE the `exec` subcommand.
+ * Without `opts.level`, falls back to the legacy bypass flag for backward
+ * compatibility with unmigrated callers.
+ *
+ * @param {Object} [opts]
+ * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level]
+ * @returns {string[]}
+ */
+export function _buildSpawnArgs(opts = {}) {
+  // Approval-related flags are GLOBAL Codex CLI flags — they go BEFORE `exec`.
+  // codex 0.118+: `codex exec -a never` → `error: unexpected argument '-a'`.
+  //
+  // Strict level validation: only resolved level strings ('suggest',
+  // 'auto-edit', 'full-auto') trigger the new permission-mirroring path.
+  // Anything else — `'auto'`, typos, undefined — falls through to legacy
+  // bypass so a future caller bug cannot silently downgrade workers to
+  // `read-only` sandbox without us noticing.
+  let approvalArgs;
+  if (opts.level && VALID_SPAWN_LEVELS.has(opts.level)) {
+    approvalArgs = buildCodexExecArgs(opts.level); // ['-a', 'never', '-s', '<sandbox>']
+  } else {
+    // Legacy: keep the v1 bypass behavior so unmigrated callers don't regress.
+    approvalArgs = ['--dangerously-bypass-approvals-and-sandbox'];
+  }
+  return [
+    ...approvalArgs,
+    'exec',
+    '--json',
+    '--ephemeral',
+    '-',
+  ];
+}
+
+/**
  * Spawn a Codex exec --json process with the given prompt.
  * The prompt is written to stdin; Codex reads it via `-` (stdin mode).
+ *
+ * Permission mirroring: pass `opts.level` to mirror the host Claude session's
+ * permission tier into the Codex sandbox via `buildCodexExecArgs(level)`.
+ * The resulting `-a never -s <sandbox>` flags are GLOBAL Codex CLI flags and
+ * MUST appear BEFORE the `exec` subcommand (Codex 0.118+).
+ *
+ * Backward compatibility: when `opts.level` is omitted, the function preserves
+ * the legacy behavior of `--dangerously-bypass-approvals-and-sandbox`. New
+ * callers should always pass `opts.level`. Once all callers are migrated, the
+ * legacy branch will be removed.
  *
  * @param {string} prompt - The prompt to send to Codex
  * @param {Object} [opts] - Options
  * @param {string} [opts.cwd] - Working directory
+ * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level] - Host Claude
+ *   permission tier; resolved by callers via `resolveCodexApproval`. When set,
+ *   replaces the legacy `--dangerously-bypass-approvals-and-sandbox` flag with
+ *   the appropriate `-a never -s <sandbox>` global flags.
  * @param {Object} [opts.env] - Additional environment variables merged over process.env
  * @returns {CodexHandle}
  */
 export function spawn(prompt, opts = {}) {
   const codexPath = resolveBinary('codex');
-  const args = [
-    'exec',
-    '--json',
-    '--dangerously-bypass-approvals-and-sandbox',
-    '--ephemeral',
-    '-',
-  ];
+  const args = _buildSpawnArgs(opts);
 
   const child = nodeSpawn(codexPath, args, {
     cwd: opts.cwd || process.cwd(),

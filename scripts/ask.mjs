@@ -28,6 +28,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { detectCapabilities } from './lib/preflight.mjs';
 import { resolveGeminiApproval } from './lib/gemini-approval.mjs';
+import { resolveCodexApproval, shouldDemoteCodexWorker } from './lib/codex-approval.mjs';
 import { loadAutonomyConfig } from './lib/autonomy.mjs';
 
 const COLLECT_TIMEOUT_MS = 120_000;
@@ -116,18 +117,43 @@ async function loadAdapter(adapterName) {
 }
 
 /**
- * Build adapter-specific spawn options. Codex: bypass-only (matches today).
+ * Build adapter-specific spawn options.
+ *
+ * Codex: passes `level` resolved from host Claude permissions via
+ * `resolveCodexApproval`. The codex-exec spawn() then maps level →
+ * `-a never -s <sandbox>` global flags. If the host level is `'suggest'`,
+ * codex cannot run usefully (read-only sandbox would silently complete with
+ * "I can only suggest changes"); the caller must check the returned
+ * `_demoted` flag and exit with code 2 (model not available).
+ *
  * Gemini: approval mode mirrored from Claude permissions via gemini-approval.
  *
- * Exported for tests so we can verify the production gemini-approval plumbing
+ * Exported for tests so we can verify the production approval plumbing
  * without mocking dynamic imports.
  *
  * @param {'codex-exec' | 'gemini-exec'} adapterName
- * @returns {Object}
+ * @returns {Object} Spawn opts; may also carry `_demoted: true` for codex
+ *   when the host level is too low to run codex usefully.
  */
 export function buildSpawnOpts(adapterName) {
   const opts = { cwd: process.cwd() };
-  if (adapterName === 'gemini-exec') {
+  if (adapterName === 'codex-exec') {
+    try {
+      const autonomy = loadAutonomyConfig(process.cwd());
+      const level = resolveCodexApproval(autonomy, { cwd: process.cwd() });
+      if (shouldDemoteCodexWorker(level)) {
+        // Signal the caller — `/ask` cannot demote to claude-cli the way
+        // worker-spawn does (it has no team context); instead we exit-2.
+        opts._demoted = true;
+        opts._demotionReason = `host permission level (${level}) too low for non-interactive codex`;
+      } else {
+        opts.level = level;
+      }
+    } catch {
+      // Fall through with no level — codex-exec spawn() will use its
+      // legacy bypass fallback.
+    }
+  } else if (adapterName === 'gemini-exec') {
     try {
       const autonomy = loadAutonomyConfig(process.cwd());
       opts.approvalMode = resolveGeminiApproval(autonomy, { cwd: process.cwd() });
@@ -163,6 +189,19 @@ export async function runOnce(adapterName, prompt, _inject = {}) {
   const opts = _inject.opts || buildSpawnOpts(adapterName);
   const label = modelLabel(adapterName);
   const path = artifactPath(label);
+
+  // Codex permission gate: if buildSpawnOpts marked the worker as demoted
+  // (host permission too low for non-interactive codex), refuse to spawn.
+  // Returning ok:false with `demoted: true` signals main() to exit with code
+  // 2 (model not available, answer as Claude).
+  //
+  // Per the file-header contract, exit-2 paths do NOT write an artifact
+  // (no model was actually queried) — we return artifactPath: null and the
+  // caller must not log a path either.
+  if (opts._demoted) {
+    const msg = opts._demotionReason || 'demoted';
+    return { ok: false, output: '', error: `demoted: ${msg}`, artifactPath: null, demoted: true };
+  }
 
   let handle = null;
   try {
@@ -253,13 +292,30 @@ async function main() {
     caps = {};
   }
 
-  const adapterName = pickAskAdapter(model, caps);
+  let adapterName = pickAskAdapter(model, caps);
   if (adapterName === 'none') {
     printUnavailable(model);
     process.exit(2);
   }
 
-  const result = await runOnce(adapterName, prompt);
+  let result = await runOnce(adapterName, prompt);
+
+  if (result.demoted) {
+    // Codex permission gate fired (host level too low for non-interactive
+    // codex). In `auto` mode, transparently fall back to gemini-exec if it
+    // is available — `auto` is contractually "whichever model works".
+    // For explicit codex requests, exit 2 (model not available, answer as
+    // Claude) per the file-header contract (no artifact written).
+    if (model === 'auto' && adapterName === 'codex-exec' && caps.hasGeminiCli) {
+      process.stderr.write(`[ask] codex unavailable (${result.error}); falling back to gemini-exec\n`);
+      adapterName = 'gemini-exec';
+      result = await runOnce(adapterName, prompt);
+      // Fall through to standard ok/error handling below.
+    } else {
+      process.stderr.write(`[ask] codex unavailable: ${result.error}\n`);
+      process.exit(2);
+    }
+  }
 
   if (!result.ok) {
     process.stderr.write(`[ask] adapter error: ${result.error}\n`);

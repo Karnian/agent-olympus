@@ -197,10 +197,21 @@ All worker types (Codex, Claude, Gemini) mirror the host session's permission le
 
 **Detection** reads allow/deny lists from (in priority order): project `.claude/settings.local.json` → user `~/.claude/settings.local.json` → user `~/.claude/settings.json`. Deny lists are merged from ALL files (any deny overrides any allow).
 
-**Codex** approval mode:
-- `Bash(*) + Write(*)` in Claude settings → `--full-auto`
-- `Write(*)` or `Edit(*)` only → `--auto-edit`
-- Otherwise → no flag (suggest/read-only)
+**Codex** mirrors permissions to the **sandbox axis** (not the approval axis). Both `codex-exec` and `codex-appserver` workers run non-interactively — there is no TTY to prompt for approvals — so we hold the approval policy at `never` and vary the Codex sandbox tier instead. (Codex 0.118+ docs: *"Prefer `on-request` for interactive runs or `never` for non-interactive runs"*; the `--auto-edit` flag was removed in 0.118.)
+
+| Host Claude allow list      | `-a` (approval) | `-s` (sandbox)         |
+|-----------------------------|-----------------|------------------------|
+| `Bash(*) + Write(*)`        | `never`         | `danger-full-access`   |
+| `Write(*)` or `Edit(*)`     | `never`         | `workspace-write`      |
+| Otherwise (suggest)         | _demoted_       | _demoted_              |
+
+Suggest-tier hosts cannot run codex usefully — a `read-only` sandbox would let codex silently complete with "I can only suggest changes" and confuse Atlas/Athena into marking the task done. So:
+- **Atlas/Athena teams** (`worker-spawn.mjs`): codex workers are demoted to `claude` workers BEFORE adapter selection (`demoteCodexWorkersIfNeeded`). The `_demotedFrom`/`_demotionReason`/`_demotedModel` fields are preserved on the worker for observability. Provider-specific fields like `model` are stripped so the Claude path doesn't receive a Codex model name.
+- **`/ask` skill** (`ask.mjs`): codex requests exit with code 2 (model not available, answer as Claude) — no team context to demote into.
+
+The `-a` and `-s` flags are GLOBAL Codex CLI flags and MUST appear BEFORE the `exec` subcommand. `codex exec -a never` errors with `unexpected argument '-a'` in 0.118+.
+
+**Known limitation.** Sandbox mirroring is based on Claude Code's `permissions.allow` list — what tool calls the host is permitted to make — not the host's actual sandbox boundaries. A `Bash(*)+Write(*)` host running inside a restricted shell sandbox will still receive `danger-full-access` Codex workers. True host-sandbox detection is tracked separately.
 
 **Claude** workers now auto-detect permission level (no longer default to `--dangerously-skip-permissions`):
 - `Bash(*) + Write(*)` → `--permission-mode bypassPermissions`
@@ -237,7 +248,7 @@ Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
 - `scripts/lib/worker-spawn.mjs` — Adapter router (`selectAdapter`, `spawnTeam`, `monitorTeam`)
 - `scripts/lib/resolve-binary.mjs` — Binary resolution with caching + `buildEnhancedPath()`
 - `scripts/lib/preflight.mjs` — `runStateCleanup()` (lightweight, SessionStart) + `runPreflight()` (full, orchestrators) + `detectCapabilities()` (parallel, cached 60min)
-- `scripts/lib/codex-approval.mjs` — Claude permission detection → Codex approval mode mirroring
+- `scripts/lib/codex-approval.mjs` — Claude permission level → Codex sandbox tier mirroring (`buildCodexExecArgs`, `buildCodexAppServerParams`, `shouldDemoteCodexWorker`)
 - `scripts/lib/cost-estimate.mjs` — Token-based cost estimation (Claude + Gemini pricing)
 
 ### Session Naming

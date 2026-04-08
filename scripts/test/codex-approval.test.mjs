@@ -1,7 +1,9 @@
 /**
  * Unit tests for scripts/lib/codex-approval.mjs
  *
- * Tests detectClaudePermissionLevel(), resolveCodexApproval(), and codexApprovalFlag().
+ * Tests detectClaudePermissionLevel(), resolveCodexApproval(), and the
+ * sandbox-axis helpers (codexSandboxForLevel, buildCodexExecArgs,
+ * buildCodexAppServerParams, shouldDemoteCodexWorker).
  * Uses temporary settings files to simulate different Claude permission configurations.
  */
 
@@ -14,7 +16,10 @@ import { randomUUID } from 'node:crypto';
 import {
   detectClaudePermissionLevel,
   resolveCodexApproval,
-  codexApprovalFlag,
+  codexSandboxForLevel,
+  buildCodexExecArgs,
+  buildCodexAppServerParams,
+  shouldDemoteCodexWorker,
 } from '../lib/codex-approval.mjs';
 
 // ---------------------------------------------------------------------------
@@ -34,28 +39,122 @@ function writeSettings(dir, relPath, data) {
 }
 
 // ---------------------------------------------------------------------------
-// codexApprovalFlag
+// codexSandboxForLevel — level → sandbox enum mapping
 // ---------------------------------------------------------------------------
 
-describe('codexApprovalFlag', () => {
-  it('returns --full-auto for full-auto', () => {
-    assert.equal(codexApprovalFlag('full-auto'), '--full-auto');
+describe('codexSandboxForLevel', () => {
+  it('maps full-auto → danger-full-access', () => {
+    assert.equal(codexSandboxForLevel('full-auto'), 'danger-full-access');
   });
 
-  it('returns --auto-edit for auto-edit', () => {
-    assert.equal(codexApprovalFlag('auto-edit'), '--auto-edit');
+  it('maps auto-edit → workspace-write', () => {
+    assert.equal(codexSandboxForLevel('auto-edit'), 'workspace-write');
   });
 
-  it('returns empty string for suggest', () => {
-    assert.equal(codexApprovalFlag('suggest'), '');
+  it('maps suggest → read-only', () => {
+    assert.equal(codexSandboxForLevel('suggest'), 'read-only');
   });
 
-  it('returns empty string for unknown mode', () => {
-    assert.equal(codexApprovalFlag('unknown'), '');
+  it('falls back to read-only for unknown level', () => {
+    assert.equal(codexSandboxForLevel('unknown'), 'read-only');
   });
 
-  it('returns empty string for undefined', () => {
-    assert.equal(codexApprovalFlag(undefined), '');
+  it('falls back to read-only for undefined', () => {
+    assert.equal(codexSandboxForLevel(undefined), 'read-only');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildCodexExecArgs — global CLI flags (must come BEFORE `exec` subcommand)
+// ---------------------------------------------------------------------------
+
+describe('buildCodexExecArgs', () => {
+  it('full-auto → -a never -s danger-full-access', () => {
+    assert.deepEqual(
+      buildCodexExecArgs('full-auto'),
+      ['-a', 'never', '-s', 'danger-full-access'],
+    );
+  });
+
+  it('auto-edit → -a never -s workspace-write', () => {
+    assert.deepEqual(
+      buildCodexExecArgs('auto-edit'),
+      ['-a', 'never', '-s', 'workspace-write'],
+    );
+  });
+
+  it('suggest → -a never -s read-only (last-resort safety only)', () => {
+    assert.deepEqual(
+      buildCodexExecArgs('suggest'),
+      ['-a', 'never', '-s', 'read-only'],
+    );
+  });
+
+  it('always returns approval flag "never" regardless of level', () => {
+    for (const level of ['full-auto', 'auto-edit', 'suggest', 'unknown']) {
+      const args = buildCodexExecArgs(level);
+      assert.equal(args[0], '-a');
+      assert.equal(args[1], 'never');
+    }
+  });
+
+  it('returns a 4-element array (no extra positional args)', () => {
+    assert.equal(buildCodexExecArgs('full-auto').length, 4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildCodexAppServerParams — JSON-RPC thread/start params shape
+// ---------------------------------------------------------------------------
+
+describe('buildCodexAppServerParams', () => {
+  it('full-auto → { approvalPolicy: never, sandbox: danger-full-access }', () => {
+    assert.deepEqual(
+      buildCodexAppServerParams('full-auto'),
+      { approvalPolicy: 'never', sandbox: 'danger-full-access' },
+    );
+  });
+
+  it('auto-edit → { approvalPolicy: never, sandbox: workspace-write }', () => {
+    assert.deepEqual(
+      buildCodexAppServerParams('auto-edit'),
+      { approvalPolicy: 'never', sandbox: 'workspace-write' },
+    );
+  });
+
+  it('suggest → { approvalPolicy: never, sandbox: read-only }', () => {
+    assert.deepEqual(
+      buildCodexAppServerParams('suggest'),
+      { approvalPolicy: 'never', sandbox: 'read-only' },
+    );
+  });
+
+  it('always sets approvalPolicy to never', () => {
+    for (const level of ['full-auto', 'auto-edit', 'suggest', 'unknown']) {
+      assert.equal(buildCodexAppServerParams(level).approvalPolicy, 'never');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shouldDemoteCodexWorker — host permission too low for non-interactive codex
+// ---------------------------------------------------------------------------
+
+describe('shouldDemoteCodexWorker', () => {
+  it('returns true for suggest', () => {
+    assert.equal(shouldDemoteCodexWorker('suggest'), true);
+  });
+
+  it('returns false for auto-edit', () => {
+    assert.equal(shouldDemoteCodexWorker('auto-edit'), false);
+  });
+
+  it('returns false for full-auto', () => {
+    assert.equal(shouldDemoteCodexWorker('full-auto'), false);
+  });
+
+  it('returns false for unknown level (caller treats as non-suggest)', () => {
+    assert.equal(shouldDemoteCodexWorker('unknown'), false);
   });
 });
 

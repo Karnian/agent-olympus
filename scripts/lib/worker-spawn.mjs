@@ -8,6 +8,8 @@ import { join } from 'path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import { buildRecoveryStrategy } from './stuck-recovery.mjs';
 import { detectClaudePermissionLevel, claudePermissionModeFlag } from './permission-detect.mjs';
+import { loadAutonomyConfig } from './autonomy.mjs';
+import { resolveCodexApproval, shouldDemoteCodexWorker } from './codex-approval.mjs';
 
 const STATE_DIR = '.ao/state';
 const ARTIFACTS_DIR = '.ao/artifacts';
@@ -305,8 +307,64 @@ export async function reassignToClaude(teamName, workerName, originalPrompt, fai
   }
 }
 
+/**
+ * Provider-specific worker fields that must NOT survive a codex→claude
+ * demotion. `model` is the canonical example: a Codex model name like
+ * `gpt-5` would be passed straight through to `claude-cli --model` and
+ * fail. Stripping the field forces the demoted worker to use the Claude
+ * default model instead.
+ */
+const CODEX_PROVIDER_FIELDS = ['model'];
+
+/**
+ * Demote codex-typed workers to claude when the host permission level is
+ * too low for non-interactive codex execution. Mutates each worker in-place:
+ * sets `type: 'claude'`, records `_demotedFrom: 'codex'` /
+ * `_demotionReason: ...`, and strips provider-specific fields (`model`)
+ * that would break the Claude path. Returns the count of demoted workers.
+ * Exported for hermetic unit testing.
+ *
+ * Why demote: a `'suggest'` level → `read-only` sandbox would let codex
+ * silently complete with "I can only suggest changes" and confuse Atlas/
+ * Athena into marking the task done.
+ *
+ * @param {Array<{type: string}>} workers - Worker descriptors (mutated in place)
+ * @param {'suggest'|'auto-edit'|'full-auto'} level - Resolved permission level
+ * @returns {number} Count of demoted workers
+ */
+export function demoteCodexWorkersIfNeeded(workers, level) {
+  if (!shouldDemoteCodexWorker(level)) return 0;
+  let demoted = 0;
+  for (const w of workers) {
+    if (w && w.type === 'codex') {
+      w._demotedFrom = 'codex';
+      w._demotionReason = `host permission level (${level}) too low for non-interactive codex worker`;
+      w.type = 'claude';
+      // Strip provider-specific fields that would corrupt the Claude path.
+      for (const field of CODEX_PROVIDER_FIELDS) {
+        if (field in w) {
+          w[`_demoted${field[0].toUpperCase()}${field.slice(1)}`] = w[field];
+          delete w[field];
+        }
+      }
+      demoted++;
+    }
+  }
+  return demoted;
+}
+
 export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
-  // Determine adapter per worker
+  // ─── Codex permission mirroring + demotion ───────────────────────────────
+  // Resolve the host Claude permission level once for all codex workers in
+  // this team. The level is then forwarded to codex-exec and codex-appserver
+  // adapter spawn calls so the Codex sandbox tier mirrors the host.
+  //
+  // Demotion runs BEFORE adapter selection so demoted workers route to
+  // claude-cli/tmux instead of any codex adapter.
+  const codexLevel = resolveCodexApproval(loadAutonomyConfig(cwd), { cwd });
+  demoteCodexWorkersIfNeeded(workers, codexLevel);
+
+  // Determine adapter per worker (after demotion)
   const adapterNames = workers.map(w => selectAdapter(w, capabilities));
   const needsTmux = adapterNames.some(a => a === 'tmux');
 
@@ -362,10 +420,12 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
         if (initResult.error) {
           throw new Error(initResult.error.message || 'Failed to initialize server');
         }
-        // Create thread and start first turn
+        // Create thread and start first turn.
+        // Pass `level` so the new permission-mirroring path in createThread
+        // sets both approvalPolicy ('never') and sandbox (mapped from level).
         const threadResult = await codexAppServer.createThread(serverHandle, {
           cwd,
-          approvalPolicy: 'never',
+          level: codexLevel,
           ephemeral: true,
         });
         if (threadResult.error) {
@@ -407,9 +467,11 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
         state.workers[i].error = err.message;
       }
     } else if (adapterNames[i] === 'codex-exec') {
-      // Spawn via codex-exec adapter
+      // Spawn via codex-exec adapter.
+      // Pass `level` so spawn() builds `-a never -s <sandbox>` global flags
+      // mirroring the host Claude permission tier (Codex 0.118+).
       try {
-        const handle = codexExec.spawn(worker.prompt, { cwd });
+        const handle = codexExec.spawn(worker.prompt, { cwd, level: codexLevel });
         state.workers[i].status = 'running';
         state.workers[i].startedAt = new Date().toISOString();
         state.workers[i]._handle = { pid: handle.pid }; // Serializable subset

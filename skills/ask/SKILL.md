@@ -79,10 +79,15 @@ Display the response to the user. The artifact lives at
 - Explicit model requests (`/ask codex`, `/ask gemini`) do NOT silently
   cross-fall back. If you ask for codex and codex isn't installed, you get
   exit 2 — even if gemini is available. Use `/ask auto` for "whichever works."
-- Permission mirroring: `gemini-exec` reads `.ao/autonomy.json` and Claude's
-  permission allow-list to set `--approval-mode`. `codex-exec` currently uses
-  `--dangerously-bypass-approvals-and-sandbox` (matches the previous tmux
-  behavior).
+- Permission mirroring: both `gemini-exec` and `codex-exec` read
+  `.ao/autonomy.json` and Claude's permission allow-list to determine the
+  correct sandbox/approval mode. `codex-exec` mirrors host permissions to the
+  Codex sandbox axis (`Bash(*)+Write(*)` → `danger-full-access`, `Write(*)` →
+  `workspace-write`), with approval policy held at `never` (codex 0.118+ docs:
+  *"never for non-interactive runs"*). When the host has neither `Bash(*)` nor
+  `Write(*)/Edit(*)`, codex cannot run usefully — `/ask auto` transparently
+  falls back to `gemini-exec` if available, and explicit `/ask codex` exits
+  with code 2.
 - Artifacts persist in `.ao/artifacts/ask/` for later reference.
 - Can be used inside Atlas/Athena workflows for quick model consultations.
 

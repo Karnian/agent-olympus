@@ -26,6 +26,10 @@
 import { spawn as nodeSpawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
+import { buildCodexAppServerParams } from './codex-approval.mjs';
+
+/** Valid resolved permission levels (mirrors codex-exec.VALID_SPAWN_LEVELS). */
+const VALID_THREAD_LEVELS = new Set(['suggest', 'auto-edit', 'full-auto']);
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -273,11 +277,31 @@ export function startServer(opts = {}) {
           emitter.emit(emitName, msg.params || msg);
         }
       } else if (kind === 'request') {
-        // Server-initiated request (e.g., approval prompts).
-        // Auto-respond with empty result — we use approvalPolicy: 'never'.
+        // Server-initiated request (approval prompts, MCP elicitation, tool
+        // requestUserInput, auth refresh, etc.). Codex 0.118 schema requires
+        // method-specific required fields in every response (`decision`,
+        // `action`, `answers`, `permissions`, `accessToken`, ...), so a
+        // generic `result: {}` response is schema-invalid for every method.
+        //
+        // Agent Olympus workers run non-interactively — there is no TTY to
+        // prompt the user — so we explicitly REJECT all server-initiated
+        // requests with a JSON-RPC error response. This is schema-safe for
+        // every method (errors are universal in JSON-RPC 2.0).
+        //
+        // With `approvalPolicy: 'never'` set on the thread, approval-style
+        // requests should never arrive in the first place; this branch is
+        // a safety net for MCP elicitations and tool input requests that
+        // bypass the approval gate.
         try {
-          const resp = JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} });
-          handle.process.stdin.write(resp + '\n');
+          const errResp = JSON.stringify({
+            jsonrpc: '2.0',
+            id: msg.id,
+            error: {
+              code: -32000,
+              message: `Auto-rejected: client cannot prompt user (method=${msg.method || 'unknown'})`,
+            },
+          });
+          handle.process.stdin.write(errResp + '\n');
         } catch {
           // stdin may be closed
         }
@@ -494,12 +518,28 @@ export function sendRequest(handle, method, params, timeoutMs = RPC_TIMEOUT_MS) 
  *
  * Wire: thread/start → result.thread.id
  *
+ * Permission mirroring: pass `opts.level` to mirror the host Claude session's
+ * permission tier into the Codex thread's `approvalPolicy` and `sandbox`
+ * fields. The level → params mapping is centralized in
+ * `buildCodexAppServerParams(level)` so the codex-exec, codex-appserver, and
+ * tmux paths all share the same axis. `approvalPolicy` is always `never`
+ * because the app-server runs non-interactively (no TTY for prompts).
+ *
+ * Backward compatibility: when `opts.level` is omitted, the function preserves
+ * the legacy behavior — `approvalPolicy` from `opts.approvalPolicy` (default
+ * `'never'`) and NO `sandbox` field. This lets unmigrated callers keep working
+ * unchanged. New callers should always pass `opts.level`.
+ *
  * @param {AppServerHandle} handle
  * @param {Object} [opts]
  * @param {string} [opts.cwd] - Working directory
  * @param {string} [opts.model] - Model override
  * @param {string} [opts.baseInstructions] - System prompt
- * @param {string} [opts.approvalPolicy='never'] - Approval policy
+ * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level] - Host Claude
+ *   permission tier; resolved by callers via `resolveCodexApproval`. When set,
+ *   takes precedence over `opts.approvalPolicy` and adds the `sandbox` field.
+ * @param {string} [opts.approvalPolicy='never'] - Legacy approval policy
+ *   (used only when `opts.level` is omitted). New callers should pass `level`.
  * @param {boolean} [opts.ephemeral=true] - Whether thread persists
  * @returns {Promise<{ threadId?: string, error?: Object }>}
  */
@@ -510,8 +550,21 @@ export async function createThread(handle, opts = {}) {
 
   const params = {
     ephemeral: opts.ephemeral !== false,
-    approvalPolicy: opts.approvalPolicy || 'never',
   };
+
+  if (opts.level && VALID_THREAD_LEVELS.has(opts.level)) {
+    // New permission-mirroring path: derive both approvalPolicy and sandbox
+    // from the host Claude permission level. Strict validation matches
+    // codex-exec._buildSpawnArgs so a future caller bug cannot silently
+    // downgrade workers to read-only sandbox via 'auto' or a typo.
+    const codexParams = buildCodexAppServerParams(opts.level);
+    params.approvalPolicy = codexParams.approvalPolicy;
+    params.sandbox = codexParams.sandbox;
+  } else {
+    // Legacy path: preserve the v1 contract for unmigrated or invalid-level callers.
+    params.approvalPolicy = opts.approvalPolicy || 'never';
+  }
+
   if (opts.cwd) params.cwd = opts.cwd;
   if (opts.model) params.model = opts.model;
   if (opts.baseInstructions) params.baseInstructions = opts.baseInstructions;

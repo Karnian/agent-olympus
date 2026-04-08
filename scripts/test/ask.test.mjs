@@ -204,17 +204,29 @@ function makeFakeAdapter({ collectResult, spawnError, collectError, shutdownErro
   return { adapter, calls };
 }
 
-// Use a temp cwd so artifact writes don't pollute the repo
+// Use a temp cwd so artifact writes don't pollute the repo.
+// Also redirects HOME to an empty temp dir so permission detection cannot
+// be polluted by the developer's real ~/.claude/settings*.json files (which
+// would otherwise leak deny lists into the test).
 function withTempCwd(fn) {
   return async () => {
     const tmp = mkdtempSync(join(tmpdir(), 'ask-test-'));
-    const orig = process.cwd();
+    const tmpHome = mkdtempSync(join(tmpdir(), 'ask-home-'));
+    const origCwd = process.cwd();
+    const origHome = process.env.HOME;
     process.chdir(tmp);
+    process.env.HOME = tmpHome;
     try {
       await fn(tmp);
     } finally {
-      process.chdir(orig);
+      process.chdir(origCwd);
+      if (origHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = origHome;
+      }
       try { rmSync(tmp, { recursive: true, force: true }); } catch {}
+      try { rmSync(tmpHome, { recursive: true, force: true }); } catch {}
     }
   };
 }
@@ -333,14 +345,73 @@ test('AC-9: buildSpawnOpts(gemini-exec) returns an approvalMode from resolveGemi
   );
 }));
 
-test('AC-9: buildSpawnOpts(codex-exec) does NOT set approvalMode (codex hard-bypasses)', withTempCwd(async (cwd) => {
+test('AC-9: buildSpawnOpts(codex-exec) does NOT set approvalMode (codex uses sandbox axis)', withTempCwd(async (cwd) => {
   const opts = buildSpawnOpts('codex-exec');
   // macOS symlinks /var → /private/var; process.cwd() returns realpath, so
   // endsWith is the safe comparison.
   assert.ok(opts.cwd.endsWith(cwd) || cwd.endsWith(opts.cwd),
     `cwd mismatch: opts.cwd=${opts.cwd} vs tmpdir=${cwd}`);
   assert.equal(opts.approvalMode, undefined,
-    'codex-exec should not get approvalMode — it uses --dangerously-bypass-approvals-and-sandbox');
+    'codex-exec mirrors permissions via sandbox axis (level), not approvalMode');
+}));
+
+test('AC-9: buildSpawnOpts(codex-exec) sets level=full-auto when host has Bash(*)+Write(*)', withTempCwd(async (cwd) => {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  mkdirSync(join(cwd, '.claude'), { recursive: true });
+  writeFileSync(
+    join(cwd, '.claude', 'settings.local.json'),
+    JSON.stringify({ permissions: { allow: ['Bash(*)', 'Write(*)'] } })
+  );
+  const opts = buildSpawnOpts('codex-exec');
+  assert.equal(opts.level, 'full-auto');
+  assert.equal(opts._demoted, undefined, 'full-auto host should not demote');
+}));
+
+test('AC-9: buildSpawnOpts(codex-exec) sets level=auto-edit when host has Write(*) only', withTempCwd(async (cwd) => {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  mkdirSync(join(cwd, '.claude'), { recursive: true });
+  writeFileSync(
+    join(cwd, '.claude', 'settings.local.json'),
+    JSON.stringify({ permissions: { allow: ['Read(*)', 'Write(*)'] } })
+  );
+  const opts = buildSpawnOpts('codex-exec');
+  assert.equal(opts.level, 'auto-edit');
+  assert.equal(opts._demoted, undefined);
+}));
+
+test('AC-9: buildSpawnOpts(codex-exec) flags _demoted when host is read-only/suggest', withTempCwd(async (cwd) => {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  mkdirSync(join(cwd, '.claude'), { recursive: true });
+  writeFileSync(
+    join(cwd, '.claude', 'settings.local.json'),
+    JSON.stringify({ permissions: { allow: ['Read(*)'] } })
+  );
+  const opts = buildSpawnOpts('codex-exec');
+  assert.equal(opts.level, undefined, 'demoted ops should not carry a level');
+  assert.equal(opts._demoted, true);
+  assert.match(opts._demotionReason, /suggest/);
+}));
+
+test('AC-9: buildSpawnOpts(codex-exec) honors .ao/autonomy.json codex.approval=full-auto override', withTempCwd(async (cwd) => {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  mkdirSync(join(cwd, '.ao'), { recursive: true });
+  writeFileSync(
+    join(cwd, '.ao', 'autonomy.json'),
+    JSON.stringify({ codex: { approval: 'full-auto' } })
+  );
+  const opts = buildSpawnOpts('codex-exec');
+  assert.equal(opts.level, 'full-auto');
+}));
+
+test('AC-9: buildSpawnOpts(codex-exec) demotes when autonomy.json sets codex.approval=suggest', withTempCwd(async (cwd) => {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  mkdirSync(join(cwd, '.ao'), { recursive: true });
+  writeFileSync(
+    join(cwd, '.ao', 'autonomy.json'),
+    JSON.stringify({ codex: { approval: 'suggest' } })
+  );
+  const opts = buildSpawnOpts('codex-exec');
+  assert.equal(opts._demoted, true);
 }));
 
 test('AC-9: buildSpawnOpts(gemini-exec) honors .ao/autonomy.json gemini.approval=yolo override', withTempCwd(async (cwd) => {

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectCodexError, selectAdapter } from '../lib/worker-spawn.mjs';
+import { detectCodexError, selectAdapter, demoteCodexWorkersIfNeeded } from '../lib/worker-spawn.mjs';
 
 // ---------------------------------------------------------------------------
 // detectCodexError — no failure
@@ -205,4 +205,93 @@ test('selectAdapter: is a pure function (no side effects)', () => {
   // Originals unchanged
   assert.equal(caps.hasCodexExecJson, true);
   assert.equal(worker.type, 'codex');
+});
+
+// ---------------------------------------------------------------------------
+// demoteCodexWorkersIfNeeded — host permission too low → codex → claude
+// ---------------------------------------------------------------------------
+
+test('demoteCodexWorkersIfNeeded: suggest level demotes codex workers to claude', () => {
+  const workers = [
+    { type: 'codex', name: 'c1' },
+    { type: 'claude', name: 'cl1' },
+    { type: 'codex', name: 'c2' },
+    { type: 'gemini', name: 'g1' },
+  ];
+  const count = demoteCodexWorkersIfNeeded(workers, 'suggest');
+  assert.equal(count, 2);
+  assert.equal(workers[0].type, 'claude');
+  assert.equal(workers[0]._demotedFrom, 'codex');
+  assert.match(workers[0]._demotionReason, /suggest/);
+  assert.equal(workers[1].type, 'claude'); // unchanged (was already claude)
+  assert.equal(workers[1]._demotedFrom, undefined);
+  assert.equal(workers[2].type, 'claude');
+  assert.equal(workers[2]._demotedFrom, 'codex');
+  assert.equal(workers[3].type, 'gemini'); // unchanged (different type)
+});
+
+test('demoteCodexWorkersIfNeeded: full-auto level keeps codex workers', () => {
+  const workers = [{ type: 'codex', name: 'c1' }];
+  const count = demoteCodexWorkersIfNeeded(workers, 'full-auto');
+  assert.equal(count, 0);
+  assert.equal(workers[0].type, 'codex');
+  assert.equal(workers[0]._demotedFrom, undefined);
+});
+
+test('demoteCodexWorkersIfNeeded: auto-edit level keeps codex workers', () => {
+  const workers = [{ type: 'codex', name: 'c1' }];
+  const count = demoteCodexWorkersIfNeeded(workers, 'auto-edit');
+  assert.equal(count, 0);
+  assert.equal(workers[0].type, 'codex');
+});
+
+test('demoteCodexWorkersIfNeeded: empty workers array is no-op', () => {
+  const workers = [];
+  const count = demoteCodexWorkersIfNeeded(workers, 'suggest');
+  assert.equal(count, 0);
+  assert.equal(workers.length, 0);
+});
+
+test('demoteCodexWorkersIfNeeded: preserves non-provider fields when demoting', () => {
+  const workers = [{
+    type: 'codex',
+    name: 'c1',
+    prompt: 'do the thing',
+    custom: 42,
+  }];
+  demoteCodexWorkersIfNeeded(workers, 'suggest');
+  assert.equal(workers[0].name, 'c1');
+  assert.equal(workers[0].prompt, 'do the thing');
+  assert.equal(workers[0].custom, 42);
+});
+
+test('demoteCodexWorkersIfNeeded: strips provider-specific model field on demotion', () => {
+  // Codex model names like "gpt-5" would be forwarded to claude-cli --model
+  // and crash the worker. The demotion must strip them so the Claude path
+  // uses its own default model.
+  const workers = [{
+    type: 'codex',
+    name: 'c1',
+    prompt: 'analyze',
+    model: 'gpt-5',
+  }];
+  demoteCodexWorkersIfNeeded(workers, 'suggest');
+  assert.equal(workers[0].type, 'claude');
+  assert.equal(workers[0].model, undefined, 'codex model must be stripped');
+  // Original value preserved on _demotedModel for observability/debugging.
+  assert.equal(workers[0]._demotedModel, 'gpt-5');
+});
+
+test('demoteCodexWorkersIfNeeded: full-auto level keeps original model field', () => {
+  const workers = [{ type: 'codex', name: 'c1', model: 'gpt-5' }];
+  demoteCodexWorkersIfNeeded(workers, 'full-auto');
+  assert.equal(workers[0].model, 'gpt-5');
+  assert.equal(workers[0]._demotedModel, undefined);
+});
+
+test('demoteCodexWorkersIfNeeded: tolerates null worker entries', () => {
+  const workers = [null, { type: 'codex', name: 'c1' }, undefined];
+  const count = demoteCodexWorkersIfNeeded(workers, 'suggest');
+  assert.equal(count, 1);
+  assert.equal(workers[1].type, 'claude');
 });

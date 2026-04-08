@@ -100,10 +100,19 @@ function createHandle(child, initialized = false) {
           emitter.emit(emitName, msg.params || msg);
         }
       } else if (kind === 'request') {
-        // Auto-respond to server requests
+        // Mirror production behavior: reject server requests with JSON-RPC
+        // error response (schema-safe; result:{} is invalid for all 9 server
+        // request methods because each requires non-empty fields).
         try {
-          const resp = JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} });
-          child.stdin.write(resp + '\n');
+          const errResp = JSON.stringify({
+            jsonrpc: '2.0',
+            id: msg.id,
+            error: {
+              code: -32000,
+              message: `Auto-rejected: client cannot prompt user (method=${msg.method || 'unknown'})`,
+            },
+          });
+          child.stdin.write(errResp + '\n');
         } catch {}
       }
     }
@@ -528,7 +537,7 @@ test('notification: error with willRetry=true does not set error', () => {
 
 // ─── Server request handling ───────────────────────────────────────────────────
 
-test('server request: auto-responds with empty result', () => {
+test('server request: rejects with JSON-RPC error response', () => {
   const child = createMockChildProcess();
   const handle = createHandle(child, true);
   let responded = null;
@@ -543,7 +552,40 @@ test('server request: auto-responds with empty result', () => {
   emitServerRequest(child, 42, 'approval/request', { action: 'rm -rf /' });
   assert.ok(responded);
   assert.equal(responded.id, 42);
-  assert.deepEqual(responded.result, {});
+  // Schema-safe rejection: every server request method requires non-empty
+  // result fields, so result:{} would be schema-invalid. Use error response.
+  assert.ok(responded.error);
+  // -32000 is the JSON-RPC server-defined error range (not -32601 method-not-found,
+  // which is semantically wrong — we know the method, we just refuse it).
+  assert.equal(responded.error.code, -32000);
+  assert.match(responded.error.message, /Auto-rejected/);
+  assert.match(responded.error.message, /approval\/request/);
+  assert.equal(responded.result, undefined);
+});
+
+test('server request: rejection includes method name in error message', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  const captured = [];
+
+  const origWrite = child.stdin.write;
+  child.stdin.write = (data, ...args) => {
+    captured.push(JSON.parse(data.toString().trim()));
+    return origWrite.call(child.stdin, data, ...args);
+  };
+
+  emitServerRequest(child, 1, 'mcpServer/elicitation/request', {});
+  emitServerRequest(child, 2, 'item/tool/requestUserInput', {});
+  emitServerRequest(child, 3, 'item/permissions/requestApproval', {});
+
+  assert.equal(captured.length, 3);
+  for (const resp of captured) {
+    assert.ok(resp.error);
+    assert.equal(resp.error.code, -32000);
+  }
+  assert.match(captured[0].error.message, /mcpServer\/elicitation\/request/);
+  assert.match(captured[1].error.message, /item\/tool\/requestUserInput/);
+  assert.match(captured[2].error.message, /item\/permissions\/requestApproval/);
 });
 
 // ─── monitor ───────────────────────────────────────────────────────────────────
@@ -621,6 +663,118 @@ test('createThread: sends thread/start and extracts result.thread.id', async () 
   assert.equal(capturedReq.method, 'thread/start');
   assert.equal(capturedReq.params.approvalPolicy, 'never');
   assert.equal(capturedReq.params.ephemeral, true);
+  // Legacy compatibility: when opts.level is omitted, no sandbox field is set
+  // (preserves v1 behavior for unmigrated callers).
+  assert.equal(capturedReq.params.sandbox, undefined);
+});
+
+test('createThread: invalid level "auto" → falls back to legacy (no silent downgrade)', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  let capturedReq;
+  child.stdin.write = (data) => {
+    capturedReq = JSON.parse(data.toString().trim());
+    setImmediate(() => emitResponse(child, capturedReq.id, {
+      thread: { id: 'th-x', status: { type: 'idle' }, turns: [] },
+    }));
+    return true;
+  };
+
+  // 'auto' is an autonomy.json key, NOT a resolved level. If a caller bug
+  // forwards it, we must fall back to legacy params (no sandbox field) rather
+  // than silently downgrading to read-only sandbox.
+  await createThread(handle, { cwd: '/w', level: 'auto' });
+  assert.equal(capturedReq.params.approvalPolicy, 'never');
+  assert.equal(capturedReq.params.sandbox, undefined,
+    'invalid level must not produce a sandbox field');
+});
+
+test('createThread: invalid level "typo" → falls back to legacy', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  let capturedReq;
+  child.stdin.write = (data) => {
+    capturedReq = JSON.parse(data.toString().trim());
+    setImmediate(() => emitResponse(child, capturedReq.id, {
+      thread: { id: 'th-y', status: { type: 'idle' }, turns: [] },
+    }));
+    return true;
+  };
+
+  await createThread(handle, { cwd: '/w', level: 'typoo' });
+  assert.equal(capturedReq.params.sandbox, undefined);
+});
+
+test('createThread: legacy approvalPolicy still honored when level absent', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+
+  let capturedReq;
+  child.stdin.write = (data) => {
+    capturedReq = JSON.parse(data.toString().trim());
+    setImmediate(() => emitResponse(child, capturedReq.id, {
+      thread: { id: 'th-legacy', status: { type: 'idle' }, turns: [] },
+    }));
+    return true;
+  };
+
+  await createThread(handle, { cwd: '/w', approvalPolicy: 'on-failure' });
+  assert.equal(capturedReq.params.approvalPolicy, 'on-failure');
+  assert.equal(capturedReq.params.sandbox, undefined);
+});
+
+test('createThread: level=full-auto → sandbox=danger-full-access', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+
+  let capturedReq;
+  child.stdin.write = (data) => {
+    capturedReq = JSON.parse(data.toString().trim());
+    setImmediate(() => emitResponse(child, capturedReq.id, {
+      thread: { id: 'th-1', status: { type: 'idle' }, turns: [] },
+    }));
+    return true;
+  };
+
+  await createThread(handle, { cwd: '/w', level: 'full-auto' });
+  assert.equal(capturedReq.params.approvalPolicy, 'never');
+  assert.equal(capturedReq.params.sandbox, 'danger-full-access');
+});
+
+test('createThread: level=auto-edit → sandbox=workspace-write', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+
+  let capturedReq;
+  child.stdin.write = (data) => {
+    capturedReq = JSON.parse(data.toString().trim());
+    setImmediate(() => emitResponse(child, capturedReq.id, {
+      thread: { id: 'th-2', status: { type: 'idle' }, turns: [] },
+    }));
+    return true;
+  };
+
+  await createThread(handle, { cwd: '/w', level: 'auto-edit' });
+  assert.equal(capturedReq.params.approvalPolicy, 'never');
+  assert.equal(capturedReq.params.sandbox, 'workspace-write');
+});
+
+test('createThread: level=suggest → sandbox=read-only (last-resort)', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+
+  let capturedReq;
+  child.stdin.write = (data) => {
+    capturedReq = JSON.parse(data.toString().trim());
+    setImmediate(() => emitResponse(child, capturedReq.id, {
+      thread: { id: 'th-3', status: { type: 'idle' }, turns: [] },
+    }));
+    return true;
+  };
+
+  await createThread(handle, { cwd: '/w', level: 'suggest' });
+  assert.equal(capturedReq.params.approvalPolicy, 'never');
+  assert.equal(capturedReq.params.sandbox, 'read-only');
 });
 
 test('createThread: returns error on RPC failure', async () => {
