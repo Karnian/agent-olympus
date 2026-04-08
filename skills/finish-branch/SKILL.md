@@ -49,6 +49,15 @@ Step 2: LINT
         └─ FAIL ────→ STOP (fix or suppress)
                      │
                      ▼
+Step 2.5: UI SMELL SCAN (v1.0.2 US-001 — opt-in)
+    Run ui-smell-scan if config/design-blacklist.jsonc exists
+        │
+        ├─ CLEAN / NO CONFIG / NO UI FILES ────┐
+        ├─ WARN MODE + violations ─────────────┤ (log + continue)
+        │                                      │
+        └─ BLOCK MODE + violations ────→ STOP (fail with structured error)
+                                               │
+                                               ▼
 Step 3: COVERAGE
     Check for test gaps (invoke verify-coverage)
         │
@@ -108,6 +117,89 @@ If lint errors exist:
 ```
 
 **Gate**: Zero lint errors. Warnings are acceptable.
+
+### Step 2.5 — UI SMELL SCAN (v1.0.2 US-001, opt-in)
+
+Run the anti-pattern registry scan against the diff. This step is OPT-IN:
+it only runs when `config/design-blacklist.jsonc` exists. Without that file
+the step is skipped silently and finish-branch continues.
+
+```
+# Check for config
+if [ ! -f config/design-blacklist.jsonc ]; then
+  # skip silently — no config, no scan
+  continue to Step 3
+fi
+
+# Determine mode from .ao/autonomy.json (default 'warn')
+mode=$(node -e '
+  try {
+    const c = JSON.parse(require("fs").readFileSync(".ao/autonomy.json","utf-8"));
+    process.stdout.write(c.uiSmellScan === "block" ? "block" : "warn");
+  } catch { process.stdout.write("warn"); }
+')
+
+# Collect diff files with UI extensions
+BASE=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+UI_FILES=$(git diff origin/$BASE --name-only | grep -E '\.(css|scss|sass|less|tsx|jsx|vue|svelte|html)$' || true)
+
+# If no UI files in diff, skip silently regardless of mode
+if [ -z "$UI_FILES" ]; then
+  continue to Step 3
+fi
+
+# Run scan via scripts/lib/ui-smell-scan.mjs
+# IMPORTANT: env vars MUST be set BEFORE `node`, not as positional args after `-e`.
+UI_FILES="$UI_FILES" AO_RUN_ID="${AO_RUN_ID:-}" node -e '
+  import("./scripts/lib/ui-smell-scan.mjs").then(async (m) => {
+    const fs = await import("node:fs/promises");
+    const paths = (process.env.UI_FILES || "").split("\n").filter(Boolean);
+    const files = await Promise.all(paths.map(async (p) => ({
+      path: p,
+      content: await fs.readFile(p, "utf-8").catch(() => ""),
+    })));
+    const result = await m.scanDiff({ files });
+    // Write run artifact
+    const runId = process.env.AO_RUN_ID || String(Date.now());
+    const artifactDir = `.ao/artifacts/runs/${runId}`;
+    await fs.mkdir(artifactDir, { recursive: true });
+    await fs.writeFile(
+      `${artifactDir}/ui-smell-scan.json`,
+      JSON.stringify({ schemaVersion: 1, ...result }, null, 2),
+    );
+    console.log(JSON.stringify(result));
+    if (result.mode === "block" && !result.clean) process.exit(2);
+  }).catch((err) => { console.error("ui-smell-scan failed:", err.message); process.exit(0); });
+'
+```
+
+**Gate (warn mode, default)**: Log violations and continue to Step 3.
+**Gate (block mode, opt-in)**: Fail finish-branch with structured error listing all violations. User must resolve each violation or override via `allowedFonts` in `.ao/memory/design-identity.json`.
+
+**Rollback**: Delete `config/design-blacklist.jsonc` to disable the scan entirely.
+
+### Step 2.7 — UI REMEDIATE (v1.0.2 US-008, optional)
+
+If `/ui-remediate` was invoked during this session and a remediation chain is
+in progress, finish-branch waits for chain completion before continuing.
+
+```javascript
+// Finish-branch checks for a pending remediation run
+const remediationPending = existsSync('.ao/state/ao-ui-remediation-pending.json');
+if (remediationPending) {
+  // Wait for runChain() to resolve — it is already running as an awaited async task
+  // The skill handles the wait; finish-branch does NOT spawn a new chain here.
+  // If the chain already completed, read the result from:
+  //   .ao/artifacts/runs/<runId>/ui-remediation.json
+  // Check result.ok — if false: STOP and report to user
+  // If ok or if file doesn't exist: continue to Step 3
+}
+```
+
+**Gate (if remediation was run)**: `result.ok === true`. A halted or regressed
+remediation chain causes finish-branch to STOP and report.
+
+**Gate (if remediation was NOT run)**: Skip silently, continue to Step 3.
 
 ### Step 3 — COVERAGE
 

@@ -616,9 +616,10 @@ saveCheckpoint('atlas', { phase: 5, prdSnapshot: <prd.json>, completedStories, a
 
 If changed files include frontend code (`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`):
 
-1. **Detect frontend changes**:
+1. **Detect frontend changes** (use full branch diff vs main, not just HEAD~1 — multi-commit branches need the cumulative diff):
    ```bash
-   git diff --name-only HEAD~1 | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'
+   BASE=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||' || echo "main")
+   git diff --name-only "origin/$BASE...HEAD" | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'
    ```
    If no frontend files changed → skip this phase entirely.
 
@@ -670,25 +671,67 @@ Note: This phase is OPTIONAL. If Themis agent is absent, skip and proceed.
 
 ### Phase 5 — REVIEW (loop until approved)
 
-Spawn ALL reviewers **simultaneously**:
-```
-Task A: agent-olympus:architect (opus) — functional completeness
-Task B: agent-olympus:security-reviewer (sonnet) — security
-Task C: agent-olympus:code-reviewer (sonnet) — quality
-Task D: agent-olympus:aphrodite (sonnet) — UI/UX design review [CONDITIONAL]
+**Step 5.0 — Consult review router (US-005)**
+
+Before fanning out reviewers, call `scripts/lib/review-router.mjs` to compute the
+minimal reviewer set for the actual diff scope. This eliminates 60-80% of wasted
+reviewer tokens on irrelevant diffs while still catching security-relevant code
+in shared utilities via the `securityPatterns` regex set.
+
+```bash
+node -e '
+  import("./scripts/lib/review-router.mjs").then(async (m) => {
+    const { execSync } = await import("node:child_process");
+    // Use full branch diff vs origin/HEAD (not just HEAD~1) so multi-commit branches route correctly.
+    const base = (() => {
+      try { return execSync("git symbolic-ref refs/remotes/origin/HEAD", { encoding: "utf-8" }).trim().replace(/^refs\/remotes\/origin\//, ""); }
+      catch { return "main"; }
+    })();
+    const range = `origin/${base}...HEAD`;
+    const paths = execSync(`git diff --name-only ${range}`, { encoding: "utf-8" })
+      .split("\n").filter(Boolean);
+    const content = execSync(`git diff ${range}`, { encoding: "utf-8" });
+    const r = m.routeReviewers({ diffPaths: paths, diffContent: content });
+    console.log(JSON.stringify(r, null, 2));
+  });
+'
 ```
 
-**Task D is conditional**: Only spawn Aphrodite if the changeset includes frontend files
-(`.tsx`, `.jsx`, `.vue`, `.svelte`, `.css`, `.scss`, `.html`).
-Check via: `git diff --name-only HEAD~1 | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'`
-If no frontend files changed → skip Task D silently.
+Spawn ONLY the reviewers in `r.reviewers`, in parallel. Honor `securityHit=true`
+by always including `agent-olympus:security-reviewer`. If `r.warning` is set,
+log it but proceed with the fallback set.
+
+**Step 5.1 — Spawn reviewer fan-out**
+
+```
+For each reviewer in r.reviewers, fire in parallel:
+  Task(subagent_type="agent-olympus:<reviewer>", model="sonnet|opus", prompt="...")
+```
+
+**Step 5.2 — Handle reviewer escalation**
+
+Reviewers may emit a structured escalation flag mid-run:
+```json
+{ "type": "RE-REVIEW-REQUESTED",
+  "additionalReviewer": "security-reviewer",
+  "reason": "detected hardcoded API key in shared util" }
+```
+
+When you see this flag, call `handleEscalation(currentSet, flag)` and spawn the
+requested reviewer in the **same iteration** (not the next loop). This catches
+the case where code-reviewer notices security-relevant code that the path-based
+router missed.
 
 ```
 ┌─→ Collect verdicts
 │   ├─ ALL APPROVED → DONE ✓
+│   ├─ ANY ESCALATION → spawn additional reviewer same iteration
 │   └─ ANY REJECTED → fix issues, re-review
 └── Loop (max 3 review rounds)
 ```
+
+**Rollback**: set `.ao/autonomy.json` → `{ "reviewRouter": { "disabled": true } }`
+to bypass the router entirely and always run the full reviewer set.
 
 ### Phase 5b — SLOP CLEAN + COMMIT
 

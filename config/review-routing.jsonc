@@ -1,0 +1,127 @@
+// Review routing rules (v1.0.2 US-005)
+//
+// Schema: { schemaVersion: 1, alwaysInclude: [...], rules: [{match, reviewers}],
+//           securityPatterns: [regex strings], fallback: [full reviewer set] }
+//
+// Rules are evaluated top-to-bottom. The union of all matching rules' `reviewers`
+// is returned. If any file content matches `securityPatterns`, security-reviewer
+// is always added. If no rule matches, fallback is used with a warning.
+//
+// Disable entirely via .ao/autonomy.json -> { "reviewRouter": { "disabled": true } }.
+{
+  "schemaVersion": 1,
+
+  // Reviewers always included regardless of diff scope.
+  // Set to ["*"] to force the full fallback reviewer set on every diff (rollback path).
+  "alwaysInclude": [],
+
+  // Diff-scope rules. Each rule: { name, pathMatch (regex), reviewers }.
+  // pathMatch is evaluated against each diff path.
+  "rules": [
+    {
+      "name": "frontend-styles",
+      "pathMatch": "\\.(css|scss|sass|less)$",
+      "reviewers": ["aphrodite", "designer"]
+    },
+    {
+      "name": "frontend",
+      "pathMatch": "\\.(tsx|jsx|vue|svelte|html|htm)$|^(components|pages)/",
+      "reviewers": ["aphrodite", "designer", "code-reviewer"]
+    },
+    {
+      "name": "backend",
+      "pathMatch": "\\.(go|rs|py|rb|java|kt|scala|ex|exs|cs|php)$|^(api|server|backend|services|lib|pkg|cmd|internal)/",
+      "reviewers": ["code-reviewer", "architect", "security-reviewer"]
+    },
+    {
+      "name": "node-backend",
+      "pathMatch": "^(api|server|backend|services|routes|controllers|middleware)/.*\\.(ts|js|mjs|cjs)$",
+      "reviewers": ["code-reviewer", "architect", "security-reviewer"]
+    },
+    {
+      "name": "infra",
+      "pathMatch": "\\.(tf|tfvars|yaml|yml)$|^(terraform|infra|k8s|kubernetes|helm|ansible|.github/workflows)/|Dockerfile|docker-compose",
+      "reviewers": ["architect", "security-reviewer", "code-reviewer"]
+    },
+    {
+      "name": "auth",
+      "pathMatch": "(auth|login|signin|signup|session|oauth|oidc|jwt|saml|passwd|password|crypto|token)",
+      "reviewers": ["security-reviewer", "code-reviewer", "architect"]
+    },
+    {
+      "name": "tests",
+      "pathMatch": "(test|spec|__tests__|__mocks__)/|\\.(test|spec)\\.(ts|js|mjs|tsx|jsx|go|py|rb)$",
+      "reviewers": ["test-engineer", "code-reviewer"]
+    },
+    {
+      "name": "docs",
+      "pathMatch": "\\.(md|mdx|rst|txt)$|^(docs|documentation)/",
+      "reviewers": ["writer"]
+    }
+  ],
+
+  // Regex patterns (case-insensitive) — if ANY diff content matches, security-reviewer
+  // is force-included. Stored as strings, compiled to RegExp at router time.
+  "securityPatterns": [
+    "token",
+    "secret",
+    "apikey",
+    "api[_-]?key",
+    "credential",
+    "hmac",
+    "signature",
+    "sign(ed|ing)?",
+    "bcrypt",
+    "argon2?",
+    "scrypt",
+    "pbkdf2?",
+    "private[_-]?key",
+    "privatekey",
+    "(?<![a-z])rsa(?![a-z])",
+    "ecdsa",
+    "ed25519",
+    "csrf",
+    "xsrf",
+    "saml",
+    "oidc",
+    "jwks",
+    "(?<![a-z])kms(?![a-z])",
+    "vault",
+    "(?<![a-z])jwt",
+    "session[_-]?id",
+    "password",
+    "oauth",
+    "cookie",
+    "refresh.?token",
+    "Authorization",
+    "bearer",
+    "client[_-]?secret",
+    "access[_-]?key",
+    "secret[_-]?access[_-]?key",
+    "ssh[_-]?key",
+    "OPENSSH PRIVATE KEY",
+    "BEGIN RSA PRIVATE KEY",
+    "BEGIN EC PRIVATE KEY",
+    "BEGIN PRIVATE KEY",
+    "ssh-(rsa|ed25519|dss|ecdsa)",
+    "connection.?string",
+    "database.?url",
+    "db[_-]?url",
+    "\\.pem(?![a-z])",
+    "\\.p12(?![a-z])",
+    "\\.keystore",
+    "\\.env(\\.|\\b)",
+    "crypto\\.subtle",
+    "jwt[-_]?decode",
+    "signed[-_]?url"
+  ],
+
+  // Full fallback reviewer set when no rule matches.
+  "fallback": [
+    "code-reviewer",
+    "architect",
+    "security-reviewer",
+    "aphrodite",
+    "test-engineer"
+  ]
+}

@@ -24,10 +24,38 @@ This is the skill to use when you want a thorough, multi-dimensional evaluation 
 
 ### Step 1 — Scope & Context
 
-Determine what to review:
+Determine what to review, then lazy-load only the relevant design reference modules
+via `scripts/lib/ui-reference.mjs` → `selectModules()` (v1.0.2 US-002). Do NOT
+read all 7 reference files upfront; only the ones that match the diff scope.
+
 ```bash
 # Detect changed frontend files
 git diff --name-only origin/main | grep -E '\.(tsx|jsx|vue|svelte|css|scss|html)$'
+
+# Determine which of the 7 reference modules apply
+node -e '
+  import("./scripts/lib/ui-reference.mjs").then(async (m) => {
+    const fs = await import("node:fs/promises");
+    const { execSync } = await import("node:child_process");
+    const paths = execSync("git diff --name-only origin/main", { encoding: "utf-8" })
+      .split("\n").filter(Boolean);
+    const content = execSync("git diff origin/main", { encoding: "utf-8" });
+    const modules = m.selectModules({ diffPaths: paths, diffContent: content });
+    console.log(JSON.stringify(modules));
+    // Load ONLY the selected modules
+    for (const name of modules) {
+      const body = m.loadModule(name);
+      await fs.writeFile(`.ao/state/ui-review-${name}.md`, body);
+    }
+  });
+'
+```
+
+The loaded modules live under `skills/ui-review/reference/{name}.md`:
+`typography`, `color-and-contrast`, `spatial-design`, `motion-design`,
+`interaction-design`, `responsive-design`, `ux-writing`.
+
+
 ```
 
 If Claude Preview MCP is available, start the preview server:
