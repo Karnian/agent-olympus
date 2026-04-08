@@ -1,5 +1,53 @@
 # Changelog
 
+## [1.0.2] - 2026-04-08
+
+### Feature — impeccable + gstack Adoption (Foundation + Group A/B/C1/C2/D)
+
+[pbakaus/impeccable](https://github.com/pbakaus/impeccable) (Apache 2.0) 와 [garrytan/gstack](https://github.com/garrytan/gstack) (MIT) 에서 아이디어를 가져와 디자인 품질 도구와 오케스트레이션 효율성 도구를 통합. 9개 user story 구현 + Codex 교차검증 BLOCK 이슈 전부 해결.
+
+**Foundation**
+- **F-001**: SubagentStart hook 싱글패스 로더 — 2.5s 월클럭 하드캡, sync-by-default, 개별 로더 fail-safe, `schemaVersion:1` 레이턴시 로그 파일 (`.ao/state/ao-subagent-latency.log`). 이전에는 `logLatency()`가 `process.exit(0)` 전에 fire-and-forget으로 호출되어 파일이 아예 생성되지 않던 dead-code 버그 수정.
+- **F-002**: `.ao/memory/` 네임스페이스 — worktree간 공유 (git common-dir 해석), SessionEnd 24h cleanup에서 exempt, forward-schema 거부 시 stderr 명확한 경고, `memoryFilePath()` path traversal 하드닝 (`../`, 절대 경로, `\\` 거부).
+
+**Group A — 안티패턴 + 모듈화 참조 팩 (impeccable)**
+- **US-001**: `ui-smell-scan.mjs` + finish-branch 게이트 (warn 기본, block opt-in, run artifact 발행). `config/design-blacklist.jsonc.example`.
+- **US-002**: `ui-reference.mjs` `selectModules()` + 7개 도메인별 참조 모듈 (color-and-contrast, typography, spatial-design, motion-design, interaction-design, responsive-design, ux-writing).
+
+**Group B — 디자인 아이덴티티 + 정밀 마이크로 스킬 (impeccable)**
+- **US-003**: `/teach-design` 아이덴티티 브리핑 + subagent-start 자동 주입. 하드 2KB 캡 (우선순위 기반 필드 drop — 비제한 spacing 배열이 캡을 초과하던 Codex 블로커 수정).
+- **US-004**: `/normalize`, `/polish`, `/typeset`, `/arrange` 정밀 마이크로 스킬 (`requiresTDD:true`, `micro-skill-scope.mjs` 스코프 체커).
+
+**Group C1 — 리뷰 라우터 + 취향 메모리 (gstack)**
+- **US-005**: 정규식 기반 리뷰 라우터 (`review-router.mjs` + `config/review-routing.jsonc`). CSS-only 변경은 `{aphrodite, designer}`로 최소 라우팅 (code-reviewer 제외). `alwaysInclude:["*"]` rollback 경로로 전체 폴백 세트 강제. Atlas/Athena는 `origin/$BASE...HEAD` 전체 브랜치 diff 사용 (이전 `HEAD~1`은 multi-commit 브랜치에서 오작동).
+- **US-009**: `.ao/memory/taste.jsonl` 취향 메모리. `pruneTaste()`는 빈 selector 거부 (실수 nuke 방지).
+
+**Group C2 — 순차 프론트엔드 교정 체인 (impeccable)**
+- **US-008**: `/ui-remediate` audit → normalize → polish → re-audit 체인. harden 스테이지 없음. 실패 시 halt, 구조화된 outbox 전달만 (full conversation history 없음), re-audit convergence gate (smell count 증가 시 ABORT, 감소 시 성공). `ui-remediation.json` 아티팩트 (`schemaVersion:1`). finish-branch Step 2.7 연동.
+
+**Group D — 브라우저 핸드오프 + 아카이벌 파이프 (gstack)**
+- **US-006**: 브라우저 일시정지 + 수동 재개 프로토콜. `.ao/state/browser-handoff.json` (`schemaVersion:1`, 24h TTL). URL sanitize (access_token/id_token/code/state/sig/secret/key/password/auth/session/token/jwt/hmac/otp/recovery/refresh 16개 파라미터 스트립). Breadcrumb은 `{step, lastClickedSelector, screenshotPath?}` 화이트리스트만 허용 (명시적 credential-leak deny-list 테스트). `/resume-handoff` thin state-reader skill. 결정론적 exact-resume은 v1.0.3로 연기.
+- **US-007**: 캐스케이드 아티팩트 **아카이벌** 파이프 (엄격한 prompt-history 격리 아님). `artifact-pipe.mjs`에 `writeOutbox(runId, stage, name, payload)` / `readInbox(runId, stage)` 제공. 정규 스테이지 이름 6개 한정 (`plan`, `decompose`, `execute`, `verify`, `review`, `finish`). 파일당 100KB / 런당 10MB 캡. Atomic write. 인프로세스 async 전용. 24h 보존 후 SessionEnd sweep. CLAUDE.md State Management 섹션 업데이트.
+
+### Fix — Codex 교차검증 BLOCK 이슈 전부 해결
+- **F-001**: `logLatency()` → `await` 추가 + `schemaVersion:1`
+- **US-001/003/009**: `node -e '...' ENV=val` → `ENV=val node -e '...'` 환경변수 순서 교정 (여러 SKILL.md)
+- **US-003**: 비제한 spacing/allowedFonts 배열에도 하드 2KB 캡 강제
+- **US-005**: `alwaysInclude:[code-reviewer]` 제거, `frontend-styles` 규칙 신규, `alwaysInclude:["*"]` rollback 구현, Atlas/Athena diff base 교정
+- **F-002**: forward-schema 거부 시 stderr 경고, `memoryFilePath()` path traversal 하드닝
+- **preflight.test.mjs:310**: `cwd: tmpDir` 격리 추가로 프로젝트의 `.ao/autonomy.json` 오염 차단
+
+### Test
+- **1326 passing / 0 failing** (baseline 1174 → +152, 64 test files). 모든 fix는 regression test로 잠금.
+
+### Docs
+- **CLAUDE.md State Management 섹션** 전면 업데이트 — `.ao/memory/`, `.ao/artifacts/pipe/`, `browser-handoff.json`, `ui-remediation.json`, `schemaVersion:1` 컨벤션 명시
+- **README.md / README.ko.md Acknowledgements**: impeccable (Apache 2.0), gstack (MIT) 출처와 매핑된 user story 명시
+
+### Cross-Validation
+- **Codex (gpt-5-codex)**: Foundation+A+B+C1 범위 review → BLOCK verdict 4건 blocking + 3건 suggestion → 전부 해결 후 BLOCK 해제
+- **Gemini (gemini-3-flash-preview)**: rate limit + 루프 감지로 중단, Codex review로 대체
+
 ## [1.0.1] - 2026-04-06
 
 ### Fix — Concurrency Slot Zombie Bug + Config-Driven Limits

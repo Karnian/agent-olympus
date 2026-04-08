@@ -6,7 +6,7 @@
 
 Agent Olympus is a standalone Claude Code plugin that transforms how you build software. Give it a task, and it orchestrates specialized AI agents to complete it autonomously — analyzing requirements, planning execution, implementing changes, verifying results, and fixing issues until everything passes.
 
-Two orchestrators, 18 specialized agents, 26 workflow skills. Zero npm dependencies.
+Two orchestrators, 19 specialized agents, 34 workflow skills. Zero npm dependencies.
 
 ## What It Does
 
@@ -22,8 +22,8 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 ## Features
 
 - **Two orchestrators**: Atlas (hub-and-spoke) and Athena (peer-to-peer team)
-- **18 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Hermes (spec), Executor, Designer (UI/UX), **Aphrodite (design review)**, Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Themis (quality gate), Atlas, Athena
-- **26 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, tdd, systematic-debug, brainstorm, finish-branch, **design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review**, harness-init, sessions
+- **19 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Hermes (spec), Executor, Designer (UI/UX), **Aphrodite (design review)**, Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Themis (quality gate), Ask, Atlas, Athena
+- **34 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, tdd, systematic-debug, brainstorm, finish-branch, design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review, harness-init, sessions, **teach-design, normalize, polish, typeset, arrange, taste, ui-remediate, resume-handoff**
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
 - **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs; intent-aware query expansion
 - **Zero npm dependencies**: Node.js built-ins only
@@ -47,7 +47,13 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Robust hook execution** *(v0.9.8)*: `run.sh` shell wrapper resolves node from nvm/volta/fnm/mise in restricted PATH hook environments; `run.sh || node run.cjs` fallback for Windows; `buildEnhancedPath()` injected into all capability detection child processes
 - **Native Teams config fallback** *(v0.9.8)*: `.ao/autonomy.json` `nativeTeams: true` enables Native Agent Teams without `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` env var
 - **Gemini permission mirroring** *(v0.9.8)*: `.ao/autonomy.json` `gemini.approval` — auto-detect or override Gemini approval mode (`yolo`, `auto_edit`, `plan`, `default`)
-- **1000+ unit tests**: Comprehensive test suite using `node:test` across 50 test files
+- **Design identity memory** *(v1.0.2)*: `.ao/memory/design-identity.json` — `/teach-design` captures brand colors, typography, spacing, component library; auto-injected into designer/aphrodite/ui-review subagents (hard 2KB cap, worktree-shared, schemaVersion:1)
+- **Anti-pattern scan + precision micro-skills** *(v1.0.2, adapted from [impeccable](https://github.com/pbakaus/impeccable))*: `ui-smell-scan` as finish-branch gate (warn default, block opt-in), modular design reference pack (7 domains), `/normalize`, `/polish`, `/typeset`, `/arrange`, `/ui-remediate` audit→normalize→polish→re-audit convergence chain
+- **Change-aware review router** *(v1.0.2, adapted from [gstack](https://github.com/garrytan/gstack))*: CSS-only diffs minimal-route to `{aphrodite, designer}` (60-80% reviewer overhead cut) with 30+ regex security patterns that force-include `security-reviewer`; `alwaysInclude:["*"]` rollback path
+- **Taste memory** *(v1.0.2, adapted from gstack)*: `.ao/memory/taste.jsonl` accumulates user aesthetic preferences across sessions; replayed to designer/aphrodite (1KB cap, 200-entry FIFO, explicit `/taste prune` grammar)
+- **Browser pause + manual continue** *(v1.0.2, adapted from gstack)*: `/resume-handoff` — on CAPTCHA/auth/MFA, persists sanitized URL + breadcrumb to `.ao/state/browser-handoff.json` (16 sensitive param strip, allow-list breadcrumb, 24h TTL). Deterministic exact-resume deferred to v1.0.3.
+- **Cascade artifact archival pipe** *(v1.0.2, adapted from gstack)*: `.ao/artifacts/pipe/<runId>/<stage>/{inbox,outbox}/` structured stage handoffs (6 canonical stages, 100KB/file + 10MB/run caps, atomic writes). Archival only, NOT prompt-history isolation.
+- **1300+ unit tests**: Comprehensive test suite using `node:test` across 64 test files (v1.0.2: 1326 passing)
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -270,7 +276,7 @@ User Request
 | Best for | Independent tasks | Interdependent tasks |
 | Overhead | Lower | Higher but more collaborative |
 
-## Agents (18 Total)
+## Agents (19 Total)
 
 | Agent | Model | Role |
 |-------|-------|------|
@@ -292,8 +298,9 @@ User Request
 | **code-reviewer** | Sonnet | Code quality reviewer (read-only) — standards, patterns, maintainability |
 | **themis** | Sonnet | Quality gate enforcer (read-only) — tests, syntax, namespace hygiene; PASS/FAIL/CONDITIONAL verdict |
 | **writer** | Haiku | Documentation specialist — clear, accurate technical docs and code comments |
+| **ask** | Sonnet | Quick single-shot dispatcher — routes questions to Codex/Gemini workers |
 
-## Skills (26 Total)
+## Skills (34 Total)
 
 | Skill | Level | Aliases | Use Case |
 |-------|-------|---------|----------|
@@ -321,6 +328,16 @@ User Request
 | **a11y-audit** | 2 | `a11y-audit`, `접근성검사`, `accessibility-audit` | WCAG 2.2 AA accessibility audit via code review |
 | **design-system-audit** | 2 | `design-system-audit`, `디자인시스템검사`, `ds-audit` | Design system health: token leaks, component consistency |
 | **ux-copy-review** | 2 | `ux-copy-review`, `카피리뷰`, `copy-review` | UX copy quality: clarity, consistency, tone, inclusivity |
+| **harness-init** | 2 | `harness-init`, `하네스초기화`, `setup-harness` | Initialize testing harness and framework scaffolding |
+| **sessions** | 1 | `sessions`, `세션`, `history` | Browse and inspect prior Atlas/Athena session artifacts |
+| **teach-design** *(v1.0.2)* | 3 | `teach-design`, `디자인알려줘`, `brand-identity` | Capture brand identity (colors, typography, spacing, components) into `.ao/memory/design-identity.json` |
+| **normalize** *(v1.0.2)* | 2 | `normalize`, `정규화`, `ui-normalize` | Precision micro-skill — normalize UI to design system tokens |
+| **polish** *(v1.0.2)* | 2 | `polish`, `다듬기`, `ui-polish` | Precision micro-skill — final UI refinement and polish pass |
+| **typeset** *(v1.0.2)* | 2 | `typeset`, `타이포`, `typography` | Precision micro-skill — typography hierarchy and rhythm fixes |
+| **arrange** *(v1.0.2)* | 2 | `arrange`, `정렬`, `layout-arrange` | Precision micro-skill — spacing and layout alignment fixes |
+| **taste** *(v1.0.2)* | 2 | `taste`, `취향`, `aesthetic-memory` | Persist user aesthetic preferences into `.ao/memory/taste.jsonl` (gstack-inspired) |
+| **ui-remediate** *(v1.0.2)* | 4 | `ui-remediate`, `UI개선`, `ui-fix-chain` | Sequential audit→normalize→polish→re-audit convergence chain |
+| **resume-handoff** *(v1.0.2)* | 2 | `resume-handoff`, `브라우저이어서`, `browser-resume` | Resume work after browser pause (CAPTCHA/auth/MFA) via sanitized handoff state |
 
 ## Architecture
 
@@ -522,7 +539,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (601+ tests across 39 files) covers the core hook libraries. To run:
+A `node:test` based test suite (1326+ tests across 64 files as of v1.0.2) covers the core hook libraries. To run:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'
