@@ -3,7 +3,7 @@ import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { createWorkerWorktree } from './worktree.mjs';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
-import { resolveCodexApproval, codexApprovalFlag } from './codex-approval.mjs';
+import { resolveCodexApproval, buildCodexExecArgs } from './codex-approval.mjs';
 import { resolveGeminiApproval, geminiApprovalFlag } from './gemini-approval.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
 
@@ -228,13 +228,13 @@ export function buildWorkerCommand(worker, opts = {}) {
 
   switch (worker.type) {
     case 'codex': {
-      // Mirror Claude's permission level to Codex approval mode.
+      // Mirror Claude's permission level to Codex sandbox mode.
       // Detect from autonomy.json config or Claude settings files.
+      // Codex 0.118+: -a/-s are GLOBAL flags and MUST appear BEFORE `exec`.
       const autonomyConfig = opts.autonomyConfig || loadAutonomyConfig(opts.cwd || process.cwd());
-      const approval = resolveCodexApproval(autonomyConfig, { cwd: opts.cwd });
-      const flag = codexApprovalFlag(approval);
-      const flagPart = flag ? ` ${flag}` : '';
-      return `"${resolveBinary('codex')}"${flagPart} exec "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
+      const level = resolveCodexApproval(autonomyConfig, { cwd: opts.cwd });
+      const codexArgs = buildCodexExecArgs(level).join(' '); // "-a never -s <sandbox>"
+      return `"${resolveBinary('codex')}" ${codexArgs} exec "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
     }
     case 'gemini': {
       // Mirror Claude's permission level to Gemini approval mode

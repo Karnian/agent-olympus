@@ -18,6 +18,7 @@ import {
   monitor,
   collect,
   shutdown,
+  _buildSpawnArgs,
 } from '../lib/codex-exec.mjs';
 
 // ─── Mock helpers ──────────────────────────────────────────────────────────────
@@ -112,6 +113,74 @@ function createHandle(child) {
 
   return handle;
 }
+
+// ─── _buildSpawnArgs ──────────────────────────────────────────────────────────
+// Verifies CLI flag composition for codex 0.118+ (global -a/-s before `exec`).
+
+test('_buildSpawnArgs: level=full-auto → -a never -s danger-full-access before exec', () => {
+  const args = _buildSpawnArgs({ level: 'full-auto' });
+  assert.deepEqual(args, [
+    '-a', 'never', '-s', 'danger-full-access',
+    'exec', '--json', '--ephemeral', '-',
+  ]);
+});
+
+test('_buildSpawnArgs: level=auto-edit → -a never -s workspace-write before exec', () => {
+  const args = _buildSpawnArgs({ level: 'auto-edit' });
+  assert.deepEqual(args, [
+    '-a', 'never', '-s', 'workspace-write',
+    'exec', '--json', '--ephemeral', '-',
+  ]);
+});
+
+test('_buildSpawnArgs: level=suggest → -a never -s read-only before exec', () => {
+  const args = _buildSpawnArgs({ level: 'suggest' });
+  assert.deepEqual(args, [
+    '-a', 'never', '-s', 'read-only',
+    'exec', '--json', '--ephemeral', '-',
+  ]);
+});
+
+test('_buildSpawnArgs: omitted level → legacy bypass flag (backward compat)', () => {
+  const args = _buildSpawnArgs({});
+  assert.deepEqual(args, [
+    '--dangerously-bypass-approvals-and-sandbox',
+    'exec', '--json', '--ephemeral', '-',
+  ]);
+});
+
+test('_buildSpawnArgs: no opts → legacy bypass', () => {
+  const args = _buildSpawnArgs();
+  assert.equal(args[0], '--dangerously-bypass-approvals-and-sandbox');
+});
+
+test('_buildSpawnArgs: invalid level "auto" → legacy bypass (strict validation)', () => {
+  // 'auto' is an autonomy.json value, NOT a resolved level; if a caller bug
+  // forwards it unresolved, we should fall through to legacy bypass rather
+  // than silently downgrade to read-only.
+  const args = _buildSpawnArgs({ level: 'auto' });
+  assert.equal(args[0], '--dangerously-bypass-approvals-and-sandbox');
+});
+
+test('_buildSpawnArgs: invalid level "typo" → legacy bypass', () => {
+  const args = _buildSpawnArgs({ level: 'typoo' });
+  assert.equal(args[0], '--dangerously-bypass-approvals-and-sandbox');
+});
+
+test('_buildSpawnArgs: empty string level → legacy bypass', () => {
+  const args = _buildSpawnArgs({ level: '' });
+  assert.equal(args[0], '--dangerously-bypass-approvals-and-sandbox');
+});
+
+test('_buildSpawnArgs: approval flags always precede exec subcommand (codex 0.118+)', () => {
+  for (const level of ['full-auto', 'auto-edit', 'suggest']) {
+    const args = _buildSpawnArgs({ level });
+    const execIdx = args.indexOf('exec');
+    const approvalIdx = args.indexOf('-a');
+    assert.ok(approvalIdx >= 0, `level=${level} should include -a`);
+    assert.ok(approvalIdx < execIdx, `level=${level}: -a (${approvalIdx}) must come before exec (${execIdx})`);
+  }
+});
 
 // ─── parseJSONLEvents ─────────────────────────────────────────────────────────
 
