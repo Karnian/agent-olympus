@@ -9,7 +9,12 @@ import { atomicWriteFileSync } from './fs-atomic.mjs';
 import { buildRecoveryStrategy } from './stuck-recovery.mjs';
 import { detectClaudePermissionLevel, claudePermissionModeFlag } from './permission-detect.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
-import { resolveCodexApproval, shouldDemoteCodexWorker } from './codex-approval.mjs';
+import {
+  resolveCodexApproval,
+  shouldDemoteCodexWorker,
+  detectHostSandbox,
+  buildHostSandboxWarning,
+} from './codex-approval.mjs';
 
 const STATE_DIR = '.ao/state';
 const ARTIFACTS_DIR = '.ao/artifacts';
@@ -354,15 +359,32 @@ export function demoteCodexWorkersIfNeeded(workers, level) {
 }
 
 export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
-  // ─── Codex permission mirroring + demotion ───────────────────────────────
-  // Resolve the host Claude permission level once for all codex workers in
-  // this team. The level is then forwarded to codex-exec and codex-appserver
-  // adapter spawn calls so the Codex sandbox tier mirrors the host.
-  //
-  // Demotion runs BEFORE adapter selection so demoted workers route to
-  // claude-cli/tmux instead of any codex adapter.
-  const codexLevel = resolveCodexApproval(loadAutonomyConfig(cwd), { cwd });
+  // ─── Codex permission mirroring + demotion + host sandbox warning ──────
+  // Resolve the effective codex level once (intersects permissions.allow
+  // with host sandbox detection).
+  const autonomy = loadAutonomyConfig(cwd);
+  const codexLevel = resolveCodexApproval(autonomy, { cwd });
   demoteCodexWorkersIfNeeded(workers, codexLevel);
+
+  // Surface host-sandbox ambiguity to the user via wisdom. When the host is
+  // clearly sandboxed (container/seccomp/etc) but detection couldn't pin
+  // down a tier, silently trusting `permissions.allow` would be wrong.
+  // `addWisdom` dedupes on Jaccard similarity, so this won't spam the log
+  // on repeated Atlas/Athena runs.
+  try {
+    const hostSandbox = detectHostSandbox({ cwd, autonomyConfig: autonomy });
+    const warning = buildHostSandboxWarning(codexLevel, hostSandbox);
+    if (warning && workers.some(w => w && w.type === 'codex')) {
+      // Fire-and-forget — never block spawnTeam on wisdom logging
+      addWisdom({
+        category: 'architecture',
+        lesson: warning,
+        confidence: 'medium',
+      }).catch(() => {});
+    }
+  } catch {
+    // Wisdom warning is best-effort; never let it block spawnTeam
+  }
 
   // Determine adapter per worker (after demotion)
   const adapterNames = workers.map(w => selectAdapter(w, capabilities));

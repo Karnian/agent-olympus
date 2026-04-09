@@ -211,7 +211,17 @@ Suggest-tier hosts cannot run codex usefully — a `read-only` sandbox would let
 
 The `-a` and `-s` flags are GLOBAL Codex CLI flags and MUST appear BEFORE the `exec` subcommand. `codex exec -a never` errors with `unexpected argument '-a'` in 0.118+.
 
-**Known limitation.** Sandbox mirroring is based on Claude Code's `permissions.allow` list — what tool calls the host is permitted to make — not the host's actual sandbox boundaries. A `Bash(*)+Write(*)` host running inside a restricted shell sandbox will still receive `danger-full-access` Codex workers. True host-sandbox detection is tracked separately.
+**Host sandbox intersection** (`scripts/lib/host-sandbox-detect.mjs`). The codex permission level derived from `permissions.allow` is now INTERSECTED with a passive host-sandbox detection (the more restrictive of the two wins). Signal priority:
+
+1. **Explicit override** (ground truth) — `AO_HOST_SANDBOX_LEVEL` env var OR `.ao/autonomy.json { codex: { hostSandbox: ... } }` ∈ `{unrestricted, workspace-write, read-only}`. Env wins when both are set.
+2. **Linux LSM enforcing** — AppArmor (`/proc/self/attr/current` `(enforce)`), SELinux (`/sys/fs/selinux/enforce == 1` + non-`unconfined_t` context), or Landlock (`/proc/self/status` Landlock field). Any of these → tier `workspace-write`.
+3. **Otherwise** — tier `unknown` (NO silent downgrade; ambiguous signals like containers, seccomp, or macOS `OPERON_SANDBOXED_NETWORK` are recorded as SIGNALS but don't force a tier change).
+
+When tier is `unknown` but filesystem-scoped signals exist (containerized, seccomp filter, NoNewPrivs), Atlas/Athena records a one-time `architecture` wisdom warning asking the user to set `AO_HOST_SANDBOX_LEVEL` explicitly. Network-only signals (OPERON_SANDBOXED_NETWORK) do NOT trigger the warning because the override controls filesystem tier, not network.
+
+Diagnostic CLI: `node scripts/diagnose-sandbox.mjs` prints the full detection record (tier, source, all signals, effective codex level) as JSON. Use it to figure out whether you need to set an explicit override.
+
+**Known limitation.** Host sandbox detection is passive only — no active probing of writable roots or network reachability. A host that appears unrestricted on paper but is actually inside a chroot or `sandbox-exec` policy without exposing LSM-equivalent signals will still show tier `unknown`. Set `AO_HOST_SANDBOX_LEVEL` explicitly in those environments.
 
 **Claude** workers now auto-detect permission level (no longer default to `--dangerously-skip-permissions`):
 - `Bash(*) + Write(*)` → `--permission-mode bypassPermissions`
@@ -226,13 +236,14 @@ The `-a` and `-s` flags are GLOBAL Codex CLI flags and MUST appear BEFORE the `e
 Override via `.ao/autonomy.json`:
 ```json
 {
-  "codex": { "approval": "full-auto" },
+  "codex": { "approval": "full-auto", "hostSandbox": "auto" },
   "gemini": { "approval": "yolo" },
   "nativeTeams": true,
   "planExecution": "ask"
 }
 ```
 Codex values: `auto` (default), `suggest`, `auto-edit`, `full-auto`
+Codex host sandbox: `auto` (default — detect), `unrestricted`, `workspace-write`, `read-only`. Env var `AO_HOST_SANDBOX_LEVEL` (same enum, minus `auto`) takes precedence.
 Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
 `nativeTeams`: `true` enables Native Agent Teams without env var (fallback when `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is not set in hook environment)
 `planExecution`: `ask` (default) presents Solo/Atlas/Athena choice via `AskUserQuestion` interactive UI after plan approval (text fallback for non-Desktop environments); `solo` skips orchestration; `atlas`/`athena` auto-routes. Simple plans (S-scale or ≤2 stories) auto-skip to solo.
@@ -248,7 +259,9 @@ Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
 - `scripts/lib/worker-spawn.mjs` — Adapter router (`selectAdapter`, `spawnTeam`, `monitorTeam`)
 - `scripts/lib/resolve-binary.mjs` — Binary resolution with caching + `buildEnhancedPath()`
 - `scripts/lib/preflight.mjs` — `runStateCleanup()` (lightweight, SessionStart) + `runPreflight()` (full, orchestrators) + `detectCapabilities()` (parallel, cached 60min)
-- `scripts/lib/codex-approval.mjs` — Claude permission level → Codex sandbox tier mirroring (`buildCodexExecArgs`, `buildCodexAppServerParams`, `shouldDemoteCodexWorker`)
+- `scripts/lib/codex-approval.mjs` — Claude permission level → Codex sandbox tier mirroring + host-sandbox intersection (`buildCodexExecArgs`, `buildCodexAppServerParams`, `shouldDemoteCodexWorker`, `effectiveCodexLevel`, `buildHostSandboxWarning`)
+- `scripts/lib/host-sandbox-detect.mjs` — Passive host sandbox detection (LSM enforce, container, seccomp, macOS signals, WSL)
+- `scripts/diagnose-sandbox.mjs` — Diagnostic CLI that prints the full host-sandbox record + effective codex level as JSON
 - `scripts/lib/cost-estimate.mjs` — Token-based cost estimation (Claude + Gemini pricing)
 
 ### Session Naming
