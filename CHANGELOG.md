@@ -1,5 +1,80 @@
 # Changelog
 
+## [1.0.3] - 2026-04-09
+
+### Feature — Codex permission mirroring hardening + host sandbox intersection
+
+코덱스 권한 미러링을 approval axis에서 **sandbox axis**로 전환하고, `permissions.allow` 기반 검출에 **host sandbox 감지**를 교집합으로 적용. Codex 0.118+ 호환성 확보와 source-of-truth gap 동시 해소. Codex 교차검증 6 라운드에서 발견된 모든 지적 흡수 (총 15건).
+
+**Codex sandbox-axis mirroring (#46)**
+- 미러링 축을 approval → sandbox로 전환. 이유: Codex 0.118에서 `--auto-edit` 플래그 삭제됨, docs 명시 *"never for non-interactive runs"*. exec/appserver 모두 비대화형이라 approval은 `never` 고정, sandbox만 host trust로 변동.
+- 매핑: `Bash(*)+Write(*) → -a never -s danger-full-access` / `Write(*) or Edit(*) → -a never -s workspace-write` / 그 외 → codex 워커 demote (`codex→claude`)
+- `-a/-s`는 Codex 0.118+ 에서 **global flag**이며 `exec` subcommand 앞에 와야 함 (`codex exec -a never`는 `error: unexpected argument '-a'`). `scripts/lib/codex-approval.mjs` `buildCodexExecArgs` / `buildCodexAppServerParams` / `codexSandboxForLevel` / `shouldDemoteCodexWorker` / `demoteCodexWorkersIfNeeded` 신규 helper.
+- `codex-appserver.mjs` server request 자동 응답을 `result:{}`에서 **JSON-RPC error `-32000`** 로 교체. 이유: Codex 0.118 schema에서 9개 ServerRequest 메서드 모두 response에 필수 필드 (`decision`/`action`/`answers`/`permissions`/`accessToken`/...)가 있어 빈 객체는 전부 schema 위반.
+- suggest-tier 호스트에서 codex 워커 demote 시 **`model` 필드 strip** (Codex 모델명이 `claude-cli --model`에 누수되는 회귀 차단). `_demotedFrom` / `_demotionReason` / `_demotedModel` 필드 보존.
+- `/ask` skill: demote 시 exit 2 (no artifact — 헤더 contract 보존). `/ask auto` + suggest host는 `gemini-exec`로 transparent fallback.
+- Backward compat: `spawn()` / `createThread()` 모두 `opts.level` 미지정시 legacy 동작 유지. `VALID_LEVELS` strict check로 `'auto'`/typo의 silent downgrade 차단 (exec + appserver 양쪽 동일).
+
+**Host sandbox detection + intersection (#47)**
+- v1.0.2 spec §4.3 Open Question 해소. `permissions.allow`는 "도구 호출 가능 여부"지 "host shell 실제 sandbox 경계"가 아님 → 별도 passive detection 추가 후 교집합.
+- `scripts/lib/host-sandbox-detect.mjs` 신규: detection 우선순위 **env `AO_HOST_SANDBOX_LEVEL` > autonomy `codex.hostSandbox` > Linux LSM enforce (AppArmor/SELinux/Landlock) > unknown**. Container (`/.dockerenv`, cgroup), seccomp, macOS `OPERON_SANDBOXED_NETWORK`, WSL은 `signals` 필드로만 기록 — 모호한 신호는 tier를 강제 downgrade하지 않음.
+- 신규 `effectiveCodexLevel(permLevel, hostSandbox)` = `min(permTier, hostTier)`. `unknown` host tier는 3(unrestricted)로 매핑하여 silent downgrade 방지.
+- **Breaking contract change (의도된)**: explicit `codex.approval`도 host sandbox로 intersect됨. 이전에는 `codex.approval=full-auto`가 무조건 full-auto였으나, read-only 호스트에서 codex가 실패하는 동작을 만듦. 이제 `codex.approval`은 **ceiling permLevel**이고 host sandbox는 ground truth. 호스트 검출을 override하려면 `codex.hostSandbox` / `AO_HOST_SANDBOX_LEVEL`도 함께 설정.
+- `worker-spawn.mjs` `spawnTeam`에서 host sandbox가 `unknown`이고 filesystem-scoped signals (`containerized`/`seccompActive`/`noNewPrivs`)가 있으면 **wisdom 1회 경고** 기록. Jaccard dedup이 spam 차단. `networkRestricted`는 warning trigger에서 제외 (`AO_HOST_SANDBOX_LEVEL`은 fs tier용이라 network-only 신호로 권유하면 misleading).
+- `autonomy.mjs` validator에 `codex.hostSandbox ∈ {auto, unrestricted, workspace-write, read-only}` 추가 (default `'auto'`).
+- `scripts/diagnose-sandbox.mjs` 신규 진단 CLI. `effectiveCodexLevel`을 `resolveCodexApproval`에서 직접 가져와 runtime과 report drift 방지 (`node scripts/diagnose-sandbox.mjs`).
+
+**spawnTeam E2E integration tests (#48)**
+- `spawnTeam()`에 `_inject` 파라미터 추가 (test-only dependency injection). `_inject.adapters` / `_inject.createTeamSession` / `_inject.validateTmux` 주입 가능. Production 호출자는 4 인자로 기존 path 유지.
+- `scripts/test/worker-spawn-integration.test.mjs` 신규, 14 E2E 테스트: level 전달 매트릭스 (full-auto/auto-edit), demotion E2E + model field strip, mixed team (codex+claude+gemini), `AO_HOST_SANDBOX_LEVEL=read-only` host intersection, `autonomy.codex.approval` ceiling, tmux fallback path, `validateTmux()=false` 에러, appserver init/createThread 실패 cleanup, codex-exec spawn throw.
+- Fake adapter shapes가 production 불변식 (`_initialized`, `threadId`, `_sessionId`) 강제 — Codex가 지적한 drift 방지.
+- Test isolation: `process.chdir()` + tmp HOME + 격리된 `AO_HOST_SANDBOX_LEVEL` → `wisdom.jsonl`/state가 repo 오염 불가.
+
+**tmux removal X1: createTeamWorktrees helper (#49)**
+- tmux 완전 제거 multi-PR 시퀀스의 첫 단계. **순수 additive** — observable behavior 변화 0.
+- `scripts/lib/worktree.mjs`에 `createTeamWorktrees(teamName, workers, cwd)` batch helper 신규 export. `worktreeCreated`는 1급 필드 (Codex가 지적한 "create:false 계약 보존" 함정).
+- `tmux-session.mjs` diff는 **comment-only** — 왜 `createTeamSession`이 새 helper를 사용하지 않는지 설명 (인터리빙 순서 보존, strict behavior-preserving).
+- 5개 새 테스트 (batch shape, empty, fallback `worktreeCreated:false`, partial batch, sanitization pass-through).
+- Follow-up: PR X2 (per-worker `executionCwd` in `worker-spawn`) / PR X2.5 (`_liveHandle` durable state) / PR X3 (tmux fallback 제거) 는 별도 plan으로 추적.
+
+### Fix — 6-round Codex peer review 흡수
+- **Plan v1 폐기**: stderr silent, legacy bypass 영구화, appserver 비결정성 (Codex가 `codex-exec` 단독 범위를 반대하여 A+B 합본으로 재설계)
+- **Plan v2 → v3**: CLI flag global 위치 검증, schema-invalid `result:{}`, read-only silent completion, source-of-truth 한계 (후속 plan으로 분리)
+- **Step 2**: 기본 `level='suggest'`가 미이관 호출자에서 회귀 → `opts.level` 명시될 때만 새 path. 에러 코드 `-32601`(method not found)은 의미 오용 → `-32000`(server-defined)로 교정
+- **Step 3**: `opts.level='auto'`/typo의 silent downgrade → `VALID_SPAWN_LEVELS` strict check
+- **Step 4**: demoted `worker.model` 누수 → strip + `_demotedModel` 보존
+- **Step 5**: exit-2 artifact 계약 깨짐 → demoted 시 artifact 안 씀. test HOME isolation
+- **Final**: explicit `codex.approval`이 host detection 우회 (blocker) → ceiling 패턴으로 intersection 항상 적용. `diagnose-sandbox` 필드가 runtime과 drift → single source
+- **#47 final**: appserver invalid level도 strict check 추가 (exec와 동일화). `/ask auto` gemini fallback. SKILL.md stale 문구 정정
+- **#48 final**: HOME isolation 불충분 → `process.chdir()`. fake adapter shapes가 `_initialized`/`threadId`/`_sessionId` 계약 미강제 → mirror
+- **#49 final**: draft 1이 NOT behavior-preserving (인터리빙 순서 변화) → `createTeamSession` 수정 롤백, 순수 additive
+
+### Test
+- 1394 → **1506** (+112 신규 테스트)
+- `scripts/test/codex-approval.test.mjs`: +46 (sandbox-axis helper matrix + host intersection + warning)
+- `scripts/test/host-sandbox-detect.test.mjs`: **신규** 50 hermetic tests
+- `scripts/test/codex-exec.test.mjs`: +10 (_buildSpawnArgs invariant + invalid level)
+- `scripts/test/codex-appserver.test.mjs`: +11 (createThread sandbox matrix + server request error response)
+- `scripts/test/worker-spawn.test.mjs`: +8 (demoteCodexWorkersIfNeeded matrix + model strip)
+- `scripts/test/worker-spawn-integration.test.mjs`: **신규** 14 E2E
+- `scripts/test/ask.test.mjs`: +6 (codex level + autonomy override + demotion + HOME isolation)
+- `scripts/test/autonomy.test.mjs`: +9 (codex.hostSandbox validator)
+- `scripts/test/worktree.test.mjs`: +5 (createTeamWorktrees batch)
+
+### Docs
+- `CLAUDE.md` Permission Mirroring 섹션: Codex sandbox-axis 전면 교체, host intersection 설명, known limitation 정정
+- `skills/ask/SKILL.md`: 새 demotion/fallback 동작 반영
+- `scripts/diagnose-sandbox.mjs` 언급 추가
+- `AO_HOST_SANDBOX_LEVEL` 환경변수 문서화
+
+### Out of Scope (이후 릴리즈)
+- **PR X2**: per-worker `executionCwd` 공통화로 모든 non-tmux adapter에 worktree isolation 확장 (Athena 계약 보존)
+- **PR X2.5**: `_liveHandle` durable state / crash recovery — `monitorTeam`/`collectResults`/`shutdownTeam`이 disk state에서 재구성 가능해야 X3 가능
+- **PR X3**: `selectAdapter` tmux fallback 제거, `tmux-session.mjs` 삭제
+- `claude-cli` / `gemini`에 host sandbox intersection 적용
+- Active host-sandbox probing 자동화
+- `permissions.allow`의 cwd-relative registry → project-root 공유 모델 리팩터
+
 ## [1.0.2] - 2026-04-08
 
 ### Feature — impeccable + gstack Adoption (Foundation + Group A/B/C1/C2/D)
