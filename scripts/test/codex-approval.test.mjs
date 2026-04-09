@@ -20,6 +20,8 @@ import {
   buildCodexExecArgs,
   buildCodexAppServerParams,
   shouldDemoteCodexWorker,
+  effectiveCodexLevel,
+  buildHostSandboxWarning,
 } from '../lib/codex-approval.mjs';
 
 // ---------------------------------------------------------------------------
@@ -367,5 +369,257 @@ describe('resolveCodexApproval', () => {
     );
     assert.equal(result, 'full-auto');
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// effectiveCodexLevel — intersect permissions.allow with host sandbox tier
+// ---------------------------------------------------------------------------
+
+describe('effectiveCodexLevel: matrix (permLevel × hostSandbox.tier)', () => {
+  // Matrix: rows = permLevel, cols = hostSandbox.tier, values = expected effective
+  const cases = [
+    // [permLevel,     hostTier,          expected]
+    // full-auto permissions
+    ['full-auto',     'unrestricted',    'full-auto'],
+    ['full-auto',     'workspace-write', 'auto-edit'],
+    ['full-auto',     'read-only',       'suggest'],
+    ['full-auto',     'unknown',         'full-auto'], // unknown does NOT downgrade
+    // auto-edit permissions
+    ['auto-edit',     'unrestricted',    'auto-edit'],
+    ['auto-edit',     'workspace-write', 'auto-edit'],
+    ['auto-edit',     'read-only',       'suggest'],
+    ['auto-edit',     'unknown',         'auto-edit'],
+    // suggest permissions
+    ['suggest',       'unrestricted',    'suggest'],
+    ['suggest',       'workspace-write', 'suggest'],
+    ['suggest',       'read-only',       'suggest'],
+    ['suggest',       'unknown',         'suggest'],
+  ];
+
+  for (const [permLevel, tier, expected] of cases) {
+    it(`${permLevel} ∩ ${tier} → ${expected}`, () => {
+      const result = effectiveCodexLevel(permLevel, { tier, signals: {} });
+      assert.equal(result, expected);
+    });
+  }
+
+  it('unknown host tier never downgrades (silent downgrade guard)', () => {
+    assert.equal(effectiveCodexLevel('full-auto', { tier: 'unknown' }), 'full-auto');
+    assert.equal(effectiveCodexLevel('auto-edit', { tier: 'unknown' }), 'auto-edit');
+  });
+
+  it('missing hostSandbox argument → treated as unknown (no downgrade)', () => {
+    assert.equal(effectiveCodexLevel('full-auto', undefined), 'full-auto');
+    assert.equal(effectiveCodexLevel('full-auto', null), 'full-auto');
+  });
+
+  it('unknown permLevel → suggest (fail-safe)', () => {
+    assert.equal(effectiveCodexLevel('bogus', { tier: 'unrestricted' }), 'suggest');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveCodexApproval integration with host sandbox detection
+// ---------------------------------------------------------------------------
+
+describe('resolveCodexApproval: host sandbox intersection', () => {
+  it('explicit autonomy approval is still intersected with AO_HOST_SANDBOX_LEVEL', () => {
+    // KEY CONTRACT: explicit codex.approval does NOT bypass host sandbox.
+    // The user can express a ceiling permLevel, but the host sandbox is
+    // ground truth and always applies. To escape the host detection the
+    // user must also set AO_HOST_SANDBOX_LEVEL or codex.hostSandbox.
+    const result = resolveCodexApproval(
+      { codex: { approval: 'full-auto' } },
+      {
+        cwd: '/nonexistent',
+        home: '/nonexistent',
+        env: { AO_HOST_SANDBOX_LEVEL: 'read-only' },
+      },
+    );
+    assert.equal(result, 'suggest');
+  });
+
+  it('explicit codex.approval + explicit codex.hostSandbox → intersection of both', () => {
+    // User sets a ceiling AND a host override → min(permLevel, hostTier)
+    const result = resolveCodexApproval(
+      { codex: { approval: 'full-auto', hostSandbox: 'workspace-write' } },
+      { cwd: '/nonexistent', home: '/nonexistent', env: {} },
+    );
+    assert.equal(result, 'auto-edit');
+  });
+
+  it('explicit codex.approval=suggest forces suggest even on permissive host', () => {
+    const result = resolveCodexApproval(
+      { codex: { approval: 'suggest', hostSandbox: 'unrestricted' } },
+      { cwd: '/nonexistent', home: '/nonexistent', env: {} },
+    );
+    assert.equal(result, 'suggest');
+  });
+
+  it('explicit codex.approval acts as ceiling, unknown host does not downgrade', () => {
+    // approval=auto-edit, no host signals → unknown → keep auto-edit
+    const result = resolveCodexApproval(
+      { codex: { approval: 'auto-edit' } },
+      { cwd: '/nonexistent', home: '/nonexistent', env: {} },
+    );
+    assert.equal(result, 'auto-edit');
+  });
+
+  it('AO_HOST_SANDBOX_LEVEL=read-only downgrades full-auto permissions to suggest', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['Bash(*)', 'Write(*)'] },
+    });
+    const result = resolveCodexApproval(
+      { codex: { approval: 'auto' } },
+      {
+        cwd: dir,
+        home: '/nonexistent',
+        env: { AO_HOST_SANDBOX_LEVEL: 'read-only' },
+      },
+    );
+    assert.equal(result, 'suggest');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('AO_HOST_SANDBOX_LEVEL=workspace-write downgrades full-auto to auto-edit', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['Bash(*)', 'Write(*)'] },
+    });
+    const result = resolveCodexApproval(
+      { codex: { approval: 'auto' } },
+      {
+        cwd: dir,
+        home: '/nonexistent',
+        env: { AO_HOST_SANDBOX_LEVEL: 'workspace-write' },
+      },
+    );
+    assert.equal(result, 'auto-edit');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('autonomy.codex.hostSandbox honored when env absent', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['Bash(*)', 'Write(*)'] },
+    });
+    const result = resolveCodexApproval(
+      { codex: { approval: 'auto', hostSandbox: 'read-only' } },
+      { cwd: dir, home: '/nonexistent', env: {} },
+    );
+    assert.equal(result, 'suggest');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('host tier unknown (no signals) keeps permLevel', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['Bash(*)', 'Write(*)'] },
+    });
+    const result = resolveCodexApproval(
+      { codex: { approval: 'auto' } },
+      { cwd: dir, home: '/nonexistent', env: {} },
+    );
+    // Should equal full-auto because host detection returns 'unknown' without signals
+    assert.equal(result, 'full-auto');
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildHostSandboxWarning — surfaces unknown-tier ambiguity to the user
+// ---------------------------------------------------------------------------
+
+describe('buildHostSandboxWarning', () => {
+  it('returns null when hostSandbox is null', () => {
+    assert.equal(buildHostSandboxWarning('full-auto', null), null);
+  });
+
+  it('returns null when tier is resolved (not unknown)', () => {
+    assert.equal(
+      buildHostSandboxWarning('full-auto', { tier: 'workspace-write', signals: {} }),
+      null,
+    );
+  });
+
+  it('returns null when tier is unknown with no suspicious signals', () => {
+    assert.equal(
+      buildHostSandboxWarning('full-auto', {
+        tier: 'unknown',
+        signals: {
+          containerized: false,
+          networkRestricted: false,
+          seccompActive: false,
+          noNewPrivs: false,
+        },
+      }),
+      null,
+    );
+  });
+
+  it('returns warning when containerized + unknown tier', () => {
+    const w = buildHostSandboxWarning('full-auto', {
+      tier: 'unknown',
+      signals: { containerized: true },
+    });
+    assert.ok(w);
+    assert.match(w, /container/);
+    assert.match(w, /full-auto/);
+    assert.match(w, /AO_HOST_SANDBOX_LEVEL/);
+  });
+
+  it('returns null when ONLY networkRestricted (network-only signal does not trigger fs-tier warning)', () => {
+    // OPERON_SANDBOXED_NETWORK alone should NOT trigger a warning because
+    // AO_HOST_SANDBOX_LEVEL sets a FILESYSTEM tier; recommending it for a
+    // network-only signal is misleading.
+    assert.equal(
+      buildHostSandboxWarning('full-auto', {
+        tier: 'unknown',
+        signals: { networkRestricted: true },
+      }),
+      null,
+    );
+  });
+
+  it('returns warning when seccomp + unknown', () => {
+    const w = buildHostSandboxWarning('auto-edit', {
+      tier: 'unknown',
+      signals: { seccompActive: true },
+    });
+    assert.ok(w);
+    assert.match(w, /seccomp/);
+  });
+
+  it('returns warning listing multiple filesystem-scoped signals', () => {
+    const w = buildHostSandboxWarning('full-auto', {
+      tier: 'unknown',
+      signals: { containerized: true, seccompActive: true, noNewPrivs: true },
+    });
+    assert.ok(w);
+    assert.match(w, /container/);
+    assert.match(w, /seccomp/);
+    assert.match(w, /NoNewPrivs/);
+  });
+
+  it('networkRestricted mixed with fs signals does not appear in warning text', () => {
+    const w = buildHostSandboxWarning('full-auto', {
+      tier: 'unknown',
+      signals: { containerized: true, networkRestricted: true },
+    });
+    assert.ok(w);
+    assert.match(w, /container/);
+    // Network signal is intentionally excluded from the warning text —
+    // the override it recommends doesn't address network policy.
+    assert.ok(!/network/.test(w), `network should not appear: ${w}`);
+  });
+
+  it('warning includes current effective level so user sees the risk', () => {
+    const w = buildHostSandboxWarning('full-auto', {
+      tier: 'unknown',
+      signals: { containerized: true },
+    });
+    assert.match(w, /full-auto/);
   });
 });

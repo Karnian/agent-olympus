@@ -254,3 +254,70 @@ test('loadAutonomyConfig: returns object with required keys', async () => {
     await removeTmpDir(tmpDir);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Test: codex.hostSandbox validation (host-sandbox-detect integration)
+// ---------------------------------------------------------------------------
+
+test('validateAutonomyConfig: default codex.hostSandbox is "auto"', () => {
+  assert.equal(DEFAULT_AUTONOMY_CONFIG.codex.hostSandbox, 'auto');
+});
+
+test('validateAutonomyConfig: codex.hostSandbox accepts "auto"', () => {
+  const cfg = minimal();
+  cfg.codex.hostSandbox = 'auto';
+  const r = validateAutonomyConfig(cfg);
+  assert.deepEqual(r.errors, []);
+});
+
+test('validateAutonomyConfig: codex.hostSandbox accepts "unrestricted"', () => {
+  const cfg = minimal();
+  cfg.codex.hostSandbox = 'unrestricted';
+  const r = validateAutonomyConfig(cfg);
+  assert.deepEqual(r.errors, []);
+});
+
+test('validateAutonomyConfig: codex.hostSandbox accepts "workspace-write"', () => {
+  const cfg = minimal();
+  cfg.codex.hostSandbox = 'workspace-write';
+  const r = validateAutonomyConfig(cfg);
+  assert.deepEqual(r.errors, []);
+});
+
+test('validateAutonomyConfig: codex.hostSandbox accepts "read-only"', () => {
+  const cfg = minimal();
+  cfg.codex.hostSandbox = 'read-only';
+  const r = validateAutonomyConfig(cfg);
+  assert.deepEqual(r.errors, []);
+});
+
+test('validateAutonomyConfig: codex.hostSandbox rejects invalid value', () => {
+  const cfg = minimal();
+  cfg.codex.hostSandbox = 'yolo';
+  const r = validateAutonomyConfig(cfg);
+  assert.ok(r.errors.length > 0);
+  assert.ok(r.errors.some(e => /codex\.hostSandbox must be one of/.test(e)),
+    `expected hostSandbox error, got: ${JSON.stringify(r.errors)}`);
+});
+
+test('validateAutonomyConfig: codex.hostSandbox rejects non-string', () => {
+  const cfg = minimal();
+  cfg.codex.hostSandbox = 42;
+  const r = validateAutonomyConfig(cfg);
+  assert.ok(r.errors.length > 0);
+});
+
+test('validateAutonomyConfig: omitted codex.hostSandbox is fine (optional)', () => {
+  const cfg = minimal();
+  delete cfg.codex.hostSandbox;
+  const r = validateAutonomyConfig(cfg);
+  assert.deepEqual(r.errors, []);
+});
+
+test('validateAutonomyConfig: codex.hostSandbox and codex.approval coexist', () => {
+  const cfg = minimal();
+  cfg.codex.approval = 'full-auto';
+  cfg.codex.hostSandbox = 'workspace-write';
+  const r = validateAutonomyConfig(cfg);
+  assert.deepEqual(r.errors, []);
+});

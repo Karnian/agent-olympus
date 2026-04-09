@@ -45,6 +45,7 @@ export const DEFAULT_AUTONOMY_CONFIG = {
   },
   codex: {
     approval: 'auto',
+    hostSandbox: 'auto',
   },
   gemini: {
     approval: 'auto',
@@ -227,6 +228,19 @@ export function validateAutonomyConfig(config) {
             errors.push(
               'config.codex.approval must be one of: auto, suggest, auto-edit, full-auto; received: ' +
               JSON.stringify(approval)
+            );
+          }
+        }
+        // codex.hostSandbox — explicit host-sandbox-tier override.
+        // Consumed by host-sandbox-detect.mjs when AO_HOST_SANDBOX_LEVEL
+        // env var is not set. `'auto'` (default) means "use detection".
+        const hostSandbox = config.codex.hostSandbox;
+        if (hostSandbox !== undefined) {
+          const validSandbox = ['auto', 'unrestricted', 'workspace-write', 'read-only'];
+          if (typeof hostSandbox !== 'string' || !validSandbox.includes(hostSandbox)) {
+            errors.push(
+              'config.codex.hostSandbox must be one of: auto, unrestricted, workspace-write, read-only; received: ' +
+              JSON.stringify(hostSandbox)
             );
           }
         }
