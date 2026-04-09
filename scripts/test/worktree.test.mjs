@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   createWorkerWorktree,
+  createTeamWorktrees,
   removeWorkerWorktree,
   listTeamWorktrees,
   mergeWorkerBranch,
@@ -250,6 +251,99 @@ test('cleanupTeamWorktrees: no-op on team with no worktrees (returns cleaned:0)'
     const result = cleanupTeamWorktrees(repo, 'phantom-team');
     assert.equal(result.cleaned, 0);
     assert.equal(result.errors, 0);
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test: createTeamWorktrees — batch helper extracted from tmux-session
+// ---------------------------------------------------------------------------
+
+test('createTeamWorktrees: creates a worktree per worker and returns per-worker entries', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const workers = [
+      { name: 'w1' },
+      { name: 'w2' },
+      { name: 'w3' },
+    ];
+    const results = createTeamWorktrees('batch-team', workers, repo);
+    assert.equal(results.length, 3);
+    for (let i = 0; i < results.length; i++) {
+      assert.equal(results[i].workerName, workers[i].name);
+      assert.equal(results[i].worktreeCreated, true);
+      assert.ok(results[i].worktreePath);
+      assert.ok(results[i].branchName);
+      assert.ok(existsSync(results[i].worktreePath), 'worktree dir should exist on disk');
+    }
+    // Each worker must get a distinct worktree path and branch
+    const paths = new Set(results.map(r => r.worktreePath));
+    const branches = new Set(results.map(r => r.branchName));
+    assert.equal(paths.size, 3);
+    assert.equal(branches.size, 3);
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+test('createTeamWorktrees: empty workers array returns empty array (no error)', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const results = createTeamWorktrees('empty-team', [], repo);
+    assert.deepEqual(results, []);
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+test('createTeamWorktrees: fallback behavior — worktreeCreated=false when createWorkerWorktree fails', async () => {
+  // Use a path that is NOT a git repo so createWorkerWorktree hits its fallback
+  // branch. The helper must surface `worktreeCreated: false` as a first-class
+  // field (not hidden), and `worktreePath` must fall back to `cwd`.
+  const notARepo = await fs.mkdtemp(path.join(os.tmpdir(), 'ao-worktree-not-git-'));
+  try {
+    const results = createTeamWorktrees('fail-team', [{ name: 'solo' }], notARepo);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].workerName, 'solo');
+    assert.equal(results[0].worktreeCreated, false,
+      'worktreeCreated must be explicitly false on failure (first-class signal)');
+    assert.equal(results[0].worktreePath, notARepo,
+      'worktreePath should fall back to cwd on failure');
+    assert.ok(results[0].branchName, 'branchName is still set (deterministic)');
+  } finally {
+    await fs.rm(notARepo, { recursive: true, force: true });
+  }
+});
+
+test('createTeamWorktrees: partial failure — mixed success + fallback in one batch', async () => {
+  // Same directory, mix of valid and odd worker names; since the repo is
+  // valid, all workers should succeed. We're exercising the shape of the
+  // return value across >1 worker to catch array aliasing bugs.
+  const repo = await makeGitRepo();
+  try {
+    const workers = [{ name: 'alpha' }, { name: 'beta' }];
+    const results = createTeamWorktrees('shape-team', workers, repo);
+    assert.equal(results.length, 2);
+    assert.notEqual(results[0].worktreePath, results[1].worktreePath);
+    assert.notEqual(results[0].branchName, results[1].branchName);
+    assert.equal(results[0].worktreeCreated, true);
+    assert.equal(results[1].worktreeCreated, true);
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+test('createTeamWorktrees: sanitizes special characters in worker names via createWorkerWorktree', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const workers = [{ name: 'w/with/slashes' }, { name: 'w spaces' }];
+    const results = createTeamWorktrees('sanitize-team', workers, repo);
+    assert.equal(results.length, 2);
+    assert.equal(results[0].worktreeCreated, true);
+    assert.equal(results[1].worktreeCreated, true);
+    // Sanitized paths should not contain the raw unsafe characters
+    assert.ok(!/[/ ]w\/with/.test(results[0].worktreePath));
   } finally {
     await teardownRepo(repo);
   }

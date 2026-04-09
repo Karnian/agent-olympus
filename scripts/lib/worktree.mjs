@@ -152,6 +152,49 @@ export function createWorkerWorktree(cwd, teamName, workerName) {
 }
 
 /**
+ * Create isolated git worktrees for an entire team of workers in one batch.
+ *
+ * This helper was extracted from `tmux-session.createTeamSession` so that
+ * worktree creation is decoupled from tmux session creation. The return
+ * shape mirrors what `tmux-session.createTeamSession` already stores on
+ * each worker (`worktreePath`, `branchName`, `worktreeCreated`), so existing
+ * consumers can switch to this helper without touching their state schema.
+ *
+ * Failure semantics are inherited from `createWorkerWorktree`:
+ *   - On git failure, `worktreePath` falls back to `cwd` and
+ *     `worktreeCreated` is `false`. Consumers MUST check `worktreeCreated`
+ *     if they need to distinguish a real isolated worktree from the
+ *     fallback shared directory — this is a first-class field.
+ *   - Errors are never thrown; each worker's entry is self-contained.
+ *
+ * @param {string} teamName
+ * @param {Array<{ name: string }>} workers
+ * @param {string} cwd - Project root (absolute path)
+ * @returns {Array<{
+ *   workerName: string,
+ *   worktreePath: string,
+ *   branchName: string,
+ *   worktreeCreated: boolean,
+ *   error?: string,
+ * }>}
+ */
+export function createTeamWorktrees(teamName, workers, cwd) {
+  const results = [];
+  for (const worker of workers) {
+    const info = createWorkerWorktree(cwd, teamName, worker.name);
+    const entry = {
+      workerName: worker.name,
+      worktreePath: info.worktreePath,
+      branchName: info.branchName,
+      worktreeCreated: info.created,
+    };
+    if (info.error) entry.error = info.error;
+    results.push(entry);
+  }
+  return results;
+}
+
+/**
  * Remove a worker's worktree and delete its branch.
  *
  * @param {string} cwd           - Project root
