@@ -206,10 +206,15 @@ const NOTIFY = {
  *
  * NOTE: The handle is NOT ready until initializeServer() completes the handshake.
  *
+ * Observability tagging note: codex-cli 0.118 removed the `--session-source`
+ * CLI flag (it errors with "unexpected argument '--session-source'" and exits
+ * before initialize completes). The equivalent 0.118-compatible approach is
+ * passing `serviceName` inside `thread/start` RPC params — callers should set
+ * `createThread({ serviceName: '...' })` instead of piping a tag through here.
+ *
  * @param {Object} [opts]
  * @param {string} [opts.cwd] - Working directory
  * @param {Object} [opts.env] - Additional environment variables
- * @param {string} [opts.sessionSource] - Session source tag (default: 'agent-olympus')
  * @returns {AppServerHandle}
  */
 export function startServer(opts = {}) {
@@ -218,9 +223,6 @@ export function startServer(opts = {}) {
     'app-server',
     '--listen', 'stdio://',
   ];
-  if (opts.sessionSource) {
-    args.push('--session-source', opts.sessionSource);
-  }
 
   const child = nodeSpawn(codexPath, args, {
     cwd: opts.cwd || process.cwd(),
@@ -541,6 +543,10 @@ export function sendRequest(handle, method, params, timeoutMs = RPC_TIMEOUT_MS) 
  * @param {string} [opts.approvalPolicy='never'] - Legacy approval policy
  *   (used only when `opts.level` is omitted). New callers should pass `level`.
  * @param {boolean} [opts.ephemeral=true] - Whether thread persists
+ * @param {string} [opts.serviceName] - Integration tag forwarded as the
+ *   `serviceName` field in thread/start params. Replaces the removed
+ *   `--session-source` CLI flag (codex 0.118+). Use e.g.
+ *   `agent-olympus:<teamName>` for Athena/Atlas observability.
  * @returns {Promise<{ threadId?: string, error?: Object }>}
  */
 export async function createThread(handle, opts = {}) {
@@ -568,6 +574,10 @@ export async function createThread(handle, opts = {}) {
   if (opts.cwd) params.cwd = opts.cwd;
   if (opts.model) params.model = opts.model;
   if (opts.baseInstructions) params.baseInstructions = opts.baseInstructions;
+  // serviceName replaces the removed --session-source CLI flag (codex 0.118+).
+  // Validated against ThreadStartParams JSON schema (v2) which accepts
+  // serviceName: string | null.
+  if (opts.serviceName) params.serviceName = opts.serviceName;
 
   const response = await sendRequest(handle, 'thread/start', params);
 
