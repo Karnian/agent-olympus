@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.0.4] - 2026-04-10
+
+### Feature — `/ask` job-based async path (async/status/collect/cancel/list)
+
+`scripts/ask.mjs`를 **단일 entry point 2-mode** 구조로 리팩터. 기존 sync 경로 (`echo ... | node scripts/ask.mjs codex`) 는 byte-identical 보존, 그 위에 detached fire-and-forget job 시스템 추가. Codex 교차검증 4 라운드 (REWORK → APPROVE-WITH-FIXES × 2 → APPROVE) + step 구현 교차검증 2 라운드. 총 8 건 blocker + 5 건 medium 흡수.
+
+**Problem**
+- Sync 경로의 `COLLECT_TIMEOUT_MS = 120_000`이 2-5분 걸리는 Codex review를 SIGKILL하고 출력을 폐기. 지난 세션에서 사용자가 매번 `tmux new-session` 우회로 대응 → shell-quoting 사고, 백그라운드 프로세스 알림 폭탄, `tmux capture-pane -S -500` 트렁케이션 발생. 이번 PR 목적: **그 tmux 우회를 폐기**.
+
+**Subcommand surface**
+- `echo "..." | node scripts/ask.mjs async <model>` — detach runner, stdout에 `{jobId, artifactPath, runnerPid}` JSON 한 줄 반환 후 즉시 exit.
+- `node scripts/ask.mjs status <jobId>` — 메타 + liveness 재판정 (pure read). runnerPid + adapterPid 중 하나라도 alive면 `running`, 둘 다 dead면 `runner_done` sentinel을 권위로 `completed|failed|cancelled` 보정.
+- `node scripts/ask.mjs collect <jobId> [--wait] [--timeout Ns]` — `.md` artifact 출력. `--wait` 없으면 running시 exit 75, `--wait`면 500ms poll (기본 600s cap). Completed + `.md` 누락 케이스는 sentinel `text` field에서 fallback 복원 (adapter-agnostic).
+- `node scripts/ask.mjs cancel <jobId>` — SIGTERM → 5s grace → SIGKILL. Runner preferred, runner dead + adapter alive면 adapter 직접 시그널. Idempotent (reconcile 후 terminal이면 exit 0).
+- `node scripts/ask.mjs list [--status X] [--older-than N]` — `.ao/state/ask-jobs/*.json` enumerate, sorted by startedAt desc.
+- `node scripts/ask.mjs _run-job <jobId>` — internal detached runner entry point (외부 노출 X).
+
+**Critical correctness design**
+- **Single-writer rule**: `.ao/state/ask-jobs/<jobId>.json`을 쓰는 프로세스는 오직 detach된 `_run-job` runner 1개. Cancel/status/collect/list는 read-only. Race 원천 차단.
+- **`runner_done` sentinel**: Runner가 finalize 직전 `{schemaVersion:1, type:"runner_done", status, text:handle._output, ...}`를 JSONL에 `appendFileSync` (동기, WriteStream 버퍼 bypass). Rev 3에서 `jsonlStream.end() + process.exit(0)`가 플러시를 보장 못한다는 Codex 지적 반영. Sentinel이 metadata 플립 실패를 견디는 authoritative 오라클.
+- **Completion detection adapter-agnostic**: Rev 1은 codex-exec의 `turn.completed`를 오라클로 썼으나 gemini-exec은 stdout에 그 이벤트를 안 냄 (Codex rev-2 blocker). Runner sentinel로 전환해 양쪽 커버.
+- **Dual-liveness reconciliation**: `reconcileStatus`가 runner OR adapter 중 하나라도 alive면 `running` 유지 (Codex step-1 review 지적: runner 크래시 + adapter 고아 상황을 잘못 `failed/crashed`로 보고 + cancel 단락).
+- **24h collect timeout**: Runner는 `adapter.collect(handle, 86_400_000)`를 명시 전달. 기본값 30s를 생략하면 원래 120s 문제가 고스란히 재현됨 (Codex rev-1 blocker 2).
+- **Dispatch-level auto fallback**: `async auto`에서 codex가 demoted (host suggest tier)면 runner spawn 전에 dispatcher가 `gemini-exec` 재선택. v1.0.3 sync 경로의 `ask.mjs:307-318` 계약 보존 (Codex rev-2 blocker 1).
+- **Debounced metadata flush**: Runner tee listener가 매 chunk마다 `lastActivityAt` bump, 5초 floor나 상태 변화 시점에만 atomic tmp+rename. `status` 쿼리 freshness 5초 보장 + 디스크 트래픽 방지. Codex step-1 review 지적 흡수.
+- **Launch ordering race fix**: 부모가 spawn 직후 동기 metadata write → `runner.unref()` → exit. Runner step 1에서 metadata 미존재시 2초 retry loop (50ms × 40) 방어. Codex rev-1 blocker 1.
+- **mkdir 호이스트**: `_run-job` step 3에서 `mkdirSync`를 모든 branch 앞으로 이동. Demoted 조기 종료 경로도 sentinel 대상 dir이 존재해야 함 (Codex rev-3 small finding).
+
+**Files**
+- `scripts/lib/ask-jobs.mjs` NEW (~550 LOC) — pure helpers: `allocateJobId`, `computePromptHash`, `writeMetadata`/`readMetadata` (atomic tmp+rename, schemaVersion:1 forward-compat), `writePromptFile`/`readAndUnlinkPromptFile`, `writeRunnerSentinel` (appendFileSync 동기), `jsonlFindRunnerSentinel`, `isProcessAlive` (injectable map), `reconcileStatus`, `maybeFlushMetadata`, `parseAskArgs` (pure dispatcher), `listJobs`, `synthesizeMdFromSentinel`. Test seams: `_injectClock`/`_injectLiveness`/`_injectRandom`.
+- `scripts/ask.mjs` REWRITE (339 → 837 LOC, sync path byte-identical) — dispatcher, `runSyncPath` (legacy preserved), `runAsyncLaunch`, `runJob` (detached runner), `runStatus`, `runCollect`, `runCancel`, `runList`. Test seams: `_inject({runJobSpawner, adapter, buildSpawnOpts, clock, liveness, pollInterval, exitFn, stdoutWrite, stderrWrite, stdinReader, capabilities, killFn})`. `liveness` injection이 `askJobs._injectLiveness`로 proxy (Codex step-3 review 지적: pid 맵을 `killImpl` positional arg로 잘못 전달해 silently false 반환하던 버그).
+- `scripts/test/ask-jobs-unit.test.mjs` NEW (50 tests).
+- `scripts/test/ask-async-integration.test.mjs` NEW (31 tests) — fake adapter + fake clock + fake liveness + fake runner spawner로 full lifecycle. `stdinReader`/`capabilities` 주입으로 `process.stdin` / `detectCapabilities` 부수효과 차단. 포함: 해피 패스 (codex+gemini), demoted, dispatch-level auto fallback, status 재판정 (sentinel completed/failed/cancelled), collect `.md` + sentinel fallback + mid-poll completion + timeout 75, cancel idempotent + adapter fallback + SIGKILL escalation, maybeFlush wiring, list 필터, dispatcher, AC-6 grep (tmux 부재).
+
+**Docs**
+- `skills/ask/SKILL.md` — `## Async usage` 섹션 신규. 기존 sync recipe 보존. description 업데이트.
+- `CLAUDE.md` State Management — `.ao/state/ask-jobs/`, `.ao/artifacts/ask/<jobId>.{jsonl,md}` entry 추가. Single-writer rule 명시. 24h SessionEnd sweep opt-in.
+- `docs/plans/ask-job-based/spec.md` — rev 4 APPROVED, 4 라운드 cross-review trail.
+
+**Backward compat**
+- 순수 additive. Sync 경로 byte-identical. Atlas/Athena/외부 호출자 영향 0. 기존 28 ask.test.mjs tests unchanged green. Baseline 1506 → 1587 tests (+81, 목표 1530 초과).
+- Rollback: revert 시 `.ao/state/ask-jobs/` 고아 파일은 SessionEnd 24h sweep에 처리. 인-플라이트 runner는 detach 상태로 계속 달리다 자연 종료.
+
 ## [1.0.3] - 2026-04-09
 
 ### Feature — Codex permission mirroring hardening + host sandbox intersection

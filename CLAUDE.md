@@ -83,10 +83,14 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/state/ao-notifications.json` — logged idle/permission prompt notifications for stall detection (capped at 50 entries, FIFO)
 - `.ao/state/ao-plan-pending.json` — marker for plan execution routing fallback (created by PlanExecuteGate, consumed by SessionStart)
 - `.ao/state/browser-handoff.json` — [v1.0.2+] browser pause state (sessionId + sanitized URL + sanitized breadcrumb); 24h TTL; created by US-006 browser-handoff.mjs; read by `/resume-handoff`
+- `.ao/state/ask-jobs/<jobId>.json` — [v1.0.4+] per-job metadata for the async `/ask` path (schemaVersion:1). **Single-writer rule:** only the detached `_run-job` runner process ever writes this file; `status`/`collect`/`cancel`/`list` subcommands are read-only. 24h SessionEnd sweep applies.
+- `.ao/state/ask-jobs/<jobId>.prompt` — [v1.0.4+] raw prompt sidecar for async `/ask` jobs; written by the async launcher and deleted by the runner on adapter spawn (mode 0o600).
 - `.ao/state/*.json` — transient state files (deleted on completion or cleaned by SessionEnd after 24h)
 - `.ao/sessions/<sessionId>.json` — per-session metadata (branch, cwd, status, linked runIds); shared across worktrees; 90-day TTL
 - `.ao/artifacts/runs/<runId>/` — per-run artifacts (events.jsonl, summary.json, verification.jsonl)
   - `.ao/artifacts/runs/<runId>/ui-remediation.json` — [v1.0.2+] sequential remediation chain results (schemaVersion: 1); written by `/ui-remediate`
+- `.ao/artifacts/ask/<jobId>.jsonl` — [v1.0.4+] raw JSONL event stream (adapter stdout tee) for async `/ask` jobs. Also carries the runner-written `{"type":"runner_done","schemaVersion":1,"status":"completed|failed|cancelled","text":...}` sentinel — the adapter-agnostic completion oracle used by `status`/`collect` reconciliation when the runner crashed before flipping metadata.
+- `.ao/artifacts/ask/<jobId>.md` — [v1.0.4+] rendered markdown body for async `/ask` jobs, synthesized by the runner from `handle._output` on the completed path. JobId-addressable (vs sync path's `<model>-<ts>.md`) to tolerate parallel launches.
 - `.ao/artifacts/pipe/` — **[v1.0.2+] cascade artifact ARCHIVAL pipe (NOT prompt-history isolation); swept by SessionEnd after 24h**
   - `.ao/artifacts/pipe/<runId>/<stage>/outbox/` — stage output archives written by orchestrators
   - `.ao/artifacts/pipe/<runId>/<stage>/inbox/` — prior-stage handoff manifests for current stage

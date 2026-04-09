@@ -1,6 +1,6 @@
 ---
 name: ask
-description: Quick single-shot query to Codex or Gemini via the worker-adapter system, with artifact saved
+description: Quick single-shot (sync) or long-running (async) query to Codex or Gemini via the worker-adapter system. Async subcommands (async/status/collect/cancel/list) added in v1.0.4 for jobs that outlive the 120s sync timeout.
 level: 2
 aliases: [ask, 물어봐, codex, gemini, quick-ask]
 ---
@@ -69,6 +69,80 @@ stdout; the artifact path is logged to stderr.
 
 Display the response to the user. The artifact lives at
 `.ao/artifacts/ask/<model>-<timestamp>.md` for later reference.
+
+## Async usage (v1.0.4+)
+
+For long-running queries (Codex code reviews that take 2–5 minutes, deep
+research passes, etc.), the sync path's 120-second `COLLECT_TIMEOUT_MS`
+would SIGKILL the adapter and discard the output. The async subcommands let
+you fire a job, walk away, and collect the answer later from a separate
+process — no tmux wrappers, no shell-quoting gymnastics, no truncation.
+
+### Fire a job
+
+```bash
+echo "<long review prompt>" | node scripts/ask.mjs async codex
+# → {"jobId":"ask-codex-20260409-123456-ab12","artifactPath":".ao/artifacts/ask/ask-codex-20260409-123456-ab12.md","runnerPid":55123}
+```
+
+The helper allocates a `jobId`, writes metadata under
+`.ao/state/ask-jobs/<jobId>.json`, detach-spawns the runner process, and
+exits immediately. The runner owns the adapter lifecycle and flips metadata
+when done.
+
+### Check progress
+
+```bash
+node scripts/ask.mjs status <jobId>
+# → {"status":"running","elapsedSec":47.2,"bytesOut":3012,"runnerAlive":true,...}
+```
+
+`status` reconciles against process liveness and the JSONL sentinel, so a
+crashed runner that left a valid completion sentinel is still reported as
+`completed`.
+
+### Collect the answer
+
+```bash
+# Return immediately if done; exit 75 otherwise
+node scripts/ask.mjs collect <jobId>
+
+# Block until done (default 600s cap)
+node scripts/ask.mjs collect <jobId> --wait
+
+# Custom timeout
+node scripts/ask.mjs collect <jobId> --wait --timeout 1800
+```
+
+Exit codes: 0 success (body on stdout) / 1 failed or cancelled / 3 unknown
+jobId / 75 still running (when `--wait` is omitted or times out).
+
+### Cancel a running job
+
+```bash
+node scripts/ask.mjs cancel <jobId>
+```
+
+Sends SIGTERM to the runner (or to the adapter directly if the runner has
+already died). Idempotent — a second cancel on an already-terminal job
+exits 0.
+
+### List jobs
+
+```bash
+node scripts/ask.mjs list                          # all jobs
+node scripts/ask.mjs list --status running          # only running
+node scripts/ask.mjs list --older-than 3600         # older than 1h
+```
+
+### When to use async vs sync
+
+- **Sync** (`/ask codex <query>`): quick one-off queries, <2 minutes.
+  Default; no state file overhead.
+- **Async** (`/ask async codex <query>` + `/ask collect <jobId> --wait`):
+  Codex code reviews, deep research, anything the user might want to walk
+  away from. Artifacts live at `.ao/artifacts/ask/<jobId>.md` and are
+  addressable by jobId.
 
 ## Notes
 
