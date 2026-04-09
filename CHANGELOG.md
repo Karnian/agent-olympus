@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.4] - 2026-04-09
+
+### Fix — Athena/Atlas codex workers broken on codex-cli 0.118
+
+Codex 0.118에서 `codex app-server --session-source` CLI 플래그가 제거됨. Olympus의 `codex-appserver` 어댑터가 여전히 이 플래그를 argv에 추가하고 있어, Athena/Atlas가 `codex-appserver` 경로(우선순위 1)로 codex 워커를 띄우려 할 때마다 codex 프로세스가 `error: unexpected argument '--session-source' found`로 즉시 종료. 권한 상향으로는 해결 불가한 argv 파서 단계 실패.
+
+**Fix (Option D — 관측성 유지)**
+- `scripts/lib/codex-appserver.mjs` `startServer()`: `opts.sessionSource` 분기 + `--session-source` argv 삽입 제거.
+- `createThread()`: 신규 `opts.serviceName` 옵션 — `thread/start` RPC params에 `serviceName` 필드로 전달. Codex 0.118 `ThreadStartParams` v2 스키마에 정식으로 존재하는 필드 (`codex app-server generate-json-schema` 덤프로 검증).
+- `scripts/lib/worker-spawn.mjs:463-479`: `startServer({ sessionSource })` → `startServer({ cwd })`, 태그는 `createThread({ serviceName: 'agent-olympus:${teamName}' })`로 이동.
+
+**Verification**
+- 라이브 E2E (실제 codex 0.118.0 바이너리 대상): `startServer → initializeServer → createThread(level:'full-auto', serviceName:'agent-olympus:demo-team') → executeTurn` 전 구간 성공, 모델 응답 수신, stderr clean.
+- Unit tests 108/108 통과 (`codex-appserver.test.mjs` + `worker-spawn.test.mjs`).
+- Codex 교차 검증: `--session-source`는 0.118에서 user-settable flag로 제거 확정. `-c` config 키 대체 없음. 0.118 권장 경로는 `thread/start` RPC params의 `serviceName` 필드 + conversation id 상관 분석 + `[otel].environment` 환경 그룹핑.
+
+**Impact**
+- codex-cli ≥ 0.118 사용자: Athena/Atlas + codex 워커 조합이 복구됨. `/ask codex`는 `codex-exec` 어댑터를 사용하므로 영향 없었음 (이 PR로도 동작 동일).
+- codex-cli 0.116-0.117 사용자: `serviceName`은 해당 버전 `thread/start` 스키마에도 이미 존재하는 optional 필드 → 무해.
+
 ## [1.0.3] - 2026-04-09
 
 ### Feature — Codex permission mirroring hardening + host sandbox intersection

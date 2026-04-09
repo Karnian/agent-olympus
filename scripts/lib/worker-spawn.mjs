@@ -460,10 +460,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
       // Spawn via codex-appserver adapter (multi-turn)
       let serverHandle = null;
       try {
-        serverHandle = codexAppServer.startServer({
-          cwd,
-          sessionSource: `agent-olympus:${teamName}`,
-        });
+        serverHandle = codexAppServer.startServer({ cwd });
         // Initialize handshake (required before any other method)
         const initResult = await codexAppServer.initializeServer(serverHandle);
         if (initResult.error) {
@@ -472,10 +469,13 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
         // Create thread and start first turn.
         // Pass `level` so the new permission-mirroring path in createThread
         // sets both approvalPolicy ('never') and sandbox (mapped from level).
+        // `serviceName` replaces the removed `--session-source` CLI flag
+        // (codex 0.118+) — observability tag for Athena/Atlas workers.
         const threadResult = await codexAppServer.createThread(serverHandle, {
           cwd,
           level: codexLevel,
           ephemeral: true,
+          serviceName: `agent-olympus:${teamName}`,
         });
         if (threadResult.error) {
           throw new Error(threadResult.error.message || 'Failed to create thread');
