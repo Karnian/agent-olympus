@@ -358,7 +358,25 @@ export function demoteCodexWorkersIfNeeded(workers, level) {
   return demoted;
 }
 
-export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
+/**
+ * Spawn a team of workers via the appropriate adapters.
+ *
+ * Production call signature is `spawnTeam(teamName, workers, cwd, capabilities)`.
+ * Tests can pass a fifth `_inject` parameter to supply fake adapter modules
+ * (bypassing `loadRequiredAdapters` dynamic imports) and a fake
+ * `createTeamSession` (bypassing real tmux). Production callers MUST NOT
+ * pass `_inject`; the parameter is prefixed with `_` to make that clear.
+ *
+ * @param {string} teamName
+ * @param {Array<Object>} workers
+ * @param {string} cwd
+ * @param {Object} [capabilities]
+ * @param {Object} [_inject] - Test-only dependency injection
+ * @param {Object} [_inject.adapters] - { 'codex-exec'?, 'codex-appserver'?, 'claude-cli'?, 'gemini-exec'?, 'gemini-acp'? }
+ * @param {Function} [_inject.createTeamSession] - Replaces tmux session creation
+ * @param {Function} [_inject.validateTmux] - Replaces tmux install check
+ */
+export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inject = null) {
   // ─── Codex permission mirroring + demotion + host sandbox warning ──────
   // Resolve the effective codex level once (intersects permissions.allow
   // with host sandbox detection).
@@ -390,12 +408,19 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
   const adapterNames = workers.map(w => selectAdapter(w, capabilities));
   const needsTmux = adapterNames.some(a => a === 'tmux');
 
-  if (needsTmux && !validateTmux()) {
+  // Tmux availability check — tests can inject a fake validator
+  const tmuxValidator = _inject?.validateTmux || validateTmux;
+  if (needsTmux && !tmuxValidator()) {
     throw new Error('tmux is not installed. Run: brew install tmux');
   }
 
-  // Lazy-load adapters as needed via registry
-  const adapterModules = await loadRequiredAdapters(adapterNames.filter(a => a !== 'tmux'));
+  // Adapter modules: tests inject pre-built fake modules, production uses
+  // dynamic import via the registry. Tests MUST supply every adapter name
+  // they use in the workers array; missing adapters yield nulls (same as
+  // prod when the adapter isn't needed).
+  const adapterModules = _inject?.adapters
+    ? { ..._inject.adapters }
+    : await loadRequiredAdapters(adapterNames.filter(a => a !== 'tmux'));
   const codexExec = adapterModules['codex-exec'] || null;
   const codexAppServer = adapterModules['codex-appserver'] || null;
   const claudeCli = adapterModules['claude-cli'] || null;
@@ -418,11 +443,13 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}) {
     cwd
   };
 
-  // Spawn tmux workers first (need sessions created in batch)
+  // Spawn tmux workers first (need sessions created in batch).
+  // Tests can inject a fake createTeamSession to avoid real tmux.
+  const createTeamSessionFn = _inject?.createTeamSession || createTeamSession;
   const tmuxWorkers = workers.map((w, i) => ({ ...w, idx: i })).filter((_, i) => adapterNames[i] === 'tmux');
   let sessions = [];
   if (tmuxWorkers.length > 0) {
-    sessions = createTeamSession(teamName, tmuxWorkers, cwd);
+    sessions = createTeamSessionFn(teamName, tmuxWorkers, cwd);
   }
 
   let tmuxIdx = 0;
