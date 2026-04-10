@@ -1,6 +1,6 @@
 {
   "name": "agent-olympus",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Self-driving AI orchestrator plugin for Claude Code",
   "type": "module",
   "license": "MIT",

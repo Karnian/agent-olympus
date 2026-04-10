@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.0.6] - 2026-04-10
+
+### Chore — Documentation sync + git cleanup
+
+Full codebase-documentation consistency audit with Codex cross-review.
+
+**Documentation sync (CLAUDE.md, AGENTS.md, docs/plans/README.md):**
+- Add `ask` agent to agent listings (18 → 19)
+- Add 14 missing skills to AGENTS.md, 8 to CLAUDE.md (26/26 → 34/34)
+- Add 17 missing scripts/lib entries to CLAUDE.md project structure
+- Document IntentGate and ModelRouter hooks in CLAUDE.md
+- Add 5 missing hooks to AGENTS.md hooks table (SubagentStart/Stop, Notification, SessionEnd, PlanExecuteGate)
+- Fix concurrency defaults in CLAUDE.md: (5/3/2/2) → (10/8/5/5)
+- Update test counts: 1000+/50 → 1500+/69 (all references)
+- Fix broken v0.10-deferred → v0.9.5-deferred link in plans index
+- Add 4 missing plan entries (gemini-adapter, native-agent-teams, ask-adapter-migration, ask-job-based)
+
+**Codex review fixes:**
+- Fix Athena description from tmux to adapter system
+- Split SubagentStop hooks table into subagent-stop + concurrency-release
+- Fix `.ao/teams/` description from "Codex workers" to generic team workers
+- Fix v1.0.2 story count 10 → 9 (US-010 deferred)
+
+**Git cleanup:**
+- Remove 4 stale worktrees + 5 local branches + 13 remote branches
+
 ## [1.0.5] - 2026-04-10
 
 ### Feature — `/ask` job-based async path (async/status/collect/cancel/list)
