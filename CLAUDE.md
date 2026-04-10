@@ -20,9 +20,12 @@ scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-ou
               wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
               autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
               worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts,
-              session-registry, permission-detect, codex-approval, gemini-exec, gemini-acp,
-              gemini-approval)
-scripts/test → node:test based unit tests (1000+ tests, 50 files)
+              session-registry, permission-detect, codex-approval, codex-exec, codex-appserver,
+              claude-cli, gemini-exec, gemini-acp, gemini-approval, host-sandbox-detect,
+              resolve-binary, artifact-pipe, browser-handoff, design-identity, memory,
+              micro-skill-scope, review-router, subagent-context, taste-memory,
+              ui-reference, ui-remediate, ui-smell-scan, ask-jobs)
+scripts/test → node:test based unit tests (1500+ tests, 69 files)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -48,11 +51,13 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - Hooks must complete within their timeout (3s for most, 5s for SessionStart/SessionEnd, 10s for Stop)
 - Hooks never block Claude Code — they fail open on any error
 - Hooks can set `"async": true` to run in the background without blocking Claude's execution
+- **IntentGate** (`scripts/intent-gate.mjs`) — fires on UserPromptSubmit; classifies intent via pattern matching and saves routing context to `.ao/state/ao-intent.json` for downstream model routing
+- **ModelRouter** (`scripts/model-router.mjs`) — fires on PreToolUse Task/Agent; reads intent state from IntentGate and injects model routing advice as `additionalContext` (advisory only, never blocks)
 - **SessionStart** (`scripts/session-start.mjs`) — fires at session start; injects prior wisdom and any interrupted checkpoint context into the conversation
 - **SubagentStart** (`scripts/subagent-start.mjs`) — fires when a subagent is spawned; injects token efficiency directive (non-haiku agents only) + wisdom context via `additionalContext`, filtered by `subagent_type` relevance
 - **Notification** (`scripts/notification.mjs`) — fires on `idle_prompt` and `permission_prompt` events; logs to `.ao/state/ao-notifications.json` for stall detection (async, non-blocking)
 - **SubagentStop** (`scripts/subagent-stop.mjs`) — fires when a subagent completes; captures results to `.ao/state/ao-subagent-results.json` (async, non-blocking); also triggers concurrency-release as safety net
-- **ConcurrencyGate** (`scripts/concurrency-gate.mjs`) — fires on PreToolUse Task/Agent; enforces parallel limits (global 5, claude 3, codex 2, gemini 2) with 3-min stale pruning. Limits configurable via `config/model-routing.jsonc` or `AO_CONCURRENCY_*` env vars
+- **ConcurrencyGate** (`scripts/concurrency-gate.mjs`) — fires on PreToolUse Task/Agent; enforces parallel limits (global 10, claude 8, codex 5, gemini 5) with 3-min stale pruning. Limits configurable via `config/model-routing.jsonc` or `AO_CONCURRENCY_*` env vars
 - **ConcurrencyRelease** (`scripts/concurrency-release.mjs`) — fires on PostToolUse Task/Agent + SubagentStop; 3-stage release: task_id match → provider match → SubagentStop safety net (force-release oldest). Stale threshold 3 min
 - **PlanExecuteGate** (`scripts/plan-execute-gate.mjs`) — fires on PostToolUse ExitPlanMode; reads `planExecution` from autonomy.json and injects execution routing (solo/ask/atlas/athena); `ask` mode instructs Claude to use `AskUserQuestion` interactive UI with text fallback; writes marker `.ao/state/ao-plan-pending.json` for SessionStart fallback (marker preserved as `handled: true`, cleaned by SessionEnd after 24h)
 - **SessionEnd** (`scripts/session-end.mjs`) — fires on session termination; cleans up stale state files older than 24h (async, non-blocking)
@@ -62,8 +67,8 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - **Skill** (`skills/*/SKILL.md`) = workflow recipe with steps. User-facing, triggered by `/command` or keyword matching
 - **Agent** (`agents/*.md`) = role persona with model assignment. Called internally via `Task(subagent_type="agent-olympus:<name>")`
 - Not every agent has a matching skill. executor, debugger, designer etc. are internal-only
-- **Available agents** (agents/): aphrodite, atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hephaestus, hermes, metis, momus, prometheus, security-reviewer, test-engineer, themis, writer
-- **Available skills** (skills/): a11y-audit, ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, design-critique, design-system-audit, external-context, finish-branch, git-master, harness-init, plan, research, sessions, slop-cleaner, systematic-debug, tdd, trace, ui-review, ux-copy-review, verify-coverage
+- **Available agents** (agents/): aphrodite, ask, atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hephaestus, hermes, metis, momus, prometheus, security-reviewer, test-engineer, themis, writer
+- **Available skills** (skills/): a11y-audit, arrange, ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, design-critique, design-system-audit, external-context, finish-branch, git-master, harness-init, normalize, plan, polish, research, resume-handoff, sessions, slop-cleaner, systematic-debug, taste, tdd, teach-design, trace, typeset, ui-remediate, ui-review, ux-copy-review, verify-coverage
 
 ### State Management
 - `.ao/prd.json` — PRD with user stories and acceptance criteria (ephemeral working copy)
