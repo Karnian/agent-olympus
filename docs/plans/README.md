@@ -14,7 +14,7 @@ Auto-generated index of all project specifications.
 | [C3-R Pragmatic Memory](./c3r-pragmatic-memory/spec.md) | S | forward | 3 stories (US-C3R-001~003) | plan (R1) | 2026-04-04 |
 | [Improvement Tracker](./improvements.md) | — | — | 53+6 items | 53 done + J1~J6 (v0.9.8) | 2026-04-05 |
 | [Claude Code Integration Research](./claude-code-integration/research-report.md) | L | forward | 22 recommendations (P0~P3) | P0 fixed (v0.9.8) | 2026-04-05 |
-| [v1.0.2 Impeccable & gstack Adoption](./v1.0.2-impeccable-gstack-adoption/spec.md) | M | forward | 10 stories (US-001~010, 5 unanimous + 5 majority) | implemented | 2026-04-07 |
+| [v1.0.2 Impeccable & gstack Adoption](./v1.0.2-impeccable-gstack-adoption/spec.md) | M | forward | 9 stories (US-001~009, US-010 deferred) | implemented | 2026-04-07 |
 | [Gemini CLI Adapter Integration](./gemini-adapter/SPEC.md) | L | forward | 5 parallel streams | implemented | 2026-04-04 |
 | [Native Agent Teams (G#4)](./native-agent-teams/spec.md) | M | forward | autonomy.json fallback | implemented | 2026-04-04 |
 | [/ask Adapter Migration](./ask-adapter-migration/spec.md) | S | forward | tmux → adapter system | implemented | 2026-04-08 |

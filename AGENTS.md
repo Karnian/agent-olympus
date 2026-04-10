@@ -1,7 +1,7 @@
 # Agent Olympus
 
 Standalone multi-model orchestrator plugin for Claude Code.
-Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 19 specialized agents, 34 skills, Claude + Codex + Gemini multi-model execution, and adapter-based team infrastructure.
+Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 19 specialized agents, 34 skills, Claude + Codex + Gemini multi-model execution, and adapter-based worker infrastructure.
 
 ## Architecture
 
@@ -150,7 +150,7 @@ agent-olympus/
 | Agent | Role |
 |-------|------|
 | **atlas** | Hub-and-spoke: one brain delegates to many sub-agents; supports session recovery via checkpoint |
-| **athena** | Peer-to-peer: many brains collaborate via SendMessage + tmux; supports session recovery via checkpoint |
+| **athena** | Peer-to-peer: Claude + Codex + Gemini team via adapter system; supports session recovery via checkpoint |
 
 ### Planning & Specification (Opus)
 | Agent | Role |
@@ -191,7 +191,7 @@ agent-olympus/
 | Skill | Trigger | What It Does |
 |-------|---------|--------------|
 | `/atlas` | "해줘", "do it" | Full autonomous pipeline: triage → analyze → plan → execute → verify → review → commit |
-| `/athena` | "팀으로 해", "team" | Same pipeline but with native Claude team (each in git worktree) + Codex tmux workers |
+| `/athena` | "팀으로 해", "team" | Same pipeline but with Claude + Codex + Gemini team (each in git worktree) via adapter system |
 | `/plan` | "기획", "spec", "역기획" | Adaptive product planner — forward (idea→spec) and reverse (code→spec) |
 
 ### Pre-Processing
@@ -263,7 +263,8 @@ agent-olympus/
 | PostToolUse:Agent | concurrency-release | Same release for Agent tool |
 | PostToolUse:ExitPlanMode | plan-execute-gate | Inject execution routing (solo/ask/atlas/athena) after plan approval |
 | SubagentStart | subagent-start | Inject token efficiency directive + wisdom context into subagents |
-| SubagentStop | subagent-stop | Capture subagent results + concurrency release safety net |
+| SubagentStop | subagent-stop | Capture subagent results (async) |
+| SubagentStop | concurrency-release | Release concurrency slot as safety net (async) |
 | Notification:idle_prompt | notification | Log idle/permission prompts for stall detection |
 | Notification:permission_prompt | notification | Same logging for permission prompts |
 | SessionEnd | session-end | Clean up stale state files older than 24h |
@@ -281,7 +282,7 @@ agent-olympus/
 | `.ao/state/checkpoint-athena[-sessionId].json` | Athena session recovery checkpoint (session-scoped) | Auto-expires after 24h |
 | `.ao/state/ao-intent.json` | Last classified intent | Updated per prompt |
 | `.ao/state/ao-concurrency.json` | Active task tracking | Updated per task spawn/complete |
-| `.ao/teams/<slug>/` | Inbox/outbox for Codex workers | Created by Athena, cleaned on completion |
+| `.ao/teams/<slug>/` | Inbox/outbox for team workers (Claude/Codex/Gemini) | Created by Athena, cleaned on completion |
 | `.ao/worktrees/<slug>/<worker>/` | Isolated git worktrees for Athena workers | Created per worker, merged + cleaned on completion |
 
 ## Multi-Model Support

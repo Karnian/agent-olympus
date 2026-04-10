@@ -299,7 +299,7 @@ Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), G
 ## Testing
 
 ```bash
-# Run unit tests (1000+ tests, 50 files)
+# Run unit tests (1500+ tests, 69 files)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script
