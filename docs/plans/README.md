@@ -9,9 +9,13 @@ Auto-generated index of all project specifications.
 | [Agent Olympus Reverse PRD](./reverse-prd/spec.md) | L | reverse | 11 features | analyzed | 2026-03-27 |
 | [v0.9 Source-Informed Improvements](./v0.9-source-informed-improvements/spec.md) | M | forward | 10 items (4 done, 4 merged, 2 done via G) | done | 2026-04-01 |
 | [v0.9.1 Hook System + Hygiene](./improvements.md#f-hook-system-extensions-v091) | S | forward | 4 items (4 done) | done | 2026-04-01 |
-| [v0.10 Deferred Items](./v0.10-deferred/spec.md) | M | forward | 2 items (blocked) | backlog | 2026-04-01 |
+| [v0.9.5 Deferred Items](./v0.9.5-deferred/spec.md) | M | forward | 2 items (blocked) | backlog | 2026-04-02 |
 | [v0.9.3 Cross-Session Management](./improvements.md#h-cross-session-management-v093) | S | forward | 1 item (1 done) | done | 2026-04-02 |
 | [C3-R Pragmatic Memory](./c3r-pragmatic-memory/spec.md) | S | forward | 3 stories (US-C3R-001~003) | plan (R1) | 2026-04-04 |
 | [Improvement Tracker](./improvements.md) | — | — | 53+6 items | 53 done + J1~J6 (v0.9.8) | 2026-04-05 |
 | [Claude Code Integration Research](./claude-code-integration/research-report.md) | L | forward | 22 recommendations (P0~P3) | P0 fixed (v0.9.8) | 2026-04-05 |
-| [v1.0.2 Impeccable & gstack Adoption](./v1.0.2-impeccable-gstack-adoption/spec.md) | M | forward | 10 stories (US-001~010, 5 unanimous + 5 majority) | draft | 2026-04-07 |
+| [v1.0.2 Impeccable & gstack Adoption](./v1.0.2-impeccable-gstack-adoption/spec.md) | M | forward | 10 stories (US-001~010, 5 unanimous + 5 majority) | implemented | 2026-04-07 |
+| [Gemini CLI Adapter Integration](./gemini-adapter/SPEC.md) | L | forward | 5 parallel streams | implemented | 2026-04-04 |
+| [Native Agent Teams (G#4)](./native-agent-teams/spec.md) | M | forward | autonomy.json fallback | implemented | 2026-04-04 |
+| [/ask Adapter Migration](./ask-adapter-migration/spec.md) | S | forward | tmux → adapter system | implemented | 2026-04-08 |
+| [/ask Job-Based Async](./ask-job-based/spec.md) | S | forward | async/status/collect/cancel/list | implemented | 2026-04-10 |
