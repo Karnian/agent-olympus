@@ -15,7 +15,7 @@ Agent Olympus solves the **supervision problem**: you shouldn't have to babysit 
 Two distinct modes:
 
 - **Atlas** — Hub-and-spoke orchestration. One orchestrator brain analyzes the task, creates a plan, spawns specialized agents in parallel, verifies results, and fixes issues autonomously. Best for independent, parallelizable work.
-- **Athena** — Peer-to-peer team orchestration. Multiple agents collaborate with each other via native SendMessage and Codex workers via tmux. Best for interdependent tasks requiring real-time coordination.
+- **Athena** — Peer-to-peer team orchestration. Multiple agents collaborate via native SendMessage, with Codex/Gemini workers spawned through an adapter system (codex-appserver > codex-exec > tmux fallback). Best for interdependent tasks requiring real-time coordination.
 
 Both loop until every acceptance criterion is met, the build passes, tests pass, and code review is approved — or escalate with evidence if something is unfixable.
 
@@ -27,7 +27,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
 - **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs; intent-aware query expansion
 - **Zero npm dependencies**: Node.js built-ins only
-- **Multi-model support**: Claude (Opus/Sonnet/Haiku) + Codex/Gemini via tmux
+- **Multi-model support**: Claude (Opus/Sonnet/Haiku) + Codex/Gemini via adapter system (appserver/exec/tmux fallback)
 - **Multilingual intent detection**: English, Korean, Japanese, Chinese aliases for all skills
 - **Worker Status Dashboard**: Real-time inline markdown display of all active worker states during Athena team runs
 - **Athena worktree isolation**: Each parallel worker runs in an isolated git worktree, preventing silent file overwrites between concurrent workers
@@ -53,7 +53,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Taste memory** *(v1.0.2, adapted from gstack)*: `.ao/memory/taste.jsonl` accumulates user aesthetic preferences across sessions; replayed to designer/aphrodite (1KB cap, 200-entry FIFO, explicit `/taste prune` grammar)
 - **Browser pause + manual continue** *(v1.0.2, adapted from gstack)*: `/resume-handoff` — on CAPTCHA/auth/MFA, persists sanitized URL + breadcrumb to `.ao/state/browser-handoff.json` (16 sensitive param strip, allow-list breadcrumb, 24h TTL). Deterministic exact-resume deferred to v1.0.3.
 - **Cascade artifact archival pipe** *(v1.0.2, adapted from gstack)*: `.ao/artifacts/pipe/<runId>/<stage>/{inbox,outbox}/` structured stage handoffs (6 canonical stages, 100KB/file + 10MB/run caps, atomic writes). Archival only, NOT prompt-history isolation.
-- **1300+ unit tests**: Comprehensive test suite using `node:test` across 64 test files (v1.0.2: 1326 passing)
+- **1500+ unit tests**: Comprehensive test suite using `node:test` across 69 test files (v1.0.6: 1587 passing)
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -252,7 +252,7 @@ User Request
     │   ├─ Test Worker (test-engineer)
     │   └─ Docs Worker (writer)
     │
-    └─→ Codex Workers (via tmux, inbox/outbox)
+    └─→ Codex/Gemini Workers (via adapter system)
         ├─ Algorithm Worker
         └─ Refactoring Worker
 ```
@@ -384,7 +384,7 @@ hooks/               Hook event registrations (hooks.json)
 - Purpose: Cross-session learnings reduce friction in future runs
 
 **Teams** (`.ao/teams/<slug>/`) — Athena only:
-- Per-worker inbox/outbox directories for Codex communication
+- Per-worker communication directories for Codex/Gemini (adapter-managed)
 - Cleaned up after team completion
 
 ## Session Recovery
@@ -442,28 +442,28 @@ Later sessions query wisdom to accelerate analysis, avoid repeating mistakes, an
 - **Sonnet** — Standard implementation (most executor, designer, test work)
 - **Opus** — Complex reasoning (analysis, planning, architecture, security review)
 
-### Codex / Gemini (via tmux)
+### Codex / Gemini (via Adapter System)
 
-For algorithmic work, large refactoring, or exploratory coding, orchestrators spawn Codex workers via tmux:
+For algorithmic work, large refactoring, or exploratory coding, orchestrators spawn Codex/Gemini workers through a strategy-pattern adapter system. The adapter is auto-selected by priority:
 
-```bash
-tmux new-session -d -s "atlas-codex-<N>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-<N>" 'codex <approval-flag> exec "<prompt>"' Enter
-tmux capture-pane -pt "atlas-codex-<N>" -S -200  # monitor output
-tmux kill-session -t "atlas-codex-<N>"            # cleanup
-```
+| Worker Type | Priority |
+|-------------|----------|
+| **Codex** | codex-appserver (JSON-RPC 2.0) → codex-exec (JSONL) → tmux (legacy fallback) |
+| **Gemini** | gemini-acp (JSON-RPC 2.0) → gemini-exec (JSON) → tmux (legacy fallback) |
+| **Claude** | claude-cli (stream-json) → tmux (legacy fallback) |
 
-The `<approval-flag>` is automatically resolved from Claude's permission level (see [Permission Mirroring](#features)). Override via `.ao/autonomy.json` `codex.approval`.
+The permission level is automatically resolved from Claude's permission level (see [Permission Mirroring](#features)). Override via `.ao/autonomy.json` `codex.approval` or `gemini.approval`.
 
 Session naming convention:
-- Atlas: `atlas-codex-<N>`
-- Athena: `athena-<slug>-codex-<N>`
+- Atlas: `atlas-codex-<N>`, `atlas-gemini-<N>`
+- Athena: `athena-<slug>-codex-<N>`, `athena-<slug>-gemini-<N>`
 
 ## Requirements
 
 - **Node.js** ≥ 20.0.0 (for ESM support)
-- **Optional**: tmux (required for Codex/Gemini integration and Athena team mode)
-- **Optional**: codex CLI or equivalent (if invoking Codex directly)
+- **Optional**: tmux (legacy fallback for all worker types when native adapters are unavailable)
+- **Optional**: codex CLI (`npm install -g @openai/codex`) for Codex worker execution
+- **Optional**: gemini CLI (`npm install -g @google/gemini-cli`) for Gemini worker execution
 - **npm packages**: None (zero runtime dependencies)
 
 ## Project Structure for Contributors
@@ -539,7 +539,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (1326+ tests across 64 files as of v1.0.2) covers the core hook libraries. To run:
+A `node:test` based test suite (1587+ tests across 69 files as of v1.0.6) covers the core hook libraries. To run:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'
@@ -551,7 +551,7 @@ Additional integration verification:
 
 1. Syntax check all scripts (see above)
 2. Run a trivial `/atlas` task in Claude Code
-3. Run an `/athena` task if tmux is available
+3. Run an `/athena` task to verify team orchestration
 4. Check `.ao/wisdom.jsonl` is populated after completion
 5. Verify checkpoints can be resumed after interruption
 
