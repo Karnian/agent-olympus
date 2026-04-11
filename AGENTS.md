@@ -96,7 +96,7 @@ agent-olympus/
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
 │       ├── model-router.mjs      — Routing logic with JSONC config merge
 │       ├── tmux-session.mjs      — Tmux session lifecycle + sanitizeForShellArg()
-│       ├── inbox-outbox.mjs      — File-based message queue for Claude↔Codex
+│       ├── inbox-outbox.mjs      — File-based message queue (legacy, used by tmux fallback)
 │       ├── worker-spawn.mjs      — Team worker lifecycle (spawn/monitor/collect/shutdown)
 │       ├── checkpoint.mjs        — Session checkpoint save/restore (24h expiry)
 │       ├── wisdom.mjs            — Structured learning store (JSONL, intent-aware query)
@@ -213,7 +213,7 @@ agent-olympus/
 |-------|---------|--------------|
 | `/slop-cleaner` | "정리", "deslop" | Regression-safe AI bloat removal in 4 passes |
 | `/git-master` | "커밋", "commit" | Style-detected atomic commits (3+ files → 2+ commits) |
-| `/cancel` | "취소", "stop" | Graceful shutdown: kill tmux, clean state, clean worktrees, preserve progress |
+| `/cancel` | "취소", "stop" | Graceful shutdown: shutdown workers (adapters + tmux sessions), clean state, clean worktrees, preserve progress |
 | `/finish-branch` | "브랜치완료", "finish" | Structured branch completion with verified checklist before merge |
 | `/sessions` | "세션", "세션관리" | Browse, inspect, resume, and clean up session history |
 
