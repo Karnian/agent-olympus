@@ -1,8 +1,6 @@
 ---
 name: design-system-audit
 description: Audit codebase for design system compliance — tokens, consistency, component API, hardcoded values
-level: 2
-aliases: [design-system-audit, 디자인시스템검사, ds-audit, token-audit, 토큰검사, デザインシステム監査]
 ---
 
 <Design_System_Audit>

@@ -1,8 +1,6 @@
 ---
 name: ui-review
 description: Comprehensive UI/UX review — chains design-critique + a11y-audit + design-system-audit + ux-copy-review
-level: 3
-aliases: [ui-review, UI리뷰, 종합UI검토, full-design-review, ui-audit, UI검사, UI総合レビュー]
 ---
 
 <UI_Review>

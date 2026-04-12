@@ -1,8 +1,6 @@
 ---
 name: atlas
 description: Self-driving sub-agent orchestrator — analyzes, plans, executes, and loops until task is fully complete
-level: 5
-aliases: [atlas, 아틀라스, do-it, 알아서해, 해줘, just-do-it]
 ---
 
 <Atlas_Orchestrator>

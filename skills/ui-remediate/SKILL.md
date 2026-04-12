@@ -1,8 +1,6 @@
 ---
 name: ui-remediate
 description: Sequential frontend remediation chain — audit → normalize → polish → re-audit with convergence verification
-level: 3
-aliases: [ui-remediate, remediate-ui, frontend-fix, ui-fix, 프런트엔드수정]
 ---
 
 <UI_Remediate_Skill>

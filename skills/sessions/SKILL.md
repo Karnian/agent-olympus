@@ -1,8 +1,6 @@
 ---
 name: sessions
 description: Browse, inspect, resume, and clean up Claude Code session history
-level: 2
-aliases: [sessions, session, 세션, 세션관리, history, 히스토리, runs, 실행이력, show-sessions]
 ---
 
 <Sessions>

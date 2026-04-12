@@ -135,9 +135,7 @@ Every new persisted file format introduced in v1.0.2 carries `schemaVersion: 1`:
    ```yaml
    ---
    name: <name>
-   description: One-line description
-   level: 1-5
-   aliases: [trigger, words, 한국어도가능]
+   description: One-line description (include key trigger keywords for discoverability)
    ---
    ```
 2. Write the workflow steps

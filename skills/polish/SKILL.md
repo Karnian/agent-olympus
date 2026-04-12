@@ -1,8 +1,6 @@
 ---
 name: polish
 description: Final-pass micro-refinements — alignment, spacing rhythm, micro-detail. No structural changes
-level: 2
-aliases: [polish, final-pass, refine, 마감]
 ---
 
 <Polish_Skill>

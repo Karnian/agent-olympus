@@ -1,8 +1,6 @@
 ---
 name: cancel
 description: Graceful shutdown of running Atlas/Athena sessions — clean up state, tmux, and team resources
-level: 1
-aliases: [cancel, 취소, stop, abort, 중지]
 ---
 
 <Cancel>

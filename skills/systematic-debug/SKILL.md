@@ -1,8 +1,6 @@
 ---
 name: systematic-debug
 description: Root-cause-first debugging methodology - reproduce before any fix attempt
-level: 3
-aliases: [systematic-debug, 체계적디버깅, debug, 디버그, root-cause-debug]
 ---
 
 <Systematic_Debug_Skill>

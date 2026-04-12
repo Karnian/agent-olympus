@@ -1,4 +1,5 @@
 ---
+name: designer
 model: sonnet
 description: UI/UX implementation specialist — builds beautiful, accessible, responsive interfaces with design system discipline
 ---

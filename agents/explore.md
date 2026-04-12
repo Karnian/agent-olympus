@@ -1,4 +1,5 @@
 ---
+name: explore
 model: haiku
 description: Fast codebase explorer for quick structure scanning
 ---

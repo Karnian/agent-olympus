@@ -28,7 +28,7 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **구조화된 Wisdom**: JSONL 형식의 세션 간 학습 데이터베이스; Intent-aware 쿼리 확장 지원
 - **npm 의존성 제로**: Node.js 내장 모듈만 사용
 - **멀티 모델 지원**: Claude (Opus/Sonnet/Haiku) + 어댑터 시스템(appserver/exec/tmux 폴백)을 통한 Codex/Gemini
-- **다국어 의도 감지**: 모든 스킬에 영어, 한국어, 일본어, 중국어 별칭 지원
+- **다국어 의도 감지**: IntentGate 훅을 통한 영어, 한국어, 일본어, 중국어 패턴 매칭
 - **워커 상태 대시보드**: Athena 팀 실행 중 실시간 인라인 마크다운 상태 표시
 - **Athena 워크트리 격리**: 각 병렬 워커가 독립된 git worktree에서 실행, 파일 충돌 방지
 - **SessionStart 훅**: 세션 시작 시 이전 wisdom과 중단된 체크포인트 컨텍스트 자동 주입
@@ -80,11 +80,11 @@ git clone https://github.com/Karnian/agent-olympus.git ~/.claude/plugins/agent-o
 /atlas 로그인과 회원가입이 포함된 사용자 인증 시스템을 구축해줘
 ```
 
-다국어 별칭도 사용 가능:
+한국어로 자연어 요청도 가능합니다 — IntentGate가 다국어 의도를 감지합니다:
 
 ```
-/아틀라스 사용자 로그인 시스템을 구현해줘
-/해줘 결제 처리 파이프라인을 재구축해줘
+아틀라스 사용자 로그인 시스템을 구현해줘
+/atlas 결제 처리 파이프라인을 재구축해줘
 ```
 
 Atlas가 자동으로:
@@ -479,9 +479,7 @@ description: 한 줄 설명
 ```yaml
 ---
 name: <name>
-description: 한 줄 설명
-level: 1-5
-aliases: [trigger, words, 한국어도가능]
+description: 한 줄 설명 (검색성을 위해 주요 트리거 키워드 포함)
 ---
 ```
 

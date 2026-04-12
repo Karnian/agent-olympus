@@ -1,4 +1,5 @@
 ---
+name: security-reviewer
 model: sonnet
 description: Security vulnerability detection specialist (OWASP Top 10)
 ---

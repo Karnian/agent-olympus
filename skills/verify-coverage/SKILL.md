@@ -1,8 +1,6 @@
 ---
 name: verify-coverage
 description: Detect test coverage gaps for recently changed files and report missing tests
-level: 2
-aliases: [verify-coverage, coverage-check, test-gaps, 커버리지확인, 테스트갭]
 ---
 
 # Verify Coverage

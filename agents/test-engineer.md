@@ -1,4 +1,5 @@
 ---
+name: test-engineer
 model: sonnet
 description: Test engineering specialist for comprehensive test strategies
 ---

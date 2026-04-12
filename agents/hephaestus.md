@@ -1,4 +1,5 @@
 ---
+name: hephaestus
 model: sonnet
 description: Deep autonomous coding specialist for exploratory end-to-end tasks
 ---

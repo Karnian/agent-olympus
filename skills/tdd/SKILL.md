@@ -1,8 +1,6 @@
 ---
 name: tdd
 description: Test-driven development with strict RED-GREEN-REFACTOR discipline
-level: 3
-aliases: [tdd, test-driven, 테스트주도개발, tdd개발, red-green-refactor, 리팩터]
 ---
 
 <TDD_Skill>

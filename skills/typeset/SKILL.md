@@ -1,8 +1,6 @@
 ---
 name: typeset
 description: Typography-only pass — font choice, hierarchy, sizing, weight. Touches nothing else
-level: 2
-aliases: [typeset, typography-pass, type-only, 타이포]
 ---
 
 <Typeset_Skill>

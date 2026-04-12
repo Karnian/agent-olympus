@@ -1,4 +1,5 @@
 ---
+name: momus
 model: opus
 description: Ruthless plan validator that catches blocking issues before execution
 ---

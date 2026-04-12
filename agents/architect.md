@@ -1,4 +1,5 @@
 ---
+name: architect
 model: opus
 description: Strategic architecture advisor for structural integrity review
 ---

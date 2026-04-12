@@ -1,8 +1,6 @@
 ---
 name: arrange
 description: Layout & spacing rhythm pass — touches nothing else (no typography, no color, no copy)
-level: 2
-aliases: [arrange, layout-pass, spacing-pass, 배치]
 ---
 
 <Arrange_Skill>

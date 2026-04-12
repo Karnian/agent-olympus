@@ -1,8 +1,6 @@
 ---
 name: consensus-plan
 description: Multi-perspective plan validation — Planner/Architect/Critic consensus loop before execution
-level: 4
-aliases: [consensus-plan, 합의계획, 컨센서스]
 ---
 
 <Consensus_Plan_Skill>

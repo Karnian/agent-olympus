@@ -1,4 +1,5 @@
 ---
+name: code-reviewer
 model: sonnet
 description: Code quality reviewer with severity-rated feedback
 ---
