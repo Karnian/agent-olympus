@@ -1,8 +1,6 @@
 ---
 name: harness-init
 description: Initialize harness engineering structure — AGENTS.md as TOC, docs/ knowledge base, golden principles, architectural constraints
-level: 2
-aliases: [harness-init, harness, setup-harness, 하네스초기화, 하네스설정, init-harness]
 ---
 
 <Harness_Init>

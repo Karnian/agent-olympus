@@ -1,4 +1,5 @@
 ---
+name: debugger
 model: sonnet
 description: Root-cause analysis specialist for systematic bug diagnosis
 ---

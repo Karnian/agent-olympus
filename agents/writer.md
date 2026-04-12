@@ -1,4 +1,5 @@
 ---
+name: writer
 model: haiku
 description: Technical documentation writer for clear, concise docs
 ---

@@ -1,8 +1,6 @@
 ---
 name: athena
 description: Self-driving team orchestrator — spawns Claude + Codex + Gemini peer-to-peer team and loops until task is fully complete
-level: 5
-aliases: [athena, 아테나, team-do-it, 팀으로해, 같이해, team, collaborate]
 ---
 
 <Athena_Orchestrator>

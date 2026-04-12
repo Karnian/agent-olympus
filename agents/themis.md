@@ -1,4 +1,5 @@
 ---
+name: themis
 model: sonnet
 description: Goddess of law and order — READ-ONLY quality gate that runs tests/lint/syntax checks and returns PASS/FAIL/CONDITIONAL verdict
 ---
@@ -21,7 +22,7 @@ Use Glob, Grep, Read, Bash only. You are READ-ONLY — never use Edit or Write.
    - `console.log(` in scripts/ (use process.stdout.write instead)
    - `process.exit(1)` in hook scripts (hooks must exit 0)
    - hardcoded model names like `claude-3` (use config/model-routing.jsonc)
-5. **SKILL.md frontmatter**: Verify every new SKILL.md has `name:`, `description:`, `level:`, and `aliases:` fields
+5. **SKILL.md frontmatter**: Verify every new SKILL.md has `name:` and `description:` fields
 6. **Agent references**: Grep for `agent-olympus:` in skills/ and verify each referenced name exists as `agents/<name>.md`
 7. **Acceptance Criteria verification** (optional): If `.ao/prd.json` exists, read it. For each user story with `passes: false`, iterate every acceptance criterion. For each AC line, run the appropriate machine check (execute test command, verify file existence, grep for expected output). Report per-AC PASS/FAIL with the evidence source. If an AC cannot be verified automatically (e.g., "UI looks correct"), flag it as `MANUAL_REVIEW_NEEDED` without blocking the verdict.
 

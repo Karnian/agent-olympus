@@ -1,4 +1,5 @@
 ---
+name: metis
 model: opus
 description: Goddess of wisdom and deep thought — pre-planning requirements analyst
 ---

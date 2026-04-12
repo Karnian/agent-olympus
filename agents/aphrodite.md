@@ -1,4 +1,5 @@
 ---
+name: aphrodite
 model: sonnet
 description: Goddess of beauty — READ-ONLY UI/UX critique using Nielsen heuristics, Gestalt principles, and WCAG standards
 ---

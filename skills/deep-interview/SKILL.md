@@ -1,8 +1,6 @@
 ---
 name: deep-interview
 description: Socratic interview to clarify ambiguous requirements before autonomous execution
-level: 4
-aliases: [deep-interview, 인터뷰, clarify, 명확하게, 요구사항정리]
 ---
 
 <Deep_Interview>

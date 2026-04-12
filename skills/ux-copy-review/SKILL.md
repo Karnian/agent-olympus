@@ -1,8 +1,6 @@
 ---
 name: ux-copy-review
 description: Review UI copy for clarity, consistency, tone, and inclusivity — error messages, CTAs, empty states, labels
-level: 2
-aliases: [ux-copy-review, 카피리뷰, copy-review, microcopy-review, 문구검토, UXライティング]
 ---
 
 <UX_Copy_Review>

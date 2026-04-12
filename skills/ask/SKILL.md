@@ -1,8 +1,6 @@
 ---
 name: ask
 description: Quick single-shot (sync) or long-running (async) query to Codex or Gemini via the worker-adapter system. Async subcommands (async/status/collect/cancel/list) added in v1.0.4 for jobs that outlive the 120s sync timeout.
-level: 2
-aliases: [ask, 물어봐, codex, gemini, quick-ask]
 ---
 
 <Ask>

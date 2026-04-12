@@ -1,8 +1,6 @@
 ---
 name: git-master
 description: Atomic commit discipline — style detection, multi-file decomposition, clean history
-level: 2
-aliases: [git-master, commit, 커밋, git]
 ---
 
 <Git_Master>

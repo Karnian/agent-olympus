@@ -1,8 +1,6 @@
 ---
 name: teach-design
 description: Capture project-specific brand colors, typography, and design conventions into .ao/memory/design-identity.json for auto-injection into designer/aphrodite subagents
-level: 2
-aliases: [teach-design, teach-identity, design-brief, brand-capture, 디자인학습]
 ---
 
 <Teach_Design_Skill>

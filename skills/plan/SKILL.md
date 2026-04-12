@@ -1,8 +1,6 @@
 ---
 name: plan
 description: Adaptive product planner — forward (idea→spec) and reverse (code→spec) planning across any scale
-level: 4
-aliases: [plan, 기획, 기획서, spec, PRD, 스펙, product-plan, feature-spec, 기획분석, reverse-plan, analyze-spec]
 ---
 
 <Plan_Skill>

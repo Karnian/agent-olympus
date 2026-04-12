@@ -1,8 +1,6 @@
 ---
 name: finish-branch
 description: Structured branch completion with verified checklist before merge decision
-level: 2
-aliases: [finish-branch, 브랜치완료, finish, 완료, branch-done, pre-merge]
 ---
 
 <Finish_Branch_Skill>

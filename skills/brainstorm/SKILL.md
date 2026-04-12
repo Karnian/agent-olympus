@@ -1,8 +1,6 @@
 ---
 name: brainstorm
 description: Design-before-code with diverge-converge-refine methodology
-level: 3
-aliases: [brainstorm, 브레인스톰, 설계, design-first, ideate, 아이디어, 설계검토]
 ---
 
 <Brainstorm_Skill>

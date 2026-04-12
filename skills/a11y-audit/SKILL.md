@@ -1,8 +1,6 @@
 ---
 name: a11y-audit
 description: WCAG 2.2 AA accessibility audit via code review — no browser tools required
-level: 2
-aliases: [a11y-audit, accessibility-audit, 접근성검사, 접근성감사, a11y-check, wcag-audit, アクセシビリティ監査]
 ---
 
 <A11y_Audit>

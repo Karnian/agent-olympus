@@ -1,8 +1,6 @@
 ---
 name: external-context
 description: Parallel web research with facet decomposition — enrich task context with external docs and best practices
-level: 3
-aliases: [external-context, 외부컨텍스트, 외부조사, context-research]
 ---
 
 <External_Context>

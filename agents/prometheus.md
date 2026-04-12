@@ -1,4 +1,5 @@
 ---
+name: prometheus
 model: opus
 description: Titan of foresight — strategic implementation planner
 ---

@@ -1,8 +1,6 @@
 ---
 name: resume-handoff
 description: Read persisted browser handoff state and confirm manual resume point — thin state-reader, no auto-resume
-level: 2
-aliases: [resume-handoff, resume, browser-resume, continue-after-auth, 재개]
 ---
 
 <Resume_Handoff_Skill>

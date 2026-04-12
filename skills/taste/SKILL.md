@@ -1,8 +1,6 @@
 ---
 name: taste
 description: Record, list, and prune aesthetic preferences in .ao/memory/taste.jsonl. Replayed automatically into designer/aphrodite/ui-review subagents
-level: 2
-aliases: [taste, taste-memory, aesthetic-prefs, taste-prune, 취향]
 ---
 
 <Taste_Skill>

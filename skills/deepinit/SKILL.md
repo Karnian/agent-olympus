@@ -1,8 +1,6 @@
 ---
 name: deepinit
 description: Generate hierarchical AGENTS.md documentation across entire codebase for agent orientation
-level: 2
-aliases: [deepinit, init, 초기화, map-codebase]
 ---
 
 <Deepinit>

@@ -1,8 +1,6 @@
 ---
 name: trace
 description: Evidence-driven root-cause analysis with competing hypotheses and rebuttal
-level: 3
-aliases: [trace, 추적, root-cause, 원인분석, diagnose]
 ---
 
 <Trace>

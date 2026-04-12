@@ -1,8 +1,6 @@
 ---
 name: normalize
 description: Replace hardcoded CSS/JS values with design tokens. Surgical pass — does not alter layout or structure
-level: 2
-aliases: [normalize, tokenize, de-slop, 정규화]
 ---
 
 <Normalize_Skill>

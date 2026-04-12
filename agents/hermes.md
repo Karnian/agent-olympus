@@ -1,4 +1,5 @@
 ---
+name: hermes
 model: opus
 description: Messenger of ideas — product planning specialist that transforms vague concepts into executable specifications
 ---

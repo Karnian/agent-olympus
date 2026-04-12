@@ -28,7 +28,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs; intent-aware query expansion
 - **Zero npm dependencies**: Node.js built-ins only
 - **Multi-model support**: Claude (Opus/Sonnet/Haiku) + Codex/Gemini via adapter system (appserver/exec/tmux fallback)
-- **Multilingual intent detection**: English, Korean, Japanese, Chinese aliases for all skills
+- **Multilingual intent detection**: English, Korean, Japanese, Chinese pattern matching via IntentGate hook
 - **Worker Status Dashboard**: Real-time inline markdown display of all active worker states during Athena team runs
 - **Athena worktree isolation**: Each parallel worker runs in an isolated git worktree, preventing silent file overwrites between concurrent workers
 - **SessionStart hook**: Automatically injects prior wisdom and interrupted checkpoint context at session start
@@ -83,11 +83,11 @@ Start an autonomous task:
 /atlas build a user authentication system with login and signup
 ```
 
-Or use the multilingual aliases:
+Or describe your task in any language — IntentGate detects intent across English, Korean, Japanese, and Chinese:
 
 ```
-/아틀라스 사용자 로그인 시스템을 구현해줘
-/do-it rebuild the payment processing pipeline
+아틀라스 사용자 로그인 시스템을 구현해줘
+/atlas rebuild the payment processing pipeline
 ```
 
 Atlas will:
@@ -489,9 +489,7 @@ description: One-line description
 ```yaml
 ---
 name: <name>
-description: One-line description
-level: 1-5
-aliases: [trigger, words, 한국어도가능]
+description: One-line description (include key trigger keywords for discoverability)
 ---
 ```
 

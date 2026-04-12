@@ -1,4 +1,5 @@
 ---
+name: executor
 model: sonnet
 description: Focused task executor for precise plan implementation
 ---

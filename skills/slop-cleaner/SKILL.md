@@ -1,8 +1,6 @@
 ---
 name: slop-cleaner
 description: Regression-safe cleanup of AI-generated code bloat — deletion-first, verify-after
-level: 3
-aliases: [slop-cleaner, deslop, 슬롭, cleanup, clean]
 ---
 
 <Slop_Cleaner>

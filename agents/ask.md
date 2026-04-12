@@ -1,4 +1,5 @@
 ---
+name: ask
 model: sonnet
 description: Quick single-shot query to Codex or Gemini — second opinion, cross-review, or comparison
 ---

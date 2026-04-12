@@ -1,8 +1,6 @@
 ---
 name: deep-dive
 description: 2-stage investigation pipeline — trace analysis + requirements crystallization before execution
-level: 4
-aliases: [deep-dive, 딥다이브, 심층분석]
 ---
 
 <Deep_Dive>
