@@ -44,7 +44,7 @@ multi-line prompts with backticks/quotes/`$` work as-is.
 
 ```bash
 mkdir -p .ao/artifacts/ask
-node scripts/ask.mjs <model> <<'ASK_PROMPT_EOF'
+node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs <model> <<'ASK_PROMPT_EOF'
 <the user's full question, as-is>
 ASK_PROMPT_EOF
 EXIT=$?
@@ -79,7 +79,7 @@ process — no tmux wrappers, no shell-quoting gymnastics, no truncation.
 ### Fire a job
 
 ```bash
-echo "<long review prompt>" | node scripts/ask.mjs async codex
+echo "<long review prompt>" | node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs async codex
 # → {"jobId":"ask-codex-20260409-123456-ab12","artifactPath":".ao/artifacts/ask/ask-codex-20260409-123456-ab12.md","runnerPid":55123}
 ```
 
@@ -91,7 +91,7 @@ when done.
 ### Check progress
 
 ```bash
-node scripts/ask.mjs status <jobId>
+node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs status <jobId>
 # → {"status":"running","elapsedSec":47.2,"bytesOut":3012,"runnerAlive":true,...}
 ```
 
@@ -103,13 +103,13 @@ crashed runner that left a valid completion sentinel is still reported as
 
 ```bash
 # Return immediately if done; exit 75 otherwise
-node scripts/ask.mjs collect <jobId>
+node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs collect <jobId>
 
 # Block until done (default 600s cap)
-node scripts/ask.mjs collect <jobId> --wait
+node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs collect <jobId> --wait
 
 # Custom timeout
-node scripts/ask.mjs collect <jobId> --wait --timeout 1800
+node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs collect <jobId> --wait --timeout 1800
 ```
 
 Exit codes: 0 success (body on stdout) / 1 failed or cancelled / 3 unknown
@@ -118,7 +118,7 @@ jobId / 75 still running (when `--wait` is omitted or times out).
 ### Cancel a running job
 
 ```bash
-node scripts/ask.mjs cancel <jobId>
+node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs cancel <jobId>
 ```
 
 Sends SIGTERM to the runner (or to the adapter directly if the runner has
@@ -128,9 +128,9 @@ exits 0.
 ### List jobs
 
 ```bash
-node scripts/ask.mjs list                          # all jobs
-node scripts/ask.mjs list --status running          # only running
-node scripts/ask.mjs list --older-than 3600         # older than 1h
+node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs list                          # all jobs
+node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs list --status running          # only running
+node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs list --older-than 3600         # older than 1h
 ```
 
 ### When to use async vs sync
