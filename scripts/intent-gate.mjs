@@ -15,6 +15,38 @@ import { readStdin } from './lib/stdin.mjs';
 import { classifyIntent } from './lib/intent-patterns.mjs';
 import { atomicWriteFileSync } from './lib/fs-atomic.mjs';
 
+/**
+ * Read cached capability state from .ao/state/ao-capabilities.json.
+ * Returns null if cache doesn't exist or is stale (>60min).
+ * @param {string} directory
+ * @returns {{ hasCodex: boolean, hasGemini: boolean } | null}
+ */
+function readCapabilityCache(directory) {
+  try {
+    const capPath = path.join(directory, '.ao/state/ao-capabilities.json');
+    const stat = fs.statSync(capPath);
+    const raw = fs.readFileSync(capPath, 'utf8');
+    const data = JSON.parse(raw);
+
+    // Check TTL (60 minutes) — prefer detectedAt field, fall back to file mtime
+    const TTL = 60 * 60 * 1000;
+    if (data.detectedAt) {
+      const ts = new Date(data.detectedAt).getTime();
+      if (Number.isNaN(ts) || Date.now() - ts > TTL) return null;
+    } else {
+      // preflight.mjs uses file mtime for TTL, no detectedAt field
+      if (Date.now() - stat.mtimeMs > TTL) return null;
+    }
+
+    return {
+      hasCodex: !!(data.hasCodexExecJson || data.hasCodexAppServer),
+      hasGemini: !!(data.hasGeminiCli || data.hasGeminiAcp),
+    };
+  } catch {
+    return null;
+  }
+}
+
 const STATE_DIR = '.ao/state';
 const INTENT_FILE = 'ao-intent.json';
 
@@ -67,11 +99,29 @@ function saveIntentState(directory, intentResult) {
  * Build a human-readable routing advice string for a given intent category.
  * @param {string} category
  * @param {number} confidence
+ * @param {string} [directory] - Project root for capability cache lookup
  * @returns {string}
  */
-function buildAdvice(category, confidence) {
+function buildAdvice(category, confidence, directory) {
   const pct = Math.round(confidence * 100);
   const confidenceLabel = pct >= 70 ? 'high' : pct >= 40 ? 'medium' : 'low';
+
+  // Special handling for external-model: capability-aware routing
+  if (category === 'external-model' && directory) {
+    const caps = readCapabilityCache(directory);
+    let capStatus = '';
+    if (caps) {
+      const available = [];
+      const unavailable = [];
+      if (caps.hasCodex) available.push('codex'); else unavailable.push('codex');
+      if (caps.hasGemini) available.push('gemini'); else unavailable.push('gemini');
+      capStatus = ` Available: ${available.join(', ') || 'none'}${unavailable.length ? ` | Not available: ${unavailable.join(', ')}` : ''}.`;
+    } else {
+      capStatus = ' Capability cache not available — /ask will auto-detect on first run.';
+    }
+    const advice = `User wants to query an external model (Codex/Gemini). Use the /ask skill: \`/ask codex <question>\` or \`/ask gemini <question>\` or \`/ask auto <question>\`. This routes through the CLI (codex exec / gemini CLI), NOT through an API key. Do NOT claim API keys are needed — the CLI handles its own authentication.${capStatus}`;
+    return `${advice} (confidence: ${confidenceLabel} ${pct}%)`;
+  }
 
   const adviceMap = {
     'visual-engineering': 'Consider using the designer agent or Gemini for visual/UI tasks. Sonnet-class model recommended.',
@@ -92,10 +142,11 @@ function buildAdvice(category, confidence) {
  * @param {string} category
  * @param {number} confidence
  * @param {Record<string, number>} scores
+ * @param {string} [directory] - Project root for capability cache lookup
  * @returns {string}
  */
-function buildAdditionalContext(category, confidence, scores) {
-  const advice = buildAdvice(category, confidence);
+function buildAdditionalContext(category, confidence, scores, directory) {
+  const advice = buildAdvice(category, confidence, directory);
 
   // Include top-3 non-zero scores for transparency
   const topScores = Object.entries(scores)
@@ -156,6 +207,7 @@ async function main() {
       intentResult.category,
       intentResult.confidence,
       intentResult.scores,
+      directory,
     );
 
     process.stdout.write(JSON.stringify({

@@ -152,6 +152,33 @@ export const INTENT_CATEGORIES = {
     ],
     weight: 0.9,
   },
+
+  'external-model': {
+    patterns: [
+      // Direct model references
+      /\b(ask\s+codex|codex\s*(한테|에게|로|로\s*해|에)\s*물어|codex\s+(review|check|analyze|verify|look\s+at))\b/i,
+      /\b(ask\s+gemini|gemini\s*(한테|에게|로|로\s*해|에)\s*물어|gemini\s+(review|check|analyze|verify|look\s+at))\b/i,
+      /\b(cross.?review|cross.?validate|second\s+opinion|다른\s*모델|외부\s*모델)\b/i,
+      /\b(codex\s*로\s*(검토|분석|리뷰|확인)|gemini\s*로\s*(검토|분석|리뷰|확인))\b/i,
+      // Korean: 코덱스한테 물어봐, 제미니한테 물어봐, 교차 리뷰, 상호 리뷰
+      /(?:코덱스|codex)\s*(?:한테|에게|로|와|과)?\s*(?:물어|질문|리뷰|검토|분석|확인)/u,
+      /(?:제미니|gemini)\s*(?:한테|에게|로|와|과)?\s*(?:물어|질문|리뷰|검토|분석|확인)/u,
+      /(?:교차\s*리뷰|상호\s*리뷰|교차\s*검토|상호\s*검토|크로스\s*리뷰|크로스\s*체크)/u,
+      // Japanese: Codexに聞いて, Geminiに聞いて, クロスレビュー (case-insensitive for Latin)
+      /(?:codex|コデックス)(?:に|で)(?:聞|確認|レビュー|分析)/iu,
+      /(?:gemini|ジェミニ)(?:に|で)(?:聞|確認|レビュー|分析)/iu,
+      /(?:クロスレビュー|相互レビュー|セカンドオピニオン)/u,
+      // Korean: broader patterns for 다른 모델에게 물어봐, 외부 모델로 확인해줘
+      /(?:다른\s*모델|외부\s*모델)\s*(?:한테|에게|로|에서)?\s*(?:물어|질문|확인|검토|분석)/u,
+    ],
+    keywords: [
+      'ask codex', 'ask gemini', 'codex review', 'gemini review',
+      'cross-review', 'cross review', 'cross-validate', 'second opinion',
+      'codex한테', 'gemini한테', '코덱스', '제미니', '교차 리뷰', '상호 리뷰',
+      'codex로 검토', 'gemini로 분석', 'another model', 'different model',
+    ],
+    weight: 1.5,
+  },
 };
 
 /**
@@ -212,6 +239,21 @@ export function classifyIntent(text) {
     }
 
     scores[category] = Math.round(score * 100) / 100;
+  }
+
+  // Hard override: explicit external-model requests always win.
+  // "ask codex to review this complex auth refactor" should route to /ask,
+  // not to 'deep' because 'auth refactor' scored higher in that bucket.
+  if (scores['external-model'] > 0) {
+    const totalScore = Object.values(scores).reduce((a, b) => a + b, 0);
+    const confidence = totalScore > 0
+      ? Math.min(1, Math.round((scores['external-model'] / Math.max(totalScore, scores['external-model'])) * 100) / 100)
+      : 0;
+    return {
+      category: 'external-model',
+      confidence,
+      scores,
+    };
   }
 
   // Find highest-scoring category

@@ -51,7 +51,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - Hooks must complete within their timeout (3s for most, 5s for SessionStart/SessionEnd, 10s for Stop)
 - Hooks never block Claude Code — they fail open on any error
 - Hooks can set `"async": true` to run in the background without blocking Claude's execution
-- **IntentGate** (`scripts/intent-gate.mjs`) — fires on UserPromptSubmit; classifies intent via pattern matching and saves routing context to `.ao/state/ao-intent.json` for downstream model routing
+- **IntentGate** (`scripts/intent-gate.mjs`) — fires on UserPromptSubmit; classifies intent via pattern matching and saves routing context to `.ao/state/ao-intent.json` for downstream model routing. Categories: `visual-engineering`, `design-review`, `deep`, `quick`, `writing`, `artistry`, `planning`, `external-model`. The `external-model` category detects requests to query Codex/Gemini (e.g. "ask codex", "코덱스한테 물어봐", "cross-review") and injects capability-aware advice to use the `/ask` skill
 - **ModelRouter** (`scripts/model-router.mjs`) — fires on PreToolUse Task/Agent; reads intent state from IntentGate and injects model routing advice as `additionalContext` (advisory only, never blocks)
 - **SessionStart** (`scripts/session-start.mjs`) — fires at session start; injects prior wisdom and any interrupted checkpoint context into the conversation
 - **SubagentStart** (`scripts/subagent-start.mjs`) — fires when a subagent is spawned; injects token efficiency directive (non-haiku agents only) + wisdom context via `additionalContext`, filtered by `subagent_type` relevance
