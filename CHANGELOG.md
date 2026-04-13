@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.10] - 2026-04-14
+
+### Fix — Remove duplicate `hooks` field from plugin.json
+
+`hooks/hooks.json` is auto-loaded by Claude Code. Specifying it again in manifest causes "Duplicate hooks file detected" error.
+
+**Changes:**
+- Removed `hooks` field from `plugin.json` — Claude Code auto-loads `hooks/hooks.json` when present
+- Combined with v1.0.9 fix (agents field removal), `plugin.json` now only has `skills` as the explicit component path
+
+**Pattern:** Claude Code auto-discovers standard directories/files:
+- `agents/` → auto-discovered (field must be `.md` file paths if used)
+- `hooks/hooks.json` → auto-loaded (field should only reference *additional* hook files)
+- `skills/` → auto-discovered (kept explicit for clarity since the skill loading path differs)
+
 ## [1.0.9] - 2026-04-14
 
 ### Fix — Remove invalid `agents` field from plugin.json

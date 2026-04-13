@@ -1,6 +1,6 @@
 {
   "name": "agent-olympus",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Agent Olympus: Standalone intelligent orchestrator — Atlas (sub-agent) + Athena (team) with Claude + Codex + Gemini multi-model support, 34 skills, 19 agents",
   "author": {
     "name": "Karnian"
@@ -17,6 +17,5 @@
     "codex",
     "tmux"
   ],
-  "skills": "./skills/",
-  "hooks": "./hooks/hooks.json"
+  "skills": "./skills/"
 }
