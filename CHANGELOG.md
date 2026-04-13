@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.9] - 2026-04-14
+
+### Fix — Remove invalid `agents` field from plugin.json
+
+Plugin failed to load on Claude Code 2.1.92+ due to manifest validation error.
+
+**Root cause:**
+- `plugin.json` contained `"agents": "./agents/"` (directory path)
+- Claude Code's Zod schema (`W91 = kn().endsWith(".md")`) only accepts `.md` file paths, not directory paths
+- This caused `agents: Invalid input` validation error, preventing the entire plugin from loading (skills, agents, hooks all unavailable)
+
+**Fix:**
+- Removed `agents` field from `plugin.json`
+- Claude Code auto-discovers `agents/` directory when the field is absent (confirmed via CLI source analysis)
+- Verified with `claude plugin validate` — passes cleanly
+- Cross-validated with Codex (GPT-5.4): confirmed fix is correct and auto-discovery risk is low
+
+**Note:** Claude Code public docs still show directory-style `agents` examples, but the actual CLI schema rejects them. The docs appear stale relative to v2.1.92.
+
 ## [1.0.6] - 2026-04-10
 
 ### Chore — Documentation sync + git cleanup
