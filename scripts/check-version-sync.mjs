@@ -22,7 +22,16 @@ function readJsonVersion(relPath) {
 }
 
 function main() {
-  const topLevelVersion = readJsonVersion('.claude-plugin/marketplace.json');
+  // marketplace.json: version lives in metadata.version (not root level)
+  let topLevelVersion = null;
+  try {
+    const mp = JSON.parse(
+      readFileSync(join(ROOT, '.claude-plugin/marketplace.json'), 'utf-8')
+    );
+    topLevelVersion = mp?.metadata?.version || mp?.version || null;
+  } catch {
+    // fall through
+  }
 
   // Also check plugins[0].version in marketplace.json separately
   let pluginsEntryVersion = null;
