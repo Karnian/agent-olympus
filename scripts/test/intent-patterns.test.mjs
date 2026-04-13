@@ -19,6 +19,7 @@ const VALID_CATEGORIES = new Set([
   'writing',
   'artistry',
   'planning',
+  'external-model',
 ]);
 
 function assertKnownCategory(result) {
@@ -169,7 +170,7 @@ test('classifyIntent: code block is stripped before matching', () => {
 test('classifyIntent: scores object contains all categories', () => {
   const result = classifyIntent('write documentation for this React component');
   const expectedCategories = [
-    'visual-engineering', 'design-review', 'deep', 'quick', 'writing', 'artistry', 'planning',
+    'visual-engineering', 'design-review', 'deep', 'quick', 'writing', 'artistry', 'planning', 'external-model',
   ];
   for (const cat of expectedCategories) {
     assert.ok(cat in result.scores, `scores should contain "${cat}"`);
@@ -230,6 +231,79 @@ test('classifyIntent: design-review dashboard UI → visual-engineering', () => 
 test('classifyIntent: responsive navbar → visual-engineering', () => {
   const result = classifyIntent('build a responsive navbar with CSS flexbox and dark mode toggle');
   assert.equal(result.category, 'visual-engineering');
+});
+
+// ---------------------------------------------------------------------------
+// External model intent → external-model
+// ---------------------------------------------------------------------------
+
+test('classifyIntent: "ask codex to review" → external-model', () => {
+  const result = classifyIntent('ask codex to review this code');
+  assert.equal(result.category, 'external-model');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: Korean codex request → external-model', () => {
+  const result = classifyIntent('코덱스한테 물어봐');
+  assert.equal(result.category, 'external-model');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: gemini analysis → external-model', () => {
+  const result = classifyIntent('ask gemini what it thinks about this');
+  assert.equal(result.category, 'external-model');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: cross-review → external-model', () => {
+  const result = classifyIntent('cross-review with gemini and codex');
+  assert.equal(result.category, 'external-model');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: Korean cross-review → external-model', () => {
+  const result = classifyIntent('교차 리뷰 해줘');
+  assert.equal(result.category, 'external-model');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: codex로 검토 → external-model', () => {
+  const result = classifyIntent('codex로 검토해줘');
+  assert.equal(result.category, 'external-model');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: second opinion → external-model', () => {
+  const result = classifyIntent('get a second opinion from codex');
+  assert.equal(result.category, 'external-model');
+  assert.ok(result.confidence > 0);
+});
+
+test('classifyIntent: mixed prompt with codex request overrides deep', () => {
+  // "ask codex to review this complex auth refactor plan" should be external-model
+  // even though "auth refactor" scores high in 'deep'
+  const result = classifyIntent('ask codex to review this complex auth refactor plan');
+  assert.equal(result.category, 'external-model');
+});
+
+test('classifyIntent: Japanese lowercase codex → external-model', () => {
+  const result = classifyIntent('codexにレビューして');
+  assert.equal(result.category, 'external-model');
+});
+
+test('classifyIntent: Japanese lowercase gemini → external-model', () => {
+  const result = classifyIntent('geminiに聞いてください');
+  assert.equal(result.category, 'external-model');
+});
+
+test('classifyIntent: Korean 다른 모델에게 물어봐 → external-model', () => {
+  const result = classifyIntent('다른 모델에게 물어봐');
+  assert.equal(result.category, 'external-model');
+});
+
+test('classifyIntent: Korean 외부 모델로 확인 → external-model', () => {
+  const result = classifyIntent('외부 모델로 확인해줘');
+  assert.equal(result.category, 'external-model');
 });
 
 // ---------------------------------------------------------------------------
