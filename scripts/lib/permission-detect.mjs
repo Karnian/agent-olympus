@@ -61,40 +61,64 @@ function getDefaultMode(data) {
 }
 
 /**
- * Extract `permissions.disableBypassPermissionsMode` as a strict boolean.
+ * Extract `permissions.disableBypassPermissionsMode`.
+ *
+ * Claude docs historically accepted two schemas for this field:
+ *   - legacy boolean `true`
+ *   - current string `"disable"`
+ * Both forms are treated as "disabled" for forward/backward compatibility.
  */
 function getDisableBypass(data) {
-  return data?.permissions?.disableBypassPermissionsMode === true;
+  const v = data?.permissions?.disableBypassPermissionsMode;
+  return v === true || v === 'disable';
 }
 
 /**
- * Resolve the platform-specific managed settings root + fragment directory.
- * Returns `{ file, dir }` paths (not guaranteed to exist).
+ * Extract `permissions.allowManagedPermissionRulesOnly` (boolean).
+ * When set by a managed scope, non-managed allow lists are suppressed
+ * (deny/ask still apply from all scopes for defense-in-depth).
+ */
+function getAllowManagedOnly(data) {
+  return data?.permissions?.allowManagedPermissionRulesOnly === true;
+}
+
+/**
+ * Resolve the platform-specific managed settings roots + fragment directories.
+ * Returns an array of `{ file, dir }` entries (not guaranteed to exist),
+ * highest precedence first.
  *
- * Paths per Claude Code docs:
- *   darwin: /Library/Application Support/ClaudeCode/
- *   linux:  /etc/claude-code/
- *   win32:  %PROGRAMDATA%\ClaudeCode\
+ * Paths per Claude Code docs (2026 current, with legacy fallbacks for older
+ * installs):
+ *   darwin:  /Library/Application Support/ClaudeCode/
+ *   linux:   /etc/claude-code/
+ *   win32:   C:\Program Files\ClaudeCode\  (current)
+ *            %PROGRAMDATA%\ClaudeCode\      (legacy fallback)
  */
 function resolveManagedPaths(opts = {}) {
   const plat = opts.platformOverride || osPlatform();
   if (opts.managedRootOverride) {
-    return {
+    return [{
       file: join(opts.managedRootOverride, 'managed-settings.json'),
       dir: join(opts.managedRootOverride, 'managed-settings.d'),
-    };
+    }];
   }
   if (plat === 'darwin') {
     const root = '/Library/Application Support/ClaudeCode';
-    return { file: join(root, 'managed-settings.json'), dir: join(root, 'managed-settings.d') };
+    return [{ file: join(root, 'managed-settings.json'), dir: join(root, 'managed-settings.d') }];
   }
   if (plat === 'win32') {
-    const root = (opts.env?.PROGRAMDATA || process.env.PROGRAMDATA || 'C:\\ProgramData') + '\\ClaudeCode';
-    return { file: join(root, 'managed-settings.json'), dir: join(root, 'managed-settings.d') };
+    const env = opts.env || process.env;
+    const programFiles = (env.ProgramFiles || env.PROGRAMFILES || 'C:\\Program Files') + '\\ClaudeCode';
+    const programData  = (env.PROGRAMDATA || 'C:\\ProgramData') + '\\ClaudeCode';
+    // Primary (docs-current) first, legacy second. Both merged if present.
+    return [
+      { file: join(programFiles, 'managed-settings.json'), dir: join(programFiles, 'managed-settings.d') },
+      { file: join(programData,  'managed-settings.json'), dir: join(programData,  'managed-settings.d') },
+    ];
   }
   // linux + everything else
   const root = '/etc/claude-code';
-  return { file: join(root, 'managed-settings.json'), dir: join(root, 'managed-settings.d') };
+  return [{ file: join(root, 'managed-settings.json'), dir: join(root, 'managed-settings.d') }];
 }
 
 /**
@@ -138,20 +162,33 @@ export function loadPermissionSources(opts = {}) {
   const home = opts.home || process.env.HOME || process.env.USERPROFILE || '';
   const fs = opts.fs || { readFileSync, readdirSync, statSync };
 
-  const managed = resolveManagedPaths(opts);
+  const managedRoots = resolveManagedPaths(opts);
   const out = [];
 
-  // 1. Managed root file
-  const managedData = readJson(managed.file, fs);
-  if (managedData) out.push({ scope: 'managed', data: managedData });
+  // 1. Managed roots (highest precedence first — e.g. Program Files before ProgramData on Win).
+  //    Within a single managed root: the root file first, then fragments in
+  //    lexical order. Scalar "last-wins" merge within managed is handled in
+  //    detectClaudePermissions (fragments later in the iteration override
+  //    earlier values for scalar fields like defaultMode).
+  for (const managed of managedRoots) {
+    const managedData = readJson(managed.file, fs);
+    if (managedData) out.push({ scope: 'managed', data: managedData });
 
-  // 2. Managed fragments (lexical order, same "managed" scope)
-  const fragments = readManagedFragments(managed.dir, fs);
-  for (const data of fragments) {
-    out.push({ scope: 'managed', data });
+    const fragments = readManagedFragments(managed.dir, fs);
+    for (const data of fragments) {
+      out.push({ scope: 'managed', data });
+    }
   }
 
-  // 3. Project-local, project, user-local, user
+  // 2. Project-local, project, user-local, user.
+  //
+  //    `userLocal` (~/.claude/settings.local.json) is a compatibility scope:
+  //    Claude's current permissions-docs explicitly document only four scopes
+  //    (managed, project-local, project, user), but ~/.claude/settings.local.json
+  //    is widely seen in practice (many users keep a local override alongside
+  //    their committed ~/.claude/settings.json). We read it at a precedence
+  //    tier between project and user for a faithful mirror of what the host
+  //    Claude session actually sees on disk.
   const scoped = [
     ['projectLocal', join(cwd, '.claude', 'settings.local.json')],
     ['project',      join(cwd, '.claude', 'settings.json')],
@@ -232,29 +269,72 @@ export function detectClaudePermissions(opts = {}) {
   try {
     const sources = loadPermissionSources(opts);
 
-    // Merge allow/deny/ask across ALL scopes (union semantics).
-    const allow = [];
-    const deny = [];
-    const ask = [];
+    // Managed allow/deny/ask are collected separately so we can honor
+    // `allowManagedPermissionRulesOnly` (managed scope can suppress user/project
+    // allow rules while keeping deny/ask defense-in-depth).
+    const managedAllow = [];
+    const managedDeny = [];
+    const managedAsk = [];
+    const otherAllow = [];
+    const otherDeny = [];
+    const otherAsk = [];
+
+    // defaultMode is scope-scoped: the highest-precedence scope that sets a
+    // non-null value wins. Within a single scope (notably 'managed' with
+    // fragments), later entries override earlier ones for scalar fields
+    // (last-wins within-scope).
     let defaultMode = null;
+    let defaultModeScope = null;
     let bypassDisabled = false;
+    let allowManagedOnly = false;
     let managedDetected = false;
 
-    for (const { scope, data } of sources) {
-      if (scope === 'managed') managedDetected = true;
-      allow.push(...getList(data, 'allow'));
-      deny.push(...getList(data, 'deny'));
-      ask.push(...getList(data, 'ask'));
+    // Precedence rank (lower = higher precedence). Mirrors the order returned
+    // by loadPermissionSources. Used to break "first-wins across scopes,
+    // last-wins within scope" ties for defaultMode.
+    const scopeRank = (scope) => ({
+      managed: 0, projectLocal: 1, project: 2, userLocal: 3, user: 4,
+    }[scope] ?? 99);
 
-      // defaultMode: first non-null in precedence order wins.
-      if (defaultMode === null) {
-        const m = getDefaultMode(data);
-        if (m) defaultMode = m;
+    for (const { scope, data } of sources) {
+      if (scope === 'managed') {
+        managedDetected = true;
+        managedAllow.push(...getList(data, 'allow'));
+        managedDeny.push(...getList(data, 'deny'));
+        managedAsk.push(...getList(data, 'ask'));
+        if (getAllowManagedOnly(data)) allowManagedOnly = true;
+      } else {
+        otherAllow.push(...getList(data, 'allow'));
+        otherDeny.push(...getList(data, 'deny'));
+        otherAsk.push(...getList(data, 'ask'));
       }
 
-      // disableBypassPermissionsMode: OR across all scopes (any true disables).
+      // defaultMode precedence: higher-precedence scope wins; within the SAME
+      // scope, later entries (e.g. managed fragments appearing after the root
+      // managed-settings.json) override earlier values.
+      const m = getDefaultMode(data);
+      if (m) {
+        const r = scopeRank(scope);
+        if (defaultModeScope === null || r < defaultModeScope) {
+          defaultMode = m;
+          defaultModeScope = r;
+        } else if (r === defaultModeScope) {
+          // Same scope, later-wins for scalar override (e.g. fragments).
+          defaultMode = m;
+        }
+      }
+
+      // disableBypassPermissionsMode: OR across all scopes (any disables).
       if (getDisableBypass(data)) bypassDisabled = true;
     }
+
+    // Assemble final lists honoring allowManagedPermissionRulesOnly:
+    //   - allow: only managed if suppression is active; otherwise union.
+    //   - deny/ask: ALWAYS union (defense-in-depth — a narrower restriction
+    //     in any scope still applies even when managed suppresses user allows).
+    const allow = allowManagedOnly ? managedAllow : [...managedAllow, ...otherAllow];
+    const deny  = [...managedDeny,  ...otherDeny];
+    const ask   = [...managedAsk,   ...otherAsk];
 
     // Per-tool broad/scoped detection with fail-closed ask/deny.
     const result = {
@@ -264,6 +344,7 @@ export function detectClaudePermissions(opts = {}) {
       defaultMode,
       bypassDisabled,
       managedDetected,
+      allowManagedOnly,
     };
 
     // defaultMode translates to an IMPLICIT allow grant per tool, then
@@ -319,6 +400,7 @@ export function detectClaudePermissions(opts = {}) {
       defaultMode: null,
       bypassDisabled: false,
       managedDetected: false,
+      allowManagedOnly: false,
     };
   }
 }
@@ -326,16 +408,22 @@ export function detectClaudePermissions(opts = {}) {
 /**
  * Map detected Claude permissions to a Codex-style approval level string.
  *
- * Ordering (highest tier first):
- *   1. defaultMode `bypassPermissions` (and not disabled) → full-auto
- *   2. Broad Bash AND broad Write in allow                → full-auto
- *   3. defaultMode `acceptEdits`                          → auto-edit
- *   4. Any broad or scoped Write/Edit/Bash grant          → auto-edit
- *   5. Otherwise                                           → suggest
+ * Only BROAD grants promote a tier — scoped grants cannot promote because
+ * codex's coarse sandbox tiers (read-only | workspace-write | danger-full-access)
+ * cannot honor the user's scoped restriction. Examples:
+ *   - `Write(src/**)` alone → `suggest` (workspace-write would let codex
+ *     write to `docs/**`, expanding beyond the granted scope).
+ *   - `Bash(git:*)` alone → `suggest` (workspace-write still lets codex run
+ *     arbitrary shell within cwd — `rm`, `curl`, etc. — not just git).
  *
- * Scoped Bash alone maps to `auto-edit` (not `full-auto`): codex's
- * `workspace-write` sandbox still lets it write files, which matches the
- * user's actual trust level, without granting arbitrary shell.
+ * Mapping (highest tier first):
+ *   1. Broad Bash AND broad Write              → full-auto
+ *   2. Broad Write OR broad Edit               → auto-edit
+ *   3. Otherwise                               → suggest
+ *
+ * `defaultMode` is already baked into the broad flags by detectClaudePermissions
+ * (bypassPermissions → broad Bash+Write+Edit; acceptEdits → broad Write+Edit),
+ * with deny/ask fail-closed applied uniformly.
  *
  * @param {object} [opts]
  * @returns {'full-auto' | 'auto-edit' | 'suggest'}
@@ -343,21 +431,8 @@ export function detectClaudePermissions(opts = {}) {
 export function detectClaudePermissionLevel(opts = {}) {
   const p = detectClaudePermissions(opts);
 
-  // defaultMode is already baked into per-tool flags by detectClaudePermissions
-  // (bypassPermissions → all broad, acceptEdits → write/edit broad), with
-  // deny/ask fail-closed applied uniformly. So level mapping is a simple
-  // 3-tier decision over the final flags.
-
   if (p.hasBashStar && p.hasWriteStar) return 'full-auto';
-
-  if (
-    p.hasWriteStar || p.hasEditStar ||
-    p.hasWriteScoped || p.hasEditScoped ||
-    p.hasBashScoped
-  ) {
-    return 'auto-edit';
-  }
-
+  if (p.hasWriteStar || p.hasEditStar) return 'auto-edit';
   return 'suggest';
 }
 

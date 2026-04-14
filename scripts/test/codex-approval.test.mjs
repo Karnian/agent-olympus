@@ -329,7 +329,11 @@ describe('detectClaudePermissionLevel: broad/scoped split (Plan A)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('scoped Write(src/**) alone → auto-edit', () => {
+  it('scoped Write(src/**) alone → suggest (scoped cannot promote — codex workspace-write would widen beyond src/**)', () => {
+    // Security fix (Plan A v2, post-Codex cross-review 2026-04-14):
+    // Scoped grants alone MUST NOT promote. codex's workspace-write sandbox
+    // writes anywhere under cwd, not just the user's scoped path — mirroring
+    // `Write(src/**)` to auto-edit is privilege expansion.
     const dir = makeTmpDir();
     writeSettings(dir, '.claude/settings.local.json', {
       permissions: { allow: ['Write(src/**)'] },
@@ -337,7 +341,22 @@ describe('detectClaudePermissionLevel: broad/scoped split (Plan A)', () => {
     const result = detectClaudePermissionLevel({
       cwd: dir, home: '/nonexistent', managedRootOverride: '/nonexistent/managed',
     });
-    assert.equal(result, 'auto-edit');
+    assert.equal(result, 'suggest');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('scoped Bash(git:*) alone → suggest (scoped bash cannot promote)', () => {
+    // Security fix: workspace-write still allows arbitrary shell within cwd,
+    // so mirroring `Bash(git:*)` to auto-edit would let codex run `rm`, `curl`,
+    // etc. — far beyond the user's git-only grant.
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['Bash(git:*)'] },
+    });
+    const result = detectClaudePermissionLevel({
+      cwd: dir, home: '/nonexistent', managedRootOverride: '/nonexistent/managed',
+    });
+    assert.equal(result, 'suggest');
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -594,6 +613,23 @@ describe('detectClaudePermissionLevel: multi-scope merge', () => {
 // ---------------------------------------------------------------------------
 
 describe('detectClaudePermissionLevel: disableBypassPermissionsMode', () => {
+  it('disableBypassPermissionsMode="disable" (string schema) demotes bypassPermissions', () => {
+    // Claude docs current schema: the value is the string "disable", not boolean.
+    // We accept both for forward/backward compat.
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: {
+        defaultMode: 'bypassPermissions',
+        disableBypassPermissionsMode: 'disable',
+      },
+    });
+    const result = detectClaudePermissionLevel({
+      cwd: dir, home: '/nonexistent', managedRootOverride: '/nonexistent/managed',
+    });
+    assert.equal(result, 'suggest');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('disableBypassPermissionsMode=true demotes bypassPermissions to suggest when no allow', () => {
     const dir = makeTmpDir();
     writeSettings(dir, '.claude/settings.local.json', {
@@ -700,6 +736,75 @@ describe('detectClaudePermissionLevel: managed settings', () => {
     });
     assert.equal(result, 'full-auto');
     rmSync(managedRoot, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('managed fragment scalar defaultMode uses last-wins within managed scope', () => {
+    // managed-settings.json says acceptEdits; a later fragment says
+    // bypassPermissions. Per managed-settings.d merge rules, later fragments
+    // override earlier scalars → bypassPermissions wins.
+    const managedRoot = makeTmpDir();
+    const cwd = makeTmpDir();
+    writeSettings(managedRoot, 'managed-settings.json', {
+      permissions: { defaultMode: 'acceptEdits' },
+    });
+    writeSettings(managedRoot, 'managed-settings.d/99-override.json', {
+      permissions: { defaultMode: 'bypassPermissions' },
+    });
+    const result = detectClaudePermissionLevel({
+      cwd, home: '/nonexistent', managedRootOverride: managedRoot,
+    });
+    assert.equal(result, 'full-auto'); // bypassPermissions wins via last-wins
+    rmSync(managedRoot, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('allowManagedPermissionRulesOnly suppresses user/project allow lists', () => {
+    // Managed scope sets the flag → only managed allow rules contribute.
+    // User-level Bash(*)+Write(*) is ignored.
+    const managedRoot = makeTmpDir();
+    const home = makeTmpDir();
+    const cwd = makeTmpDir();
+    writeSettings(managedRoot, 'managed-settings.json', {
+      permissions: {
+        allowManagedPermissionRulesOnly: true,
+        allow: ['Read(*)'],
+      },
+    });
+    writeSettings(home, '.claude/settings.local.json', {
+      permissions: { allow: ['Bash(*)', 'Write(*)'] },
+    });
+    const result = detectClaudePermissionLevel({
+      cwd, home, managedRootOverride: managedRoot,
+    });
+    assert.equal(result, 'suggest'); // user allows suppressed, managed only has Read
+    rmSync(managedRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it('allowManagedPermissionRulesOnly does NOT suppress deny/ask (defense-in-depth)', () => {
+    // Even with the flag set, user-scope deny/ask still apply — a narrow
+    // restriction in any scope must still invalidate the managed broad grant.
+    const managedRoot = makeTmpDir();
+    const home = makeTmpDir();
+    const cwd = makeTmpDir();
+    writeSettings(managedRoot, 'managed-settings.json', {
+      permissions: {
+        allowManagedPermissionRulesOnly: true,
+        allow: ['Bash(*)', 'Write(*)'],
+      },
+    });
+    writeSettings(home, '.claude/settings.local.json', {
+      permissions: { deny: ['Bash(*)'] },
+    });
+    const result = detectClaudePermissionLevel({
+      cwd, home, managedRootOverride: managedRoot,
+    });
+    // User deny still applies → Bash dropped → auto-edit (Write still broad)
+    assert.equal(result, 'auto-edit');
+    rmSync(managedRoot, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
   });
 

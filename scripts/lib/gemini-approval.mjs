@@ -57,22 +57,11 @@ export function resolveGeminiApproval(autonomyConfig, opts = {}) {
     // deny/ask fail-closed applied uniformly.
     const p = detectClaudePermissions(opts);
 
-    // Literal broad Bash + Write (no ask/deny interference) → yolo
-    if (p.hasBashStar && p.hasWriteStar) {
-      return 'yolo';
-    }
-
-    // Any Write/Edit grant (broad or scoped), or scoped Bash → auto_edit.
-    // Scoped Bash does NOT promote to yolo: gemini's yolo bypasses all
-    // confirmations and cannot honor the user's scoped restriction.
-    if (
-      p.hasWriteStar || p.hasEditStar ||
-      p.hasWriteScoped || p.hasEditScoped ||
-      p.hasBashScoped
-    ) {
-      return 'auto_edit';
-    }
-
+    // Only BROAD grants promote a tier. Gemini's coarse modes cannot honor
+    // scoped restrictions (e.g. `Write(src/**)` → auto_edit would let gemini
+    // edit outside `src/**`). Scoped grants alone → `default`.
+    if (p.hasBashStar && p.hasWriteStar) return 'yolo';
+    if (p.hasWriteStar || p.hasEditStar) return 'auto_edit';
     return 'default';
   } catch {
     return 'default';

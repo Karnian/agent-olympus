@@ -209,7 +209,11 @@ All worker types (Codex, Claude, Gemini) mirror the host session's permission le
 - `defaultMode` is taken from the HIGHEST precedence scope that sets it.
 - `disableBypassPermissionsMode: true` in ANY scope (OR semantics) demotes `bypassPermissions` to no-implicit-grant.
 
-**Broad vs scoped split** — only LITERAL `Bash` or `Bash(*)` in `allow` count as a "broad" shell grant. Wildcard variants like `Bash(*:*)`, `Bash(**)`, `Bash(*,*)` are SCOPED (per Claude's matcher, `:*` is a trailing-wildcard suffix, not universal). Scoped Bash maps to `workspace-write`, never `danger-full-access` — codex's `danger-full-access` sandbox cannot honor the user's scoped restriction.
+**Broad vs scoped split** — only LITERAL `Tool` or `Tool(*)` in `allow` count as "broad". Wildcard variants like `Bash(*:*)`, `Bash(**)`, `Bash(*,*)` are SCOPED (per Claude's matcher, `:*` is a trailing-wildcard suffix, not universal). **Only broad grants promote a tier** — scoped grants alone map to `suggest`, because codex's coarse sandbox tiers cannot honor the user's scoped restriction:
+- `Write(src/**)` alone → `suggest`. `workspace-write` would let codex edit `docs/**` too (privilege expansion).
+- `Bash(git:*)` alone → `suggest`. `workspace-write` still allows arbitrary shell in cwd (`rm`, `curl`, etc.) — not just git.
+
+**Managed policy** — managed settings come from OS-specific locations (macOS `/Library/Application Support/ClaudeCode/`, Linux `/etc/claude-code/`, Windows `C:\Program Files\ClaudeCode\` with `%PROGRAMDATA%\ClaudeCode\` as legacy fallback). Each root supports a `managed-settings.json` plus a lexically-ordered `managed-settings.d/*.json` fragment dir. Within managed scope, **fragments override earlier scalars** (last-wins) for `defaultMode` and similar scalar fields. `permissions.allowManagedPermissionRulesOnly: true` in managed suppresses non-managed `allow` lists, but deny/ask from ALL scopes still apply (defense-in-depth). `disableBypassPermissionsMode` accepts both legacy boolean `true` and current string `"disable"`.
 
 **Fail-closed rules** (codex is non-interactive, cannot honor "please confirm"):
 - Any `Bash(...)` or `Bash` entry in `ask` — even scoped — invalidates the broad Bash grant.
@@ -231,6 +235,8 @@ Suggest-tier hosts cannot run codex usefully — a `read-only` sandbox would let
 - **`/ask` skill** (`ask.mjs`): codex requests exit with code 2 (model not available, answer as Claude) — no team context to demote into.
 
 The `-a` and `-s` flags are GLOBAL Codex CLI flags and MUST appear BEFORE the `exec` subcommand. `codex exec -a never` errors with `unexpected argument '-a'` in 0.118+.
+
+**Known limitation — settings-file mirror, not live session mirror.** Detection reads Claude Code's *settings files* only; it does NOT observe runtime session state. That means `--permission-mode`, `--allowedTools`, `--disallowedTools` CLI launch flags and mid-session mode flips (e.g. Shift+Tab) are invisible. If the host session's actual permissions are narrower than the on-disk settings, the worker may be mirrored to a broader tier. Workers still run under codex's sandbox (workspace-write at most) so damage is capped, but set `.ao/autonomy.json { codex: { approval: "suggest" } }` or explicit CLI flags if you need a strict ceiling.
 
 **Host sandbox intersection** (`scripts/lib/host-sandbox-detect.mjs`). The codex permission level derived from `permissions.allow` is now INTERSECTED with a passive host-sandbox detection (the more restrictive of the two wins). Signal priority:
 

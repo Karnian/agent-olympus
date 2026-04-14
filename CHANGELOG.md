@@ -13,12 +13,15 @@ Rework `scripts/lib/permission-detect.mjs` (shared by codex + gemini + claude ad
 
 **Plan A resolution**
 - Load all documented scopes (managed root + `managed-settings.d/*.json` fragments → project-local → project → user-local → user) and UNION the allow/deny/ask lists. `defaultMode` taken from highest precedence scope; `disableBypassPermissionsMode` OR'd across scopes.
-- Split per-tool grants into `broad` (literal `Tool` or `Tool(*)`) vs `scoped` (any other `Tool(...)`). Only broad `Bash(*)` + broad `Write(*)` → `danger-full-access`. Any scoped Bash → `workspace-write` at most. Wildcard variants like `Bash(*:*)`, `Bash(**)`, `Bash(*,*)` are scoped per Claude's matcher (`:*` is a trailing-wildcard suffix, not universal).
+- Split per-tool grants into `broad` (literal `Tool` or `Tool(*)`) vs `scoped` (any other `Tool(...)`). **Only broad grants promote a tier**: `Write(src/**)` alone and `Bash(git:*)` alone now both map to `suggest` — codex's coarse `workspace-write` sandbox would widen beyond the user's scoped path or limit arbitrary shell in cwd. Wildcard variants like `Bash(*:*)`, `Bash(**)`, `Bash(*,*)` are scoped per Claude's matcher (`:*` is a trailing-wildcard suffix, not universal).
 - Fail-closed pipeline: any Bash entry in `ask` (broad OR scoped) invalidates broad Bash; any scoped deny invalidates broad; literal broad deny invalidates ALL grants for that tool.
 - `defaultMode` becomes an implicit broad allow that flows through the SAME deny/ask pipeline: `bypassPermissions` (unless disabled) → implicit broad for Bash+Write+Edit; `acceptEdits` → implicit broad for Write+Edit. `bypassPermissions + deny Bash(*)` correctly demotes Bash while preserving Write/Edit.
-- `disableBypassPermissionsMode: true` in any scope strips the bypass implicit grants.
+- `disableBypassPermissionsMode` accepts both legacy boolean `true` and current string `"disable"` schemas; OR semantics across scopes.
+- Managed settings improvements (Codex cross-review follow-up): Windows primary path now `C:\Program Files\ClaudeCode\` with `%PROGRAMDATA%` legacy fallback; `managed-settings.d/*.json` fragments apply scalar **last-wins** within managed scope for `defaultMode`; `permissions.allowManagedPermissionRulesOnly: true` now suppresses non-managed `allow` lists while keeping deny/ask from all scopes (defense-in-depth).
 
-**Test coverage** — 1626 tests pass. New coverage: multi-scope merge, managed settings + fragment dir, disableBypassPermissionsMode OR, scoped ask fail-closed, literal broad deny, wildcard variants treated as scoped, defaultMode precedence from highest scope.
+**Known limitation documented** — this is a *settings-file* mirror, not a live session mirror. `--permission-mode`, `--allowedTools`, `--disallowedTools` CLI launch flags and mid-session mode flips are invisible. Damage is still capped by codex's workspace-write sandbox.
+
+**Test coverage** — 1631 tests pass. New coverage: multi-scope merge, managed settings + fragment dir + last-wins scalar, disableBypassPermissionsMode string schema, `allowManagedPermissionRulesOnly` allow suppression + deny/ask passthrough, scoped-alone demotion (security fix), wildcard variants as scoped, defaultMode precedence.
 
 **User-facing** — expanded demote error messages in `scripts/ask.mjs` and `scripts/lib/worker-spawn.mjs` now list three concrete fixes (autonomy.json override, literal `Bash(*) + Write(*)` entries, `defaultMode: bypassPermissions`).
 
