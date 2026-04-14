@@ -222,6 +222,150 @@ describe('detectClaudePermissionLevel: project-level settings', () => {
 });
 
 // ---------------------------------------------------------------------------
+// detectClaudePermissionLevel — defaultMode + expanded patterns
+// (NEW: plugin-user realism fix)
+// ---------------------------------------------------------------------------
+
+describe('detectClaudePermissionLevel: defaultMode recognition', () => {
+  it('bypassPermissions defaultMode → full-auto (no allow list needed)', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { defaultMode: 'bypassPermissions' },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'full-auto');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('acceptEdits defaultMode → auto-edit (Write/Edit granted, no Bash)', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { defaultMode: 'acceptEdits' },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'auto-edit');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('plan defaultMode → suggest (no implicit grants)', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { defaultMode: 'plan' },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'suggest');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('unknown defaultMode → suggest (safe default)', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { defaultMode: 'dontAsk' },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'suggest');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('acceptEdits + Bash(*) allow → full-auto (union)', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { defaultMode: 'acceptEdits', allow: ['Bash(*)'] },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'full-auto');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('bypassPermissions + deny Bash(*) → auto-edit (deny wins for bash)', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { defaultMode: 'bypassPermissions', deny: ['Bash(*)'] },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'auto-edit');
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('detectClaudePermissionLevel: expanded pattern matching', () => {
+  it('scoped Bash(git:*) + Write(*) → full-auto (scoped bash counts)', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['Bash(git:*)', 'Write(*)'] },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'full-auto');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('Bash(*:*) wildcard variant → full-auto', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['Bash(*:*)', 'Write(*)'] },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'full-auto');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('scoped Write(src/**) alone → auto-edit', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['Write(src/**)'] },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'auto-edit');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('NotebookEdit(*) does NOT match Edit (anchored prefix)', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['NotebookEdit(*)', 'Read(*)'] },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'suggest');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('scoped deny Bash(curl:*) does NOT block broad Bash allow', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['Bash(*)', 'Write(*)'], deny: ['Bash(curl:*)'] },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'full-auto');
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('detectClaudePermissionLevel: project settings.json source', () => {
+  it('reads project-committed .claude/settings.json when settings.local.json absent', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.json', {
+      permissions: { allow: ['Bash(*)', 'Write(*)'] },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'full-auto');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('settings.local.json wins over settings.json within same project', () => {
+    const dir = makeTmpDir();
+    writeSettings(dir, '.claude/settings.local.json', {
+      permissions: { allow: ['Read(*)'] },
+    });
+    writeSettings(dir, '.claude/settings.json', {
+      permissions: { allow: ['Bash(*)', 'Write(*)'] },
+    });
+    const result = detectClaudePermissionLevel({ cwd: dir, home: '/nonexistent' });
+    assert.equal(result, 'suggest');
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // detectClaudePermissionLevel — user-level settings
 // ---------------------------------------------------------------------------
 

@@ -197,7 +197,13 @@ export function buildSpawnOpts(adapterName) {
       const level = resolveCodexApproval(autonomy, { cwd: process.cwd() });
       if (shouldDemoteCodexWorker(level)) {
         opts._demoted = true;
-        opts._demotionReason = `host permission level (${level}) too low for non-interactive codex`;
+        opts._demotionReason = (
+          `host permission level (${level}) too low for non-interactive codex. ` +
+          `Fix any of: (1) add \`"codex": { "approval": "full-auto" }\` to .ao/autonomy.json; ` +
+          `(2) add "Bash(*)" + "Write(*)" to permissions.allow in .claude/settings.local.json; ` +
+          `(3) set permissions.defaultMode = "bypassPermissions". ` +
+          `Then retry, or use \`/ask auto\` to fall back to gemini.`
+        );
       } else {
         opts.level = level;
       }

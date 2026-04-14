@@ -343,7 +343,12 @@ export function demoteCodexWorkersIfNeeded(workers, level) {
   for (const w of workers) {
     if (w && w.type === 'codex') {
       w._demotedFrom = 'codex';
-      w._demotionReason = `host permission level (${level}) too low for non-interactive codex worker`;
+      w._demotionReason = (
+        `host permission level (${level}) too low for non-interactive codex worker. ` +
+        `Fix: add \`"codex": { "approval": "full-auto" }\` to .ao/autonomy.json, ` +
+        `or add "Bash(*)" + "Write(*)" to permissions.allow (or set permissions.defaultMode = "bypassPermissions") ` +
+        `in .claude/settings.local.json.`
+      );
       w.type = 'claude';
       // Strip provider-specific fields that would corrupt the Claude path.
       for (const field of CODEX_PROVIDER_FIELDS) {

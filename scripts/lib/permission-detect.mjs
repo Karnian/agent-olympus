@@ -44,15 +44,48 @@ function getDenyList(filePath) {
 }
 
 /**
+ * Extract permissions.defaultMode from a Claude settings file.
+ * Recognized Claude Code modes: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions'
+ * Returns null if not set or unrecognized.
+ */
+function getDefaultMode(filePath) {
+  const data = readJson(filePath);
+  const mode = data?.permissions?.defaultMode;
+  if (typeof mode !== 'string') return null;
+  return mode;
+}
+
+/**
+ * Match a permission entry against a tool name, broadened to any-argument form.
+ * Matches bare name (`Bash`) or any parenthesized form (`Bash(*)`, `Bash(git:*)`, etc.).
+ * Anchored to start-of-string so `NotebookEdit` does NOT match `Edit`.
+ */
+function matchesTool(entry, tool) {
+  if (typeof entry !== 'string') return false;
+  if (entry === tool) return true;
+  return entry.startsWith(`${tool}(`);
+}
+
+/**
  * Detect Claude Code's permission flags from settings files.
  *
  * Checks (in priority order):
  *   1. Project-level: `<cwd>/.claude/settings.local.json`
- *   2. User-level: `~/.claude/settings.local.json`
- *   3. User-level: `~/.claude/settings.json`
+ *   2. Project-level: `<cwd>/.claude/settings.json`    (team-committed)
+ *   3. User-level:    `~/.claude/settings.local.json`
+ *   4. User-level:    `~/.claude/settings.json`
  *
- * The first file with a non-empty allow list wins.
- * Deny lists from ALL files are merged (any deny blocks the permission).
+ * Permission signals combined (first-wins for allow/mode, union for deny):
+ *   - `permissions.defaultMode`:
+ *       'bypassPermissions' → implicit Bash + Write + Edit (all true)
+ *       'acceptEdits'       → implicit Write + Edit (no Bash)
+ *       other modes         → no implicit grant
+ *   - `permissions.allow` entries: matched via any-argument form.
+ *       `Bash`, `Bash(*)`, `Bash(git:*)`, `Bash(*:*)` → hasBashStar
+ *       Same for `Write(...)`, `Edit(...)`.
+ *   - `permissions.deny`: union across ALL files; any literal deny (`Bash(*)` /
+ *     `Bash`) overrides the corresponding grant. Scoped deny entries
+ *     (`Bash(curl:*)`) are NOT treated as full deny to avoid false negatives.
  *
  * @param {object} [opts]
  * @param {string} [opts.cwd] - Project root (default: process.cwd())
@@ -66,6 +99,7 @@ export function detectClaudePermissions(opts = {}) {
 
     const sources = [
       join(cwd, '.claude', 'settings.local.json'),
+      join(cwd, '.claude', 'settings.json'),
       join(home, '.claude', 'settings.local.json'),
       join(home, '.claude', 'settings.json'),
     ];
@@ -80,26 +114,47 @@ export function detectClaudePermissions(opts = {}) {
       }
     }
 
+    // Get defaultMode (first non-null wins, same priority as allow)
+    let defaultMode = null;
+    for (const src of sources) {
+      const mode = getDefaultMode(src);
+      if (mode) { defaultMode = mode; break; }
+    }
+
     // Merge deny lists from ALL sources (any deny blocks the permission)
     const denyList = [];
     for (const src of sources) {
       denyList.push(...getDenyList(src));
     }
 
-    // Check for broad permissions in allow list
-    const hasBashStar = allowList.some(p => p === 'Bash(*)' || p === 'Bash');
-    const hasWriteStar = allowList.some(p => p === 'Write(*)' || p === 'Write');
-    const hasEditStar = allowList.some(p => p === 'Edit(*)' || p === 'Edit');
+    // Broadened allow matching: any `Bash`/`Bash(...)` entry counts.
+    // Rationale: users commonly scope Bash like `Bash(git:*)`. The host-Claude
+    // session still runs those commands non-interactively once approved, so
+    // treat the presence of any Bash grant as evidence that non-interactive
+    // shell usage is acceptable for codex workers. If a user wants codex to
+    // stay read-only despite broad Claude permissions, they override via
+    // `.ao/autonomy.json` { codex: { approval: 'suggest' } }.
+    const hasBashFromAllow  = allowList.some(p => matchesTool(p, 'Bash'));
+    const hasWriteFromAllow = allowList.some(p => matchesTool(p, 'Write'));
+    const hasEditFromAllow  = allowList.some(p => matchesTool(p, 'Edit'));
 
-    // Check deny list — if a permission is explicitly denied, override
-    const bashDenied = denyList.some(p => p === 'Bash(*)' || p === 'Bash');
+    // defaultMode implicit grants
+    const bypass = defaultMode === 'bypassPermissions';
+    const accept = defaultMode === 'acceptEdits';
+    const hasBashFromMode  = bypass;
+    const hasWriteFromMode = bypass || accept;
+    const hasEditFromMode  = bypass || accept;
+
+    // Deny is LITERAL only (strict). A scoped deny like `Bash(curl:*)` does
+    // not imply a full Bash ban — the user only wanted to block curl.
+    const bashDenied  = denyList.some(p => p === 'Bash(*)'  || p === 'Bash');
     const writeDenied = denyList.some(p => p === 'Write(*)' || p === 'Write');
-    const editDenied = denyList.some(p => p === 'Edit(*)' || p === 'Edit');
+    const editDenied  = denyList.some(p => p === 'Edit(*)'  || p === 'Edit');
 
     return {
-      hasBashStar: hasBashStar && !bashDenied,
-      hasWriteStar: hasWriteStar && !writeDenied,
-      hasEditStar: hasEditStar && !editDenied,
+      hasBashStar:  (hasBashFromAllow  || hasBashFromMode)  && !bashDenied,
+      hasWriteStar: (hasWriteFromAllow || hasWriteFromMode) && !writeDenied,
+      hasEditStar:  (hasEditFromAllow  || hasEditFromMode)  && !editDenied,
     };
   } catch {
     return { hasBashStar: false, hasWriteStar: false, hasEditStar: false };
