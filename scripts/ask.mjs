@@ -197,7 +197,19 @@ export function buildSpawnOpts(adapterName) {
       const level = resolveCodexApproval(autonomy, { cwd: process.cwd() });
       if (shouldDemoteCodexWorker(level)) {
         opts._demoted = true;
-        opts._demotionReason = `host permission level (${level}) too low for non-interactive codex`;
+        opts._demotionReason = (
+          `host permission level (${level}) too low for non-interactive codex. ` +
+          `Codex sandbox is coarse (danger-full-access or workspace-write); if your ` +
+          `Claude settings use scoped Bash grants (e.g. Bash(git:*)) or scoped ` +
+          `deny/ask rules, they cannot be honored by codex, so the mirror ` +
+          `conservatively demotes. Fix any of: ` +
+          `(1) add \`"codex": { "approval": "full-auto" }\` to .ao/autonomy.json ` +
+          `(explicit override — bypasses scoped deny/ask in mirror); ` +
+          `(2) add LITERAL "Bash(*)" + "Write(*)" to permissions.allow in ` +
+          `.claude/settings.local.json and remove any scoped Bash/Write deny/ask; ` +
+          `(3) set permissions.defaultMode = "bypassPermissions". ` +
+          `Or use \`/ask auto\` to fall back to gemini.`
+        );
       } else {
         opts.level = level;
       }

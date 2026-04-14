@@ -128,8 +128,18 @@ describe('_detectClaudePermissions: no settings files', () => {
     const result = _detectClaudePermissions({
       cwd: '/nonexistent/path',
       home: '/nonexistent/home',
+      managedRootOverride: '/nonexistent/managed',
     });
-    assert.deepEqual(result, { hasBashStar: false, hasWriteStar: false, hasEditStar: false });
+    // Contract: all tool flags false; defaultMode null; no bypass disable; not managed.
+    assert.equal(result.hasBashStar, false);
+    assert.equal(result.hasBashScoped, false);
+    assert.equal(result.hasWriteStar, false);
+    assert.equal(result.hasWriteScoped, false);
+    assert.equal(result.hasEditStar, false);
+    assert.equal(result.hasEditScoped, false);
+    assert.equal(result.defaultMode, null);
+    assert.equal(result.bypassDisabled, false);
+    assert.equal(result.managedDetected, false);
   });
 });
 
@@ -272,19 +282,21 @@ describe('resolveGeminiApproval: auto detection', () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  it('project-level settings override user-level', () => {
+  it('allow lists MERGE across scopes (project + user)', () => {
+    // Plan A semantics: allow arrays union across scopes (per Claude docs).
+    // Project-local narrow grant does NOT hide broader user-level grant.
     const home = makeTmpDir();
     const cwd = makeTmpDir();
-    // User-level: would yield yolo
     writeSettings(home, '.claude/settings.local.json', {
       permissions: { allow: ['Bash(*)', 'Write(*)'] },
     });
-    // Project-level: read-only → default
     writeSettings(cwd, '.claude/settings.local.json', {
       permissions: { allow: ['Read(*)'] },
     });
-    const result = resolveGeminiApproval({}, { cwd, home });
-    assert.equal(result, 'default');
+    const result = resolveGeminiApproval({}, {
+      cwd, home, managedRootOverride: '/nonexistent/managed',
+    });
+    assert.equal(result, 'yolo'); // merged allow includes Bash(*) + Write(*)
     rmSync(home, { recursive: true, force: true });
     rmSync(cwd, { recursive: true, force: true });
   });
