@@ -1,178 +1,363 @@
 /**
  * Unified Claude Code permission detection — shared by codex-approval.mjs and gemini-approval.mjs.
  *
- * Reads Claude Code's permission configuration from settings files and detects
- * the current permission level. Also checks deny lists for safety.
+ * Reads Claude Code's permission configuration from settings files across all
+ * documented scopes (managed → project-local → project → user-local → user),
+ * MERGES allow/deny/ask lists across scopes (not first-wins), and returns
+ * both BROAD-literal (`Bash`, `Bash(*)`) and SCOPED (`Bash(git:*)`) grant flags
+ * so callers can distinguish "host trusts codex with full shell" from
+ * "host only trusts codex with file edits".
+ *
+ * Security-first design (Plan A, consulted with Codex 2026-04-14):
+ *   - Only LITERAL `Bash` / `Bash(*)` in allow counts as a "broad" grant.
+ *     Wildcard variants (`Bash(*:*)`, `Bash(**)`, `Bash(*,*)`) are SCOPED —
+ *     Claude's matcher treats `:*` as a trailing-wildcard suffix, so these
+ *     patterns are NOT semantically "match everything".
+ *   - Any `Bash`/`Bash(...)` entry in `permissions.ask` (literal OR scoped)
+ *     invalidates the broad Bash grant — codex runs non-interactively and
+ *     cannot honor "please confirm". Fail-closed per Claude docs
+ *     (deny → ask → allow evaluation order).
+ *   - Scoped deny (`Bash(curl:*)`) also invalidates broad grants: codex's
+ *     `danger-full-access` sandbox cannot respect the scoped restriction.
+ *   - Precedence order: managed > project-local > project > user-local > user.
+ *     Allow/deny/ask lists MERGE across scopes; defaultMode is taken from
+ *     the HIGHEST precedence scope that sets it.
+ *   - `permissions.disableBypassPermissionsMode: true` (any scope) disables
+ *     `bypassPermissions` defaultMode, demoting it to `acceptEdits`.
  *
  * Zero npm dependencies — uses Node.js built-ins only.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { platform as osPlatform } from 'node:os';
 
 /**
  * Read and parse a JSON file, returning null on any error.
  */
-function readJson(filePath) {
+function readJson(filePath, fsImpl = { readFileSync }) {
   try {
-    return JSON.parse(readFileSync(filePath, 'utf-8'));
+    return JSON.parse(fsImpl.readFileSync(filePath, 'utf-8'));
   } catch {
     return null;
   }
 }
 
 /**
- * Extract permissions.allow array from a Claude settings file.
+ * Safely coerce a `permissions.<listName>` field to an array of strings.
  */
-function getAllowList(filePath) {
-  const data = readJson(filePath);
-  if (!data?.permissions?.allow || !Array.isArray(data.permissions.allow)) {
-    return [];
-  }
-  return data.permissions.allow;
+function getList(data, listName) {
+  const val = data?.permissions?.[listName];
+  if (!Array.isArray(val)) return [];
+  return val.filter(x => typeof x === 'string');
 }
 
 /**
- * Extract permissions.deny array from a Claude settings file.
+ * Extract `permissions.defaultMode` if it's a non-empty string.
  */
-function getDenyList(filePath) {
-  const data = readJson(filePath);
-  if (!data?.permissions?.deny || !Array.isArray(data.permissions.deny)) {
-    return [];
-  }
-  return data.permissions.deny;
-}
-
-/**
- * Extract permissions.defaultMode from a Claude settings file.
- * Recognized Claude Code modes: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions'
- * Returns null if not set or unrecognized.
- */
-function getDefaultMode(filePath) {
-  const data = readJson(filePath);
+function getDefaultMode(data) {
   const mode = data?.permissions?.defaultMode;
-  if (typeof mode !== 'string') return null;
-  return mode;
+  return typeof mode === 'string' && mode.length > 0 ? mode : null;
 }
 
 /**
- * Match a permission entry against a tool name, broadened to any-argument form.
- * Matches bare name (`Bash`) or any parenthesized form (`Bash(*)`, `Bash(git:*)`, etc.).
- * Anchored to start-of-string so `NotebookEdit` does NOT match `Edit`.
+ * Extract `permissions.disableBypassPermissionsMode` as a strict boolean.
  */
-function matchesTool(entry, tool) {
-  if (typeof entry !== 'string') return false;
-  if (entry === tool) return true;
-  return entry.startsWith(`${tool}(`);
+function getDisableBypass(data) {
+  return data?.permissions?.disableBypassPermissionsMode === true;
+}
+
+/**
+ * Resolve the platform-specific managed settings root + fragment directory.
+ * Returns `{ file, dir }` paths (not guaranteed to exist).
+ *
+ * Paths per Claude Code docs:
+ *   darwin: /Library/Application Support/ClaudeCode/
+ *   linux:  /etc/claude-code/
+ *   win32:  %PROGRAMDATA%\ClaudeCode\
+ */
+function resolveManagedPaths(opts = {}) {
+  const plat = opts.platformOverride || osPlatform();
+  if (opts.managedRootOverride) {
+    return {
+      file: join(opts.managedRootOverride, 'managed-settings.json'),
+      dir: join(opts.managedRootOverride, 'managed-settings.d'),
+    };
+  }
+  if (plat === 'darwin') {
+    const root = '/Library/Application Support/ClaudeCode';
+    return { file: join(root, 'managed-settings.json'), dir: join(root, 'managed-settings.d') };
+  }
+  if (plat === 'win32') {
+    const root = (opts.env?.PROGRAMDATA || process.env.PROGRAMDATA || 'C:\\ProgramData') + '\\ClaudeCode';
+    return { file: join(root, 'managed-settings.json'), dir: join(root, 'managed-settings.d') };
+  }
+  // linux + everything else
+  const root = '/etc/claude-code';
+  return { file: join(root, 'managed-settings.json'), dir: join(root, 'managed-settings.d') };
+}
+
+/**
+ * Read all JSON fragments in a `managed-settings.d/` directory in lexical order.
+ * Returns an array of parsed data objects (nulls filtered).
+ */
+function readManagedFragments(dir, fsImpl = { readdirSync, statSync, readFileSync }) {
+  try {
+    const entries = fsImpl.readdirSync(dir).sort();
+    const out = [];
+    for (const name of entries) {
+      if (!name.endsWith('.json')) continue;
+      const full = join(dir, name);
+      try {
+        if (!fsImpl.statSync(full).isFile()) continue;
+      } catch { continue; }
+      const parsed = readJson(full, fsImpl);
+      if (parsed) out.push(parsed);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Load all permission sources in precedence order (highest first).
+ * Returns array of `{ scope, data }` entries; missing files are silently skipped.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.cwd]
+ * @param {string} [opts.home]
+ * @param {string} [opts.managedRootOverride]  Override managed root dir (for testing)
+ * @param {string} [opts.platformOverride]     Override os.platform() (for testing)
+ * @param {object} [opts.env]                  Override env (for testing)
+ * @param {object} [opts.fs]                   Override fs impl (for testing)
+ * @returns {Array<{scope: string, data: object}>}
+ */
+export function loadPermissionSources(opts = {}) {
+  const cwd = opts.cwd || process.cwd();
+  const home = opts.home || process.env.HOME || process.env.USERPROFILE || '';
+  const fs = opts.fs || { readFileSync, readdirSync, statSync };
+
+  const managed = resolveManagedPaths(opts);
+  const out = [];
+
+  // 1. Managed root file
+  const managedData = readJson(managed.file, fs);
+  if (managedData) out.push({ scope: 'managed', data: managedData });
+
+  // 2. Managed fragments (lexical order, same "managed" scope)
+  const fragments = readManagedFragments(managed.dir, fs);
+  for (const data of fragments) {
+    out.push({ scope: 'managed', data });
+  }
+
+  // 3. Project-local, project, user-local, user
+  const scoped = [
+    ['projectLocal', join(cwd, '.claude', 'settings.local.json')],
+    ['project',      join(cwd, '.claude', 'settings.json')],
+    ['userLocal',    join(home, '.claude', 'settings.local.json')],
+    ['user',         join(home, '.claude', 'settings.json')],
+  ];
+  for (const [scope, path] of scoped) {
+    const data = readJson(path, fs);
+    if (data) out.push({ scope, data });
+  }
+
+  return out;
+}
+
+/**
+ * Anchored tool-name matcher.
+ *
+ * Returns `'broad'` for literal `Tool` or `Tool(*)`, `'scoped'` for any
+ * other `Tool(...)` pattern, and `null` for non-matches.
+ *
+ * NOTE: `Bash(*:*)`, `Bash(**)`, `Bash(*,*)` are treated as SCOPED per
+ * Claude's matcher docs (`:*` is a trailing-wildcard suffix, not a universal
+ * wildcard). Only the bare tool or `Tool(*)` count as broad.
+ */
+export function classifyToolPattern(entry, tool) {
+  if (typeof entry !== 'string') return null;
+  if (entry === tool) return 'broad';
+  if (entry === `${tool}(*)`) return 'broad';
+  if (entry.startsWith(`${tool}(`)) return 'scoped';
+  return null;
+}
+
+/**
+ * Any reference to `tool` in the list (broad or scoped).
+ */
+function listMentionsTool(list, tool) {
+  return list.some(e => classifyToolPattern(e, tool) !== null);
+}
+
+/**
+ * A LITERAL broad reference to `tool` in the list.
+ */
+function listHasBroad(list, tool) {
+  return list.some(e => classifyToolPattern(e, tool) === 'broad');
+}
+
+/**
+ * A SCOPED (non-broad) reference to `tool` in the list.
+ */
+function listHasScoped(list, tool) {
+  return list.some(e => classifyToolPattern(e, tool) === 'scoped');
 }
 
 /**
  * Detect Claude Code's permission flags from settings files.
  *
- * Checks (in priority order):
- *   1. Project-level: `<cwd>/.claude/settings.local.json`
- *   2. Project-level: `<cwd>/.claude/settings.json`    (team-committed)
- *   3. User-level:    `~/.claude/settings.local.json`
- *   4. User-level:    `~/.claude/settings.json`
- *
- * Permission signals combined (first-wins for allow/mode, union for deny):
- *   - `permissions.defaultMode`:
- *       'bypassPermissions' → implicit Bash + Write + Edit (all true)
- *       'acceptEdits'       → implicit Write + Edit (no Bash)
- *       other modes         → no implicit grant
- *   - `permissions.allow` entries: matched via any-argument form.
- *       `Bash`, `Bash(*)`, `Bash(git:*)`, `Bash(*:*)` → hasBashStar
- *       Same for `Write(...)`, `Edit(...)`.
- *   - `permissions.deny`: union across ALL files; any literal deny (`Bash(*)` /
- *     `Bash`) overrides the corresponding grant. Scoped deny entries
- *     (`Bash(curl:*)`) are NOT treated as full deny to avoid false negatives.
+ * Returns BOTH broad-literal and scoped flags per tool so downstream
+ * mapping can distinguish "unrestricted shell trust" from "trust to edit
+ * files in cwd".
  *
  * @param {object} [opts]
- * @param {string} [opts.cwd] - Project root (default: process.cwd())
- * @param {string} [opts.home] - Home directory override (for testing)
- * @returns {{ hasBashStar: boolean, hasWriteStar: boolean, hasEditStar: boolean }}
+ * @param {string} [opts.cwd]
+ * @param {string} [opts.home]
+ * @param {string} [opts.managedRootOverride]
+ * @param {string} [opts.platformOverride]
+ * @param {object} [opts.env]
+ * @param {object} [opts.fs]
+ * @returns {{
+ *   hasBashStar: boolean,   hasBashScoped: boolean,
+ *   hasWriteStar: boolean,  hasWriteScoped: boolean,
+ *   hasEditStar: boolean,   hasEditScoped: boolean,
+ *   defaultMode: string|null,
+ *   bypassDisabled: boolean,
+ *   managedDetected: boolean,
+ * }}
  */
 export function detectClaudePermissions(opts = {}) {
   try {
-    const cwd = opts.cwd || process.cwd();
-    const home = opts.home || process.env.HOME || process.env.USERPROFILE || '';
+    const sources = loadPermissionSources(opts);
 
-    const sources = [
-      join(cwd, '.claude', 'settings.local.json'),
-      join(cwd, '.claude', 'settings.json'),
-      join(home, '.claude', 'settings.local.json'),
-      join(home, '.claude', 'settings.json'),
-    ];
-
-    // Get allow list (first file with non-empty list wins)
-    let allowList = [];
-    for (const src of sources) {
-      const list = getAllowList(src);
-      if (list.length > 0) {
-        allowList = list;
-        break;
-      }
-    }
-
-    // Get defaultMode (first non-null wins, same priority as allow)
+    // Merge allow/deny/ask across ALL scopes (union semantics).
+    const allow = [];
+    const deny = [];
+    const ask = [];
     let defaultMode = null;
-    for (const src of sources) {
-      const mode = getDefaultMode(src);
-      if (mode) { defaultMode = mode; break; }
+    let bypassDisabled = false;
+    let managedDetected = false;
+
+    for (const { scope, data } of sources) {
+      if (scope === 'managed') managedDetected = true;
+      allow.push(...getList(data, 'allow'));
+      deny.push(...getList(data, 'deny'));
+      ask.push(...getList(data, 'ask'));
+
+      // defaultMode: first non-null in precedence order wins.
+      if (defaultMode === null) {
+        const m = getDefaultMode(data);
+        if (m) defaultMode = m;
+      }
+
+      // disableBypassPermissionsMode: OR across all scopes (any true disables).
+      if (getDisableBypass(data)) bypassDisabled = true;
     }
 
-    // Merge deny lists from ALL sources (any deny blocks the permission)
-    const denyList = [];
-    for (const src of sources) {
-      denyList.push(...getDenyList(src));
-    }
-
-    // Broadened allow matching: any `Bash`/`Bash(...)` entry counts.
-    // Rationale: users commonly scope Bash like `Bash(git:*)`. The host-Claude
-    // session still runs those commands non-interactively once approved, so
-    // treat the presence of any Bash grant as evidence that non-interactive
-    // shell usage is acceptable for codex workers. If a user wants codex to
-    // stay read-only despite broad Claude permissions, they override via
-    // `.ao/autonomy.json` { codex: { approval: 'suggest' } }.
-    const hasBashFromAllow  = allowList.some(p => matchesTool(p, 'Bash'));
-    const hasWriteFromAllow = allowList.some(p => matchesTool(p, 'Write'));
-    const hasEditFromAllow  = allowList.some(p => matchesTool(p, 'Edit'));
-
-    // defaultMode implicit grants
-    const bypass = defaultMode === 'bypassPermissions';
-    const accept = defaultMode === 'acceptEdits';
-    const hasBashFromMode  = bypass;
-    const hasWriteFromMode = bypass || accept;
-    const hasEditFromMode  = bypass || accept;
-
-    // Deny is LITERAL only (strict). A scoped deny like `Bash(curl:*)` does
-    // not imply a full Bash ban — the user only wanted to block curl.
-    const bashDenied  = denyList.some(p => p === 'Bash(*)'  || p === 'Bash');
-    const writeDenied = denyList.some(p => p === 'Write(*)' || p === 'Write');
-    const editDenied  = denyList.some(p => p === 'Edit(*)'  || p === 'Edit');
-
-    return {
-      hasBashStar:  (hasBashFromAllow  || hasBashFromMode)  && !bashDenied,
-      hasWriteStar: (hasWriteFromAllow || hasWriteFromMode) && !writeDenied,
-      hasEditStar:  (hasEditFromAllow  || hasEditFromMode)  && !editDenied,
+    // Per-tool broad/scoped detection with fail-closed ask/deny.
+    const result = {
+      hasBashStar: false,  hasBashScoped: false,
+      hasWriteStar: false, hasWriteScoped: false,
+      hasEditStar: false,  hasEditScoped: false,
+      defaultMode,
+      bypassDisabled,
+      managedDetected,
     };
+
+    // defaultMode translates to an IMPLICIT allow grant per tool, then
+    // flows through the same fail-closed pipeline as the explicit allow list:
+    //   - `bypassPermissions` (unless disabled) → implicit broad for ALL tools
+    //   - `acceptEdits`                         → implicit broad for Write + Edit only
+    // This preserves the expected interaction with deny/ask rules: a host
+    // that sets `bypassPermissions` + `deny: Bash(*)` gets bash demoted while
+    // write/edit stay broad.
+    const bypassActive = defaultMode === 'bypassPermissions' && !bypassDisabled;
+    const acceptActive = defaultMode === 'acceptEdits';
+    const implicitBroad = {
+      Bash:  bypassActive,
+      Write: bypassActive || acceptActive,
+      Edit:  bypassActive || acceptActive,
+    };
+
+    for (const tool of ['Bash', 'Write', 'Edit']) {
+      const broadAllow  = listHasBroad(allow, tool) || implicitBroad[tool];
+      const scopedAllow = listHasScoped(allow, tool);
+
+      // Any mention (broad or scoped) in ask → fail-closed for broad grant.
+      // Codex is non-interactive and cannot honor "please confirm".
+      const askMentions = listMentionsTool(ask, tool);
+
+      // Literal broad deny (`Bash(*)` / `Bash`) → invalidates all grants.
+      const literalDeny = listHasBroad(deny, tool);
+      // Any mention in deny → invalidates broad grant (scoped deny means
+      // host has restrictions codex cannot honor under danger-full-access).
+      const denyMentions = literalDeny || listHasScoped(deny, tool);
+
+      // broad flag: broad allow (literal OR implicit via defaultMode),
+      // AND no ask/deny mention on this tool.
+      const broadFlag = broadAllow && !askMentions && !denyMentions;
+
+      // scoped flag: any allow (broad OR scoped), AND no literal broad deny.
+      //   - broad allow survives scoped deny at scoped level (codex runs
+      //     workspace-write, which cannot honor scoped deny either but at
+      //     least cannot run arbitrary shell). Literal deny = full block.
+      const scopedFlag = (broadAllow || scopedAllow) && !literalDeny;
+
+      if (tool === 'Bash')  { result.hasBashStar  = broadFlag; result.hasBashScoped  = scopedFlag; }
+      if (tool === 'Write') { result.hasWriteStar = broadFlag; result.hasWriteScoped = scopedFlag; }
+      if (tool === 'Edit')  { result.hasEditStar  = broadFlag; result.hasEditScoped  = scopedFlag; }
+    }
+
+    return result;
   } catch {
-    return { hasBashStar: false, hasWriteStar: false, hasEditStar: false };
+    return {
+      hasBashStar: false,  hasBashScoped: false,
+      hasWriteStar: false, hasWriteScoped: false,
+      hasEditStar: false,  hasEditScoped: false,
+      defaultMode: null,
+      bypassDisabled: false,
+      managedDetected: false,
+    };
   }
 }
 
 /**
  * Map detected Claude permissions to a Codex-style approval level string.
  *
+ * Ordering (highest tier first):
+ *   1. defaultMode `bypassPermissions` (and not disabled) → full-auto
+ *   2. Broad Bash AND broad Write in allow                → full-auto
+ *   3. defaultMode `acceptEdits`                          → auto-edit
+ *   4. Any broad or scoped Write/Edit/Bash grant          → auto-edit
+ *   5. Otherwise                                           → suggest
+ *
+ * Scoped Bash alone maps to `auto-edit` (not `full-auto`): codex's
+ * `workspace-write` sandbox still lets it write files, which matches the
+ * user's actual trust level, without granting arbitrary shell.
+ *
  * @param {object} [opts]
- * @param {string} [opts.cwd]
- * @param {string} [opts.home]
  * @returns {'full-auto' | 'auto-edit' | 'suggest'}
  */
 export function detectClaudePermissionLevel(opts = {}) {
-  const { hasBashStar, hasWriteStar, hasEditStar } = detectClaudePermissions(opts);
-  if (hasBashStar && hasWriteStar) return 'full-auto';
-  if (hasWriteStar || hasEditStar) return 'auto-edit';
+  const p = detectClaudePermissions(opts);
+
+  // defaultMode is already baked into per-tool flags by detectClaudePermissions
+  // (bypassPermissions → all broad, acceptEdits → write/edit broad), with
+  // deny/ask fail-closed applied uniformly. So level mapping is a simple
+  // 3-tier decision over the final flags.
+
+  if (p.hasBashStar && p.hasWriteStar) return 'full-auto';
+
+  if (
+    p.hasWriteStar || p.hasEditStar ||
+    p.hasWriteScoped || p.hasEditScoped ||
+    p.hasBashScoped
+  ) {
+    return 'auto-edit';
+  }
+
   return 'suggest';
 }
 
@@ -180,7 +365,7 @@ export function detectClaudePermissionLevel(opts = {}) {
  * Map a Codex-style permission level to a Claude CLI --permission-mode value.
  *
  * @param {'full-auto' | 'auto-edit' | 'suggest'} level
- * @returns {string} Claude CLI --permission-mode value
+ * @returns {string}
  */
 export function claudePermissionModeFlag(level) {
   switch (level) {

@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.0.9] - 2026-04-14
+
+### Security — Permission mirroring Plan A (multi-scope merge, broad/scoped split, fail-closed)
+
+Rework `scripts/lib/permission-detect.mjs` (shared by codex + gemini + claude adapters) so the plugin faithfully mirrors Claude Code's documented permission semantics. Fixes three security/correctness issues reported from an external plugin user whose codex worker was always demoted to `suggest` despite a clearly permissive host config.
+
+**Problems**
+1. **First-wins across scopes** — previous code used the first scope with a non-empty `allow` list and ignored the rest. Per Claude docs, allow/deny/ask MERGE across scopes. Users who committed a narrow `.claude/settings.json` to the repo while keeping a broad `~/.claude/settings.local.json` were silently stuck at `suggest`.
+2. **Scoped Bash → full-auto privilege expansion** — scoped grants like `Bash(git:*)` mapped to codex `danger-full-access` sandbox, giving codex arbitrary shell the user never granted Claude.
+3. **`ask` list ignored** — `ask: ['Bash(curl:*)']` was treated as no-op. Codex is non-interactive and cannot honor "please confirm"; any ask-entry must fail closed.
+
+**Plan A resolution**
+- Load all documented scopes (managed root + `managed-settings.d/*.json` fragments → project-local → project → user-local → user) and UNION the allow/deny/ask lists. `defaultMode` taken from highest precedence scope; `disableBypassPermissionsMode` OR'd across scopes.
+- Split per-tool grants into `broad` (literal `Tool` or `Tool(*)`) vs `scoped` (any other `Tool(...)`). Only broad `Bash(*)` + broad `Write(*)` → `danger-full-access`. Any scoped Bash → `workspace-write` at most. Wildcard variants like `Bash(*:*)`, `Bash(**)`, `Bash(*,*)` are scoped per Claude's matcher (`:*` is a trailing-wildcard suffix, not universal).
+- Fail-closed pipeline: any Bash entry in `ask` (broad OR scoped) invalidates broad Bash; any scoped deny invalidates broad; literal broad deny invalidates ALL grants for that tool.
+- `defaultMode` becomes an implicit broad allow that flows through the SAME deny/ask pipeline: `bypassPermissions` (unless disabled) → implicit broad for Bash+Write+Edit; `acceptEdits` → implicit broad for Write+Edit. `bypassPermissions + deny Bash(*)` correctly demotes Bash while preserving Write/Edit.
+- `disableBypassPermissionsMode: true` in any scope strips the bypass implicit grants.
+
+**Test coverage** — 1626 tests pass. New coverage: multi-scope merge, managed settings + fragment dir, disableBypassPermissionsMode OR, scoped ask fail-closed, literal broad deny, wildcard variants treated as scoped, defaultMode precedence from highest scope.
+
+**User-facing** — expanded demote error messages in `scripts/ask.mjs` and `scripts/lib/worker-spawn.mjs` now list three concrete fixes (autonomy.json override, literal `Bash(*) + Write(*)` entries, `defaultMode: bypassPermissions`).
+
+**Files**
+- `scripts/lib/permission-detect.mjs` (rewrite)
+- `scripts/lib/gemini-approval.mjs` (consume new shape; scoped Bash → `auto_edit` not `yolo`)
+- `scripts/ask.mjs`, `scripts/lib/worker-spawn.mjs` (error message expansion)
+- `scripts/test/codex-approval.test.mjs`, `scripts/test/gemini-approval.test.mjs` (new tests + revised expectations)
+
 ## [1.0.6] - 2026-04-10
 
 ### Chore — Documentation sync + git cleanup

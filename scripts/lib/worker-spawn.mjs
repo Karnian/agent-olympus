@@ -345,9 +345,11 @@ export function demoteCodexWorkersIfNeeded(workers, level) {
       w._demotedFrom = 'codex';
       w._demotionReason = (
         `host permission level (${level}) too low for non-interactive codex worker. ` +
-        `Fix: add \`"codex": { "approval": "full-auto" }\` to .ao/autonomy.json, ` +
-        `or add "Bash(*)" + "Write(*)" to permissions.allow (or set permissions.defaultMode = "bypassPermissions") ` +
-        `in .claude/settings.local.json.`
+        `Codex's coarse sandbox cannot honor scoped Bash grants or scoped deny/ask ` +
+        `rules in your Claude settings. Fix: add \`"codex": { "approval": "full-auto" }\` ` +
+        `to .ao/autonomy.json (explicit override), or add LITERAL "Bash(*)" + "Write(*)" ` +
+        `to permissions.allow (and remove scoped Bash/Write deny/ask), or set ` +
+        `permissions.defaultMode = "bypassPermissions" in .claude/settings.local.json.`
       );
       w.type = 'claude';
       // Strip provider-specific fields that would corrupt the Claude path.

@@ -4,10 +4,18 @@
  * Detects Claude Code's current permission configuration and maps it to
  * a Gemini approval mode so Gemini workers run with equivalent permissions.
  *
- * Mapping:
- *   Claude "Bash(*)" + "Write(*)" in allow → gemini "--approval-mode yolo"
- *   Claude "Write(*)" or "Edit(*)" in allow  → gemini "--approval-mode auto_edit"
- *   Otherwise / detection fails               → gemini "--approval-mode default" (no flag)
+ * Security-first mapping (Plan A, 2026-04-14):
+ *   - Literal broad `Bash` + `Write` in allow (no ask/deny interference)
+ *                                         → `yolo`
+ *   - defaultMode `bypassPermissions` (not disabled)
+ *                                         → `yolo`
+ *   - defaultMode `acceptEdits`           → `auto_edit`
+ *   - Any broad/scoped Write/Edit grant, or scoped Bash grant
+ *                                         → `auto_edit`
+ *   - Otherwise                            → `default`
+ *
+ * Scoped Bash does NOT map to `yolo` — Gemini's `yolo` mode bypasses all
+ * confirmations, including ones outside the user's scoped grant.
  *
  * Users can override via `.ao/autonomy.json`:
  *   { "gemini": { "approval": "yolo" } }
@@ -43,16 +51,25 @@ export function resolveGeminiApproval(autonomyConfig, opts = {}) {
       return explicit;
     }
 
-    // "auto" or unset → detect from Claude permissions
-    const { hasBashStar, hasWriteStar, hasEditStar } = detectClaudePermissions(opts);
+    // "auto" or unset → detect from Claude permissions.
+    // defaultMode is already baked into per-tool flags by detectClaudePermissions
+    // (bypassPermissions → all broad, acceptEdits → write/edit broad), with
+    // deny/ask fail-closed applied uniformly.
+    const p = detectClaudePermissions(opts);
 
-    // Bash(*) + Write(*) → equivalent to full autonomy
-    if (hasBashStar && hasWriteStar) {
+    // Literal broad Bash + Write (no ask/deny interference) → yolo
+    if (p.hasBashStar && p.hasWriteStar) {
       return 'yolo';
     }
 
-    // Write or Edit permissions → can modify files but not arbitrary shell
-    if (hasWriteStar || hasEditStar) {
+    // Any Write/Edit grant (broad or scoped), or scoped Bash → auto_edit.
+    // Scoped Bash does NOT promote to yolo: gemini's yolo bypasses all
+    // confirmations and cannot honor the user's scoped restriction.
+    if (
+      p.hasWriteStar || p.hasEditStar ||
+      p.hasWriteScoped || p.hasEditScoped ||
+      p.hasBashScoped
+    ) {
       return 'auto_edit';
     }
 
