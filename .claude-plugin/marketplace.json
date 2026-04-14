@@ -1,9 +1,11 @@
 {
-  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "agent-olympus",
-  "description": "Self-driving AI orchestrator plugin for Claude Code — Atlas + Athena, 19 agents, 34 skills, zero dependencies",
   "owner": {
     "name": "Karnian"
+  },
+  "metadata": {
+    "description": "Self-driving AI orchestrator plugin for Claude Code — Atlas + Athena, 19 agents, 34 skills, zero dependencies",
+    "version": "1.1.0"
   },
   "plugins": [
     {
@@ -26,6 +28,5 @@
         "zero-dependency"
       ]
     }
-  ],
-  "version": "1.1.0"
+  ]
 }

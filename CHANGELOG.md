@@ -31,6 +31,40 @@ Rework `scripts/lib/permission-detect.mjs` (shared by codex + gemini + claude ad
 - `scripts/ask.mjs`, `scripts/lib/worker-spawn.mjs` (error message expansion)
 - `scripts/test/codex-approval.test.mjs`, `scripts/test/gemini-approval.test.mjs` (new tests + revised expectations)
 
+## [1.0.10] - 2026-04-14
+
+### Fix — Remove duplicate `hooks` field from plugin.json
+
+`hooks/hooks.json` is auto-loaded by Claude Code. Specifying it again in manifest causes "Duplicate hooks file detected" error.
+
+**Changes:**
+- Removed `hooks` field from `plugin.json` — Claude Code auto-loads `hooks/hooks.json` when present
+- Combined with v1.0.9 fix (agents field removal), `plugin.json` now only has `skills` as the explicit component path
+
+**Pattern:** Claude Code auto-discovers standard directories/files:
+- `agents/` → auto-discovered (field must be `.md` file paths if used)
+- `hooks/hooks.json` → auto-loaded (field should only reference *additional* hook files)
+- `skills/` → auto-discovered (kept explicit for clarity since the skill loading path differs)
+
+## [1.0.9] - 2026-04-14
+
+### Fix — Remove invalid `agents` field from plugin.json
+
+Plugin failed to load on Claude Code 2.1.92+ due to manifest validation error.
+
+**Root cause:**
+- `plugin.json` contained `"agents": "./agents/"` (directory path)
+- Claude Code's Zod schema (`W91 = kn().endsWith(".md")`) only accepts `.md` file paths, not directory paths
+- This caused `agents: Invalid input` validation error, preventing the entire plugin from loading (skills, agents, hooks all unavailable)
+
+**Fix:**
+- Removed `agents` field from `plugin.json`
+- Claude Code auto-discovers `agents/` directory when the field is absent (confirmed via CLI source analysis)
+- Verified with `claude plugin validate` — passes cleanly
+- Cross-validated with Codex (GPT-5.4): confirmed fix is correct and auto-discovery risk is low
+
+**Note:** Claude Code public docs still show directory-style `agents` examples, but the actual CLI schema rejects them. The docs appear stale relative to v2.1.92.
+
 ## [1.0.6] - 2026-04-10
 
 ### Chore — Documentation sync + git cleanup
