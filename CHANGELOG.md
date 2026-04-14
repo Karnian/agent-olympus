@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.0.9] - 2026-04-14
+## [1.1.0] - 2026-04-14
 
 ### Security — Permission mirroring Plan A (multi-scope merge, broad/scoped split, fail-closed)
 
