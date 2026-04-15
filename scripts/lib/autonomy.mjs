@@ -5,8 +5,9 @@
  * DEFAULT_AUTONOMY_CONFIG, and always returns a usable config. Always fail-safe.
  */
 
-import { readFileSync } from 'fs';
+import { readFileSync, realpathSync } from 'fs';
 import path from 'path';
+import os from 'os';
 
 /**
  * Default autonomy/ship-policy config used when validation fails or config is absent.
@@ -353,30 +354,257 @@ function deepMerge(target, source) {
   return result;
 }
 
+// ─── Path resolution ──────────────────────────────────────────────────────────
+
 /**
- * Load and validate the autonomy config from `<cwd>/.ao/autonomy.json`.
+ * CI provider markers. If ANY of these env vars is set to a truthy value, we
+ * treat the environment as CI and skip the global autonomy config layer
+ * (unless the user explicitly set `AO_AUTONOMY_CONFIG`).
  *
- * Reads the file synchronously, parses JSON, deep-merges the user config over
- * DEFAULT_AUTONOMY_CONFIG so partial configs work, then validates the merged
- * result. On a missing file or any error the function silently returns
- * DEFAULT_AUTONOMY_CONFIG — it never throws.
+ * List spans the major CI providers. An attacker who can set env vars in a
+ * legitimate CI runner already has bigger problems — this list is about
+ * avoiding silent misconfiguration when a developer's dotfile-synced
+ * `~/.config/agent-olympus/autonomy.json` would otherwise flip a shared
+ * runner into `codex: full-auto`.
+ */
+const CI_ENV_MARKERS = [
+  'CI',                      // GitHub Actions, GitLab, CircleCI, Travis, most generic
+  'GITHUB_ACTIONS',          // GitHub Actions
+  'GITLAB_CI',               // GitLab
+  'CIRCLECI',                // CircleCI
+  'TRAVIS',                  // Travis
+  'JENKINS_URL',             // Jenkins
+  'BUILDKITE',               // Buildkite
+  'DRONE',                   // Drone
+  'BITBUCKET_BUILD_NUMBER',  // Bitbucket Pipelines
+  'TF_BUILD',                // Azure Pipelines
+  'TEAMCITY_VERSION',        // TeamCity
+  'APPVEYOR',                // AppVeyor
+  'CODEBUILD_BUILD_ID',      // AWS CodeBuild
+];
+
+/**
+ * Detect if the current process looks like a CI environment.
+ *
+ * Used as a "kill-switch" for global autonomy config — CI environments should
+ * NOT pick up a developer's personal `~/.config/agent-olympus/autonomy.json`
+ * (e.g. dotfile-synced `full-auto` could unexpectedly widen the codex sandbox
+ * in a shared runner). Project-level `.ao/autonomy.json` still applies in CI
+ * because it's checked into the repo and intentional.
+ *
+ * An explicit `AO_AUTONOMY_CONFIG` env override bypasses this kill-switch —
+ * the user has stated an explicit intent.
+ *
+ * Checks the markers listed in `CI_ENV_MARKERS`. `CI=false` / `CI=0` are
+ * treated as "not CI" (common in local dev when running CI-adjacent tools).
+ *
+ * @returns {boolean}
+ */
+export function isCIEnvironment() {
+  for (const marker of CI_ENV_MARKERS) {
+    const v = process.env[marker];
+    if (!v) continue;
+    // Explicit negatives
+    if (v === 'false' || v === '0') continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Resolve the ordered list of autonomy.json paths to try.
+ *
+ * Order (highest precedence WINS during merge — later layers override earlier):
+ *   1. Defaults (baked in; not a file)
+ *   2. Global user-level config (SKIPPED in CI unless AO_AUTONOMY_CONFIG is set):
+ *      - $XDG_CONFIG_HOME/agent-olympus/autonomy.json
+ *      - ~/.config/agent-olympus/autonomy.json
+ *      - ~/.ao/autonomy.json  (legacy, still honored)
+ *      Only the FIRST existing global file is used (not merged across).
+ *   3. Project-level config: <cwd>/.ao/autonomy.json
+ *
+ * Env override:
+ *   AO_AUTONOMY_CONFIG=/path/to/file  — replaces the ENTIRE global chain
+ *     with exactly this path. Project-level still applies on top.
+ *     Bypasses CI kill-switch (explicit opt-in).
  *
  * @param {string} cwd - project root directory (absolute path)
- * @returns {typeof DEFAULT_AUTONOMY_CONFIG}
+ * @param {object} [opts]
+ * @param {boolean} [opts.skipGlobal=false] - Force-skip env + all global layers
+ *   (used by callers that want a pure project-only resolution, e.g. security
+ *   audits or isolated test runs).
+ * @param {boolean} [opts.skipEnv=false] - Force-skip the AO_AUTONOMY_CONFIG
+ *   env override (global layer still resolved from home/XDG if not in CI).
+ * @returns {{ global: string|null, project: string }}
  */
-export function loadAutonomyConfig(cwd) {
+export function resolveAutonomyPaths(cwd, opts = {}) {
+  const projectPath = path.join(cwd, '.ao', 'autonomy.json');
+  const skipGlobal = opts && opts.skipGlobal === true;
+  const skipEnv = opts && opts.skipEnv === true;
+
+  if (skipGlobal) {
+    return { global: null, project: projectPath };
+  }
+
+  const envOverride = process.env.AO_AUTONOMY_CONFIG;
+  if (!skipEnv && envOverride && typeof envOverride === 'string' && envOverride.trim()) {
+    // Explicit user intent — bypasses CI kill-switch.
+    return { global: envOverride, project: projectPath };
+  }
+
+  // CI kill-switch: skip global fallbacks so developer dotfiles don't leak
+  // full-auto into shared CI runners.
+  if (isCIEnvironment()) {
+    return { global: null, project: projectPath };
+  }
+
+  const home = os.homedir();
+  const xdgConfig = process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim();
+  const candidates = [
+    xdgConfig ? path.join(xdgConfig, 'agent-olympus', 'autonomy.json') : null,
+    path.join(home, '.config', 'agent-olympus', 'autonomy.json'),
+    path.join(home, '.ao', 'autonomy.json'),
+  ].filter(Boolean);
+
+  // Only the first existing global file is used — no cross-merge between global
+  // candidates. Keeps the mental model simple: "one global file, one project file".
+  for (const candidate of candidates) {
+    try {
+      readFileSync(candidate, 'utf8'); // throws on missing
+      return { global: candidate, project: projectPath };
+    } catch { /* try next */ }
+  }
+  return { global: null, project: projectPath };
+}
+
+/**
+ * Read + parse + validate a single autonomy config file. Returns the parsed
+ * object (UNMERGED) on success, or null on any error (missing file, invalid
+ * JSON, validation errors). Never throws.
+ *
+ * Validation is done against the parsed layer IN ISOLATION — Codex review
+ * recommendation: "각 레이어를 개별 parse/validate 후 defaults <- global <-
+ * project 순으로 합쳐야 한다". This catches layer-specific mistakes early
+ * rather than muddling errors after merge.
+ *
+ * Symlink protection: when `opts.requireWithinRoots` is provided, the file's
+ * realpath must be inside one of the allowed root directories. This defeats
+ * a symlink redirecting the global config to an unexpected location
+ * (e.g. a developer's stale ~/.ao pointing at a repo file that moved). The
+ * project layer does NOT use this check — the project owner already controls
+ * their own .ao/ directory.
+ *
+ * @param {string|null} filePath
+ * @param {object} [opts]
+ * @param {string[]} [opts.requireWithinRoots] - Allowed root directories. If
+ *   the file's realpath escapes all of these, return null.
+ * @returns {object|null}
+ */
+function _readLayer(filePath, opts = {}) {
+  if (!filePath) return null;
   try {
-    const filePath = path.join(cwd, '.ao', 'autonomy.json');
+    // Symlink protection: realpath must live inside an allowed root
+    if (Array.isArray(opts.requireWithinRoots) && opts.requireWithinRoots.length) {
+      let real;
+      try { real = realpathSync(filePath); } catch { return null; }
+      const okRoots = opts.requireWithinRoots
+        .filter(Boolean)
+        .map(r => {
+          try { return realpathSync(r); } catch { return null; }
+        })
+        .filter(Boolean);
+      const within = okRoots.some(root => {
+        const withSep = root.endsWith(path.sep) ? root : root + path.sep;
+        return real === root || real.startsWith(withSep);
+      });
+      if (!within) {
+        // Symlink escaped — emit a one-line diagnostic but don't throw.
+        try {
+          process.stderr.write(JSON.stringify({
+            event: 'autonomy_symlink_rejected',
+            path: filePath,
+            realpath: real,
+          }) + '\n');
+        } catch { /* never throw from logging */ }
+        return null;
+      }
+    }
     const raw = readFileSync(filePath, 'utf8');
     const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    // Validate against DEFAULTS merge — only the layer's own fields count,
+    // missing fields inherit defaults and pass validation trivially.
+    const hypothetical = deepMerge(DEFAULT_AUTONOMY_CONFIG, parsed);
+    const { valid } = validateAutonomyConfig(hypothetical);
+    return valid ? parsed : null;
+  } catch {
+    return null;
+  }
+}
 
-    // Deep-merge user config over defaults so partial configs are fully hydrated
-    const merged = deepMerge(DEFAULT_AUTONOMY_CONFIG, parsed);
+/**
+ * Load and validate the autonomy config with layered resolution.
+ *
+ * Resolution order (later layers override earlier via deep merge; arrays are
+ * REPLACED, not concatenated, consistent with existing deepMerge behavior):
+ *
+ *   defaults  ←  global (env override OR user-level)  ←  project
+ *
+ * On any error in any layer (missing file, parse error, validation failure),
+ * that layer is silently skipped and the function continues. Result is always
+ * a fully-hydrated, validated DEFAULT_AUTONOMY_CONFIG-shaped object.
+ *
+ * @param {string} cwd - project root directory (absolute path)
+ * @param {object} [opts]
+ * @param {boolean} [opts.skipGlobal=false] - Skip all global layers (env + home/XDG).
+ *   Result is `defaults ← project-only`. Use for isolated/secure contexts.
+ * @param {boolean} [opts.skipEnv=false] - Skip AO_AUTONOMY_CONFIG env override,
+ *   but still consult home/XDG global layer (unless CI).
+ * @returns {typeof DEFAULT_AUTONOMY_CONFIG}
+ */
+export function loadAutonomyConfig(cwd, opts = {}) {
+  try {
+    const { global, project } = resolveAutonomyPaths(cwd, opts);
 
+    // Symlink allow-list for global. Honors skipEnv/skipGlobal so disabled
+    // layers can't leak back in via a symlink pointing at the env override's
+    // parent directory. Codex review: even when skipEnv:true drops the env
+    // layer, if env parent stayed in the allow-list, a symlink inside XDG
+    // could still redirect there, indirectly resurrecting the env path.
+    const home = os.homedir();
+    const xdgConfig = process.env.XDG_CONFIG_HOME && process.env.XDG_CONFIG_HOME.trim();
+    const envOverride = process.env.AO_AUTONOMY_CONFIG;
+    const envActive = !opts.skipGlobal
+      && !opts.skipEnv
+      && envOverride
+      && typeof envOverride === 'string'
+      && envOverride.trim();
+    const allowedGlobalRoots = [
+      xdgConfig ? path.join(xdgConfig, 'agent-olympus') : null,
+      path.join(home, '.config', 'agent-olympus'),
+      path.join(home, '.ao'),
+      // Only whitelist env override's parent when the env override itself is
+      // actually active — otherwise a dormant env var plus a symlink in XDG
+      // would silently resurrect the env path.
+      envActive ? path.dirname(envOverride) : null,
+    ].filter(Boolean);
+
+    const globalLayer = _readLayer(global, { requireWithinRoots: allowedGlobalRoots });
+    // Project layer: no symlink guard — the project owner controls .ao/.
+    const projectLayer = _readLayer(project);
+
+    // Merge: defaults ← global ← project
+    let merged = DEFAULT_AUTONOMY_CONFIG;
+    if (globalLayer) merged = deepMerge(merged, globalLayer);
+    if (projectLayer) merged = deepMerge(merged, projectLayer);
+
+    // Final validation on the merged result — defensive; individual layers
+    // were already validated, but validation is cheap and surfaces any bug
+    // in the merge itself.
     const { config } = validateAutonomyConfig(merged);
     return config;
   } catch {
-    // Missing file or any parse/validation error — return safe defaults
+    // Never throw — return safe defaults on any unexpected error
     return DEFAULT_AUTONOMY_CONFIG;
   }
 }

@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.1.2] - 2026-04-16
+
+### Feature — Layered autonomy.json resolution (global + env + project)
+
+Codex workers are no longer stuck at `suggest` tier across every project a user opens. `loadAutonomyConfig(cwd)` now merges **defaults ← global ← project**, so a single `~/.config/agent-olympus/autonomy.json` can set `{"codex":{"approval":"full-auto"}}` once and apply to every repo (unless that repo has its own project-level override).
+
+**Resolution order** (only the first existing global file wins — no cross-merge within the global slot):
+
+1. `AO_AUTONOMY_CONFIG=<path>` — explicit env override; skips CI kill-switch
+2. `$XDG_CONFIG_HOME/agent-olympus/autonomy.json`
+3. `~/.config/agent-olympus/autonomy.json`
+4. `~/.ao/autonomy.json` — legacy path, still honored
+5. Project: `<cwd>/.ao/autonomy.json` — always applies
+
+**CI kill-switch** — 13 CI providers detected (GitHub Actions, GitLab, CircleCI, Travis, Jenkins, Buildkite, Drone, Bitbucket Pipelines, Azure Pipelines, TeamCity, AppVeyor, AWS CodeBuild, generic `CI=true`). When running under CI, the global layer is silently skipped so a developer's dotfile-synced `~/.config/agent-olympus/autonomy.json` can't widen a shared runner's codex sandbox. `AO_AUTONOMY_CONFIG` bypasses this for explicit opt-in.
+
+**Symlink guard** — global-layer files must realpath-resolve inside the allowed root dirs (XDG / `~/.config` / `~/.ao`, plus `AO_AUTONOMY_CONFIG` parent when actively used). Symlinks escaping these roots are rejected with an `autonomy_symlink_rejected` stderr event. Project files are trusted (repo owner scope). Codex review flagged and we fixed a subtle issue where `skipEnv:true` still left `AO_AUTONOMY_CONFIG` parent in the allow-list, so a symlink in XDG pointing there would silently resurrect the disabled env layer.
+
+**Safe-mode opts** for callers that need explicit hardening:
+```js
+loadAutonomyConfig(cwd, { skipGlobal: true })  // project-only, no env/home
+loadAutonomyConfig(cwd, { skipEnv: true })     // ignore AO_AUTONOMY_CONFIG
+```
+
+**Backward compat** — existing project-only configs keep working unchanged. Per-layer `validateAutonomyConfig` runs in isolation so a malformed global layer is silently dropped without affecting the project layer.
+
+**Codex cross-review** — three rounds. First round flagged path traversal / symlink / env injection / CI-provider coverage / API safe-mode. Round two caught the `skipEnv + symlink-chain` indirect bypass (allowlist still included env parent even when env layer was suppressed). Round three: LGTM.
+
+**Files**
+- `scripts/lib/autonomy.mjs` — `resolveAutonomyPaths`, `isCIEnvironment`, `_readLayer` (with symlink guard), `loadAutonomyConfig` refactored to layered merge
+- `CLAUDE.md` — new "Autonomy Config Resolution (Layered)" subsection
+- `scripts/test/autonomy.test.mjs` — +25 tests covering resolution order, CI providers, env override, XDG precedence, project override, array-replace semantics, safe-mode opts, symlink guard, skipEnv allowlist
+
+**Test coverage** — 1713 tests pass, zero regression.
+
+**Quick-start** (set full-auto globally):
+```bash
+mkdir -p ~/.config/agent-olympus
+echo '{"codex":{"approval":"full-auto"}}' > ~/.config/agent-olympus/autonomy.json
+```
+
+---
+
 ## [1.1.1] - 2026-04-15
 
 ### Feature — Gemini credential auto-resolver (no more `export GEMINI_API_KEY`)
