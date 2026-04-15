@@ -461,8 +461,30 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
 
   // Spawn tmux workers first (need sessions created in batch).
   // Tests can inject a fake createTeamSession to avoid real tmux.
+  //
+  // For gemini tmux workers, attach GEMINI_API_KEY to worker.env so
+  // createTeamSession passes it via `tmux new-session -e` — the key enters
+  // the shell's initial environment without being typed through send-keys,
+  // so it never appears in capture-pane output or shell history. If the
+  // resolver returns null (no key configured), we skip injection.
   const createTeamSessionFn = _inject?.createTeamSession || createTeamSession;
   const tmuxWorkers = workers.map((w, i) => ({ ...w, idx: i })).filter((_, i) => adapterNames[i] === 'tmux');
+  if (tmuxWorkers.length > 0) {
+    try {
+      const { resolveGeminiApiKey } = await import('./gemini-credential.mjs');
+      for (const tw of tmuxWorkers) {
+        if (tw.type !== 'gemini') continue;
+        // Respect an explicit caller override (including empty string for
+        // "explicitly disabled") — only auto-resolve when unset.
+        const existing = tw.env && Object.prototype.hasOwnProperty.call(tw.env, 'GEMINI_API_KEY');
+        if (existing) continue;
+        const key = resolveGeminiApiKey(geminiCredential);
+        if (key) {
+          tw.env = { ...(tw.env || {}), GEMINI_API_KEY: key };
+        }
+      }
+    } catch { /* resolver missing or failed — fall through without env injection */ }
+  }
   let sessions = [];
   if (tmuxWorkers.length > 0) {
     sessions = createTeamSessionFn(teamName, tmuxWorkers, cwd);
