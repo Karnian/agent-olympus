@@ -354,6 +354,8 @@ to disable the resolver entirely (env-only fallback). `keychainAccount`
 accepts any non-empty string including characters like `:`, `@`, `.`
 since `execFile` argv prevents shell injection.
 
+**First-time macOS UX**: The first time Agent Olympus invokes `security find-generic-password` from Node, macOS shows a Keychain access prompt ("`node` wants to use your confidential information stored in `gemini-cli-api-key`"). Click **Always Allow**. Subsequent calls complete in <100ms. If the user dismisses the prompt, the resolver times out at `EXEC_TIMEOUT_MS` (10s) and returns `null` — the gemini CLI then surfaces its own auth error.
+
 **Logging & security**:
 - Raw keys are never logged. Diagnostic events emit as single-line JSON on
   stderr with masked keys: `{"event":"gemini_credential_cache_invalidated","account":"...","reason":"auth_failed"}`

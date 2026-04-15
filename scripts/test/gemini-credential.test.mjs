@@ -534,3 +534,47 @@ test('teardown: restores original GEMINI_API_KEY', () => {
   }
   assert.ok(true);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Real-world Keychain payload handling (gemini CLI stores JSON envelope)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('#29 gemini CLI JSON envelope: extracts token.accessToken', () => {
+  setPlatform('darwin');
+  const envelope = JSON.stringify({
+    serverName: 'default-api-key',
+    token: { accessToken: TEST_KEY, tokenType: 'ApiKey' },
+    updatedAt: 1775660459156,
+  });
+  __setExecFileSyncForTest(mockExec(`${envelope}\n`));
+  assert.equal(resolveGeminiApiKey(), TEST_KEY);
+});
+
+test('#30 JSON envelope with alt field names (accessToken/apiKey/key)', () => {
+  setPlatform('darwin');
+
+  for (const field of ['accessToken', 'apiKey', 'api_key', 'key', 'value']) {
+    __resetForTest();
+    __setExecFileSyncForTest(mockExec(JSON.stringify({ [field]: `${field}-key-${TEST_KEY}` })));
+    assert.equal(resolveGeminiApiKey(), `${field}-key-${TEST_KEY}`, `field=${field}`);
+  }
+});
+
+test('#31 bare string is still returned as-is (backward compat)', () => {
+  setPlatform('darwin');
+  __setExecFileSyncForTest(mockExec(`${TEST_KEY}\n`));
+  assert.equal(resolveGeminiApiKey(), TEST_KEY);
+});
+
+test('#32 JSON with no recognized field returns null (safe)', () => {
+  setPlatform('darwin');
+  __setExecFileSyncForTest(mockExec(JSON.stringify({ foo: 'bar', baz: 42 })));
+  assert.equal(resolveGeminiApiKey(), null);
+});
+
+test('#33 malformed JSON with leading { falls through to bare-string handling', () => {
+  setPlatform('darwin');
+  // Looks like JSON but isn't — treat as bare string
+  __setExecFileSyncForTest(mockExec('{not json at all'));
+  assert.equal(resolveGeminiApiKey(), '{not json at all');
+});

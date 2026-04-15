@@ -30,7 +30,16 @@ import { execFileSync as nodeExecFileSync } from 'node:child_process';
 const KEYCHAIN_SERVICE = 'gemini-cli-api-key';
 const DEFAULT_ACCOUNT = 'default-api-key';
 const TTL_MS = 5 * 60 * 1000; // 5 minutes
-const EXEC_TIMEOUT_MS = 2000; // hard cap to prevent hangs on locked keychain
+/**
+ * Hard cap on each secret-store invocation.
+ *
+ * 10s is chosen to accommodate the one-time macOS Keychain access prompt
+ * (when the user hasn't previously granted Node access). Subsequent calls
+ * after "Always Allow" complete in <100ms. If the user rejects or ignores
+ * the prompt, we time out and fall back to null — the gemini CLI surfaces
+ * its own auth error, no hang.
+ */
+const EXEC_TIMEOUT_MS = 10000;
 const MAX_BUFFER = 64 * 1024;
 
 const MACOS_SECURITY_BIN = '/usr/bin/security';
@@ -106,8 +115,47 @@ export function invalidateCache(accountOrAll, reason = 'manual') {
 // ─── Platform-specific fetchers ───────────────────────────────────────────────
 
 /**
+ * Normalize a secret-store payload into a bare API key.
+ *
+ * Gemini CLI's `saveApiKey()` stores keys via HybridTokenStorage, which wraps
+ * the value in a JSON envelope like:
+ *   {"serverName":"default-api-key","token":{"accessToken":"AIza...","tokenType":"ApiKey"},"updatedAt":...}
+ *
+ * But users (or other tools) may also write a BARE string via
+ * `security add-generic-password -w "AIza..."`.
+ *
+ * This helper tolerates both: if stdout parses as JSON with a recognized
+ * shape, extract the bare key; otherwise treat stdout as the key itself.
+ *
+ * @param {string} raw - trimmed stdout from security/secret-tool
+ * @returns {string|null}
+ */
+function _extractKey(raw) {
+  if (!raw) return null;
+  // Try JSON envelope first (gemini CLI's storage format)
+  if (raw.startsWith('{')) {
+    try {
+      const obj = JSON.parse(raw);
+      // Gemini CLI shape: { token: { accessToken, tokenType } }
+      const tokAcc = obj?.token?.accessToken;
+      if (typeof tokAcc === 'string' && tokAcc.length > 0) return tokAcc;
+      // Fallback shapes seen across tools: { accessToken }, { apiKey }, { key }
+      for (const field of ['accessToken', 'apiKey', 'api_key', 'key', 'value']) {
+        const v = obj?.[field];
+        if (typeof v === 'string' && v.length > 0) return v;
+      }
+      // JSON but no recognized field → treat as unusable
+      return null;
+    } catch {
+      // Not valid JSON despite leading '{' — fall through to bare-string path
+    }
+  }
+  return raw;
+}
+
+/**
  * Fetch API key from macOS Keychain.
- * Returns the trimmed key on success; null on any failure (miss, locked, timeout).
+ * Returns the bare API key on success; null on any failure (miss, locked, timeout).
  *
  * @param {string} account
  * @returns {string|null}
@@ -125,7 +173,7 @@ function fromKeychainMacOS(account) {
       }
     );
     const trimmed = typeof stdout === 'string' ? stdout.trim() : '';
-    return trimmed.length > 0 ? trimmed : null;
+    return _extractKey(trimmed);
   } catch {
     return null;
   }
