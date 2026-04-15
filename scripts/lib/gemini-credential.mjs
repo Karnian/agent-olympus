@@ -204,7 +204,9 @@ function fromSecretToolLinux(account) {
         }
       );
       const trimmed = typeof stdout === 'string' ? stdout.trim() : '';
-      return trimmed.length > 0 ? trimmed : null;
+      // gemini CLI's cross-platform storage writes JSON envelopes to
+      // libsecret too, not just macOS Keychain — apply the same unwrap.
+      return _extractKey(trimmed);
     } catch (err) {
       // ENOENT means THIS path doesn't have the binary — try the next candidate.
       // Any other error (exit!=0, D-Bus failure, etc.) means we reached the tool

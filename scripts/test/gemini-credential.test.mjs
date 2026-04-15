@@ -578,3 +578,21 @@ test('#33 malformed JSON with leading { falls through to bare-string handling', 
   __setExecFileSyncForTest(mockExec('{not json at all'));
   assert.equal(resolveGeminiApiKey(), '{not json at all');
 });
+
+test('#34 Linux secret-tool also unwraps JSON envelope (Codex review fix)', () => {
+  setPlatform('linux');
+  const envelope = JSON.stringify({
+    serverName: 'default-api-key',
+    token: { accessToken: TEST_KEY, tokenType: 'ApiKey' },
+    updatedAt: 1775660459156,
+  });
+  __setExecFileSyncForTest(mockExec(`${envelope}\n`));
+  assert.equal(resolveGeminiApiKey(), TEST_KEY,
+    'Linux path must apply _extractKey like macOS does');
+});
+
+test('#35 Linux bare-string path still works (backward compat)', () => {
+  setPlatform('linux');
+  __setExecFileSyncForTest(mockExec(`${TEST_KEY}\n`));
+  assert.equal(resolveGeminiApiKey(), TEST_KEY);
+});
