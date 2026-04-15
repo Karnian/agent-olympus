@@ -391,6 +391,15 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
   const codexLevel = resolveCodexApproval(autonomy, { cwd });
   demoteCodexWorkersIfNeeded(workers, codexLevel);
 
+  // Build credential resolver opts once (used by every gemini spawn below).
+  // gemini-exec / gemini-acp inject the resolved key into child process env
+  // at spawn time, so users with `gemini /auth` completed can run team
+  // sessions without exporting GEMINI_API_KEY.
+  const geminiCredential = {
+    useKeychain: autonomy.gemini?.useKeychain !== false,
+    account: autonomy.gemini?.keychainAccount || 'default-api-key',
+  };
+
   // Surface host-sandbox ambiguity to the user via wisdom. When the host is
   // clearly sandboxed (container/seccomp/etc) but detection couldn't pin
   // down a tier, silently trusting `permissions.allow` would be wrong.
@@ -540,7 +549,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
       // Spawn via gemini-acp adapter (multi-turn ACP JSON-RPC 2.0)
       let serverHandle = null;
       try {
-        serverHandle = geminiAcp.startServer({ cwd });
+        serverHandle = geminiAcp.startServer({ cwd, credential: geminiCredential });
         const initResult = await geminiAcp.initializeServer(serverHandle);
         if (initResult?.error) {
           throw new Error(initResult.error.message || 'Failed to initialize Gemini ACP server');
@@ -574,6 +583,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
           cwd,
           model: worker.model,
           approvalMode: worker.approvalMode,
+          credential: geminiCredential,
         });
         state.workers[i].status = 'running';
         state.workers[i].startedAt = new Date().toISOString();
