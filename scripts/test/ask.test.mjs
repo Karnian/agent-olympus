@@ -345,6 +345,34 @@ test('AC-9: buildSpawnOpts(gemini-exec) returns an approvalMode from resolveGemi
   );
 }));
 
+test('buildSpawnOpts(gemini-exec) threads credential config (useKeychain + account)', withTempCwd(async (cwd) => {
+  const opts = buildSpawnOpts('gemini-exec');
+  assert.ok(opts.credential, 'credential opts must be present');
+  assert.equal(typeof opts.credential.useKeychain, 'boolean');
+  assert.equal(typeof opts.credential.account, 'string');
+  assert.ok(opts.credential.account.length > 0, 'account must be non-empty');
+  // Defaults from DEFAULT_AUTONOMY_CONFIG
+  assert.equal(opts.credential.useKeychain, true);
+  assert.equal(opts.credential.account, 'default-api-key');
+}));
+
+test('buildSpawnOpts(gemini-exec) honors autonomy.json override for credential config', withTempCwd(async (cwd) => {
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  mkdirSync(join(cwd, '.ao'), { recursive: true });
+  writeFileSync(
+    join(cwd, '.ao', 'autonomy.json'),
+    JSON.stringify({ gemini: { useKeychain: false, keychainAccount: 'work-key' } })
+  );
+  const opts = buildSpawnOpts('gemini-exec');
+  assert.equal(opts.credential.useKeychain, false);
+  assert.equal(opts.credential.account, 'work-key');
+}));
+
+test('buildSpawnOpts(codex-exec) does NOT set credential opts (credential resolver is gemini-only)', withTempCwd(async (cwd) => {
+  const opts = buildSpawnOpts('codex-exec');
+  assert.equal(opts.credential, undefined);
+}));
+
 test('AC-9: buildSpawnOpts(codex-exec) does NOT set approvalMode (codex uses sandbox axis)', withTempCwd(async (cwd) => {
   const opts = buildSpawnOpts('codex-exec');
   // macOS symlinks /var → /private/var; process.cwd() returns realpath, so

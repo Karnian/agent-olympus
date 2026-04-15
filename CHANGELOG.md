@@ -1,5 +1,60 @@
 # Changelog
 
+## [1.1.1] - 2026-04-15
+
+### Feature — Gemini credential auto-resolver (no more `export GEMINI_API_KEY`)
+
+Agent Olympus now pulls `GEMINI_API_KEY` from the OS secret store at spawn time so users who ran `gemini /auth` once don't need to also export the key into their shell. The resolved key is injected into the child process env only — the parent `process.env` is never mutated.
+
+**What it does**
+- Resolution priority: `process.env.GEMINI_API_KEY` → macOS Keychain (`security find-generic-password -s gemini-cli-api-key -a <account> -w`) → Linux libsecret (`secret-tool`, with `/usr/bin` → `/usr/local/bin` → NixOS → PATH fallback) → `null`
+- Per-account `Map<'${platform}:${account}', {key, expiresAt}>` cache with 5-minute TTL (null results cached too to avoid re-hammering the keychain)
+- Automatic invalidation on `auth_failed` classification — supports in-session `/auth` recovery without restart
+- Empty-string env (`GEMINI_API_KEY=""`) is treated as explicit-disable and skips the keychain fallback, respecting user intent
+- JSON envelope detection — `gemini /auth` stores keys wrapped in a JSON blob (`{"token":{"accessToken":"AIza..."}}`); the resolver unwraps this and also handles bare-string entries from manual `security add-generic-password`
+
+**Coverage — every gemini spawn path**
+- `scripts/lib/gemini-exec.mjs` — single-turn `gemini --output-format json -p`
+- `scripts/lib/gemini-acp.mjs` — multi-turn ACP JSON-RPC via `gemini --acp` (invalidates cache on 401/403 from every early-return path: `initializeServer` / `createSession` / `loadSession` / `sendPrompt`)
+- `scripts/ask.mjs` — `/ask gemini` quick-query
+- `scripts/lib/worker-spawn.mjs` — Atlas/Athena team workers
+- `scripts/lib/tmux-session.mjs` — tmux fallback via `new-session -e GEMINI_API_KEY=<val>` so the key never enters `send-keys` input or `capture-pane` output; err.message redaction strips `*_KEY|*_TOKEN|*_SECRET|*_PASSWORD` values that tmux may echo into argv errors
+
+**Config** — `.ao/autonomy.json`:
+```json
+{
+  "gemini": {
+    "useKeychain": true,
+    "keychainAccount": "default-api-key"
+  }
+}
+```
+Defaults to ON; `useKeychain: false` disables the resolver entirely (env-only fallback). `keychainAccount` accepts any non-empty string — `execFile` argv prevents shell injection, no regex restriction needed.
+
+**Security posture**
+- Raw keys never logged. Diagnostic events emit as single-line JSON on stderr with masked keys (`AIza****xx` format)
+- `AO_DEBUG_GEMINI=1` env enables a `gemini-exec/acp: GEMINI_API_KEY=AIza****xx` debug line per spawn
+- tmux argv error leakage blocked via regex redaction
+- Cache lives in Node memory only; never written to disk
+
+**First-time macOS UX** — the first time Node invokes `security` from the plugin, macOS shows a Keychain access prompt ("node wants to use your keychain"). Click **Always Allow**. Subsequent calls complete in <100ms. If the user dismisses the prompt, the resolver times out at 10s and returns `null` — the gemini CLI then surfaces its own auth error.
+
+**Known limitation** — Windows Credential Manager support is deferred to v2. Windows users continue to set `GEMINI_API_KEY` in their shell/user env (one-time stderr notice emitted on first spawn).
+
+**Codex cross-review** — the implementation went through five rounds of Codex review: null-opts throw guard, empty-env fallthrough fix, per-account cache isolation (`Map` keyed on `platform:account`), Linux path hardcoding → multi-path fallback, ACP early-return paths (init/createSession/loadSession/sendPrompt) → shared `_maybeInvalidateOnAuthError` helper, tmux argv leak → error redaction. Real-world smoke testing caught two additional prod-only bugs: JSON envelope unwrapping (gemini CLI stores keys as JSON, not bare strings) and Keychain prompt latency (2s → 10s timeout).
+
+**Files**
+- `scripts/lib/gemini-credential.mjs` (new, 260 lines)
+- `scripts/lib/autonomy.mjs` (+ `useKeychain`, `keychainAccount` schema + validation)
+- `scripts/lib/gemini-exec.mjs`, `scripts/lib/gemini-acp.mjs` (resolver integration + invalidation hooks)
+- `scripts/ask.mjs`, `scripts/lib/worker-spawn.mjs`, `scripts/lib/tmux-session.mjs` (credential threading)
+- `CLAUDE.md` — new "Credential Resolution (Gemini)" subsection under Worker Adapter System + Known Limitations entry
+- `scripts/test/gemini-credential.test.mjs` (new, 40 cases), `scripts/test/autonomy.test.mjs` (+9), `scripts/test/ask.test.mjs` (+3), `scripts/test/gemini-exec.test.mjs` (+2), `scripts/test/gemini-acp.test.mjs` (+1)
+
+**Test coverage** — 1686 tests pass (+55 vs 1.1.0), zero regression.
+
+---
+
 ## [1.1.0] - 2026-04-14
 
 ### Security — Permission mirroring Plan A (multi-scope merge, broad/scoped split, fail-closed)

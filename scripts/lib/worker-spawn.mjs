@@ -391,6 +391,15 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
   const codexLevel = resolveCodexApproval(autonomy, { cwd });
   demoteCodexWorkersIfNeeded(workers, codexLevel);
 
+  // Build credential resolver opts once (used by every gemini spawn below).
+  // gemini-exec / gemini-acp inject the resolved key into child process env
+  // at spawn time, so users with `gemini /auth` completed can run team
+  // sessions without exporting GEMINI_API_KEY.
+  const geminiCredential = {
+    useKeychain: autonomy.gemini?.useKeychain !== false,
+    account: autonomy.gemini?.keychainAccount || 'default-api-key',
+  };
+
   // Surface host-sandbox ambiguity to the user via wisdom. When the host is
   // clearly sandboxed (container/seccomp/etc) but detection couldn't pin
   // down a tier, silently trusting `permissions.allow` would be wrong.
@@ -452,8 +461,30 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
 
   // Spawn tmux workers first (need sessions created in batch).
   // Tests can inject a fake createTeamSession to avoid real tmux.
+  //
+  // For gemini tmux workers, attach GEMINI_API_KEY to worker.env so
+  // createTeamSession passes it via `tmux new-session -e` — the key enters
+  // the shell's initial environment without being typed through send-keys,
+  // so it never appears in capture-pane output or shell history. If the
+  // resolver returns null (no key configured), we skip injection.
   const createTeamSessionFn = _inject?.createTeamSession || createTeamSession;
   const tmuxWorkers = workers.map((w, i) => ({ ...w, idx: i })).filter((_, i) => adapterNames[i] === 'tmux');
+  if (tmuxWorkers.length > 0) {
+    try {
+      const { resolveGeminiApiKey } = await import('./gemini-credential.mjs');
+      for (const tw of tmuxWorkers) {
+        if (tw.type !== 'gemini') continue;
+        // Respect an explicit caller override (including empty string for
+        // "explicitly disabled") — only auto-resolve when unset.
+        const existing = tw.env && Object.prototype.hasOwnProperty.call(tw.env, 'GEMINI_API_KEY');
+        if (existing) continue;
+        const key = resolveGeminiApiKey(geminiCredential);
+        if (key) {
+          tw.env = { ...(tw.env || {}), GEMINI_API_KEY: key };
+        }
+      }
+    } catch { /* resolver missing or failed — fall through without env injection */ }
+  }
   let sessions = [];
   if (tmuxWorkers.length > 0) {
     sessions = createTeamSessionFn(teamName, tmuxWorkers, cwd);
@@ -540,7 +571,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
       // Spawn via gemini-acp adapter (multi-turn ACP JSON-RPC 2.0)
       let serverHandle = null;
       try {
-        serverHandle = geminiAcp.startServer({ cwd });
+        serverHandle = geminiAcp.startServer({ cwd, credential: geminiCredential });
         const initResult = await geminiAcp.initializeServer(serverHandle);
         if (initResult?.error) {
           throw new Error(initResult.error.message || 'Failed to initialize Gemini ACP server');
@@ -574,6 +605,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
           cwd,
           model: worker.model,
           approvalMode: worker.approvalMode,
+          credential: geminiCredential,
         });
         state.workers[i].status = 'running';
         state.workers[i].startedAt = new Date().toISOString();

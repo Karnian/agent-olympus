@@ -35,6 +35,7 @@
 import { spawn as nodeSpawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
+import { resolveGeminiApiKey, maskKey, invalidateCache } from './gemini-credential.mjs';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -147,6 +148,26 @@ export function classifyMessage(msg) {
  * @param {Object|null|undefined} errorObj - The JSON-RPC error object `{ code, message, data? }`
  * @returns {string} Error category string
  */
+/**
+ * Inspect a JSON-RPC error payload and invalidate the credential cache if it
+ * matches an auth failure category. Used on EVERY path that surfaces a
+ * response.error (initializeServer / createSession / loadSession / sendPrompt
+ * / setSessionMode / monitor). Invalidating early — before the error reaches
+ * the caller — ensures the next spawn re-reads the keychain even when the
+ * caller never reaches monitor().
+ *
+ * @param {GeminiAcpHandle} handle
+ * @param {Object} errorObj - JSON-RPC error (code/message) or { message }
+ */
+function _maybeInvalidateOnAuthError(handle, errorObj) {
+  try {
+    const category = mapGeminiAcpError(errorObj);
+    if (category === 'auth_failed' && handle && handle._credentialAccount) {
+      invalidateCache(handle._credentialAccount, 'auth_failed');
+    }
+  } catch { /* never throw from logging/cache paths */ }
+}
+
 export function mapGeminiAcpError(errorObj) {
   if (!errorObj) return 'unknown';
 
@@ -243,14 +264,32 @@ export function startServer(opts = {}) {
   const geminiPath = resolveBinary('gemini');
   const args = ['--acp'];
 
+  // Resolve GEMINI_API_KEY from the OS secret store before spawning; see
+  // scripts/lib/gemini-credential.mjs. Parent process.env stays unmodified;
+  // caller-supplied opts.env wins over resolver result.
+  const credOpts = opts.credential || {};
+  const resolvedKey = resolveGeminiApiKey({
+    useKeychain: credOpts.useKeychain !== false,
+    account: credOpts.account || 'default-api-key',
+  });
+  const mergedEnv = {
+    ...process.env,
+    PATH: buildEnhancedPath(),
+    ...(resolvedKey ? { GEMINI_API_KEY: resolvedKey } : {}),
+    ...opts.env,
+  };
+  if (process.env.AO_DEBUG_GEMINI) {
+    try {
+      process.stderr.write(
+        `gemini-acp: GEMINI_API_KEY=${maskKey(mergedEnv.GEMINI_API_KEY)}\n`
+      );
+    } catch { /* never throw from logging */ }
+  }
+
   const child = nodeSpawn(geminiPath, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      PATH: buildEnhancedPath(),
-      ...opts.env,
-    },
+    env: mergedEnv,
     detached: true,
   });
 
@@ -275,6 +314,10 @@ export function startServer(opts = {}) {
     _messageQueue: [],
     _draining: false,
     _deadLetters: [],
+    // Account name used to resolve GEMINI_API_KEY for this session — the auth
+    // error classifier calls invalidateCache(handle._credentialAccount) on
+    // ACP JSON-RPC auth failures so the next spawn re-reads the keychain.
+    _credentialAccount: credOpts.account || 'default-api-key',
   };
 
   // Parse stdout as JSONL — each newline-terminated line is a JSON-RPC message
@@ -556,6 +599,7 @@ export async function initializeServer(handle, clientInfo) {
   );
 
   if (response.error) {
+    _maybeInvalidateOnAuthError(handle, response.error);
     return { error: response.error };
   }
 
@@ -589,6 +633,7 @@ export async function createSession(handle, opts = {}) {
   const response = await sendRequest(handle, 'newSession', params);
 
   if (response.error) {
+    _maybeInvalidateOnAuthError(handle, response.error);
     return { error: response.error };
   }
 
@@ -634,6 +679,7 @@ export async function loadSession(handle, sessionId) {
   const response = await sendRequest(handle, 'loadSession', { sessionId });
 
   if (response.error) {
+    _maybeInvalidateOnAuthError(handle, response.error);
     return { error: response.error };
   }
 
@@ -678,6 +724,7 @@ export async function sendPrompt(handle, prompt, opts = {}) {
   if (response.error) {
     handle.status = 'failed';
     handle._turnError = response.error;
+    _maybeInvalidateOnAuthError(handle, response.error);
     return {
       status: 'failed',
       output: '',
@@ -753,6 +800,11 @@ export function monitor(handle) {
       message,
       exitCode: handle._exitCode,
     };
+    // See gemini-exec.mjs — auth failure invalidates the cached credential
+    // so the next startServer() re-reads the keychain.
+    if (category === 'auth_failed' && handle._credentialAccount) {
+      try { invalidateCache(handle._credentialAccount, 'auth_failed'); } catch { /* never throw */ }
+    }
   }
 
   // Surface warnings from session setup (e.g., failed setSessionMode)

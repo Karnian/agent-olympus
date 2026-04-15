@@ -106,8 +106,22 @@ export function createTeamSession(teamName, workers, cwd) {
       const tmux = resolveBinary('tmux');
       try { execFileSync(tmux, ['kill-session', '-t', name], { stdio: 'pipe' }); } catch {}
 
-      // Create new detached session rooted at the worker's worktree (or cwd on fallback)
-      execFileSync(tmux, ['new-session', '-d', '-s', name, '-c', sessionCwd], { stdio: 'pipe' });
+      // Create new detached session rooted at the worker's worktree (or cwd on fallback).
+      // Worker-scoped env vars (e.g. GEMINI_API_KEY resolved from the OS secret
+      // store) are passed via `tmux new-session -e KEY=VAL` so they enter the
+      // shell's initial environment without ever appearing in send-keys input
+      // or capture-pane output. Fail-safe: if worker.env is missing/malformed,
+      // we fall back to the minimal `new-session` call.
+      const newSessionArgs = ['new-session', '-d', '-s', name, '-c', sessionCwd];
+      const workerEnv = worker && typeof worker.env === 'object' && worker.env ? worker.env : null;
+      if (workerEnv) {
+        for (const [k, v] of Object.entries(workerEnv)) {
+          if (typeof k !== 'string' || !k) continue;
+          if (typeof v !== 'string' || !v) continue;
+          newSessionArgs.push('-e', `${k}=${v}`);
+        }
+      }
+      execFileSync(tmux, newSessionArgs, { stdio: 'pipe' });
 
       // Inject resolved PATH so CLIs (codex, claude, etc.) are always findable,
       // even when the tmux shell doesn't inherit the parent's full PATH.
@@ -125,11 +139,17 @@ export function createTeamSession(teamName, workers, cwd) {
         worktreeCreated: worktreeInfo.created,
       });
     } catch (err) {
+      // Redact any secret values that may have been embedded in argv
+      // (e.g. `-e GEMINI_API_KEY=<val>`) before surfacing the error — tmux
+      // argv errors echo the full command line, and that error.message can
+      // persist in state files read by the user.
+      const rawMsg = typeof err?.message === 'string' ? err.message : String(err);
+      const safeMsg = rawMsg.replace(/([A-Z][A-Z0-9_]*_(?:KEY|TOKEN|SECRET|PASSWORD))=\S+/g, '$1=<redacted>');
       results.push({
         name: worker.name,
         session: name,
         status: 'failed',
-        error: err.message,
+        error: safeMsg,
         worktreePath: worktreeInfo.worktreePath,
         branchName: worktreeInfo.branchName,
         worktreeCreated: worktreeInfo.created,

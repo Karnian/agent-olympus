@@ -321,3 +321,76 @@ test('validateAutonomyConfig: codex.hostSandbox and codex.approval coexist', () 
   const r = validateAutonomyConfig(cfg);
   assert.deepEqual(r.errors, []);
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// gemini.useKeychain + gemini.keychainAccount (v1.1 credential resolver)
+// ───────────────────────────────────────────────────────────────────────────
+
+test('DEFAULT_AUTONOMY_CONFIG: gemini.useKeychain defaults to true', () => {
+  assert.equal(DEFAULT_AUTONOMY_CONFIG.gemini.useKeychain, true);
+});
+
+test('DEFAULT_AUTONOMY_CONFIG: gemini.keychainAccount defaults to default-api-key', () => {
+  assert.equal(DEFAULT_AUTONOMY_CONFIG.gemini.keychainAccount, 'default-api-key');
+});
+
+test('validateAutonomyConfig: gemini.useKeychain accepts booleans', () => {
+  for (const val of [true, false]) {
+    const cfg = minimal();
+    cfg.gemini.useKeychain = val;
+    const r = validateAutonomyConfig(cfg);
+    assert.deepEqual(r.errors, [], `useKeychain=${val} should be valid`);
+  }
+});
+
+test('validateAutonomyConfig: gemini.useKeychain rejects non-boolean', () => {
+  const cfg = minimal();
+  cfg.gemini.useKeychain = 'yes';
+  const r = validateAutonomyConfig(cfg);
+  assert.ok(r.errors.some(e => /gemini\.useKeychain must be a boolean/.test(e)));
+});
+
+test('validateAutonomyConfig: gemini.keychainAccount accepts non-empty strings', () => {
+  for (const acct of ['default-api-key', 'work', 'user@example.com', 'team:prod', 'a']) {
+    const cfg = minimal();
+    cfg.gemini.keychainAccount = acct;
+    const r = validateAutonomyConfig(cfg);
+    assert.deepEqual(r.errors, [], `account="${acct}" should be valid`);
+  }
+});
+
+test('validateAutonomyConfig: gemini.keychainAccount rejects empty/whitespace-only strings', () => {
+  for (const bad of ['', '   ', '\t\n']) {
+    const cfg = minimal();
+    cfg.gemini.keychainAccount = bad;
+    const r = validateAutonomyConfig(cfg);
+    assert.ok(
+      r.errors.some(e => /gemini\.keychainAccount must be a non-empty string/.test(e)),
+      `account=${JSON.stringify(bad)} should fail`
+    );
+  }
+});
+
+test('validateAutonomyConfig: gemini.keychainAccount rejects non-string types', () => {
+  const cfg = minimal();
+  cfg.gemini.keychainAccount = 42;
+  const r = validateAutonomyConfig(cfg);
+  assert.ok(r.errors.some(e => /gemini\.keychainAccount must be a non-empty string/.test(e)));
+});
+
+test('validateAutonomyConfig: omitted gemini.useKeychain + keychainAccount is fine (optional)', () => {
+  const cfg = minimal();
+  delete cfg.gemini.useKeychain;
+  delete cfg.gemini.keychainAccount;
+  const r = validateAutonomyConfig(cfg);
+  assert.deepEqual(r.errors, []);
+});
+
+test('validateAutonomyConfig: gemini fields coexist (approval + useKeychain + keychainAccount)', () => {
+  const cfg = minimal();
+  cfg.gemini.approval = 'yolo';
+  cfg.gemini.useKeychain = false;
+  cfg.gemini.keychainAccount = 'work-api-key';
+  const r = validateAutonomyConfig(cfg);
+  assert.deepEqual(r.errors, []);
+});

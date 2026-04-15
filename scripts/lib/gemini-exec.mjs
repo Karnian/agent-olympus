@@ -25,6 +25,7 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
+import { resolveGeminiApiKey, maskKey, invalidateCache } from './gemini-credential.mjs';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -176,10 +177,34 @@ export function spawn(prompt, opts = {}) {
   // Prompt as positional arg via -p flag
   args.push('-p', prompt);
 
+  // Resolve GEMINI_API_KEY from the OS secret store (macOS Keychain / Linux
+  // secret-tool) so users who ran `gemini /auth` don't need to ALSO export
+  // the key into their shell. Null result = no injection (lets gemini CLI
+  // surface its own auth error if the user also lacks env). opts.env wins
+  // last — caller override is always respected.
+  const credOpts = opts.credential || {};
+  const resolvedKey = resolveGeminiApiKey({
+    useKeychain: credOpts.useKeychain !== false,
+    account: credOpts.account || 'default-api-key',
+  });
+  const mergedEnv = {
+    ...process.env,
+    PATH: buildEnhancedPath(),
+    ...(resolvedKey ? { GEMINI_API_KEY: resolvedKey } : {}),
+    ...opts.env,
+  };
+  if (process.env.AO_DEBUG_GEMINI) {
+    try {
+      process.stderr.write(
+        `gemini-exec: GEMINI_API_KEY=${maskKey(mergedEnv.GEMINI_API_KEY)}\n`
+      );
+    } catch { /* never throw from logging */ }
+  }
+
   const child = nodeSpawn(geminiPath, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env, PATH: buildEnhancedPath(), ...opts.env },
+    env: mergedEnv,
     detached: true, // Required for process-group cleanup
   });
 
@@ -198,6 +223,10 @@ export function spawn(prompt, opts = {}) {
     _usage: null,
     _exitCode: null,
     _stderrChunks: [],
+    // Account name used to resolve GEMINI_API_KEY for this spawn — the error
+    // classifier reads this to invalidate the right cache entry on auth
+    // failure, so the next spawn re-reads the keychain.
+    _credentialAccount: credOpts.account || 'default-api-key',
   };
 
   // Accumulate stdout — Gemini emits a single JSON object at the end, not streaming
@@ -267,6 +296,12 @@ export function monitor(handle) {
       message: stderr || 'Gemini process failed',
       exitCode: handle._exitCode,
     };
+    // Auth failure means the cached key is stale (rotated, revoked, or the
+    // entry points at a different project). Invalidate so the next spawn
+    // re-reads the keychain — supports in-session /auth recovery.
+    if (category === 'auth_failed' && handle._credentialAccount) {
+      try { invalidateCache(handle._credentialAccount, 'auth_failed'); } catch { /* never throw */ }
+    }
   }
 
   if (handle._usage) {

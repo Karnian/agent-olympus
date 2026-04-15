@@ -218,6 +218,14 @@ export function buildSpawnOpts(adapterName) {
     try {
       const autonomy = loadAutonomyConfig(process.cwd());
       opts.approvalMode = resolveGeminiApproval(autonomy, { cwd: process.cwd() });
+      // Thread credential resolver config so gemini-exec can pull the key
+      // from the OS secret store (macOS Keychain / Linux secret-tool) at
+      // spawn time — users running `gemini /auth` once don't need to also
+      // export GEMINI_API_KEY.
+      opts.credential = {
+        useKeychain: autonomy.gemini?.useKeychain !== false,
+        account: autonomy.gemini?.keychainAccount || 'default-api-key',
+      };
     } catch { /* fall through */ }
   }
   return opts;

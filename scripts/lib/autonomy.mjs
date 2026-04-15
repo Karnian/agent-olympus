@@ -49,6 +49,8 @@ export const DEFAULT_AUTONOMY_CONFIG = {
   },
   gemini: {
     approval: 'auto',
+    useKeychain: true,
+    keychainAccount: 'default-api-key',
   },
   nativeTeams: false,
   planExecution: 'ask',
@@ -262,6 +264,27 @@ export function validateAutonomyConfig(config) {
             errors.push(
               'config.gemini.approval must be one of: auto, default, auto_edit, yolo, plan; received: ' +
               JSON.stringify(approval)
+            );
+          }
+        }
+
+        // useKeychain: opt-out toggle for credential resolver
+        if (config.gemini.useKeychain !== undefined && typeof config.gemini.useKeychain !== 'boolean') {
+          errors.push(
+            'config.gemini.useKeychain must be a boolean; received: ' +
+            JSON.stringify(config.gemini.useKeychain)
+          );
+        }
+
+        // keychainAccount: which account to look up in the secret store.
+        // Accepts any non-empty string — execFile argv prevents shell injection,
+        // so no regex restriction is needed.
+        if (config.gemini.keychainAccount !== undefined) {
+          const acct = config.gemini.keychainAccount;
+          if (typeof acct !== 'string' || !acct.trim()) {
+            errors.push(
+              'config.gemini.keychainAccount must be a non-empty string; received: ' +
+              JSON.stringify(acct)
             );
           }
         }

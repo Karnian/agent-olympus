@@ -538,3 +538,93 @@ test('all required exports are present and callable', async () => {
   assert.equal(typeof mod.parseGeminiJsonOutput, 'function', 'parseGeminiJsonOutput must be exported');
   // buildEnhancedPath is now imported from resolve-binary.mjs, not gemini-exec.mjs
 });
+
+// ─── Credential invalidation on auth_failed ───────────────────────────────────
+
+test('collect(): auth_failed category triggers invalidateCache for handle._credentialAccount', async () => {
+  const mod = await import('../lib/gemini-exec.mjs');
+  const credMod = await import('../lib/gemini-credential.mjs');
+
+  // Populate cache with a fake entry for account 'test-acct'
+  credMod.__resetForTest();
+  credMod.__setExecFileSyncForTest(() => 'populated-key\n');
+  // Resolve once to populate
+  const originalPlatform = process.platform;
+  Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+  try {
+    const pre = credMod.resolveGeminiApiKey({ account: 'test-acct' });
+    assert.equal(pre, 'populated-key');
+
+    // Build a failed handle WITH _credentialAccount set, simulating an auth rejection
+    const handle = {
+      status: 'failed',
+      _output: '',
+      _events: [],
+      _stderrChunks: ['Error: authentication failed: invalid API key\n'],
+      _exitCode: 1,
+      _credentialAccount: 'test-acct',
+    };
+
+    // Swap the mock so any re-read would produce a different key —
+    // we'll verify the resolver refetches, proving cache was invalidated.
+    credMod.__setExecFileSyncForTest(() => 'rotated-key\n');
+
+    // Silence stderr during collect (invalidation event log)
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = () => true;
+    try {
+      const result = await mod.collect(handle);
+      assert.equal(result.error?.category, 'auth_failed');
+    } finally {
+      process.stderr.write = origWrite;
+    }
+
+    // After invalidation, next resolve for same account should hit execFileSync
+    // and return the new mock value.
+    const post = credMod.resolveGeminiApiKey({ account: 'test-acct' });
+    assert.equal(post, 'rotated-key', 'cache must have been invalidated by auth_failed');
+  } finally {
+    Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    credMod.__resetForTest();
+  }
+});
+
+test('collect(): non-auth errors do NOT invalidate cache', async () => {
+  const mod = await import('../lib/gemini-exec.mjs');
+  const credMod = await import('../lib/gemini-credential.mjs');
+
+  credMod.__resetForTest();
+  const originalPlatform = process.platform;
+  Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+  let callCount = 0;
+  credMod.__setExecFileSyncForTest(() => { callCount++; return 'stable-key\n'; });
+  try {
+    credMod.resolveGeminiApiKey({ account: 'stable-acct' });
+    assert.equal(callCount, 1);
+
+    // Simulate a rate_limited error
+    const handle = {
+      status: 'failed',
+      _output: '',
+      _events: [],
+      _stderrChunks: ['Error: rate limit exceeded (429)\n'],
+      _exitCode: 1,
+      _credentialAccount: 'stable-acct',
+    };
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = () => true;
+    try {
+      const r = await mod.collect(handle);
+      assert.equal(r.error?.category, 'rate_limited');
+    } finally {
+      process.stderr.write = origWrite;
+    }
+
+    // Cache must still be intact — second resolve should NOT refetch
+    credMod.resolveGeminiApiKey({ account: 'stable-acct' });
+    assert.equal(callCount, 1, 'rate_limited must not invalidate credential cache');
+  } finally {
+    Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    credMod.__resetForTest();
+  }
+});

@@ -302,6 +302,68 @@ Atlas/Athena automatically detect available capabilities via `runPreflight()` an
 - Cross-validation priority: Codex → Gemini fallback → skip with explicit record
 - Trivial tasks automatically use Claude-only (no external model overhead)
 
+### Credential Resolution (Gemini)
+
+Gemini workers resolve `GEMINI_API_KEY` at spawn time via
+`scripts/lib/gemini-credential.mjs`. Users who already ran `gemini /auth`
+(which stores the key in the OS secret store) do **not** need to also
+export the key into their shell — Agent Olympus fetches it per-spawn and
+injects into the child process env. The parent `process.env` is never
+mutated.
+
+**Resolution priority** (first hit wins):
+
+1. `process.env.GEMINI_API_KEY` — if set (non-empty), used verbatim. An
+   explicitly empty value (`GEMINI_API_KEY=""`) is treated as "disable"
+   and **skips** the keychain fallback, respecting user intent.
+2. **macOS Keychain** — `security find-generic-password -s gemini-cli-api-key -a <account> -w`
+3. **Linux libsecret** — `secret-tool lookup service gemini-cli-api-key account <account>`
+   (tries `/usr/bin`, `/usr/local/bin`, NixOS paths, then `PATH`)
+4. `null` — spawn proceeds without the env var, letting the gemini CLI
+   produce its own auth error if the user has no other credential source
+
+**Caching**: Per-account `Map<'${platform}:${account}', ...>` with 5-minute
+TTL. Null results are cached too (avoids re-hammering the keychain on
+every spawn when no key is stored). On `auth_failed` category from the
+exec/acp error classifiers, the cache entry for that account is
+invalidated so the next spawn re-reads the secret store — supports
+`/auth` recovery within a single session.
+
+**Spawn paths covered**:
+- `scripts/lib/gemini-exec.mjs` — single-turn `gemini --output-format json -p`
+- `scripts/lib/gemini-acp.mjs` — multi-turn ACP JSON-RPC via `gemini --acp`
+  (invalidates cache on 401/403 from every early-return path:
+  initializeServer / createSession / loadSession / sendPrompt)
+- `scripts/ask.mjs` — `/ask gemini` quick-query
+- `scripts/lib/worker-spawn.mjs` — Atlas/Athena team workers
+- `scripts/lib/tmux-session.mjs` — tmux fallback (via `new-session -e KEY=VAL`
+  so the key never enters `send-keys` input or `capture-pane` output)
+
+**Config** (`.ao/autonomy.json`):
+```json
+{
+  "gemini": {
+    "useKeychain": true,
+    "keychainAccount": "default-api-key"
+  }
+}
+```
+Defaults are `useKeychain: true` + `keychainAccount: 'default-api-key'`
+(matches the gemini CLI's own default account). Set `useKeychain: false`
+to disable the resolver entirely (env-only fallback). `keychainAccount`
+accepts any non-empty string including characters like `:`, `@`, `.`
+since `execFile` argv prevents shell injection.
+
+**First-time macOS UX**: The first time Agent Olympus invokes `security find-generic-password` from Node, macOS shows a Keychain access prompt ("`node` wants to use your confidential information stored in `gemini-cli-api-key`"). Click **Always Allow**. Subsequent calls complete in <100ms. If the user dismisses the prompt, the resolver times out at `EXEC_TIMEOUT_MS` (10s) and returns `null` — the gemini CLI then surfaces its own auth error.
+
+**Logging & security**:
+- Raw keys are never logged. Diagnostic events emit as single-line JSON on
+  stderr with masked keys: `{"event":"gemini_credential_cache_invalidated","account":"...","reason":"auth_failed"}`
+- `AO_DEBUG_GEMINI=1` env var enables a `gemini-exec/acp: GEMINI_API_KEY=AIza****xx` line per spawn (mask only)
+- tmux error messages are redacted via regex — any `*_KEY`, `*_TOKEN`,
+  `*_SECRET`, `*_PASSWORD` values in argv echoes are replaced with
+  `<redacted>` before reaching state files.
+
 ### Gemini Team Communication
 Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), Gemini ACP only accepts new prompts between turns. Team communication uses a message queue pattern:
 - `enqueueMessage(handle, message, { from, priority })` — queues messages during active turns
@@ -313,6 +375,7 @@ Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), G
 
 - **`--bare` mode**: When Claude Code is run with the `--bare` flag, all hooks, plugins, and skill directory walks are skipped. Agent Olympus hooks will not fire in this mode. This flag is intended for scripted `-p` calls and requires `ANTHROPIC_API_KEY` or `apiKeyHelper`.
 - **Sandbox mode**: Hook scripts should be tested with Claude Code's sandbox mode enabled (available on Linux and Mac). All scripts use Node.js built-ins only, so they should be compatible, but edge cases around file system access in `.ao/` may arise.
+- **Gemini credential resolver — Windows**: The auto-resolver in `scripts/lib/gemini-credential.mjs` supports macOS Keychain and Linux libsecret in v1. Windows Credential Manager integration is deferred to v2. Windows users must set `GEMINI_API_KEY` in their shell/user env (one-time stderr notice is emitted on first spawn).
 
 ## Testing
 
