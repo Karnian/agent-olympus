@@ -69,6 +69,25 @@ If the command prints `OK: no prompt, ACL ok` immediately (no password dialog, n
 - **macOS security updates** occasionally reset ACL trust for system binaries. If the prompt returns after a macOS upgrade, repeat the fix.
 - **Non-macOS platforms** don't have this problem — Linux libsecret (`secret-tool`) uses D-Bus authorization with different semantics.
 
+## Diagnosing which branch is failing
+
+`AO_DEBUG_CREDENTIAL=1` emits one JSON line per resolver call on stderr. `AO_DEBUG_GEMINI=1` does the same plus per-spawn masked-key logging. Example:
+
+```bash
+AO_DEBUG_CREDENTIAL=1 <your AO command> 2> >(grep gemini_cred_resolve)
+```
+
+Typical patterns you'll see at `stage: "end"`:
+
+- `{"result":"hit","source":"macos_security","elapsedMs":42,"keyMask":"AIza****xx"}` — everything working.
+- `{"result":"miss","source":"macos_security","stderrClass":"not_found","exitCode":44}` — the item isn't in the keychain; run `gemini /auth` first.
+- `{"result":"error","source":"macos_security","stderrClass":"timeout","elapsedMs":10002}` — the Keychain password dialog stayed unanswered past the 10s timeout; the ACL needs fixing (Option 1 or 2 above).
+- `{"result":"error","source":"macos_security","stderrClass":"acl_denied","exitCode":51}` — ACL rejected the read after the dialog was answered; likely clicked "Deny" or a subsequent policy rejected the app.
+- `{"result":"hit","source":"cache","elapsedMs":0}` — a previous resolution succeeded and is still within TTL; no actual keychain hit this time.
+- `{"result":"hit","source":"env"}` — `GEMINI_API_KEY` was set in the environment, keychain was not consulted.
+
+The key in each event is masked to `AIza****xx`; raw key material never appears in the event stream, even when the child process error dumped it into `stderr`/`message`.
+
 ## Future work (not available yet)
 
 A `credentialSource` option in `.ao/autonomy.json` is planned:
@@ -82,6 +101,6 @@ A `credentialSource` option in `.ao/autonomy.json` is planned:
 }
 ```
 
-With `ao-keychain`, a one-time setup wizard will write an AO-owned keychain item (`agent-olympus.gemini-api-key`) with `/usr/bin/security` pre-listed as trusted, eliminating prompts entirely. A companion `AO_DEBUG_CREDENTIAL=1` tracing flag will emit `gemini_cred_resolve` events to stderr to help diagnose which branch (miss vs. ACL prompt vs. timeout) is failing.
+With `ao-keychain`, a one-time setup wizard will write an AO-owned keychain item (`agent-olympus.gemini-api-key`) with `/usr/bin/security` pre-listed as trusted, eliminating prompts entirely.
 
-Track progress in the roadmap; until those ship, Options 1–3 above are the supported workarounds.
+Track progress in the roadmap; until that ships, Options 1–3 above are the supported workarounds.

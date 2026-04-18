@@ -95,6 +95,79 @@ export function maskKey(key) {
   return `${key.slice(0, 4)}****${key.slice(-2)}`;
 }
 
+// ─── Tracing helpers ──────────────────────────────────────────────────────────
+
+/**
+ * True when credential resolution tracing should emit events to stderr.
+ * Enabled by either AO_DEBUG_CREDENTIAL=1 (specific) or AO_DEBUG_GEMINI=1
+ * (broader umbrella). Both accept '1' exactly — no truthy coercion so that
+ * accidental values like 'false' or '0' don't turn tracing on.
+ */
+function _traceEnabled() {
+  return process.env.AO_DEBUG_CREDENTIAL === '1'
+    || process.env.AO_DEBUG_GEMINI === '1';
+}
+
+/**
+ * Emit a single diagnostic event as one JSON line on stderr.
+ * No-op unless tracing is enabled; never throws.
+ *
+ * @param {object} event
+ */
+function _emitEvent(event) {
+  if (!_traceEnabled()) return;
+  try {
+    process.stderr.write(JSON.stringify(event) + '\n');
+  } catch {
+    // never throw from logging
+  }
+}
+
+/**
+ * Classify an execFileSync error into a coarse category useful for
+ * distinguishing "keychain item missing" from "macOS prompt dismissed" from
+ * "`security` binary not on PATH". The stderrClass/exitCode fields are
+ * safe for logs — no secret material and no PII.
+ *
+ * macOS `security` CLI exit codes used below are the low byte of the
+ * Security framework OSStatus returned by the underlying call. Only the
+ * two we have high confidence in are mapped:
+ *   44 = errSecItemNotFound (-25300 & 0xff) — item missing from keychain
+ *   51 = errSecAuthFailed   (-25293 & 0xff) — auth/ACL denied
+ *
+ * Everything else (including user cancel, which shows up as the mangled
+ * low byte of -60006 or -128 depending on the path) is surfaced as
+ * `unknown` with the raw exit code. Operators can look up the original
+ * OSStatus via `security error <n>` without us claiming a meaning we
+ * can't cleanly prove.
+ *
+ * @param {unknown} err
+ * @returns {{ stderrClass: string, exitCode: (number|null), errnoCode: (string|null) }}
+ */
+function _classifyError(err) {
+  if (!err || typeof err !== 'object') {
+    return { stderrClass: 'unknown', exitCode: null, errnoCode: null };
+  }
+  const e = /** @type {any} */ (err);
+  // Node child_process timeout kills the child with SIGTERM and sets killed=true.
+  // Some Node versions also set err.code === 'ETIMEDOUT'. Handle both.
+  if (e.code === 'ETIMEDOUT'
+    || (e.killed === true && (e.signal === 'SIGTERM' || e.signal === 'SIGKILL'))) {
+    return { stderrClass: 'timeout', exitCode: null, errnoCode: e.code ?? null };
+  }
+  if (e.code === 'ENOENT') {
+    return { stderrClass: 'binary_not_found', exitCode: null, errnoCode: 'ENOENT' };
+  }
+  if (typeof e.status === 'number') {
+    switch (e.status) {
+      case 44: return { stderrClass: 'not_found', exitCode: 44, errnoCode: null };
+      case 51: return { stderrClass: 'acl_denied', exitCode: 51, errnoCode: null };
+      default: return { stderrClass: 'unknown', exitCode: e.status, errnoCode: null };
+    }
+  }
+  return { stderrClass: 'unknown', exitCode: null, errnoCode: e.code ?? null };
+}
+
 /**
  * Invalidate cached credential for a specific account, or all accounts.
  * Call this from adapter error classifiers when an auth failure is detected —
@@ -173,7 +246,23 @@ function _extractKey(raw) {
  * @param {string} account
  * @returns {string|null}
  */
+/**
+ * @typedef {Object} FetchResult
+ * @property {string|null} key - extracted API key on success, null otherwise
+ * @property {'hit'|'miss'|'error'} result - classification for tracing + downstream
+ * @property {string|null} [stderrClass] - present when result='miss'|'error' with a known cause
+ * @property {number|null} [exitCode]
+ * @property {string|null} [errnoCode]
+ */
+
+/**
+ * Fetch API key from macOS Keychain.
+ *
+ * @param {string} account
+ * @returns {FetchResult}
+ */
 function fromKeychainMacOS(account) {
+  const startedAt = Date.now();
   try {
     const stdout = _execFileSync(
       MACOS_SECURITY_BIN,
@@ -186,9 +275,38 @@ function fromKeychainMacOS(account) {
       }
     );
     const trimmed = typeof stdout === 'string' ? stdout.trim() : '';
-    return _extractKey(trimmed);
-  } catch {
-    return null;
+    const key = _extractKey(trimmed);
+    _emitEvent({
+      event: 'gemini_cred_resolve',
+      stage: 'fetch_end',
+      backend: 'macos_security',
+      account,
+      result: key ? 'hit' : 'miss',
+      elapsedMs: Date.now() - startedAt,
+      keyMask: key ? maskKey(key) : null,
+    });
+    return { key, result: key ? 'hit' : 'miss' };
+  } catch (err) {
+    const cls = _classifyError(err);
+    const result = cls.stderrClass === 'not_found' ? 'miss' : 'error';
+    _emitEvent({
+      event: 'gemini_cred_resolve',
+      stage: 'fetch_end',
+      backend: 'macos_security',
+      account,
+      result,
+      elapsedMs: Date.now() - startedAt,
+      stderrClass: cls.stderrClass,
+      exitCode: cls.exitCode,
+      errnoCode: cls.errnoCode,
+    });
+    return {
+      key: null,
+      result,
+      stderrClass: cls.stderrClass,
+      exitCode: cls.exitCode,
+      errnoCode: cls.errnoCode,
+    };
   }
 }
 
@@ -199,11 +317,18 @@ function fromKeychainMacOS(account) {
  * @param {string} account
  * @returns {string|null}
  */
+/**
+ * Fetch API key from Linux libsecret via secret-tool.
+ *
+ * @param {string} account
+ * @returns {FetchResult}
+ */
 function fromSecretToolLinux(account) {
   // Try each known absolute path in order, then plain 'secret-tool' (PATH lookup).
   // execFileSync with bin name (no slash) uses the env PATH in the child spec
   // — safe because args are argv (no shell interpolation).
   const candidates = [...LINUX_SECRET_TOOL_BINS, 'secret-tool'];
+  const startedAt = Date.now();
   for (const bin of candidates) {
     try {
       const stdout = _execFileSync(
@@ -219,17 +344,64 @@ function fromSecretToolLinux(account) {
       const trimmed = typeof stdout === 'string' ? stdout.trim() : '';
       // gemini CLI's cross-platform storage writes JSON envelopes to
       // libsecret too, not just macOS Keychain — apply the same unwrap.
-      return _extractKey(trimmed);
+      const key = _extractKey(trimmed);
+      _emitEvent({
+        event: 'gemini_cred_resolve',
+        stage: 'fetch_end',
+        backend: 'linux_secret_tool',
+        account,
+        result: key ? 'hit' : 'miss',
+        elapsedMs: Date.now() - startedAt,
+        binary: bin,
+        keyMask: key ? maskKey(key) : null,
+      });
+      return { key, result: key ? 'hit' : 'miss' };
     } catch (err) {
       // ENOENT means THIS path doesn't have the binary — try the next candidate.
       // Any other error (exit!=0, D-Bus failure, etc.) means we reached the tool
-      // but it couldn't resolve the key — stop and return null (don't retry
+      // but it couldn't resolve the key — stop and return error (don't retry
       // with a different path, we already found a working binary).
       if (err && err.code === 'ENOENT') continue;
-      return null;
+      const cls = _classifyError(err);
+      _emitEvent({
+        event: 'gemini_cred_resolve',
+        stage: 'fetch_end',
+        backend: 'linux_secret_tool',
+        account,
+        result: 'error',
+        elapsedMs: Date.now() - startedAt,
+        binary: bin,
+        stderrClass: cls.stderrClass,
+        exitCode: cls.exitCode,
+        errnoCode: cls.errnoCode,
+      });
+      return {
+        key: null,
+        result: 'error',
+        stderrClass: cls.stderrClass,
+        exitCode: cls.exitCode,
+        errnoCode: cls.errnoCode,
+      };
     }
   }
-  return null;
+  _emitEvent({
+    event: 'gemini_cred_resolve',
+    stage: 'fetch_end',
+    backend: 'linux_secret_tool',
+    account,
+    result: 'error',
+    elapsedMs: Date.now() - startedAt,
+    stderrClass: 'binary_not_found',
+    exitCode: null,
+    errnoCode: 'ENOENT',
+  });
+  return {
+    key: null,
+    result: 'error',
+    stderrClass: 'binary_not_found',
+    exitCode: null,
+    errnoCode: 'ENOENT',
+  };
 }
 
 /**
@@ -275,6 +447,16 @@ export function resolveGeminiApiKey(opts) {
     : DEFAULT_ACCOUNT;
   const useKeychain = safeOpts.useKeychain !== false;
   const forceRefresh = safeOpts.forceRefresh === true;
+  const startedAt = Date.now();
+
+  _emitEvent({
+    event: 'gemini_cred_resolve',
+    stage: 'start',
+    account,
+    platform: process.platform,
+    useKeychain,
+    forceRefresh,
+  });
 
   // 1. Env precedence with explicit-disable semantics:
   //    - undefined  → fall through to keychain
@@ -283,10 +465,28 @@ export function resolveGeminiApiKey(opts) {
   //      (otherwise we'd inject a keychain key against user intent)
   const envVal = process.env.GEMINI_API_KEY;
   if (envVal !== undefined) {
-    return envVal.length > 0 ? envVal : null;
+    const key = envVal.length > 0 ? envVal : null;
+    _emitEvent({
+      event: 'gemini_cred_resolve',
+      stage: 'end',
+      source: 'env',
+      result: key ? 'hit' : 'miss',
+      account,
+      elapsedMs: Date.now() - startedAt,
+      keyMask: key ? maskKey(key) : null,
+    });
+    return key;
   }
 
   if (!useKeychain) {
+    _emitEvent({
+      event: 'gemini_cred_resolve',
+      stage: 'end',
+      source: 'disabled',
+      result: 'miss',
+      account,
+      elapsedMs: Date.now() - startedAt,
+    });
     return null;
   }
 
@@ -294,25 +494,63 @@ export function resolveGeminiApiKey(opts) {
   if (!forceRefresh) {
     const hit = _cache.get(cacheKey);
     if (hit && hit.expiresAt > Date.now()) {
+      _emitEvent({
+        event: 'gemini_cred_resolve',
+        stage: 'end',
+        source: 'cache',
+        result: hit.key ? 'hit' : 'miss',
+        account,
+        elapsedMs: Date.now() - startedAt,
+        keyMask: hit.key ? maskKey(hit.key) : null,
+      });
       return hit.key;
     }
   }
 
-  let resolved = null;
+  /** @type {FetchResult} */
+  let fetchResult = { key: null, result: 'miss' };
+  let backend = 'unsupported';
   if (process.platform === 'darwin') {
-    resolved = fromKeychainMacOS(account);
+    backend = 'macos_security';
+    fetchResult = fromKeychainMacOS(account);
   } else if (process.platform === 'linux') {
-    resolved = fromSecretToolLinux(account);
+    backend = 'linux_secret_tool';
+    fetchResult = fromSecretToolLinux(account);
   } else if (process.platform === 'win32') {
+    backend = 'windows_unsupported';
     showWindowsNoticeOnce();
+    fetchResult = {
+      key: null,
+      result: 'error',
+      stderrClass: 'windows_unsupported',
+      exitCode: null,
+      errnoCode: null,
+    };
   }
 
+  const resolved = fetchResult.key;
   _cache.set(cacheKey, {
     platform: process.platform,
     account,
     key: resolved,
     expiresAt: Date.now() + TTL_MS,
   });
+  // Carry the fetch-time classification up to the `end` event so downstream
+  // tooling can filter on stage=="end" alone and still distinguish miss from
+  // error without having to also watch `fetch_end`.
+  const endEvent = {
+    event: 'gemini_cred_resolve',
+    stage: 'end',
+    source: backend,
+    result: fetchResult.result,
+    account,
+    elapsedMs: Date.now() - startedAt,
+    keyMask: resolved ? maskKey(resolved) : null,
+  };
+  if (fetchResult.stderrClass !== undefined) endEvent.stderrClass = fetchResult.stderrClass;
+  if (fetchResult.exitCode !== undefined) endEvent.exitCode = fetchResult.exitCode;
+  if (fetchResult.errnoCode !== undefined) endEvent.errnoCode = fetchResult.errnoCode;
+  _emitEvent(endEvent);
   return resolved;
 }
 

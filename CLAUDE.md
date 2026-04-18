@@ -418,8 +418,19 @@ If the prompt is dismissed, `execFileSync` hits `EXEC_TIMEOUT_MS` (10s) and retu
 
 **Logging & security**:
 - Raw keys are never logged. Diagnostic events emit as single-line JSON on
-  stderr with masked keys: `{"event":"gemini_credential_cache_invalidated","account":"...","reason":"auth_failed"}`
-- `AO_DEBUG_GEMINI=1` env var enables a `gemini-exec/acp: GEMINI_API_KEY=AIza****xx` line per spawn (mask only)
+  stderr with masked keys (`AIza****xx` format).
+- `AO_DEBUG_GEMINI=1` is the umbrella debug flag. It enables:
+  - `gemini-exec/acp: GEMINI_API_KEY=AIza****xx` line per spawn (mask only)
+  - `gemini_cred_resolve` event stream from the resolver (start/fetch_end/end stages)
+- `AO_DEBUG_CREDENTIAL=1` enables ONLY the `gemini_cred_resolve` stream (use this
+  when you want resolver tracing without the per-spawn spawn-side masked-key line).
+  Both flags accept the exact string `'1'` for resolver tracing (no truthy coercion)
+  so `AO_DEBUG_CREDENTIAL=true` or `=0` will NOT enable it.
+- `gemini_cred_resolve` event shape (JSONL on stderr):
+  `{"event":"gemini_cred_resolve","stage":"end","source":"macos_security|linux_secret_tool|env|cache|disabled|windows_unsupported","result":"hit|miss|error","account":"...","elapsedMs":N,"keyMask":"AIza****xx"|null,"stderrClass":"not_found|acl_denied|timeout|binary_not_found|unknown|windows_unsupported","exitCode":N|null,"errnoCode":"ETIMEDOUT|ENOENT|null"}`.
+  Backend error classification from `fetch_end` is also carried up to `end`, so
+  `jq 'select(.stage=="end") | {source,result,stderrClass,elapsedMs}'` alone is
+  enough to distinguish miss-due-to-no-item from miss-due-to-ACL-prompt-timeout.
 - tmux error messages are redacted via regex — any `*_KEY`, `*_TOKEN`,
   `*_SECRET`, `*_PASSWORD` values in argv echoes are replaced with
   `<redacted>` before reaching state files.
