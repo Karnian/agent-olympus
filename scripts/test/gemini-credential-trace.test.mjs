@@ -541,7 +541,130 @@ test('cache is per-service: shared-keychain miss does NOT shadow ao-keychain hit
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// #10 resilience — tracing code never crashes the resolver
+// #10 TTL split (PR 4): success=24h, miss=30s, error=60s
+
+test('TTL split: hit is cached >= 1 hour (deep into success window)', () => {
+  __setExecFileSyncForTest(mockExec(TEST_KEY));
+  setPlatform('darwin');
+  const originalDate = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  try {
+    resolveGeminiApiKey(); // prime (clock=1000000)
+    clock += 60 * 60 * 1000; // +1 hour
+    // Mock should NOT be called again — still within SUCCESS_TTL_MS (24h)
+    let execCalls = 0;
+    __setExecFileSyncForTest(() => { execCalls++; return TEST_KEY; });
+    const got = resolveGeminiApiKey();
+    assert.equal(got, TEST_KEY);
+    assert.equal(execCalls, 0, 'hit TTL must outlast 1 hour');
+  } finally {
+    Date.now = originalDate;
+  }
+});
+
+test('TTL split: miss expires after 30s (not the legacy 5min)', () => {
+  __setExecFileSyncForTest(mockExec(null)); // returns null (miss)
+  setPlatform('darwin');
+  const originalDate = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  try {
+    const first = resolveGeminiApiKey();
+    assert.equal(first, null);
+    // Still within MISS_TTL_MS (30s): should NOT hit execFileSync
+    clock += 20 * 1000;
+    let execCalls = 0;
+    __setExecFileSyncForTest(() => { execCalls++; return TEST_KEY; });
+    resolveGeminiApiKey();
+    assert.equal(execCalls, 0, 'miss within 30s must hit cache');
+    // Past MISS_TTL_MS (30s): cache expired, should fetch again
+    clock += 11 * 1000; // total +31s from original
+    const got = resolveGeminiApiKey();
+    assert.equal(got, TEST_KEY);
+    assert.equal(execCalls, 1, 'miss after 30s must re-fetch');
+  } finally {
+    Date.now = originalDate;
+  }
+});
+
+test('TTL split: error (timeout) expires after 60s', () => {
+  __setExecFileSyncForTest(mockExec(errorWith({ code: 'ETIMEDOUT' })));
+  setPlatform('darwin');
+  const originalDate = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  try {
+    resolveGeminiApiKey(); // prime error cache
+    clock += 45 * 1000; // 45s - still within ERROR_TTL_MS
+    let execCalls = 0;
+    __setExecFileSyncForTest(() => { execCalls++; return TEST_KEY; });
+    resolveGeminiApiKey();
+    assert.equal(execCalls, 0, 'error within 60s must hit cache');
+    clock += 20 * 1000; // total +65s - past ERROR_TTL_MS
+    const got = resolveGeminiApiKey();
+    assert.equal(got, TEST_KEY);
+    assert.equal(execCalls, 1, 'error after 60s must re-fetch');
+  } finally {
+    Date.now = originalDate;
+  }
+});
+
+test('TTL split: empty-miss recovery — user running wizard sees fix within 30s', () => {
+  // Scenario: the keychain item is missing (e.g. user hasn't run /auth yet),
+  // resolver returns null → cached as MISS (30s). User runs the wizard OR
+  // exports GEMINI_API_KEY. Within 31s the next resolve picks it up.
+  setPlatform('darwin');
+  const originalDate = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  try {
+    __setExecFileSyncForTest(mockExec(null)); // miss (no item)
+    assert.equal(resolveGeminiApiKey(), null);
+    // User fixes the missing item...
+    __setExecFileSyncForTest(mockExec(TEST_KEY));
+    clock += 31 * 1000; // past MISS_TTL (30s)
+    assert.equal(resolveGeminiApiKey(), TEST_KEY, 'miss recovers at 31s');
+  } finally {
+    Date.now = originalDate;
+  }
+});
+
+test('TTL split: error-bucket recovery — user fixing an ACL issue waits 61s (not 31s)', () => {
+  // Scenario: user misclicked "Deny" → resolver classifies as acl_denied →
+  // cached as ERROR (60s, not 30s). The fix (re-grant ACL) doesn't get
+  // picked up until 61s later. This test guards the error bucket being
+  // distinct from miss — codex PR 4 review flagged the narrative drift.
+  setPlatform('darwin');
+  const originalDate = Date.now;
+  let clock = 1_000_000;
+  Date.now = () => clock;
+  try {
+    __setExecFileSyncForTest(mockExec(errorWith({ status: 51 }))); // acl_denied
+    assert.equal(resolveGeminiApiKey(), null);
+    __setExecFileSyncForTest(mockExec(TEST_KEY));
+    clock += 31 * 1000; // within ERROR_TTL but past MISS_TTL
+    assert.equal(resolveGeminiApiKey(), null, 'error bucket holds past 30s');
+    clock += 31 * 1000; // total +62s — past ERROR_TTL (60s)
+    assert.equal(resolveGeminiApiKey(), TEST_KEY, 'error recovers at 62s');
+  } finally {
+    Date.now = originalDate;
+  }
+});
+
+test('TTL split: forceRefresh bypasses ALL TTL buckets', () => {
+  __setExecFileSyncForTest(mockExec(TEST_KEY));
+  setPlatform('darwin');
+  resolveGeminiApiKey(); // prime hit cache
+  let execCalls = 0;
+  __setExecFileSyncForTest((bin, args) => { execCalls++; return 'NEW_KEY'; });
+  const got = resolveGeminiApiKey({ forceRefresh: true });
+  assert.equal(got, 'NEW_KEY');
+  assert.equal(execCalls, 1);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// #11 resilience — tracing code never crashes the resolver
 
 test('tracing never throws even on pathological inputs', () => {
   process.env.AO_DEBUG_CREDENTIAL = '1';

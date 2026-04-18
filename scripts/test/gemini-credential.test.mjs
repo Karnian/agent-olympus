@@ -213,7 +213,7 @@ test('#10 TTL cache hit: two sequential calls invoke execFileSync once', () => {
   assert.equal(mock.calls.length, 1);
 });
 
-test('#11 TTL expiry triggers re-fetch', () => {
+test('#11 TTL expiry triggers re-fetch (hit path: SUCCESS_TTL_MS = 24h after PR 4 split)', () => {
   setPlatform('darwin');
   const mock = mockExec(`${TEST_KEY}\n`);
   __setExecFileSyncForTest(mock);
@@ -224,8 +224,8 @@ test('#11 TTL expiry triggers re-fetch', () => {
 
   try {
     assert.equal(resolveGeminiApiKey(), TEST_KEY);
-    // Advance past 5min TTL
-    Date.now = () => start + 5 * 60 * 1000 + 1;
+    // Advance past SUCCESS_TTL_MS (24h), +1ms to ensure strict past
+    Date.now = () => start + 24 * 60 * 60 * 1000 + 1;
     assert.equal(resolveGeminiApiKey(), TEST_KEY);
     assert.equal(mock.calls.length, 2);
   } finally {

@@ -23,8 +23,9 @@
  * - SYNC API (execFileSync). All callers (gemini-exec.spawn, gemini-acp.startServer,
  *   tmux-session.buildWorkerCommand, ask.mjs) are synchronous contracts — making this
  *   async would require cascading refactors.
- * - Per-(platform, service, account) cache (5-minute TTL). Null results are also
- *   cached to avoid re-hammering the keychain on every spawn.
+ * - Per-(platform, service, account) cache with split TTL: 24h on hit,
+ *   60s on error (timeout/ACL-denied/binary-missing), 30s on empty miss.
+ *   See SUCCESS_TTL_MS / ERROR_TTL_MS / MISS_TTL_MS for rationale.
  * - Fail-safe: every error path returns null. Nothing throws.
  * - Zero secret leakage: stdout from the child is trimmed only, never logged.
  *   Diagnostic events go to stderr as single-line JSON with masked keys.
@@ -52,7 +53,31 @@ const SHARED_KEYCHAIN_SERVICE = 'gemini-cli-api-key';
 const AO_KEYCHAIN_SERVICE = 'agent-olympus.gemini-api-key';
 
 const DEFAULT_ACCOUNT = 'default-api-key';
-const TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Cache TTL is split by result kind so a transient miss doesn't lock out a
+ * fresh keychain write for the full success window:
+ *
+ *   SUCCESS_TTL_MS (24h) — once we have a working key, trust it until the
+ *     next hour-scale rotation. Parent processes for Atlas/Athena orchestrators
+ *     can stay warm across many worker spawns without re-hammering keychain.
+ *
+ *   MISS_TTL_MS (30s) — when the resolver came back empty (item missing, user
+ *     dismissed prompt, etc.), cache briefly to prevent rapid re-prompt storms
+ *     but recover quickly once the user fixes the underlying issue (runs the
+ *     wizard, sets the env var, clicks Always Allow). 30s is long enough to
+ *     absorb a batch of worker spawns in one orchestrator tick, short enough
+ *     that the user doesn't wonder why their fix "isn't taking".
+ *
+ *   ERROR_TTL_MS (60s) — for stderrClass='error' paths (timeout, acl_denied,
+ *     binary_not_found). Slightly longer than miss because these indicate a
+ *     structural problem the user has to address, not a transient empty slot.
+ *
+ * Explicit `forceRefresh: true` bypasses all of the above.
+ */
+const SUCCESS_TTL_MS = 24 * 60 * 60 * 1000;
+const MISS_TTL_MS = 30 * 1000;
+const ERROR_TTL_MS = 60 * 1000;
 /**
  * Hard cap on each secret-store invocation.
  *
@@ -90,11 +115,15 @@ const LINUX_SECRET_TOOL_BINS = [
 // ─── Module state (test-hookable) ─────────────────────────────────────────────
 
 /**
- * Per-account cache.
- * Map<string cacheKey, { platform, account, key: string|null, expiresAt: number }>
- * cacheKey = `${platform}:${account}` — but invalidation uses the stored
- * `account` field for exact match (not string suffix), so accounts containing
- * ':' are handled correctly.
+ * Per-(platform, service, account) cache.
+ * Map<string cacheKey, { platform, service, account, key: string|null, expiresAt: number }>
+ * cacheKey = `${platform}:${service}:${account}` — invalidation uses the
+ * stored `account` field for exact match (not string suffix), so accounts
+ * containing ':' are handled correctly, and all services under the same
+ * account are invalidated together (desired behavior for auth_failed, where
+ * the key is bad regardless of which service it was read from).
+ * Entry TTL is set at write time based on result kind; see SUCCESS_TTL_MS
+ * / ERROR_TTL_MS / MISS_TTL_MS.
  */
 const _cache = new Map();
 
@@ -524,7 +553,8 @@ function _resolveServiceName(source, explicit) {
  * means "explicitly no key"; exporting `GEMINI_API_KEY=""` to disable the keychain
  * path is supported. For the explicit keychain sources, env is bypassed entirely.
  *
- * Per-(platform, service, account) 5-minute TTL cache. Never throws.
+ * Per-(platform, service, account) cache with split TTL (24h hit / 30s miss
+ * / 60s error). Never throws.
  *
  * @param {ResolveOpts} [opts]
  * @returns {string|null}
@@ -629,12 +659,18 @@ export function resolveGeminiApiKey(opts) {
   }
 
   const resolved = fetchResult.key;
+  // Split TTL by result kind (PR 4): 24h for hit, 30s for miss, 60s for error.
+  // See SUCCESS_TTL_MS / MISS_TTL_MS / ERROR_TTL_MS block for rationale.
+  let ttl;
+  if (fetchResult.result === 'hit') ttl = SUCCESS_TTL_MS;
+  else if (fetchResult.result === 'error') ttl = ERROR_TTL_MS;
+  else ttl = MISS_TTL_MS;
   _cache.set(cacheKey, {
     platform: process.platform,
     account,
     service,
     key: resolved,
-    expiresAt: Date.now() + TTL_MS,
+    expiresAt: Date.now() + ttl,
   });
   // Carry the fetch-time classification up to the `end` event so downstream
   // tooling can filter on stage=="end" alone and still distinguish miss from

@@ -373,11 +373,13 @@ mutated.
 4. `null` — spawn proceeds without the env var, letting the gemini CLI
    produce its own auth error if the user has no other credential source
 
-**Caching**: Per-account `Map<'${platform}:${account}', ...>` with 5-minute
-TTL. Null results are cached too (avoids re-hammering the keychain on
-every spawn when no key is stored). On `auth_failed` category from the
-exec/acp error classifiers, the cache entry for that account is
-invalidated so the next spawn re-reads the secret store — supports
+**Caching**: Per-(platform, service, account) `Map` with split TTL —
+24 hours on hit, 60 seconds on error (timeout / ACL-denied / binary-missing),
+30 seconds on empty miss. Null results are cached too so the keychain isn't
+re-hammered on every spawn when no key is stored. See the dedicated "Cache
+TTL" block below for rationale. On `auth_failed` category from the exec/acp
+error classifiers, all cache entries for that account (across all services)
+are invalidated so the next spawn re-reads the secret store — supports
 `/auth` recovery within a single session.
 
 **Spawn paths covered**:
@@ -425,6 +427,19 @@ non-empty string — `execFile` argv prevents shell injection.
 `useKeychain` is a deprecated legacy toggle; `useKeychain: false` normalizes
 internally to `credentialSource: "env"` at resolve time, so old configs keep
 working without migration. New configs should use `credentialSource` directly.
+
+**Cache TTL** (per-(platform, service, account) in-process cache):
+- Successful resolution: **24 hours** — orchestrators stay warm across many
+  worker spawns without re-hammering the keychain.
+- Empty miss: **30 seconds** — brief enough to pick up the user's fix (wizard
+  re-run, env var export, manual ACL edit) without making them restart Claude
+  Code, long enough to absorb a worker spawn batch.
+- Error (timeout / acl_denied / binary_not_found): **60 seconds** — slightly
+  longer than miss because these indicate a structural problem that needs
+  user action, not a transient empty slot.
+- `resolveGeminiApiKey({ forceRefresh: true })` bypasses all buckets.
+- `invalidateCache(account)` is called from adapter 401/403 classifiers so a
+  rotated key is picked up on the next spawn regardless of TTL.
 
 **macOS Keychain prompt (root cause & fix)**: The resolver shells out to `/usr/bin/security find-generic-password`. macOS checks the keychain item's ACL against `/usr/bin/security` — NOT against Node. gemini CLI saves its API key via `keytar`, which writes a default ACL trusting only the creating executable (typically the Node binary that ran gemini CLI at save time), so `/usr/bin/security` is untrusted and each read shows a password prompt. Clicking **Always Allow** authorizes the `security` tool for future access on that item — subsequent reads complete in <100ms.
 
