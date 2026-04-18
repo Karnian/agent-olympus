@@ -88,19 +88,43 @@ Typical patterns you'll see at `stage: "end"`:
 
 The key in each event is masked to `AIza****xx`; raw key material never appears in the event stream, even when the child process error dumped it into `stderr`/`message`.
 
-## Future work (not available yet)
+## Option 4 — AO-owned keychain item via the setup wizard
 
-A `credentialSource` option in `.ao/autonomy.json` is planned:
+The cleanest fix. Runs once, survives forever (until you rotate the key):
+
+```bash
+node scripts/setup-gemini-key.mjs
+```
+
+What the wizard does:
+
+1. Reads your Gemini API key from stdin with echo disabled (characters show as `*`, not the real key).
+2. Calls `/usr/bin/security add-generic-password -U -T /usr/bin/security -T /usr/bin/env -T <node-binary> -w` (bare `-w`, password delivered via stdin — the key never appears on argv / `ps` output).
+3. Verifies the read-back via the same `/usr/bin/security` code path AO uses at runtime. If the verification takes longer than ~3 seconds, the wizard warns you — that's a sign the ACL didn't attach correctly.
+4. Offers to flip `.ao/autonomy.json` to `"credentialSource": "ao-keychain"` so subsequent AO runs read the new item.
+
+After the wizard, `gemini_cred_resolve` events show `source: "macos_security"`, `service: "agent-olympus.gemini-api-key"`, and no dialog.
+
+**Tradeoff — drift**: the AO-owned item is SEPARATE from the gemini CLI's own `gemini-cli-api-key` item. If you ever refresh the key with `gemini /auth`, you must also re-run `node scripts/setup-gemini-key.mjs` to update the AO copy, or AO workers will fail with 401/403. This is a conscious design choice: we don't automatically sync because that would re-introduce the exact ACL read that prompts in the first place.
+
+**Tradeoff — per-project vs. global**: the wizard writes to the keychain (OS-wide, per-user) but updates `.ao/autonomy.json` in the current working directory. If you want the `credentialSource` switch to apply to every project, add it to `~/.config/agent-olympus/autonomy.json` instead:
 
 ```jsonc
-// PLANNED — not yet implemented
 {
   "gemini": {
-    "credentialSource": "ao-keychain"  // or "env" | "shared-keychain" | "auto"
+    "credentialSource": "ao-keychain"
   }
 }
 ```
 
-With `ao-keychain`, a one-time setup wizard will write an AO-owned keychain item (`agent-olympus.gemini-api-key`) with `/usr/bin/security` pre-listed as trusted, eliminating prompts entirely.
+**Piping a key**: the wizard accepts piped input for scripting:
 
-Track progress in the roadmap; until that ships, Options 1–3 above are the supported workarounds.
+```bash
+# 1Password / pass / etc. can pipe the key in without it hitting terminal history:
+op read "op://Personal/Gemini/api key" | node scripts/setup-gemini-key.mjs --update-autonomy
+```
+
+## When the wizard won't help
+
+- **Linux/Windows** — the keychain ACL problem this wizard solves doesn't exist on Linux (libsecret uses D-Bus authorization, not per-app ACLs) or Windows (Credential Manager isn't supported by the resolver in v1). The wizard exits early on those platforms with a message recommending `GEMINI_API_KEY` in your shell.
+- **Managed Macs** — corporate MDM profiles sometimes disable `add-generic-password` or require authenticated keychain writes that no script can satisfy without user interaction. The wizard surfaces `security`'s error in that case; you'll need to ask IT.

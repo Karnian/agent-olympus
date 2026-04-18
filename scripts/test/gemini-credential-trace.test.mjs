@@ -117,7 +117,7 @@ test('non-"1" values do NOT enable tracing (no truthy coercion)', () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // #2 start event shape
 
-test('start event carries account, platform, useKeychain, forceRefresh', () => {
+test('start event carries account, service, credentialSource, platform, forceRefresh', () => {
   process.env.AO_DEBUG_CREDENTIAL = '1';
   __setExecFileSyncForTest(mockExec(TEST_KEY));
   setPlatform('darwin');
@@ -127,7 +127,8 @@ test('start event carries account, platform, useKeychain, forceRefresh', () => {
   assert.ok(start);
   assert.equal(start.account, 'acct');
   assert.equal(start.platform, 'darwin');
-  assert.equal(start.useKeychain, true);
+  assert.equal(start.credentialSource, 'auto');
+  assert.equal(start.service, 'gemini-cli-api-key'); // auto defaults to shared service
   assert.equal(start.forceRefresh, false);
 });
 
@@ -154,11 +155,12 @@ test('end event has result=miss when GEMINI_API_KEY is empty string', () => {
   assert.equal(end.keyMask, null);
 });
 
-test('end event has source=disabled when useKeychain=false', () => {
+test('legacy useKeychain=false normalizes to credentialSource=env (source=env, result=miss when GEMINI_API_KEY unset)', () => {
   process.env.AO_DEBUG_CREDENTIAL = '1';
   const stderr = captureStderr(() => resolveGeminiApiKey({ useKeychain: false }));
   const end = parseEvents(stderr).find((e) => e.stage === 'end');
-  assert.equal(end.source, 'disabled');
+  assert.equal(end.source, 'env');
+  assert.equal(end.credentialSource, 'env');
   assert.equal(end.result, 'miss');
 });
 
@@ -398,7 +400,148 @@ test('raw key embedded in err.message is NOT propagated to tracing output', () =
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// #9 resilience — tracing code never crashes the resolver
+// #9 credentialSource — new in PR 3
+
+test('credentialSource=shared-keychain: env is NOT consulted; reads gemini-cli-api-key service', () => {
+  process.env.AO_DEBUG_CREDENTIAL = '1';
+  process.env.GEMINI_API_KEY = 'ENV_KEY_SHOULD_BE_IGNORED';
+  const calls = [];
+  __setExecFileSyncForTest((bin, args) => {
+    calls.push({ bin, args });
+    return TEST_KEY;
+  });
+  setPlatform('darwin');
+  const stderr = captureStderr(() => {
+    resolveGeminiApiKey({ credentialSource: 'shared-keychain' });
+  });
+  const end = parseEvents(stderr).find((e) => e.stage === 'end');
+  assert.equal(end.credentialSource, 'shared-keychain');
+  assert.equal(end.service, 'gemini-cli-api-key');
+  assert.equal(end.source, 'macos_security'); // NOT 'env'
+  assert.equal(end.result, 'hit');
+  // And verify the service arg was threaded through
+  assert.ok(calls[0].args.includes('gemini-cli-api-key'));
+});
+
+test('credentialSource=ao-keychain: env is NOT consulted; reads agent-olympus.gemini-api-key service', () => {
+  process.env.AO_DEBUG_CREDENTIAL = '1';
+  process.env.GEMINI_API_KEY = 'ENV_KEY_SHOULD_BE_IGNORED';
+  const calls = [];
+  __setExecFileSyncForTest((bin, args) => {
+    calls.push({ bin, args });
+    return TEST_KEY;
+  });
+  setPlatform('darwin');
+  const stderr = captureStderr(() => {
+    resolveGeminiApiKey({ credentialSource: 'ao-keychain' });
+  });
+  const end = parseEvents(stderr).find((e) => e.stage === 'end');
+  assert.equal(end.credentialSource, 'ao-keychain');
+  assert.equal(end.service, 'agent-olympus.gemini-api-key');
+  assert.equal(end.result, 'hit');
+  assert.ok(calls[0].args.includes('agent-olympus.gemini-api-key'));
+});
+
+test('credentialSource=env: keychain never consulted even when env unset', () => {
+  process.env.AO_DEBUG_CREDENTIAL = '1';
+  let calledExec = false;
+  __setExecFileSyncForTest(() => {
+    calledExec = true;
+    return TEST_KEY;
+  });
+  setPlatform('darwin');
+  const got = resolveGeminiApiKey({ credentialSource: 'env' });
+  assert.equal(got, null);
+  assert.equal(calledExec, false, 'execFileSync must not be called when source=env');
+});
+
+test('credentialSource=auto: env wins over shared-keychain', () => {
+  process.env.AO_DEBUG_CREDENTIAL = '1';
+  process.env.GEMINI_API_KEY = TEST_KEY;
+  let calledExec = false;
+  __setExecFileSyncForTest(() => {
+    calledExec = true;
+    return 'DIFFERENT_KEY';
+  });
+  setPlatform('darwin');
+  const got = resolveGeminiApiKey({ credentialSource: 'auto' });
+  assert.equal(got, TEST_KEY);
+  assert.equal(calledExec, false);
+});
+
+test('credentialSource=auto: falls through to shared-keychain when env unset', () => {
+  __setExecFileSyncForTest(mockExec(TEST_KEY));
+  setPlatform('darwin');
+  const got = resolveGeminiApiKey({ credentialSource: 'auto' });
+  assert.equal(got, TEST_KEY);
+});
+
+test('explicit service option overrides credentialSource default', () => {
+  process.env.AO_DEBUG_CREDENTIAL = '1';
+  const calls = [];
+  __setExecFileSyncForTest((bin, args) => {
+    calls.push({ bin, args });
+    return TEST_KEY;
+  });
+  setPlatform('darwin');
+  const stderr = captureStderr(() => {
+    resolveGeminiApiKey({
+      credentialSource: 'ao-keychain',
+      service: 'custom.service.name',
+    });
+  });
+  const end = parseEvents(stderr).find((e) => e.stage === 'end');
+  assert.equal(end.service, 'custom.service.name');
+  assert.ok(calls[0].args.includes('custom.service.name'));
+});
+
+test('invalid credentialSource value falls back to auto and emits config_invalid event', () => {
+  process.env.AO_DEBUG_CREDENTIAL = '1';
+  __setExecFileSyncForTest(mockExec(TEST_KEY));
+  setPlatform('darwin');
+  const stderr = captureStderr(() => {
+    resolveGeminiApiKey({ credentialSource: 'nonsense' });
+  });
+  // The config_invalid diagnostic is emitted UNCONDITIONALLY (not gated by AO_DEBUG_*)
+  // because it indicates a caller bug worth surfacing.
+  assert.ok(
+    stderr.includes('gemini_cred_resolve_config_invalid'),
+    `expected config_invalid diagnostic in stderr: ${stderr}`
+  );
+  const events = parseEvents(stderr);
+  const end = events.find((e) => e.stage === 'end');
+  assert.equal(end.credentialSource, 'auto'); // fell back
+});
+
+test('cache is per-service: shared-keychain miss does NOT shadow ao-keychain hit', () => {
+  const calls = [];
+  __setExecFileSyncForTest((bin, args) => {
+    calls.push({ bin, args });
+    // Shared service misses, AO service hits
+    if (args.includes('gemini-cli-api-key')) {
+      const err = errorWith({ status: 44 }); // not_found
+      throw err;
+    }
+    if (args.includes('agent-olympus.gemini-api-key')) {
+      return TEST_KEY;
+    }
+    return null;
+  });
+  setPlatform('darwin');
+  // Prime the cache with shared-keychain miss
+  const shared = resolveGeminiApiKey({ credentialSource: 'shared-keychain' });
+  assert.equal(shared, null);
+  // Now query ao-keychain — should hit execFileSync again (different cache bucket)
+  const ao = resolveGeminiApiKey({ credentialSource: 'ao-keychain' });
+  assert.equal(ao, TEST_KEY);
+  // Two distinct service args were passed to execFileSync
+  const services = calls.map((c) => c.args.find((a) => a.includes('api-key')));
+  assert.ok(services.includes('gemini-cli-api-key'));
+  assert.ok(services.includes('agent-olympus.gemini-api-key'));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// #10 resilience — tracing code never crashes the resolver
 
 test('tracing never throws even on pathological inputs', () => {
   process.env.AO_DEBUG_CREDENTIAL = '1';

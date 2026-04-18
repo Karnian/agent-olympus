@@ -394,16 +394,37 @@ invalidated so the next spawn re-reads the secret store — supports
 ```json
 {
   "gemini": {
-    "useKeychain": true,
-    "keychainAccount": "default-api-key"
+    "credentialSource": "auto",
+    "keychainAccount": "default-api-key",
+    "keychainService": null,
+    "useKeychain": true
   }
 }
 ```
-Defaults are `useKeychain: true` + `keychainAccount: 'default-api-key'`
-(matches the gemini CLI's own default account). Set `useKeychain: false`
-to disable the resolver entirely (env-only fallback). `keychainAccount`
-accepts any non-empty string including characters like `:`, `@`, `.`
-since `execFile` argv prevents shell injection.
+
+`credentialSource` values (all four resolve through the same backend; they
+differ in WHICH service name is read and whether env is considered first):
+
+- `"auto"` (default) — env → `gemini-cli-api-key` (shared) → miss. Matches
+  pre-PR-3 behavior for users who already authenticated with `gemini /auth`.
+- `"env"` — env only; keychain is never consulted. Use when you set
+  `GEMINI_API_KEY` explicitly and don't want the wizard path.
+- `"shared-keychain"` — skip env, read gemini CLI's own `gemini-cli-api-key`
+  item. Explicit opt-in to the shared store (useful when env is set to
+  something stale and you want to force a keychain read).
+- `"ao-keychain"` — skip env, read the AO-owned
+  `agent-olympus.gemini-api-key` item created by `node scripts/setup-gemini-key.mjs`.
+  The wizard pre-lists `/usr/bin/security` as trusted, so AO reads never
+  trigger a macOS password prompt. See [docs/gemini-keychain-setup.md](docs/gemini-keychain-setup.md)
+  for the tradeoffs (drift risk vs. no prompts).
+
+`keychainService` (default `null`) overrides the service name for whichever
+source was selected. Most users leave it null. `keychainAccount` accepts any
+non-empty string — `execFile` argv prevents shell injection.
+
+`useKeychain` is a deprecated legacy toggle; `useKeychain: false` normalizes
+internally to `credentialSource: "env"` at resolve time, so old configs keep
+working without migration. New configs should use `credentialSource` directly.
 
 **macOS Keychain prompt (root cause & fix)**: The resolver shells out to `/usr/bin/security find-generic-password`. macOS checks the keychain item's ACL against `/usr/bin/security` — NOT against Node. gemini CLI saves its API key via `keytar`, which writes a default ACL trusting only the creating executable (typically the Node binary that ran gemini CLI at save time), so `/usr/bin/security` is untrusted and each read shows a password prompt. Clicking **Always Allow** authorizes the `security` tool for future access on that item — subsequent reads complete in <100ms.
 

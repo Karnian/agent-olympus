@@ -269,7 +269,9 @@ export function startServer(opts = {}) {
   // caller-supplied opts.env wins over resolver result.
   const credOpts = opts.credential || {};
   const resolvedKey = resolveGeminiApiKey({
-    useKeychain: credOpts.useKeychain !== false,
+    credentialSource: credOpts.credentialSource,
+    service: credOpts.service,
+    useKeychain: credOpts.useKeychain,
     account: credOpts.account || 'default-api-key',
   });
   const mergedEnv = {

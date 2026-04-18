@@ -50,8 +50,10 @@ export const DEFAULT_AUTONOMY_CONFIG = {
   },
   gemini: {
     approval: 'auto',
-    useKeychain: true,
+    credentialSource: 'auto',
     keychainAccount: 'default-api-key',
+    keychainService: null,
+    useKeychain: true,
   },
   nativeTeams: false,
   planExecution: 'ask',
@@ -269,7 +271,39 @@ export function validateAutonomyConfig(config) {
           }
         }
 
-        // useKeychain: opt-out toggle for credential resolver
+        // credentialSource: selects which resolver path to use.
+        //   'auto'           = env → shared-keychain → miss (default)
+        //   'env'            = env only, keychain skipped
+        //   'shared-keychain'= `gemini-cli-api-key` (managed by gemini CLI)
+        //   'ao-keychain'    = `agent-olympus.gemini-api-key` (managed by setup wizard)
+        if (config.gemini.credentialSource !== undefined) {
+          const validSources = ['auto', 'env', 'shared-keychain', 'ao-keychain'];
+          const src = config.gemini.credentialSource;
+          if (typeof src !== 'string' || !validSources.includes(src)) {
+            errors.push(
+              'config.gemini.credentialSource must be one of: auto, env, shared-keychain, ao-keychain; received: ' +
+              JSON.stringify(src)
+            );
+          }
+        }
+
+        // keychainService: optional override for the keychain service name.
+        //   null (default) = derive from credentialSource (shared → `gemini-cli-api-key`,
+        //                     ao → `agent-olympus.gemini-api-key`)
+        //   string         = explicit service name
+        if (config.gemini.keychainService !== undefined && config.gemini.keychainService !== null) {
+          const svc = config.gemini.keychainService;
+          if (typeof svc !== 'string' || !svc.trim()) {
+            errors.push(
+              'config.gemini.keychainService must be null or a non-empty string; received: ' +
+              JSON.stringify(svc)
+            );
+          }
+        }
+
+        // useKeychain: DEPRECATED legacy opt-out toggle. `useKeychain: false`
+        // normalizes internally to `credentialSource: 'env'` at resolve time.
+        // Kept so existing autonomy.json files continue to validate unchanged.
         if (config.gemini.useKeychain !== undefined && typeof config.gemini.useKeychain !== 'boolean') {
           errors.push(
             'config.gemini.useKeychain must be a boolean; received: ' +

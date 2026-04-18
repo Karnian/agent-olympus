@@ -2,20 +2,29 @@
  * Gemini Credential Resolver — pulls GEMINI_API_KEY from the OS secret store
  * for headless `gemini -p` spawns, so users don't need to export the key.
  *
- * Resolution priority (first hit wins):
- *   1. process.env.GEMINI_API_KEY  — never cached (user controls it)
- *   2. macOS Keychain              — `security find-generic-password -s gemini-cli-api-key -a <account> -w`
- *   3. Linux libsecret             — `secret-tool lookup service gemini-cli-api-key account <account>`
- *   4. null                        — lets the gemini CLI surface its own auth error
+ * Credential sources (select via `credentialSource` in `.ao/autonomy.json`):
+ *   - 'auto' (default): env → shared-keychain (`gemini-cli-api-key`) → miss.
+ *     Does NOT try ao-keychain automatically — stale AO items must not silently
+ *     shadow a freshly-updated gemini CLI key.
+ *   - 'env': process.env.GEMINI_API_KEY only; keychain not consulted.
+ *   - 'shared-keychain': skip env, read `gemini-cli-api-key`. This is the
+ *     service gemini CLI writes to via `keytar`; macOS ACL may trigger a
+ *     prompt on each read (see docs/gemini-keychain-setup.md).
+ *   - 'ao-keychain': skip env, read `agent-olympus.gemini-api-key`. Created
+ *     by `scripts/setup-gemini-key.mjs`; wizard grants `/usr/bin/security`
+ *     trusted access so reads never prompt.
  *
- * Windows is not supported in v1; a one-time stderr notice is emitted on first call.
+ * Backend per platform:
+ *   - macOS:   `security find-generic-password -s <service> -a <account> -w`
+ *   - Linux:   `secret-tool lookup service <service> account <account>`
+ *   - Windows: unsupported in v1; one-time stderr notice on first call.
  *
  * Design:
  * - SYNC API (execFileSync). All callers (gemini-exec.spawn, gemini-acp.startServer,
  *   tmux-session.buildWorkerCommand, ask.mjs) are synchronous contracts — making this
  *   async would require cascading refactors.
- * - Per-account cache keyed on `${platform}:${account}` (5-minute TTL). Null results
- *   are also cached to avoid re-hammering the keychain on every spawn.
+ * - Per-(platform, service, account) cache (5-minute TTL). Null results are also
+ *   cached to avoid re-hammering the keychain on every spawn.
  * - Fail-safe: every error path returns null. Nothing throws.
  * - Zero secret leakage: stdout from the child is trimmed only, never logged.
  *   Diagnostic events go to stderr as single-line JSON with masked keys.
@@ -27,7 +36,21 @@ import { execFileSync as nodeExecFileSync } from 'node:child_process';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const KEYCHAIN_SERVICE = 'gemini-cli-api-key';
+/**
+ * Service name under which gemini CLI stores its API key via `keytar`.
+ * Kept on the default path so existing users who authenticated with
+ * `gemini /auth` work unchanged. This is the "shared" source.
+ */
+const SHARED_KEYCHAIN_SERVICE = 'gemini-cli-api-key';
+
+/**
+ * Service name for the Agent-Olympus-owned keychain item created by the
+ * setup wizard (`scripts/setup-gemini-key.mjs`). The wizard grants
+ * `/usr/bin/security` trusted access to this item, so the resolver reads
+ * it without triggering the "security wants to use your keychain" dialog.
+ */
+const AO_KEYCHAIN_SERVICE = 'agent-olympus.gemini-api-key';
+
 const DEFAULT_ACCOUNT = 'default-api-key';
 const TTL_MS = 5 * 60 * 1000; // 5 minutes
 /**
@@ -259,14 +282,15 @@ function _extractKey(raw) {
  * Fetch API key from macOS Keychain.
  *
  * @param {string} account
+ * @param {string} service - keychain service name (shared or AO-owned)
  * @returns {FetchResult}
  */
-function fromKeychainMacOS(account) {
+function fromKeychainMacOS(account, service) {
   const startedAt = Date.now();
   try {
     const stdout = _execFileSync(
       MACOS_SECURITY_BIN,
-      ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', account, '-w'],
+      ['find-generic-password', '-s', service, '-a', account, '-w'],
       {
         timeout: EXEC_TIMEOUT_MS,
         maxBuffer: MAX_BUFFER,
@@ -281,6 +305,7 @@ function fromKeychainMacOS(account) {
       stage: 'fetch_end',
       backend: 'macos_security',
       account,
+      service,
       result: key ? 'hit' : 'miss',
       elapsedMs: Date.now() - startedAt,
       keyMask: key ? maskKey(key) : null,
@@ -294,6 +319,7 @@ function fromKeychainMacOS(account) {
       stage: 'fetch_end',
       backend: 'macos_security',
       account,
+      service,
       result,
       elapsedMs: Date.now() - startedAt,
       stderrClass: cls.stderrClass,
@@ -321,9 +347,10 @@ function fromKeychainMacOS(account) {
  * Fetch API key from Linux libsecret via secret-tool.
  *
  * @param {string} account
+ * @param {string} service - keychain service name (shared or AO-owned)
  * @returns {FetchResult}
  */
-function fromSecretToolLinux(account) {
+function fromSecretToolLinux(account, service) {
   // Try each known absolute path in order, then plain 'secret-tool' (PATH lookup).
   // execFileSync with bin name (no slash) uses the env PATH in the child spec
   // — safe because args are argv (no shell interpolation).
@@ -333,7 +360,7 @@ function fromSecretToolLinux(account) {
     try {
       const stdout = _execFileSync(
         bin,
-        ['lookup', 'service', KEYCHAIN_SERVICE, 'account', account],
+        ['lookup', 'service', service, 'account', account],
         {
           timeout: EXEC_TIMEOUT_MS,
           maxBuffer: MAX_BUFFER,
@@ -350,6 +377,7 @@ function fromSecretToolLinux(account) {
         stage: 'fetch_end',
         backend: 'linux_secret_tool',
         account,
+        service,
         result: key ? 'hit' : 'miss',
         elapsedMs: Date.now() - startedAt,
         binary: bin,
@@ -368,6 +396,7 @@ function fromSecretToolLinux(account) {
         stage: 'fetch_end',
         backend: 'linux_secret_tool',
         account,
+        service,
         result: 'error',
         elapsedMs: Date.now() - startedAt,
         binary: bin,
@@ -389,6 +418,7 @@ function fromSecretToolLinux(account) {
     stage: 'fetch_end',
     backend: 'linux_secret_tool',
     account,
+    service,
     result: 'error',
     elapsedMs: Date.now() - startedAt,
     stderrClass: 'binary_not_found',
@@ -423,18 +453,78 @@ function showWindowsNoticeOnce() {
 // ─── Resolver core ────────────────────────────────────────────────────────────
 
 /**
+ * @typedef {('auto'|'env'|'shared-keychain'|'ao-keychain')} CredentialSource
+ */
+
+/**
  * @typedef {Object} ResolveOpts
  * @property {string} [account='default-api-key']
- * @property {boolean} [useKeychain=true]
+ * @property {CredentialSource} [credentialSource='auto']
+ * @property {string|null} [service] - explicit keychain service name override; null = derive from credentialSource
+ * @property {boolean} [useKeychain=true] - DEPRECATED; `useKeychain: false` normalizes to `credentialSource: 'env'`
  * @property {boolean} [forceRefresh=false]
  */
 
 /**
+ * Normalize legacy `useKeychain` + new `credentialSource` opts into one value.
+ * Explicit credentialSource wins; falls back to useKeychain=false → env, else auto.
+ * Invalid credentialSource strings silently fall through to auto (fail-safe).
+ *
+ * @param {ResolveOpts} opts
+ * @returns {CredentialSource}
+ */
+function _normalizeCredentialSource(opts) {
+  const raw = opts.credentialSource;
+  if (typeof raw === 'string') {
+    if (raw === 'auto' || raw === 'env' || raw === 'shared-keychain' || raw === 'ao-keychain') {
+      return raw;
+    }
+    // invalid value → emit a diagnostic so the caller knows we ignored it
+    try {
+      process.stderr.write(JSON.stringify({
+        event: 'gemini_cred_resolve_config_invalid',
+        field: 'credentialSource',
+        received: raw,
+        fallback: 'auto',
+      }) + '\n');
+    } catch { /* never throw from logging */ }
+  }
+  if (opts.useKeychain === false) return 'env';
+  return 'auto';
+}
+
+/**
+ * Pick the keychain service name for a given source.
+ * Explicit `opts.service` override wins (non-empty string).
+ * For shared-keychain/auto, use the gemini CLI default `gemini-cli-api-key`.
+ * For ao-keychain, use the AO-owned service name.
+ *
+ * @param {CredentialSource} source
+ * @param {string|null|undefined} explicit
+ * @returns {string}
+ */
+function _resolveServiceName(source, explicit) {
+  if (typeof explicit === 'string' && explicit.length > 0) return explicit;
+  if (source === 'ao-keychain') return AO_KEYCHAIN_SERVICE;
+  return SHARED_KEYCHAIN_SERVICE;
+}
+
+/**
  * Resolve GEMINI_API_KEY for a gemini CLI spawn.
  *
- * Priority: env → macOS keychain → Linux secret-tool → null.
- * Per-account 5-minute TTL cache (null results cached too).
- * Never throws.
+ * Credential-source semantics:
+ *   - 'auto' (default): env → shared-keychain → miss. Does NOT try ao-keychain
+ *     automatically — stale AO items must not silently shadow fresh gemini CLI keys.
+ *   - 'env': process.env.GEMINI_API_KEY only, no keychain consulted.
+ *   - 'shared-keychain': skip env, read gemini CLI's own `gemini-cli-api-key` item.
+ *   - 'ao-keychain': skip env, read AO-owned `agent-olympus.gemini-api-key` item.
+ *
+ * Env precedence explanation: for 'auto', if `process.env.GEMINI_API_KEY` is defined
+ * (any value including empty string), the keychain is never consulted. Empty env
+ * means "explicitly no key"; exporting `GEMINI_API_KEY=""` to disable the keychain
+ * path is supported. For the explicit keychain sources, env is bypassed entirely.
+ *
+ * Per-(platform, service, account) 5-minute TTL cache. Never throws.
  *
  * @param {ResolveOpts} [opts]
  * @returns {string|null}
@@ -445,7 +535,8 @@ export function resolveGeminiApiKey(opts) {
   const account = typeof safeOpts.account === 'string' && safeOpts.account
     ? safeOpts.account
     : DEFAULT_ACCOUNT;
-  const useKeychain = safeOpts.useKeychain !== false;
+  const credentialSource = _normalizeCredentialSource(safeOpts);
+  const service = _resolveServiceName(credentialSource, safeOpts.service);
   const forceRefresh = safeOpts.forceRefresh === true;
   const startedAt = Date.now();
 
@@ -453,44 +544,51 @@ export function resolveGeminiApiKey(opts) {
     event: 'gemini_cred_resolve',
     stage: 'start',
     account,
+    service,
+    credentialSource,
     platform: process.platform,
-    useKeychain,
     forceRefresh,
   });
 
-  // 1. Env precedence with explicit-disable semantics:
-  //    - undefined  → fall through to keychain
-  //    - non-empty  → use as-is
-  //    - empty str  → user explicitly wants no key → return null, SKIP keychain
-  //      (otherwise we'd inject a keychain key against user intent)
-  const envVal = process.env.GEMINI_API_KEY;
-  if (envVal !== undefined) {
-    const key = envVal.length > 0 ? envVal : null;
-    _emitEvent({
-      event: 'gemini_cred_resolve',
-      stage: 'end',
-      source: 'env',
-      result: key ? 'hit' : 'miss',
-      account,
-      elapsedMs: Date.now() - startedAt,
-      keyMask: key ? maskKey(key) : null,
-    });
-    return key;
+  // 1. env is consulted ONLY for 'auto'. Explicit 'shared-keychain'/'ao-keychain'
+  //    skip env — those sources are a user statement of intent. 'env' reads env
+  //    and stops regardless of whether the var is set.
+  if (credentialSource === 'auto' || credentialSource === 'env') {
+    const envVal = process.env.GEMINI_API_KEY;
+    if (envVal !== undefined) {
+      const key = envVal.length > 0 ? envVal : null;
+      _emitEvent({
+        event: 'gemini_cred_resolve',
+        stage: 'end',
+        source: 'env',
+        credentialSource,
+        service,
+        result: key ? 'hit' : 'miss',
+        account,
+        elapsedMs: Date.now() - startedAt,
+        keyMask: key ? maskKey(key) : null,
+      });
+      return key;
+    }
+    if (credentialSource === 'env') {
+      _emitEvent({
+        event: 'gemini_cred_resolve',
+        stage: 'end',
+        source: 'env',
+        credentialSource,
+        service,
+        result: 'miss',
+        account,
+        elapsedMs: Date.now() - startedAt,
+      });
+      return null;
+    }
   }
 
-  if (!useKeychain) {
-    _emitEvent({
-      event: 'gemini_cred_resolve',
-      stage: 'end',
-      source: 'disabled',
-      result: 'miss',
-      account,
-      elapsedMs: Date.now() - startedAt,
-    });
-    return null;
-  }
-
-  const cacheKey = `${process.platform}:${account}`;
+  // Cache key INCLUDES service name so shared-keychain and ao-keychain hits
+  // don't collide. Without this a prior resolve from shared could shadow an
+  // ao-keychain lookup for the same account.
+  const cacheKey = `${process.platform}:${service}:${account}`;
   if (!forceRefresh) {
     const hit = _cache.get(cacheKey);
     if (hit && hit.expiresAt > Date.now()) {
@@ -498,6 +596,8 @@ export function resolveGeminiApiKey(opts) {
         event: 'gemini_cred_resolve',
         stage: 'end',
         source: 'cache',
+        credentialSource,
+        service,
         result: hit.key ? 'hit' : 'miss',
         account,
         elapsedMs: Date.now() - startedAt,
@@ -512,10 +612,10 @@ export function resolveGeminiApiKey(opts) {
   let backend = 'unsupported';
   if (process.platform === 'darwin') {
     backend = 'macos_security';
-    fetchResult = fromKeychainMacOS(account);
+    fetchResult = fromKeychainMacOS(account, service);
   } else if (process.platform === 'linux') {
     backend = 'linux_secret_tool';
-    fetchResult = fromSecretToolLinux(account);
+    fetchResult = fromSecretToolLinux(account, service);
   } else if (process.platform === 'win32') {
     backend = 'windows_unsupported';
     showWindowsNoticeOnce();
@@ -532,6 +632,7 @@ export function resolveGeminiApiKey(opts) {
   _cache.set(cacheKey, {
     platform: process.platform,
     account,
+    service,
     key: resolved,
     expiresAt: Date.now() + TTL_MS,
   });
@@ -542,6 +643,8 @@ export function resolveGeminiApiKey(opts) {
     event: 'gemini_cred_resolve',
     stage: 'end',
     source: backend,
+    credentialSource,
+    service,
     result: fetchResult.result,
     account,
     elapsedMs: Date.now() - startedAt,

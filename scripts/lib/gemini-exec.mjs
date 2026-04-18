@@ -184,7 +184,9 @@ export function spawn(prompt, opts = {}) {
   // last — caller override is always respected.
   const credOpts = opts.credential || {};
   const resolvedKey = resolveGeminiApiKey({
-    useKeychain: credOpts.useKeychain !== false,
+    credentialSource: credOpts.credentialSource,
+    service: credOpts.service,
+    useKeychain: credOpts.useKeychain,
     account: credOpts.account || 'default-api-key',
   });
   const mergedEnv = {

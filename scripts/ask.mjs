@@ -223,7 +223,9 @@ export function buildSpawnOpts(adapterName) {
       // spawn time — users running `gemini /auth` once don't need to also
       // export GEMINI_API_KEY.
       opts.credential = {
-        useKeychain: autonomy.gemini?.useKeychain !== false,
+        credentialSource: autonomy.gemini?.credentialSource,
+        service: autonomy.gemini?.keychainService,
+        useKeychain: autonomy.gemini?.useKeychain,
         account: autonomy.gemini?.keychainAccount || 'default-api-key',
       };
     } catch { /* fall through */ }
