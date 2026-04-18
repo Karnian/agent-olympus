@@ -33,11 +33,24 @@ const TTL_MS = 5 * 60 * 1000; // 5 minutes
 /**
  * Hard cap on each secret-store invocation.
  *
- * 10s is chosen to accommodate the one-time macOS Keychain access prompt
- * (when the user hasn't previously granted Node access). Subsequent calls
- * after "Always Allow" complete in <100ms. If the user rejects or ignores
- * the prompt, we time out and fall back to null — the gemini CLI surfaces
- * its own auth error, no hang.
+ * 10s accommodates the macOS Keychain access dialog.
+ *
+ * Root-cause note (2026-04-19): the dialog is NOT triggered by Node itself.
+ * The resolver shells out to `/usr/bin/security find-generic-password`, and
+ * `/usr/bin/security` is the binary whose trust macOS checks against the
+ * keychain item. gemini CLI (via `keytar`) stores its API key with a default
+ * ACL trusting only the creating executable (typically the Node binary that
+ * ran gemini CLI at save time), so `/usr/bin/security` is an untrusted
+ * caller and each read prompts. Clicking "Always Allow" on that dialog
+ * authorizes the `security` tool for future access on that item — after
+ * which subsequent reads complete in <100ms.
+ *
+ * If the user dismisses the prompt, execFileSync hits this timeout and we
+ * fall back to null — gemini CLI then surfaces its own auth error, no hang.
+ *
+ * For permanent fix see docs/gemini-keychain-setup.md (manual ACL edit) or
+ * the `ao-keychain` credentialSource which writes an AO-owned keychain item
+ * with `/usr/bin/security` pre-listed as trusted.
  */
 const EXEC_TIMEOUT_MS = 10000;
 const MAX_BUFFER = 64 * 1024;

@@ -405,7 +405,16 @@ to disable the resolver entirely (env-only fallback). `keychainAccount`
 accepts any non-empty string including characters like `:`, `@`, `.`
 since `execFile` argv prevents shell injection.
 
-**First-time macOS UX**: The first time Agent Olympus invokes `security find-generic-password` from Node, macOS shows a Keychain access prompt ("`node` wants to use your confidential information stored in `gemini-cli-api-key`"). Click **Always Allow**. Subsequent calls complete in <100ms. If the user dismisses the prompt, the resolver times out at `EXEC_TIMEOUT_MS` (10s) and returns `null` — the gemini CLI then surfaces its own auth error.
+**macOS Keychain prompt (root cause & fix)**: The resolver shells out to `/usr/bin/security find-generic-password`. macOS checks the keychain item's ACL against `/usr/bin/security` — NOT against Node. gemini CLI saves its API key via `keytar`, which writes a default ACL trusting only the creating executable (typically the Node binary that ran gemini CLI at save time), so `/usr/bin/security` is untrusted and each read shows a password prompt. Clicking **Always Allow** authorizes the `security` tool for future access on that item — subsequent reads complete in <100ms.
+
+**If you keep seeing the prompt**: you likely clicked "Allow Once" (not "Always Allow"), the item was recreated, or a newer gemini CLI wrote a stricter ACL. Two options available today:
+
+1. **Manual ACL fix** — see [docs/gemini-keychain-setup.md](docs/gemini-keychain-setup.md) for a Keychain Access.app walkthrough; one-time, persists across restarts.
+2. **Export the key explicitly** — set `GEMINI_API_KEY` in your shell; the resolver skips the keychain entirely when env is set. Downside: the key becomes visible in `env` output of your shell and every child process.
+
+**Planned (not yet available)**: a `credentialSource: "ao-keychain"` option will let a one-time setup wizard create an AO-owned keychain item with `/usr/bin/security` pre-listed as trusted, eliminating prompts entirely. Tracked in the repo roadmap.
+
+If the prompt is dismissed, `execFileSync` hits `EXEC_TIMEOUT_MS` (10s) and returns `null` — gemini CLI then surfaces its own auth error.
 
 **Logging & security**:
 - Raw keys are never logged. Diagnostic events emit as single-line JSON on

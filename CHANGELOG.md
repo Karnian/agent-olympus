@@ -82,6 +82,8 @@ Defaults to ON; `useKeychain: false` disables the resolver entirely (env-only fa
 
 **First-time macOS UX** — the first time Node invokes `security` from the plugin, macOS shows a Keychain access prompt ("node wants to use your keychain"). Click **Always Allow**. Subsequent calls complete in <100ms. If the user dismisses the prompt, the resolver times out at 10s and returns `null` — the gemini CLI then surfaces its own auth error.
 
+> **Correction (2026-04-19)** — the wording above is imprecise. The prompt is from `/usr/bin/security`, not Node itself: the resolver shells out to `security find-generic-password`, and that tool is untrusted on the keychain item's ACL. Clicking "Always Allow" authorizes the `security` tool, not Node. See [docs/gemini-keychain-setup.md](docs/gemini-keychain-setup.md) for the corrected model and three supported workarounds.
+
 **Known limitation** — Windows Credential Manager support is deferred to v2. Windows users continue to set `GEMINI_API_KEY` in their shell/user env (one-time stderr notice emitted on first spawn).
 
 **Codex cross-review** — the implementation went through five rounds of Codex review: null-opts throw guard, empty-env fallthrough fix, per-account cache isolation (`Map` keyed on `platform:account`), Linux path hardcoding → multi-path fallback, ACP early-return paths (init/createSession/loadSession/sendPrompt) → shared `_maybeInvalidateOnAuthError` helper, tmux argv leak → error redaction. Real-world smoke testing caught two additional prod-only bugs: JSON envelope unwrapping (gemini CLI stores keys as JSON, not bare strings) and Keychain prompt latency (2s → 10s timeout).
