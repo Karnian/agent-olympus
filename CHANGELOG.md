@@ -1,5 +1,71 @@
 # Changelog
 
+## [1.1.3] - 2026-04-19
+
+### Fix — Eliminate the repeating macOS Keychain password prompt on Gemini spawns
+
+Before 1.1.3 many users saw the login-password dialog every time Agent Olympus spawned a Gemini worker. The old docs blamed "Node needing Always Allow"; in practice the prompt comes from `/usr/bin/security` being untrusted on the keychain item's ACL, and clicking Always Allow on the transient dialog was fragile (re-running `gemini /auth` would recreate the item and reset the ACL). This release rewrites the credential resolver around four supported sources and ships a one-time wizard that makes the prompt disappear permanently.
+
+**New `credentialSource` in `.ao/autonomy.json`**:
+```jsonc
+{
+  "gemini": {
+    "credentialSource": "auto",          // "auto" | "env" | "shared-keychain" | "ao-keychain"
+    "keychainAccount": "default-api-key",
+    "keychainService": null,             // null = derive from credentialSource
+    "useKeychain": true                   // deprecated; useKeychain:false normalizes to credentialSource:"env"
+  }
+}
+```
+- `auto` (default) — env → shared-keychain → miss. Backward-compatible with 1.1.1 behavior.
+- `env` — `GEMINI_API_KEY` only; keychain never consulted.
+- `shared-keychain` — reads gemini CLI's `gemini-cli-api-key` item.
+- `ao-keychain` — reads an AO-owned `agent-olympus.gemini-api-key` item created by the new wizard.
+
+**One-time setup wizard** (`scripts/setup-gemini-key.mjs`):
+- Run from Claude Code: `/setup-gemini-auth` (new skill; resolves `$CLAUDE_PLUGIN_ROOT`).
+- Run from a plain terminal: `node /path/to/plugin/scripts/setup-gemini-key.mjs` (the stale-warning JSON surfaces the resolved absolute path, so the user never has to guess the install location).
+- Creates an AO-owned keychain item with `/usr/bin/security`, `/usr/bin/env`, and the current Node binary pre-listed as trusted apps — no password prompt on subsequent reads.
+- Reads the API key from stdin (echo disabled, can be piped from `op read` / `pass` etc.). The secret is **never** placed on argv — the wizard uses `security add-generic-password -w` in bare (prompt) mode and delivers the password via `spawnSync`'s `input` option.
+- Idempotent: `security add-generic-password -U` updates in place when the user rotates the key. `patchCredentialSource()` cleans stale `keychainService` overrides when switching to the default AO service.
+
+**Structured tracing** via `AO_DEBUG_CREDENTIAL=1` (or `AO_DEBUG_GEMINI=1` umbrella). Every resolve emits single-line JSON events on stderr:
+```json
+{"event":"gemini_cred_resolve","stage":"end","source":"macos_security","credentialSource":"ao-keychain","service":"agent-olympus.gemini-api-key","result":"hit","elapsedMs":42,"keyMask":"AIza****x2","account":"default-api-key"}
+```
+Backend classification (`not_found`, `acl_denied`, `timeout`, `binary_not_found`, `unknown`, `windows_unsupported`) is carried to the `end` event so `jq 'select(.stage=="end")'` alone can distinguish miss from error without watching `fetch_end`. `AIza`-shape key material is masked to `AIza****xx`; raw keys never appear in the stream even when embedded in child stderr/message fields.
+
+**Stale-ao-keychain warning**: when a Gemini spawn fails auth AND the effective service was the AO-owned item, adapters emit `{"event":"gemini_cred_stale_ao_keychain","account":"...","setupScript":"/abs/path/to/setup-gemini-key.mjs","message":"..."}` on stderr. Unlike tracing events, this fires unconditionally (not gated by `AO_DEBUG_*`) because it is actionable user guidance.
+
+**Split cache TTL** (per-`platform:service:account` key):
+- Hit: 24 hours — orchestrators stay warm across many spawns; 401/403 invalidation still clears rotated keys immediately.
+- Miss: 30 seconds — wizard re-runs or env exports are picked up on the next orchestrator tick.
+- Error: 60 seconds — dampens retry storms against the ACL dialog without making the fix invisible.
+
+**Root-cause documentation** in [docs/gemini-keychain-setup.md](docs/gemini-keychain-setup.md). The leading "Do you need this guide?" matrix answers the question for every common auth method (env / OAuth / API key / Vertex AI / Cloud Shell / Linux / Windows) so users who don't hit the ACL problem aren't sent into the wizard by mistake.
+
+**Security posture**:
+- API key is **never** on argv — wizard argv is verified key-free in unit tests.
+- stderr sanitizer redacts both AIza-shape patterns AND the exact caller-supplied key for future non-standard formats.
+- Stale warning does not interpolate the key into the message body.
+
+**Codex cross-review** — the implementation went through eight review rounds across five PRs. Notable corrections captured in the final implementation: imprecise "Node access" framing in 1.1.1 docs (PR 1), `exit 45 → user_canceled` over-claim and `end`-event result flattening (PR 2), stale `keychainService` override in the autonomy patch and unchecked missing `--account`/`--service` values in the wizard (PR 3), narrative drift between new "Cache TTL" section and old "Caching" paragraph (PR 4), handle storing raw rather than effective credentialSource/service and terminal-fallback command relying on `$CLAUDE_PLUGIN_ROOT` (PR 5).
+
+**Files**
+- `scripts/lib/gemini-credential.mjs` — service-parameterized resolver, split TTL, tracing, `normalizeCredentialSource`/`resolveServiceName`/`emitStaleAoKeychainWarning` exports, import.meta.url-resolved wizard path.
+- `scripts/lib/ao-keychain-write.mjs` (new) — stdin-only keychain writer, exhaustive validation, stderr sanitizer.
+- `scripts/setup-gemini-key.mjs` (new) — interactive wizard with echo-disabled TTY input and argv parser.
+- `skills/setup-gemini-auth/` (new) — `/setup-gemini-auth` entrypoint with scenario checklist.
+- `scripts/lib/gemini-exec.mjs`, `scripts/lib/gemini-acp.mjs`, `scripts/lib/worker-spawn.mjs`, `scripts/ask.mjs` — thread `credentialSource` + `service` through `opts.credential` and store effective values on handles.
+- `scripts/lib/autonomy.mjs` — `credentialSource` enum + `keychainService` schema validation.
+- Docs: `CLAUDE.md` "Credential Resolution (Gemini)" rewrite with Cache TTL subsection and wizard entrypoint; `docs/gemini-keychain-setup.md` auth-method matrix + Option 4 (wizard) promoted from "Future work".
+- Tests: `scripts/test/gemini-credential-trace.test.mjs` (new), `scripts/test/ao-keychain-write.test.mjs` (new), `scripts/test/setup-gemini-key.test.mjs` (new), plus new cases in `scripts/test/gemini-credential.test.mjs`, `scripts/test/autonomy.test.mjs`, `scripts/test/gemini-exec.test.mjs`. Full suite 1812/1812.
+
+**Upgrading**
+- Existing configs keep working. `useKeychain: false` normalizes internally to `credentialSource: "env"`; everyone else on 1.1.1 behavior lands on `credentialSource: "auto"` (default) with no change.
+- To adopt the wizard: run `/setup-gemini-auth` (Claude Code) or `node "$CLAUDE_PLUGIN_ROOT/scripts/setup-gemini-key.mjs"` once.
+- For OAuth / Vertex AI / Cloud Shell / env-var / Linux / Windows users the wizard is **not** applicable and should not be run — see the "Do you need this guide?" table in [docs/gemini-keychain-setup.md](docs/gemini-keychain-setup.md). Setting `credentialSource: "env"` in those cases makes intent explicit.
+
 ## [1.1.2] - 2026-04-16
 
 ### Feature — Layered autonomy.json resolution (global + env + project)
