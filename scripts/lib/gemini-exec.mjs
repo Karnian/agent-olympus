@@ -25,7 +25,15 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
-import { resolveGeminiApiKey, maskKey, invalidateCache } from './gemini-credential.mjs';
+import {
+  resolveGeminiApiKey,
+  maskKey,
+  invalidateCache,
+  emitStaleAoKeychainWarning,
+  normalizeCredentialSource,
+  resolveServiceName,
+  AO_KEYCHAIN_SERVICE,
+} from './gemini-credential.mjs';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -184,7 +192,9 @@ export function spawn(prompt, opts = {}) {
   // last — caller override is always respected.
   const credOpts = opts.credential || {};
   const resolvedKey = resolveGeminiApiKey({
-    useKeychain: credOpts.useKeychain !== false,
+    credentialSource: credOpts.credentialSource,
+    service: credOpts.service,
+    useKeychain: credOpts.useKeychain,
     account: credOpts.account || 'default-api-key',
   });
   const mergedEnv = {
@@ -227,6 +237,13 @@ export function spawn(prompt, opts = {}) {
     // classifier reads this to invalidate the right cache entry on auth
     // failure, so the next spawn re-reads the keychain.
     _credentialAccount: credOpts.account || 'default-api-key',
+    // EFFECTIVE source + service after the same normalization resolveGeminiApiKey
+    // applies internally. Stored on the handle so the auth_failed classifier
+    // can gate the stale-warning on the actual service that was read, not on
+    // the raw caller-provided credentialSource (which may be 'auto' while the
+    // effective service is still the AO item via a keychainService override).
+    _credentialSource: normalizeCredentialSource(credOpts),
+    _credentialService: resolveServiceName(normalizeCredentialSource(credOpts), credOpts.service),
   };
 
   // Accumulate stdout — Gemini emits a single JSON object at the end, not streaming
@@ -301,6 +318,12 @@ export function monitor(handle) {
     // re-reads the keychain — supports in-session /auth recovery.
     if (category === 'auth_failed' && handle._credentialAccount) {
       try { invalidateCache(handle._credentialAccount, 'auth_failed'); } catch { /* never throw */ }
+      // Gate on EFFECTIVE service name, not raw credentialSource — covers both
+      // `credentialSource: 'ao-keychain'` AND `credentialSource: 'auto' +
+      // keychainService: 'agent-olympus.gemini-api-key'` (codex PR 5 review).
+      if (handle._credentialService === AO_KEYCHAIN_SERVICE) {
+        try { emitStaleAoKeychainWarning(handle._credentialAccount); } catch { /* never throw */ }
+      }
     }
   }
 

@@ -13,6 +13,7 @@ import {
   resolveGeminiApiKey,
   invalidateCache,
   maskKey,
+  emitStaleAoKeychainWarning,
   __resetForTest,
   __setExecFileSyncForTest,
 } from '../lib/gemini-credential.mjs';
@@ -213,7 +214,7 @@ test('#10 TTL cache hit: two sequential calls invoke execFileSync once', () => {
   assert.equal(mock.calls.length, 1);
 });
 
-test('#11 TTL expiry triggers re-fetch', () => {
+test('#11 TTL expiry triggers re-fetch (hit path: SUCCESS_TTL_MS = 24h after PR 4 split)', () => {
   setPlatform('darwin');
   const mock = mockExec(`${TEST_KEY}\n`);
   __setExecFileSyncForTest(mock);
@@ -224,8 +225,8 @@ test('#11 TTL expiry triggers re-fetch', () => {
 
   try {
     assert.equal(resolveGeminiApiKey(), TEST_KEY);
-    // Advance past 5min TTL
-    Date.now = () => start + 5 * 60 * 1000 + 1;
+    // Advance past SUCCESS_TTL_MS (24h), +1ms to ensure strict past
+    Date.now = () => start + 24 * 60 * 60 * 1000 + 1;
     assert.equal(resolveGeminiApiKey(), TEST_KEY);
     assert.equal(mock.calls.length, 2);
   } finally {
@@ -595,4 +596,55 @@ test('#35 Linux bare-string path still works (backward compat)', () => {
   setPlatform('linux');
   __setExecFileSyncForTest(mockExec(`${TEST_KEY}\n`));
   assert.equal(resolveGeminiApiKey(), TEST_KEY);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// emitStaleAoKeychainWarning — PR 5 stale hint for ao-keychain users
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('emitStaleAoKeychainWarning writes single JSON line with account + guidance', () => {
+  const stderr = captureStderr(() => {
+    emitStaleAoKeychainWarning('default-api-key');
+  });
+  const lines = stderr.split('\n').filter(Boolean);
+  assert.equal(lines.length, 1, 'exactly one line emitted');
+  const obj = JSON.parse(lines[0]);
+  assert.equal(obj.event, 'gemini_cred_stale_ao_keychain');
+  assert.equal(obj.account, 'default-api-key');
+  assert.match(obj.message, /setup-gemini-auth|setup-gemini-key\.mjs/);
+});
+
+test('emitStaleAoKeychainWarning fires UNCONDITIONALLY (no AO_DEBUG_* gate)', () => {
+  // Ensure neither debug env var is set — warning must still fire
+  const saved1 = process.env.AO_DEBUG_CREDENTIAL;
+  const saved2 = process.env.AO_DEBUG_GEMINI;
+  delete process.env.AO_DEBUG_CREDENTIAL;
+  delete process.env.AO_DEBUG_GEMINI;
+  try {
+    const stderr = captureStderr(() => emitStaleAoKeychainWarning('acct'));
+    assert.ok(stderr.includes('gemini_cred_stale_ao_keychain'),
+      'warning must bypass debug gating — it is user-facing guidance, not diagnostic');
+  } finally {
+    if (saved1 !== undefined) process.env.AO_DEBUG_CREDENTIAL = saved1;
+    if (saved2 !== undefined) process.env.AO_DEBUG_GEMINI = saved2;
+  }
+});
+
+test('emitStaleAoKeychainWarning does not throw even on pathological input', () => {
+  assert.doesNotThrow(() => {
+    captureStderr(() => emitStaleAoKeychainWarning(undefined));
+    captureStderr(() => emitStaleAoKeychainWarning(null));
+    captureStderr(() => emitStaleAoKeychainWarning(''));
+  });
+});
+
+test('emitStaleAoKeychainWarning never leaks API key material', () => {
+  const fakeKey = 'AIzaNEVER_IN_STALE_WARNING_ABCDEFGHIJKLMN';
+  const stderr = captureStderr(() => emitStaleAoKeychainWarning(fakeKey));
+  // The account field ends up in the JSON verbatim, which is fine (we never
+  // pass a key there in practice — only account names from autonomy.json).
+  // But the message body must not contain any AIza-shape string.
+  const obj = JSON.parse(stderr.split('\n').filter(Boolean)[0]);
+  assert.ok(!obj.message.includes(fakeKey),
+    'the guidance message must NOT interpolate the account/key value');
 });

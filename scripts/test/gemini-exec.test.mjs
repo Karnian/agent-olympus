@@ -628,3 +628,67 @@ test('collect(): non-auth errors do NOT invalidate cache', async () => {
     credMod.__resetForTest();
   }
 });
+
+// ─── Stale-warning emission (PR 5 — codex adapter-level coverage) ─────────────
+
+function _captureStderrEventName(fn, eventName) {
+  const origWrite = process.stderr.write.bind(process.stderr);
+  const captured = [];
+  process.stderr.write = (chunk) => {
+    const text = typeof chunk === 'string' ? chunk : chunk.toString();
+    if (text.includes(eventName)) captured.push(text);
+    return true;
+  };
+  try { return fn().then(() => captured); }
+  finally { process.stderr.write = origWrite; }
+}
+
+async function _runAuthFailedCollect(credentialService) {
+  const mod = await import('../lib/gemini-exec.mjs');
+  const handle = {
+    status: 'failed',
+    _output: '',
+    _events: [],
+    _stderrChunks: ['Error: authentication failed: invalid API key\n'],
+    _exitCode: 1,
+    _credentialAccount: 'test-acct',
+    _credentialService: credentialService,
+  };
+  const origWrite = process.stderr.write.bind(process.stderr);
+  const captured = [];
+  process.stderr.write = (chunk) => {
+    const text = typeof chunk === 'string' ? chunk : chunk.toString();
+    captured.push(text);
+    return true;
+  };
+  try {
+    await mod.collect(handle);
+  } finally {
+    process.stderr.write = origWrite;
+  }
+  return captured.join('');
+}
+
+test('collect(): auth_failed + handle._credentialService === AO_KEYCHAIN_SERVICE → emits stale warning', async () => {
+  const stderr = await _runAuthFailedCollect('agent-olympus.gemini-api-key');
+  assert.ok(
+    stderr.includes('gemini_cred_stale_ao_keychain'),
+    `expected stale warning in stderr, got: ${stderr}`
+  );
+});
+
+test('collect(): auth_failed + handle._credentialService === gemini-cli-api-key → does NOT emit stale warning', async () => {
+  const stderr = await _runAuthFailedCollect('gemini-cli-api-key');
+  assert.ok(
+    !stderr.includes('gemini_cred_stale_ao_keychain'),
+    `shared-keychain must not fire ao-keychain-specific warning; got: ${stderr}`
+  );
+});
+
+test('collect(): auth_failed + handle._credentialService unset → does NOT emit stale warning', async () => {
+  const stderr = await _runAuthFailedCollect(undefined);
+  assert.ok(
+    !stderr.includes('gemini_cred_stale_ao_keychain'),
+    `missing service field must be safe (no warning); got: ${stderr}`
+  );
+});

@@ -35,7 +35,15 @@
 import { spawn as nodeSpawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
-import { resolveGeminiApiKey, maskKey, invalidateCache } from './gemini-credential.mjs';
+import {
+  resolveGeminiApiKey,
+  maskKey,
+  invalidateCache,
+  emitStaleAoKeychainWarning,
+  normalizeCredentialSource,
+  resolveServiceName,
+  AO_KEYCHAIN_SERVICE,
+} from './gemini-credential.mjs';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -164,6 +172,10 @@ function _maybeInvalidateOnAuthError(handle, errorObj) {
     const category = mapGeminiAcpError(errorObj);
     if (category === 'auth_failed' && handle && handle._credentialAccount) {
       invalidateCache(handle._credentialAccount, 'auth_failed');
+      // Gate on effective service — see gemini-exec.mjs for rationale.
+      if (handle._credentialService === AO_KEYCHAIN_SERVICE) {
+        emitStaleAoKeychainWarning(handle._credentialAccount);
+      }
     }
   } catch { /* never throw from logging/cache paths */ }
 }
@@ -269,7 +281,9 @@ export function startServer(opts = {}) {
   // caller-supplied opts.env wins over resolver result.
   const credOpts = opts.credential || {};
   const resolvedKey = resolveGeminiApiKey({
-    useKeychain: credOpts.useKeychain !== false,
+    credentialSource: credOpts.credentialSource,
+    service: credOpts.service,
+    useKeychain: credOpts.useKeychain,
     account: credOpts.account || 'default-api-key',
   });
   const mergedEnv = {
@@ -318,6 +332,10 @@ export function startServer(opts = {}) {
     // error classifier calls invalidateCache(handle._credentialAccount) on
     // ACP JSON-RPC auth failures so the next spawn re-reads the keychain.
     _credentialAccount: credOpts.account || 'default-api-key',
+    // Effective source + service after normalization. Used by auth_failed
+    // handlers to decide whether to emit the ao-keychain stale warning.
+    _credentialSource: normalizeCredentialSource(credOpts),
+    _credentialService: resolveServiceName(normalizeCredentialSource(credOpts), credOpts.service),
   };
 
   // Parse stdout as JSONL — each newline-terminated line is a JSON-RPC message
@@ -804,6 +822,9 @@ export function monitor(handle) {
     // so the next startServer() re-reads the keychain.
     if (category === 'auth_failed' && handle._credentialAccount) {
       try { invalidateCache(handle._credentialAccount, 'auth_failed'); } catch { /* never throw */ }
+      if (handle._credentialService === AO_KEYCHAIN_SERVICE) {
+        try { emitStaleAoKeychainWarning(handle._credentialAccount); } catch { /* never throw */ }
+      }
     }
   }
 

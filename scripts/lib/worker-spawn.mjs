@@ -396,7 +396,9 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
   // at spawn time, so users with `gemini /auth` completed can run team
   // sessions without exporting GEMINI_API_KEY.
   const geminiCredential = {
-    useKeychain: autonomy.gemini?.useKeychain !== false,
+    credentialSource: autonomy.gemini?.credentialSource,
+    service: autonomy.gemini?.keychainService,
+    useKeychain: autonomy.gemini?.useKeychain,
     account: autonomy.gemini?.keychainAccount || 'default-api-key',
   };
 

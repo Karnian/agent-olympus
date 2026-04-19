@@ -395,6 +395,67 @@ test('validateAutonomyConfig: gemini fields coexist (approval + useKeychain + ke
   assert.deepEqual(r.errors, []);
 });
 
+// ─── credentialSource + keychainService (PR 3) ────────────────────────────────
+
+test('DEFAULT_AUTONOMY_CONFIG: gemini.credentialSource defaults to "auto"', () => {
+  assert.equal(DEFAULT_AUTONOMY_CONFIG.gemini.credentialSource, 'auto');
+});
+
+test('DEFAULT_AUTONOMY_CONFIG: gemini.keychainService defaults to null', () => {
+  assert.equal(DEFAULT_AUTONOMY_CONFIG.gemini.keychainService, null);
+});
+
+test('validateAutonomyConfig: gemini.credentialSource accepts all four documented values', () => {
+  for (const src of ['auto', 'env', 'shared-keychain', 'ao-keychain']) {
+    const cfg = minimal();
+    cfg.gemini.credentialSource = src;
+    const r = validateAutonomyConfig(cfg);
+    assert.deepEqual(r.errors, [], `credentialSource=${src} should be valid`);
+  }
+});
+
+test('validateAutonomyConfig: gemini.credentialSource rejects arbitrary strings', () => {
+  const cfg = minimal();
+  cfg.gemini.credentialSource = 'nonsense';
+  const r = validateAutonomyConfig(cfg);
+  assert.ok(r.errors.some(e => /credentialSource must be one of/.test(e)));
+});
+
+test('validateAutonomyConfig: gemini.credentialSource rejects non-string', () => {
+  const cfg = minimal();
+  cfg.gemini.credentialSource = 42;
+  const r = validateAutonomyConfig(cfg);
+  assert.ok(r.errors.some(e => /credentialSource must be one of/.test(e)));
+});
+
+test('validateAutonomyConfig: gemini.keychainService accepts null', () => {
+  const cfg = minimal();
+  cfg.gemini.keychainService = null;
+  const r = validateAutonomyConfig(cfg);
+  assert.deepEqual(r.errors, []);
+});
+
+test('validateAutonomyConfig: gemini.keychainService accepts non-empty string', () => {
+  const cfg = minimal();
+  cfg.gemini.keychainService = 'my.custom.service';
+  const r = validateAutonomyConfig(cfg);
+  assert.deepEqual(r.errors, []);
+});
+
+test('validateAutonomyConfig: gemini.keychainService rejects empty string', () => {
+  const cfg = minimal();
+  cfg.gemini.keychainService = '';
+  const r = validateAutonomyConfig(cfg);
+  assert.ok(r.errors.some(e => /keychainService must be null or a non-empty string/.test(e)));
+});
+
+test('validateAutonomyConfig: gemini.keychainService rejects non-string non-null', () => {
+  const cfg = minimal();
+  cfg.gemini.keychainService = 42;
+  const r = validateAutonomyConfig(cfg);
+  assert.ok(r.errors.some(e => /keychainService must be null or a non-empty string/.test(e)));
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // v1.1.2: Layered resolution (global + project + env override + CI kill-switch)
 // ═══════════════════════════════════════════════════════════════════════════
