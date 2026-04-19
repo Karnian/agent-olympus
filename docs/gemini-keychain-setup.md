@@ -2,6 +2,26 @@
 
 This guide explains why Agent Olympus may repeatedly prompt for your macOS login password when spawning a Gemini worker, and how to stop it.
 
+## Do you need this guide? (auth method matrix)
+
+AO's credential resolver only intervenes when a **Gemini API key needs to land in `process.env.GEMINI_API_KEY`** at child-spawn time. Everything else, gemini CLI handles itself. Check your auth method below before reading further:
+
+| Auth method | AO behavior | Do you need this guide? |
+|---|---|---|
+| `export GEMINI_API_KEY=AIza...` in shell | Reads env directly, keychain untouched | **No** — set `credentialSource: "env"` for clarity |
+| `gemini /auth` → "Login with Google" (OAuth) | Tokens at `~/.gemini/oauth_creds.json`, AO resolver returns null, gemini CLI handles auth | **No** |
+| `gemini /auth` → "Use API key" (stored in keychain) | AO reads keychain via `/usr/bin/security` → ACL prompt | **Yes — this is the scenario this guide solves** |
+| Vertex AI (`GOOGLE_CLOUD_PROJECT` + `GOOGLE_CLOUD_LOCATION` or `GOOGLE_API_KEY`) | AO resolver returns null; gemini CLI uses the Vertex path **if you've already configured it** (env vars + ADC or service account) | **No** |
+| GCP Cloud Shell / `GEMINI_CLI_USE_COMPUTE_ADC=true` | AO resolver returns null; gemini CLI uses Application Default Credentials (requires ADC setup) | **No** |
+| Linux or Windows, any method | Different trust model (no per-app ACL prompts) | **No** |
+
+If you're in a "No" row, set `credentialSource: "env"` in `.ao/autonomy.json` to make the intent explicit, and close this guide — the rest is for the one "Yes" scenario.
+
+```jsonc
+// .ao/autonomy.json — explicit "no keychain needed"
+{ "gemini": { "credentialSource": "env" } }
+```
+
 ## Why the prompt appears
 
 When you authenticate the gemini CLI with an API key (`gemini /auth` → API key), the CLI uses `keytar` to write the key to your default keychain (usually the `login` keychain) under the service name `gemini-cli-api-key`. By default, macOS attaches an ACL to that keychain item trusting only the **creating executable** — typically the Node binary that ran gemini CLI at save time.

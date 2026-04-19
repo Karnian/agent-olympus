@@ -68,7 +68,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - **Agent** (`agents/*.md`) = role persona with model assignment. Called internally via `Task(subagent_type="agent-olympus:<name>")`
 - Not every agent has a matching skill. executor, debugger, designer etc. are internal-only
 - **Available agents** (agents/): aphrodite, ask, atlas, athena, architect, code-reviewer, debugger, designer, executor, explore, hephaestus, hermes, metis, momus, prometheus, security-reviewer, test-engineer, themis, writer
-- **Available skills** (skills/): a11y-audit, arrange, ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, design-critique, design-system-audit, external-context, finish-branch, git-master, harness-init, normalize, plan, polish, research, resume-handoff, sessions, slop-cleaner, systematic-debug, taste, tdd, teach-design, trace, typeset, ui-remediate, ui-review, ux-copy-review, verify-coverage
+- **Available skills** (skills/): a11y-audit, arrange, ask, athena, atlas, brainstorm, cancel, consensus-plan, deep-dive, deep-interview, deepinit, design-critique, design-system-audit, external-context, finish-branch, git-master, harness-init, normalize, plan, polish, research, resume-handoff, sessions, setup-gemini-auth, slop-cleaner, systematic-debug, taste, tdd, teach-design, trace, typeset, ui-remediate, ui-review, ux-copy-review, verify-coverage
 
 ### State Management
 - `.ao/prd.json` — PRD with user stories and acceptance criteria (ephemeral working copy)
@@ -448,7 +448,7 @@ working without migration. New configs should use `credentialSource` directly.
 1. **Manual ACL fix** — see [docs/gemini-keychain-setup.md](docs/gemini-keychain-setup.md) for a Keychain Access.app walkthrough; one-time, persists across restarts.
 2. **Export the key explicitly** — set `GEMINI_API_KEY` in your shell; the resolver skips the keychain entirely when env is set. Downside: the key becomes visible in `env` output of your shell and every child process.
 
-**Planned (not yet available)**: a `credentialSource: "ao-keychain"` option will let a one-time setup wizard create an AO-owned keychain item with `/usr/bin/security` pre-listed as trusted, eliminating prompts entirely. Tracked in the repo roadmap.
+**Wizard** (`/setup-gemini-auth` or `node $CLAUDE_PLUGIN_ROOT/scripts/setup-gemini-key.mjs`): one-time setup that creates an AO-owned keychain item with `/usr/bin/security` pre-listed as trusted, eliminating prompts entirely. Scoped to the "Gemini API key stored in keychain" scenario — OAuth/Vertex/ADC/env-var users don't need it. On `auth_failed` with `credentialSource === "ao-keychain"`, adapters emit `{"event":"gemini_cred_stale_ao_keychain","account":"...","message":"..."}` on stderr to tell the user exactly what to do (re-run the wizard).
 
 If the prompt is dismissed, `execFileSync` hits `EXEC_TIMEOUT_MS` (10s) and returns `null` — gemini CLI then surfaces its own auth error.
 

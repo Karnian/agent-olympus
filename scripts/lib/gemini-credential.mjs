@@ -34,6 +34,8 @@
  */
 
 import { execFileSync as nodeExecFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -51,6 +53,23 @@ const SHARED_KEYCHAIN_SERVICE = 'gemini-cli-api-key';
  * it without triggering the "security wants to use your keychain" dialog.
  */
 const AO_KEYCHAIN_SERVICE = 'agent-olympus.gemini-api-key';
+
+/**
+ * Absolute filesystem path to the setup wizard. Derived from this module's
+ * own import.meta.url so it works whether the plugin is loaded via
+ * $CLAUDE_PLUGIN_ROOT (inside Claude Code) or run directly from a git
+ * checkout. Exported for the stale-warning message.
+ */
+export const SETUP_WIZARD_PATH = (() => {
+  try {
+    return join(dirname(fileURLToPath(import.meta.url)), '..', 'setup-gemini-key.mjs');
+  } catch {
+    return 'scripts/setup-gemini-key.mjs';
+  }
+})();
+
+/** Public constant exports for adapters to gate stale-warning emission on. */
+export { SHARED_KEYCHAIN_SERVICE, AO_KEYCHAIN_SERVICE };
 
 const DEFAULT_ACCOUNT = 'default-api-key';
 
@@ -218,6 +237,33 @@ function _classifyError(err) {
     }
   }
   return { stderrClass: 'unknown', exitCode: null, errnoCode: e.code ?? null };
+}
+
+/**
+ * Emit a one-line warning to stderr when an `ao-keychain` resolve path hits
+ * an auth failure. This is actionable guidance for the user (rotate key,
+ * rerun wizard), not a debug event — so it bypasses the AO_DEBUG_* gate.
+ *
+ * Emitted unconditionally so users who never enable tracing still see the
+ * hint. Callers should only invoke this when they KNOW `credentialSource`
+ * was `ao-keychain` at resolve time; otherwise the message is wrong
+ * (shared-keychain drift has a different remediation path).
+ *
+ * @param {string} account - the account name that just failed auth
+ */
+export function emitStaleAoKeychainWarning(account) {
+  try {
+    process.stderr.write(JSON.stringify({
+      event: 'gemini_cred_stale_ao_keychain',
+      account,
+      message:
+        'AO keychain key appears stale. In Claude Code run `/setup-gemini-auth`. ' +
+        `In a plain terminal run: node ${SETUP_WIZARD_PATH}`,
+      setupScript: SETUP_WIZARD_PATH,
+    }) + '\n');
+  } catch {
+    // never throw from logging
+  }
 }
 
 /**
@@ -499,9 +545,17 @@ function showWindowsNoticeOnce() {
  * Explicit credentialSource wins; falls back to useKeychain=false → env, else auto.
  * Invalid credentialSource strings silently fall through to auto (fail-safe).
  *
+ * Exported so adapters can compute the EFFECTIVE source at spawn time for the
+ * stale-warning gate — raw caller-provided values lie when `service` override
+ * is also used (codex PR 5 review finding).
+ *
  * @param {ResolveOpts} opts
  * @returns {CredentialSource}
  */
+export function normalizeCredentialSource(opts) {
+  return _normalizeCredentialSource(opts || {});
+}
+
 function _normalizeCredentialSource(opts) {
   const raw = opts.credentialSource;
   if (typeof raw === 'string') {
@@ -528,10 +582,17 @@ function _normalizeCredentialSource(opts) {
  * For shared-keychain/auto, use the gemini CLI default `gemini-cli-api-key`.
  * For ao-keychain, use the AO-owned service name.
  *
+ * Exported so adapters can compute the EFFECTIVE service name at spawn time
+ * and use it to decide whether to emit the ao-keychain stale warning.
+ *
  * @param {CredentialSource} source
  * @param {string|null|undefined} explicit
  * @returns {string}
  */
+export function resolveServiceName(source, explicit) {
+  return _resolveServiceName(source, explicit);
+}
+
 function _resolveServiceName(source, explicit) {
   if (typeof explicit === 'string' && explicit.length > 0) return explicit;
   if (source === 'ao-keychain') return AO_KEYCHAIN_SERVICE;
