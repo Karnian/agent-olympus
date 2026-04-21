@@ -57,6 +57,27 @@ export const DEFAULT_AUTONOMY_CONFIG = {
   },
   nativeTeams: false,
   planExecution: 'ask',
+  architect: {
+    // diffScope: "auto" (default — full context; flip to "enabled" after
+    // reviewing usage-report to confirm architect is a hotspot worth
+    // narrowing) | "enabled" (use 1-hop scope when no shared-lib change)
+    // | "disabled" (never narrow, always full context)
+    diffScope: 'auto',
+  },
+  stageEscalation: {
+    // Opt-in for Phase 3 critic escalation pipeline. When disabled, critics
+    // still emit free-text verdicts and existing retry paths continue
+    // unchanged. When enabled, critic STAGE_VERDICT blocks can trigger
+    // Sonnet→Opus re-runs of the prior stage.
+    enabled: false,
+  },
+  // Phase 4 — orchestrator operation mode.
+  //   "full" (default) — full pipeline with momus + architect review stages
+  //   "light"          — skip momus + architect; user confirms opt-in via
+  //                      AskUserQuestion at start of run. Any review reject
+  //                      auto-escalates back to full.
+  // Override per-run via CLI flag `--light` (highest precedence).
+  mode: 'full',
 };
 
 /**
@@ -340,6 +361,53 @@ export function validateAutonomyConfig(config) {
         errors.push(
           'config.planExecution must be one of: solo, ask, atlas, athena; received: ' +
           JSON.stringify(config.planExecution)
+        );
+      }
+    }
+
+    // --- architect ---
+    if (config.architect !== undefined) {
+      if (!config.architect || typeof config.architect !== 'object' || Array.isArray(config.architect)) {
+        errors.push(
+          'config.architect must be a non-null object; received: ' +
+          (config.architect === null ? 'null' : typeof config.architect)
+        );
+      } else if (config.architect.diffScope !== undefined) {
+        const validScope = ['auto', 'enabled', 'disabled'];
+        if (typeof config.architect.diffScope !== 'string' ||
+            !validScope.includes(config.architect.diffScope)) {
+          errors.push(
+            'config.architect.diffScope must be one of: auto, enabled, disabled; received: ' +
+            JSON.stringify(config.architect.diffScope)
+          );
+        }
+      }
+    }
+
+    // --- stageEscalation ---
+    if (config.stageEscalation !== undefined) {
+      if (!config.stageEscalation || typeof config.stageEscalation !== 'object' ||
+          Array.isArray(config.stageEscalation)) {
+        errors.push(
+          'config.stageEscalation must be a non-null object; received: ' +
+          (config.stageEscalation === null ? 'null' : typeof config.stageEscalation)
+        );
+      } else if (config.stageEscalation.enabled !== undefined &&
+                 typeof config.stageEscalation.enabled !== 'boolean') {
+        errors.push(
+          'config.stageEscalation.enabled must be boolean; received: ' +
+          JSON.stringify(config.stageEscalation.enabled)
+        );
+      }
+    }
+
+    // --- mode (Phase 4) ---
+    if (config.mode !== undefined) {
+      const validModes = ['full', 'light'];
+      if (typeof config.mode !== 'string' || !validModes.includes(config.mode)) {
+        errors.push(
+          'config.mode must be one of: full, light; received: ' +
+          JSON.stringify(config.mode)
         );
       }
     }

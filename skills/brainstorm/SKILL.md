@@ -86,7 +86,17 @@ Task(subagent_type="agent-olympus:prometheus", model="opus",
 
 ### Phase 2 — CONVERGE
 
-Evaluate all options in parallel:
+Evaluate all options in parallel. Optionally resolve a diff-scope hint
+before spawning architect (disabled by default; see `.ao/autonomy.json`
+`architect.diffScope`).
+
+```javascript
+import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
+import { resolveArchitectScope, formatScopeHint } from './scripts/lib/architect-scope.mjs';
+const _autonomy = loadAutonomyConfig(process.cwd());
+const _scope = resolveArchitectScope({ autonomyConfig: _autonomy, cwd: process.cwd() });
+const _scopeHint = formatScopeHint(_scope);
+```
 
 ```
 Task A — Architectural evaluation:
@@ -103,7 +113,8 @@ Task(subagent_type="agent-olympus:architect", model="opus",
   - Maintainability: Will future developers understand it?
 
   Recommend top 1-2 options.
-  Output: score table + recommendation")
+  Output: score table + recommendation"
+  + _scopeHint)
 
 Task B — Critical evaluation:
 Task(subagent_type="agent-olympus:momus", model="opus",

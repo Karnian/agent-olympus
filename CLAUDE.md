@@ -86,6 +86,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/state/ao-current-session.json` — active session pointer (sessionId + startedAt); used for crash recovery
 - `.ao/state/ao-capabilities.json` — cached capability detection results (60-min TTL, file-based since hooks run as separate processes). To force refresh after installing codex/gemini mid-session, delete this file manually
 - `.ao/state/ao-notifications.json` — logged idle/permission prompt notifications for stall detection (capped at 50 entries, FIFO)
+- `.ao/state/ao-model-usage.jsonl` — per-subagent model usage log (schemaVersion:1) for Opus-skew analysis; written by `subagent-stop.mjs` via `scripts/lib/model-usage.mjs`; fallback file when no active run (capped at 1000 lines FIFO); per-run variant at `.ao/artifacts/runs/<runId>/model-usage.jsonl` (uncapped); summarise with `node scripts/usage-report.mjs [--run <runId>|--all|--json]`
 - `.ao/state/ao-plan-pending.json` — marker for plan execution routing fallback (created by PlanExecuteGate, consumed by SessionStart)
 - `.ao/state/browser-handoff.json` — [v1.0.2+] browser pause state (sessionId + sanitized URL + sanitized breadcrumb); 24h TTL; created by US-006 browser-handoff.mjs; read by `/resume-handoff`
 - `.ao/state/ask-jobs/<jobId>.json` — [v1.0.4+] per-job metadata for the async `/ask` path (schemaVersion:1). **Single-writer rule:** only the detached `_run-job` runner process ever writes this file; `status`/`collect`/`cancel`/`list` subcommands are read-only. 24h SessionEnd sweep applies.

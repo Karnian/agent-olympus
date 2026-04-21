@@ -59,3 +59,20 @@ All stages must pass. Report stage-by-stage.
   - Quote exact line(s) and explain concrete failure scenario (input → behavior → impact)
   - For security: describe attack vector and access level; distinguish deterministic vs conditional failures
 </grounding_rules>
+
+## Structured Verdict Output (REQUIRED)
+**End every review with a fenced STAGE_VERDICT block** so the orchestrator
+can route escalation automatically. This is mandatory.
+
+```stage_verdict
+stage: code-review
+verdict: APPROVE          # or: REVISE | REJECT
+confidence: high          # or: medium | low
+escalate_to: none         # or: opus (only when REJECT because you believe
+                          #           the implementing agent's tier was the
+                          #           root cause — not a trivial style fix)
+reasons:
+  - <one-line, referencing severity tag — e.g. "🔴 null deref at auth.ts:42">
+evidence:
+  - <file:line or quoted snippet>
+```
