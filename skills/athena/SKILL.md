@@ -58,6 +58,17 @@ Athena = many brains collaborating.
 
 ### Phase 0 — TRIAGE & TEAM DESIGN
 
+#### Light-Mode Resolution (Phase 4, 2026-04-22)
+
+Identical pattern to Atlas — resolve mode before sub-agent spawning. See
+[skills/atlas/SKILL.md](../atlas/SKILL.md) "Light-Mode Resolution" for the
+canonical code block (replace `[Atlas]` log prefixes with `[Athena]`).
+
+In Athena, `skipMomus` additionally wraps the Phase 2 momus validation
+(Task line ~330). Any reviewer REJECT while in light mode triggers
+`autoEscalateOnReject` → `orchMode = 'full'` → re-run skipped stages before
+continuing the loop.
+
 #### Checkpoint Recovery
 
 Before starting any work:

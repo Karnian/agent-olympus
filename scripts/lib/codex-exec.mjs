@@ -169,6 +169,7 @@ export function spawn(prompt, opts = {}) {
     _usage: null,
     _exitCode: null,
     _stderrChunks: [],
+    _hadItemFailure: false,
   };
 
   // Write prompt to stdin then close so Codex gets EOF
@@ -189,22 +190,23 @@ export function spawn(prompt, opts = {}) {
         handle.threadId = event.thread_id;
       }
 
-      // Accumulate readable output and detect item-level failures
+      // Accumulate readable output; track item-level failures without committing
+      // handle.status — turn.completed is the authoritative terminal signal
       if (event.type === 'item.completed' && event.item) {
         if (event.item.type === 'agent_message' && event.item.text) {
           handle._output += event.item.text + '\n';
         } else if (event.item.type === 'command_execution' && event.item.aggregated_output) {
           handle._output += event.item.aggregated_output;
         }
-        // item.status === 'failed' means a command exited non-zero
         if (event.item.status === 'failed') {
-          handle.status = 'failed';
+          handle._hadItemFailure = true;
         }
       }
 
-      // turn.completed signals the end of a successful turn
+      // turn.completed is Codex's authoritative final signal — always wins over
+      // intermediate item failures (e.g. auth retries that succeeded)
       if (event.type === 'turn.completed') {
-        if (handle.status !== 'failed') handle.status = 'completed';
+        handle.status = 'completed';
         if (event.usage) handle._usage = event.usage;
       }
     }
@@ -291,10 +293,10 @@ function flushPartial(handle) {
         } else if (event.item.type === 'command_execution' && event.item.aggregated_output) {
           handle._output += event.item.aggregated_output;
         }
-        if (event.item.status === 'failed') handle.status = 'failed';
+        if (event.item.status === 'failed') handle._hadItemFailure = true;
       }
       if (event.type === 'turn.completed') {
-        if (handle.status !== 'failed') handle.status = 'completed';
+        handle.status = 'completed';
         if (event.usage) handle._usage = event.usage;
       }
       handle._partial = '';

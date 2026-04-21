@@ -84,6 +84,25 @@ Record the draft as `draft_plan` and `revision_count = 0`.
 
 ### Phase 2 — PARALLEL REVIEW
 
+Before spawning the architect, optionally resolve a diff-scope hint to
+constrain the architect's Glob/Grep/Read. Fail-safe: if the resolver
+returns `apply: false`, no hint is injected and the architect scans freely.
+
+```javascript
+import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
+import { resolveArchitectScope, formatScopeHint } from './scripts/lib/architect-scope.mjs';
+
+const _autonomy = loadAutonomyConfig(process.cwd());
+const _scope = resolveArchitectScope({ autonomyConfig: _autonomy, cwd: process.cwd() });
+const _scopeHint = formatScopeHint(_scope);  // empty string when apply=false
+// Log only when an actual narrowing happened.
+if (_scope.apply) {
+  Output: "[Consensus] architect diff-scope enabled — " + _scope.reason;
+} else if (_scope.sharedLibDetected) {
+  Output: "[Consensus] architect using full context — " + _scope.reason;
+}
+```
+
 Spawn both reviewers simultaneously:
 
 ```
@@ -106,7 +125,8 @@ Task(subagent_type="agent-olympus:architect", model="opus",
   End your response with one of:
   VERDICT: APPROVE
   VERDICT: REVISE — <one-line summary of required change>
-  VERDICT: REJECT  — <one-line summary of blocking reason>")
+  VERDICT: REJECT  — <one-line summary of blocking reason>"
+  + _scopeHint)
 
 Task B — Critical review:
 Task(subagent_type="agent-olympus:momus", model="opus",

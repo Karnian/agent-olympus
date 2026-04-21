@@ -764,6 +764,15 @@ Record output as `reverse_analysis`.
 For L-scale projects, the deep analysis alone may miss architectural nuances.
 Run an architect review to cross-check:
 
+```javascript
+// Optional diff-scope hint (disabled by default; see .ao/autonomy.json architect.diffScope).
+import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
+import { resolveArchitectScope, formatScopeHint } from './scripts/lib/architect-scope.mjs';
+const _autonomy = loadAutonomyConfig(process.cwd());
+const _scope = resolveArchitectScope({ autonomyConfig: _autonomy, cwd: process.cwd() });
+const _scopeHint = formatScopeHint(_scope);
+```
+
 ```
 Task(subagent_type="agent-olympus:architect", model="opus",
   prompt="Review this reverse-engineered specification for architectural accuracy.
@@ -777,7 +786,8 @@ Task(subagent_type="agent-olympus:architect", model="opus",
   3. Are the improvement opportunities technically sound?
   4. Are there additional risks or debt items to flag?
 
-  Add your notes to the analysis.")
+  Add your notes to the analysis."
+  + _scopeHint)
 ```
 
 Merge architect feedback into the spec.

@@ -37,11 +37,11 @@ You say it. Atlas finishes it. No exceptions.
 User Request
     │
     ▼
-Phase 0: TRIAGE ──→ trivial? ──→ EXECUTE DIRECTLY (no sub-agents needed)
+Phase 0: TRIAGE + ANALYZE (single metis call) ──→ trivial? ──→ EXECUTE DIRECTLY
     │
     ▼ (moderate+)
-Phase 1: ANALYZE (metis agent)
-    │
+Phase 1: OPTIONAL DEEP-DIVE / EXTERNAL CONTEXT
+    │   (reuses Phase 0 analysis fields — no second metis call)
     ▼
 Phase 1.5: SPEC GATE (hermes agent)
     │   ├── .ao/prd.json exists → validate spec
@@ -70,6 +70,81 @@ Phase 5: REVIEW ←── Fix & Retry (debugger agent)
 ## Steps
 
 ### Phase 0 — TRIAGE
+
+#### Light-Mode Resolution (Phase 4, 2026-04-22)
+
+Before any sub-agent is spawned, resolve the orchestrator mode. Light mode
+skips momus + architect review stages. Source precedence (highest first):
+CLI flag `--light` → `.ao/autonomy.json` `mode: "light"` → default `full`.
+
+```javascript
+import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
+import {
+  resolveMode, buildConfirmMessage, stageFilter, logLightModeEvent,
+} from './scripts/lib/light-mode.mjs';
+
+const _autonomy = loadAutonomyConfig(process.cwd());
+// Note on CLI args: Claude Code skills are NOT Node CLI entrypoints; the
+// orchestrator scans the user request for a literal "--light" token and
+// synthesises a cliArgs array. Example: if the user wrote
+// "/atlas --light rename the button", pass ['--light'] here.
+const _cliArgs = /(^|\s)--light(\s|$)/.test(<user_request>) ? ['--light'] : [];
+const _modeResolve = resolveMode(_autonomy, _cliArgs);
+let orchMode = _modeResolve.mode;  // mutable — auto-escalate below may flip it
+
+if (orchMode === 'light' && _modeResolve.requiresConfirm) {
+  // CLI-requested light mode. Need explicit user confirmation before skipping.
+  if (!_modeResolve.safeToAutoAccept) {
+    // Non-interactive (CI / no TTY / pipe). Never auto-accept. Fall back.
+    orchMode = 'full';
+    await logLightModeEvent({
+      event: 'exited',
+      reason: 'non-interactive environment — cannot confirm light mode, running full',
+    });
+    Output: "[Atlas] Non-interactive environment detected — running full pipeline (set `mode:\"light\"` in .ao/autonomy.json to enable light in CI).";
+  } else {
+    const msg = buildConfirmMessage({ taskDescription: <user_request>, stagesSkipped: ['momus', 'architect'] });
+    const answer = await (typeof AskUserQuestion === 'function'
+      ? AskUserQuestion({ title: msg.title, body: msg.body, options: msg.options })
+      : (Output: msg.body, null));
+    if (!answer || !/^Yes/i.test(String(answer))) {
+      orchMode = 'full';
+      Output: "[Atlas] User declined (or no response) — running full pipeline.";
+    } else {
+      await logLightModeEvent({
+        event: 'entered', reason: 'user confirmed CLI --light',
+        stagesSkipped: ['momus', 'architect'], riskyMatches: msg.riskyMatches,
+      });
+      Output: "[Atlas] Light mode ACTIVE — skipping: momus, architect. Any review reject will auto-escalate.";
+    }
+  }
+} else if (orchMode === 'light' && _modeResolve.source === 'autonomy') {
+  // Config-level opt-in — no confirm, but log for observability.
+  await logLightModeEvent({
+    event: 'entered', reason: 'autonomy.json mode=light',
+    stagesSkipped: ['momus', 'architect'],
+  });
+  Output: "[Atlas] Light mode ACTIVE (autonomy.json) — skipping: momus, architect.";
+}
+
+const _stageFilter = stageFilter(orchMode);
+```
+
+After each review stage (Phase 2b momus, architect), if `orchMode === 'light'`
+and the reviewer REJECTs, import `autoEscalateOnReject`, flip `orchMode = 'full'`,
+update `_stageFilter = stageFilter(orchMode)`, call `logLightModeEvent({ event: 'escalated', rejectingStage, rejectReason })`,
+then **jump back to Phase 2b**: re-run momus on the current plan, then
+architect review, before returning to Phase 3.
+
+**Phase 2 re-entry regimen (Codex Phase 4 #3)** — when auto-escalation
+fires AFTER Phase 3 execution has started (e.g. code-reviewer rejects in
+Phase 5), the orchestrator saves the current iteration's work, rewinds
+to Phase 2b to insert the skipped momus validation on the *actual* plan
+that was executed, then continues Phase 5 re-review with architect. If
+momus rejects retroactively, feed back to prometheus (same retry flow as
+full mode) and re-execute the affected stories. Cap at 2 rewinds per run
+(use `registerEscalation(runId, 'light-mode-rewind', { cap: 2 })`) to
+prevent runaway loops.
 
 #### Checkpoint Recovery
 
@@ -137,17 +212,43 @@ if (!inputCheck.safe) {
 }
 ```
 
-Classify and pick strategy. Spawn **simultaneously**:
+Pick strategy. **Run Explore FIRST (fast, haiku), then Metis** — metis
+requires explore_results as input, so the previous "simultaneous" pattern
+was unsafe (metis started with an empty `<explore_results>` placeholder).
+Explore is haiku-tier (< 2s typical), so the added latency is negligible.
 
 ```
-Output: "[Atlas] Spawning Explore + Metis agents..."
+Output: "[Atlas] Running Explore (haiku) before Metis..."
 
+# Step 1 — Explore first (haiku, ~1-2s)
 Agent A (fast): Task(subagent_type="agent-olympus:explore", model="haiku",
   prompt="Scan codebase: architecture, relevant files, tech stack, test framework.
   Report as bullet points. Context: <user_request>")
 
+explore_results = <Explore output>
+
+# Step 2 — Metis consumes explore_results
+Output: "[Atlas] Spawning Metis with codebase context..."
 Agent B (deep): Task(subagent_type="agent-olympus:metis", model="opus",
-  prompt="Classify this task:
+  prompt="Classify AND analyze this task in a single pass. Produce BOTH the
+  classification (needed for Phase 0 routing) AND the deep analysis (needed
+  for Phase 2 planning). Downstream stages will reuse these fields — no
+  second metis call will be made.
+
+  === PROCEDURE (ordered — follow exactly) ===
+  1. Read the codebase evidence below (explore_results) FIRST.
+  2. Draft PART B (AFFECTED_FILES / HIDDEN_REQUIREMENTS / RISKS /
+     UNKNOWNS / KNOWLEDGE_GAPS) from the evidence.
+  3. ONLY THEN classify the task in PART A.
+     (Rationale: evidence-first ordering prevents false-trivial
+     shortcutting — classify cannot justify a shallow analysis if
+     analysis was already written.)
+  4. If PART B genuinely shows trivial scope (single file, <10 lines,
+     no risks), set COMPLEXITY=trivial. Do NOT use trivial as a
+     shortcut to skip analysis — PART B must be written first.
+
+  === PART A — CLASSIFICATION (always required, written LAST) ===
+  [[PART_A_BEGIN]]
   COMPLEXITY: trivial / moderate / complex / architectural
   SCOPE: single-file / multi-file / cross-system
   MULTI_MODEL: recommend which external models to use (if any)
@@ -163,15 +264,54 @@ Agent B (deep): Task(subagent_type="agent-olympus:metis", model="opus",
   - Use external models ONLY when the task genuinely benefits (NOT for trivial fixes)
   - If a model is NOT AVAILABLE above, do not recommend it
   - When both available: use Codex for cross-validation, Gemini for visual/creative tasks
+  [[PART_A_END]]
 
-  Output format:
+  === PART B — DEEP ANALYSIS (written FIRST per PROCEDURE, emitted here) ===
+  [[PART_B_BEGIN]]
+  AFFECTED_FILES: bullet list of paths the change is likely to touch
+                  (every entry MUST be a concrete path from explore_results,
+                   not a generic noun like 'source files')
+  HIDDEN_REQUIREMENTS: non-obvious constraints inferred from the codebase
+  RISKS: things that could break (integration, perf, security, UX)
+  UNKNOWNS: what needs clarification or deeper investigation
+  KNOWLEDGE_GAPS: unfamiliar APIs / libraries / protocols that external-context should research
+
+  Anti-laziness rules:
+  - Every field MUST have at least 1 concrete bullet, or the literal word 'none'.
+  - 'SKIPPED — trivial task' is permitted ONLY when PART A COMPLEXITY=trivial
+    AND all five fields are honestly 'none'. Never use SKIPPED as a shortcut
+    for 'I don't want to analyze'.
+
+  === Output format (strict, delimiter-bracketed) ===
+  [[PART_B_BEGIN]]
+  AFFECTED_FILES:
+    - <concrete path>
+    - ...
+  HIDDEN_REQUIREMENTS:
+    - ...  (or 'none')
+  RISKS:
+    - ...  (or 'none')
+  UNKNOWNS:
+    - ...  (or 'none')
+  KNOWLEDGE_GAPS:
+    - ...  (or 'none')
+  [[PART_B_END]]
+
+  [[PART_A_BEGIN]]
   COMPLEXITY: <value>
   SCOPE: <value>
   MULTI_MODEL: { codex: yes/no (reason), gemini: yes/no (reason) }
+  [[PART_A_END]]
 
+  Codebase context (Explore ran first, below is its output): <explore_results>
   Prior learnings: <formatWisdomForPrompt()>
   Task: <user_request>")
 ```
+
+**NOTE (Phase 1 optimization, 2026-04-21)**: This single metis call replaces
+the previous two-call pattern (Phase 0 classify + Phase 1 analyze). Output
+reused by Phase 2/3/4/5 via `metis_output`. No second metis call — see
+Phase 1 below.
 
 **Sub-agent output validation — MANDATORY:**
 
@@ -180,12 +320,14 @@ After Metis and Explore return, validate before proceeding:
 metis_output = <result from Metis Task() call>
 explore_output = <result from Explore Task() call>
 
+# Phase 1 optimization: metis_output must carry BOTH classification AND
+# analysis fields in a single response. Retry criteria cover both.
 If metis_output is empty OR does not contain COMPLEXITY classification:
   Output: "[Atlas] ⚠ Metis returned empty/invalid classification. Retrying with reduced input..."
   import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
   const { summary } = extractStructuralSummary(<combined_input>, 100);
   metis_output = Task(subagent_type="agent-olympus:metis", model="sonnet",
-    prompt="Classify this task: COMPLEXITY, SCOPE, MULTI_MODEL.\nAvailable: Codex=" + hasCodex + ", Gemini=" + hasGeminiCli + ". Only recommend available models.\nTask: " + summary)
+    prompt="Classify + analyze in one pass. Output: COMPLEXITY, SCOPE, MULTI_MODEL, AFFECTED_FILES, HIDDEN_REQUIREMENTS, RISKS, UNKNOWNS, KNOWLEDGE_GAPS.\nAvailable: Codex=" + hasCodex + ", Gemini=" + hasGeminiCli + ". Only recommend available models.\nIf trivial, skip analysis fields with 'SKIPPED — trivial task'.\nTask: " + summary)
 
   If metis_output is STILL empty:
     Output: "[Atlas] ✗ Phase 0 FAILED — triage could not complete after retry."
@@ -194,7 +336,31 @@ If metis_output is empty OR does not contain COMPLEXITY classification:
     await addWisdom({ category: 'debug', lesson: 'Atlas Phase 0 failed: Metis empty output on L-scale input.', confidence: 'high' });
     STOP — do not proceed.
 
-Output: "[Atlas] Triage complete — complexity: <complexity>, scope: <scope>"
+# False-trivial guard: a "trivial" classification is only acceptable when
+# PART B analysis fields are honestly 'none'. If PART A says trivial but
+# PART B has concrete bullets, that's a lazy classification — escalate
+# complexity to 'moderate' (conservative) without re-calling metis.
+If metis_output.COMPLEXITY == 'trivial' AND
+   (metis_output.AFFECTED_FILES has bullets OR
+    metis_output.RISKS has bullets OR
+    metis_output.HIDDEN_REQUIREMENTS has bullets):
+  Output: "[Atlas] ⚠ False-trivial detected — analysis fields show real scope. Escalating COMPLEXITY to 'moderate'."
+  metis_output.COMPLEXITY = 'moderate'
+  import { addWisdom } from './scripts/lib/wisdom.mjs';
+  await addWisdom({ category: 'pattern', lesson: 'metis returned trivial but analysis fields had content — suspect lazy classification.', confidence: 'medium' });
+
+# Non-trivial tasks: verify PART B analysis fields are populated.
+If metis_output.COMPLEXITY != 'trivial' AND
+   (metis_output.AFFECTED_FILES is empty OR metis_output.RISKS is empty):
+  Output: "[Atlas] ⚠ Metis classification OK but analysis fields incomplete — requesting follow-up..."
+  # One-shot targeted refill (still a single metis call budget per Phase 1).
+  # Only the missing fields are requested; classification is trusted.
+  metis_output.AFFECTED_FILES, metis_output.HIDDEN_REQUIREMENTS,
+  metis_output.RISKS, metis_output.UNKNOWNS, metis_output.KNOWLEDGE_GAPS =
+    Task(subagent_type="agent-olympus:metis", model="opus",
+      prompt="Fill the missing analysis fields for this task.\nClassification already decided: COMPLEXITY=" + metis_output.COMPLEXITY + ", SCOPE=" + metis_output.SCOPE + ".\nOutput: AFFECTED_FILES, HIDDEN_REQUIREMENTS, RISKS, UNKNOWNS, KNOWLEDGE_GAPS.\nExplore context: " + explore_output + "\nTask: " + <user_request>)
+
+Output: "[Atlas] Triage + Analysis complete — complexity: <complexity>, scope: <scope>"
 ```
 
 **Trivial tasks**: Skip phases 1-2, execute directly (Atlas CAN implement simple things itself).
@@ -205,12 +371,22 @@ Output: "[Atlas] Triage complete — complexity: <complexity>, scope: <scope>"
 saveCheckpoint('atlas', { phase: 1, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
 ```
 
-### Phase 1 — ANALYZE (skip for trivial)
+### Phase 1 — OPTIONAL DEEP-DIVE / EXTERNAL CONTEXT (skip for trivial)
+
+**Analysis reuse**: `metis_output.AFFECTED_FILES`, `.HIDDEN_REQUIREMENTS`,
+`.RISKS`, `.UNKNOWNS`, `.KNOWLEDGE_GAPS` were already produced in Phase 0.
+Reference them as `<metis_analysis>` in downstream prompts. **Do NOT call
+metis again here** — the Phase 0 call was intentionally consolidated.
 
 ```
-Task(subagent_type="agent-olympus:metis", model="opus",
-  prompt="Deep analysis: affected files, hidden requirements, risks, unknowns.
-  Codebase context: <explore_results>. Task: <user_request>")
+# metis_analysis is synthesised from Phase 0 fields:
+metis_analysis = {
+  affected_files: metis_output.AFFECTED_FILES,
+  hidden_requirements: metis_output.HIDDEN_REQUIREMENTS,
+  risks: metis_output.RISKS,
+  unknowns: metis_output.UNKNOWNS,
+  knowledge_gaps: metis_output.KNOWLEDGE_GAPS,
+}
 ```
 
 If `NEEDS_CODEX`, simultaneously spawn Codex (batch executor — adapter auto-selected):
@@ -356,27 +532,49 @@ Skill(skill="agent-olympus:consensus-plan",
 If consensus-plan is used, skip the standard Prometheus + Momus steps below and go directly to PRD generation.
 
 **Standard path** (trivial–moderate tasks, or fewer than 3 stories):
+
+```javascript
+// Inject ORCH_MODE=light marker so prometheus runs its self-audit
+// (agents/prometheus.md "Light-Mode Self-Audit" section) when momus is skipped.
+const _orchModeHint = (orchMode === 'light') ? 'ORCH_MODE=light\n' : '';
+```
+
 ```
 Task(subagent_type="agent-olympus:prometheus", model="opus",
-  prompt="Create implementation plan with:
+  prompt=_orchModeHint + "Create implementation plan with:
   - Exact file paths per task
   - Agent type and model tier
   - Parallel groups (non-overlapping file scopes)
   - Concrete acceptance criteria
   - Codex assignments for algorithmic/refactoring work
   Spec: <contents of .ao/prd.json>
-  Analysis: <analysis>. Task: <user_request>
+  Analysis: <metis_analysis>. Task: <user_request>
   External context (if gathered): <external_context>")
 ```
 
-Validate:
+Validate (SKIP when `_stageFilter.skipMomus === true`):
+
+```javascript
+if (_stageFilter.skipMomus) {
+  Output: "[Atlas] Light mode: skipping momus plan validation.";
+} else {
+```
+
 ```
 Task(subagent_type="agent-olympus:momus", model="opus",
   prompt="Validate plan. Score Clarity/Verification/Context/BigPicture 0-100.
   REJECT if ANY < 70. Plan: <plan>")
 ```
 
-If REJECTED → feed back to prometheus, retry (max 3 rounds).
+```javascript
+}  // end skipMomus guard
+```
+
+If REJECTED → feed back to prometheus, retry (max 3 rounds). Additionally,
+if `orchMode === 'light'` at this point, call `autoEscalateOnReject`, flip
+`orchMode = 'full'`, update `_stageFilter = stageFilter(orchMode)`, record
+the event with `logLightModeEvent({ event: 'escalated', rejectingStage: 'momus', rejectReason: <...> })`,
+and re-run any skipped stages before proceeding.
 
 ```
 saveCheckpoint('atlas', { phase: 2, completedStories: [], activeWorkers: [], startedAt, taskDescription })

@@ -760,7 +760,12 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
     // Persist status changes
     if (resolvedStatus !== state.workers[i].status) {
       state.workers[i].status = resolvedStatus;
-      if (workerEntry.errorReason) state.workers[i].errorReason = workerEntry.errorReason;
+      if (workerEntry.errorReason) {
+        state.workers[i].errorReason = workerEntry.errorReason;
+      } else if (resolvedStatus === 'completed') {
+        delete state.workers[i].errorReason;
+        delete state.workers[i].errorMessage;
+      }
       stateChanged = true;
     }
   }

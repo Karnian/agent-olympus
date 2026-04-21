@@ -62,6 +62,7 @@ function createHandle(child) {
     _usage: null,
     _exitCode: null,
     _stderrChunks: [],
+    _hadItemFailure: false,
   };
 
   child.stdout.on('data', (chunk) => {
@@ -84,12 +85,12 @@ function createHandle(child) {
           handle._output += event.item.aggregated_output;
         }
         if (event.item.status === 'failed') {
-          handle.status = 'failed';
+          handle._hadItemFailure = true;
         }
       }
 
       if (event.type === 'turn.completed') {
-        if (handle.status !== 'failed') handle.status = 'completed';
+        handle.status = 'completed';
         if (event.usage) handle._usage = event.usage;
       }
     }
@@ -359,7 +360,7 @@ test('monitor: command_execution aggregated_output accumulated', async () => {
   assert.ok(result.output.includes('file.txt'));
 });
 
-test('monitor: item.status=failed sets handle.status to failed', async () => {
+test('monitor: item.status=failed sets _hadItemFailure but not handle.status', async () => {
   const child = createMockChildProcess();
   const handle = createHandle(child);
 
@@ -371,10 +372,42 @@ test('monitor: item.status=failed sets handle.status to failed', async () => {
   );
   await tick();
 
+  // handle.status stays 'running' — only _hadItemFailure is set
+  assert.equal(handle.status, 'running');
+  assert.equal(handle._hadItemFailure, true);
   const result = monitor(handle);
-  assert.equal(result.status, 'failed');
-  assert.ok('error' in result);
-  assert.equal(typeof result.error.category, 'string');
+  assert.equal(result.status, 'running');
+});
+
+test('monitor: turn.completed after item.status=failed resolves to completed (Codex R8 retry scenario)', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  // Intermediate item fails (e.g. auth retry in Codex R8)
+  child.stdout.push(
+    JSON.stringify({
+      type: 'item.completed',
+      item: { id: 'item_retry', type: 'command_execution', command: 'retry-cmd', aggregated_output: '', exit_code: 1, status: 'failed' },
+    }) + '\n'
+  );
+  await tick();
+  assert.equal(handle.status, 'running', 'item failure must NOT commit handle to failed status');
+  assert.equal(handle._hadItemFailure, true);
+
+  // Codex internally retries and completes the turn successfully
+  child.stdout.push(
+    JSON.stringify({
+      type: 'item.completed',
+      item: { id: 'item_msg', type: 'agent_message', text: 'Task complete', status: 'completed' },
+    }) + '\n' +
+    JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } }) + '\n'
+  );
+  await tick();
+
+  const result = monitor(handle);
+  assert.equal(result.status, 'completed');
+  assert.ok(!('error' in result));
+  assert.ok(result.output.includes('Task complete'));
 });
 
 test('monitor: error.category populated on failed handle with stderr', () => {
@@ -392,6 +425,33 @@ test('monitor: error.category populated on failed handle with stderr', () => {
 });
 
 // ─── collect ─────────────────────────────────────────────────────────────────
+
+test('collect: does NOT exit early when item.status=failed arrives before turn.completed', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+
+  // Item fails — in old design this set handle.status='failed' causing collect to exit early
+  child.stdout.push(
+    JSON.stringify({
+      type: 'item.completed',
+      item: { id: 'item_fail', type: 'command_execution', command: 'retry-cmd', aggregated_output: '', exit_code: 1, status: 'failed' },
+    }) + '\n'
+  );
+  await tick();
+
+  // collect() starts — should wait (not exit immediately with failed)
+  const collectPromise = collect(handle, 5000);
+
+  // turn.completed arrives shortly after
+  child.stdout.push(
+    JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 5, output_tokens: 3 } }) + '\n'
+  );
+  child.emit('exit', 0);
+
+  const result = await collectPromise;
+  assert.equal(result.status, 'completed', 'collect must wait for turn.completed, not exit on item failure');
+  assert.ok(!('error' in result));
+});
 
 test('collect: resolves immediately when handle is already completed', async () => {
   const child = createMockChildProcess();
