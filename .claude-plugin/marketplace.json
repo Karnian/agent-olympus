@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Self-driving AI orchestrator plugin for Claude Code — Atlas + Athena, 19 agents, 35 skills, zero dependencies",
-    "version": "1.1.3"
+    "version": "1.1.4"
   },
   "plugins": [
     {
       "name": "agent-olympus",
       "description": "Self-driving AI orchestrator — Atlas (hub-and-spoke) + Athena (peer-to-peer), 19 agents, 35 skills, Claude + Codex + Gemini multi-model, zero npm dependencies",
-      "version": "1.1.3",
+      "version": "1.1.4",
       "author": {
         "name": "Karnian"
       },

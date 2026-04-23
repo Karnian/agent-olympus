@@ -41,6 +41,131 @@ async function importPreflight(cwd) {
 // detectPointerFile
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// detectGeminiAcpStatic — no-spawn ACP detection via gemini CLI's package.json
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a realistic gemini CLI install layout under tmpDir:
+ *   tmpDir/lib/node_modules/@google/gemini-cli/package.json  (name, version)
+ *   tmpDir/lib/node_modules/@google/gemini-cli/dist/index.js (fake bin target)
+ *   tmpDir/bin/gemini  (symlink → ../lib/node_modules/@google/gemini-cli/dist/index.js)
+ *
+ * Returns the path to the fake `gemini` bin.
+ */
+async function makeFakeGeminiLayout(tmpDir, version) {
+  const pkgDir = path.join(tmpDir, 'lib', 'node_modules', '@google', 'gemini-cli');
+  await fs.mkdir(path.join(pkgDir, 'dist'), { recursive: true });
+  await fs.writeFile(
+    path.join(pkgDir, 'package.json'),
+    JSON.stringify({ name: '@google/gemini-cli', version }),
+  );
+  await fs.writeFile(path.join(pkgDir, 'dist', 'index.js'), '// fake gemini bin\n');
+  const binDir = path.join(tmpDir, 'bin');
+  await fs.mkdir(binDir, { recursive: true });
+  const binPath = path.join(binDir, 'gemini');
+  await fs.symlink(path.join(pkgDir, 'dist', 'index.js'), binPath);
+  return binPath;
+}
+
+test('detectGeminiAcpStatic: returns false when binPath is null', async () => {
+  const { detectGeminiAcpStatic } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(detectGeminiAcpStatic(null), false);
+  assert.equal(detectGeminiAcpStatic(undefined), false);
+  assert.equal(detectGeminiAcpStatic(''), false);
+});
+
+test('detectGeminiAcpStatic: returns true for gemini-cli >= 0.4.0 (ACP threshold)', async () => {
+  const { detectGeminiAcpStatic } = await import('../../scripts/lib/preflight.mjs');
+  const tmpDir = await makeTmpDir();
+  try {
+    const bin = await makeFakeGeminiLayout(tmpDir, '0.4.0');
+    assert.equal(detectGeminiAcpStatic(bin), true);
+    const bin2 = tmpDir + '2';
+    await fs.mkdir(bin2);
+    const bin2Path = await makeFakeGeminiLayout(bin2, '0.17.1');
+    assert.equal(detectGeminiAcpStatic(bin2Path), true);
+    await removeTmpDir(bin2);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('detectGeminiAcpStatic: returns false for gemini-cli < 0.4.0', async () => {
+  const { detectGeminiAcpStatic } = await import('../../scripts/lib/preflight.mjs');
+  const tmpDir = await makeTmpDir();
+  try {
+    const bin = await makeFakeGeminiLayout(tmpDir, '0.3.9');
+    assert.equal(detectGeminiAcpStatic(bin), false);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('detectGeminiAcpStatic: resolves symlinks via realpath before walking up', async () => {
+  // The fake bin IS a symlink (see makeFakeGeminiLayout), so this verifies
+  // the realpath hop actually happens — without it, the walk would start at
+  // tmpDir/bin and never reach the package.json under lib/node_modules/...
+  const { detectGeminiAcpStatic } = await import('../../scripts/lib/preflight.mjs');
+  const tmpDir = await makeTmpDir();
+  try {
+    const bin = await makeFakeGeminiLayout(tmpDir, '0.5.0');
+    assert.equal(detectGeminiAcpStatic(bin), true);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('detectGeminiAcpStatic: falls back to true when package.json is missing (optimistic — worker-spawn demotes on real failure)', async () => {
+  const { detectGeminiAcpStatic } = await import('../../scripts/lib/preflight.mjs');
+  const tmpDir = await makeTmpDir();
+  try {
+    // Standalone binary with NO surrounding package.json — bundled/one-file install.
+    const standalone = path.join(tmpDir, 'gemini-standalone');
+    await fs.writeFile(standalone, '// bundled bin');
+    assert.equal(detectGeminiAcpStatic(standalone), true,
+      'unknown layout defaults to optimistic true; demotion happens at worker spawn');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('detectGeminiAcpStatic: ignores unrelated package.json encountered during walk', async () => {
+  // Simulates a sibling package.json that is NOT @google/gemini-cli — e.g.
+  // a wrapper project's root package.json one level above the actual CLI.
+  const { detectGeminiAcpStatic } = await import('../../scripts/lib/preflight.mjs');
+  const tmpDir = await makeTmpDir();
+  try {
+    const bin = await makeFakeGeminiLayout(tmpDir, '0.4.2');
+    // Place a decoy package.json inside .../dist so walk finds it FIRST
+    await fs.writeFile(
+      path.join(tmpDir, 'lib', 'node_modules', '@google', 'gemini-cli', 'dist', 'package.json'),
+      JSON.stringify({ name: 'dist-helper', version: '9.9.9' }),
+    );
+    // Walk must skip the decoy (wrong name) and find the real one a level up.
+    assert.equal(detectGeminiAcpStatic(bin), true);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('detectGeminiAcpStatic: malformed package.json is skipped, walk continues', async () => {
+  const { detectGeminiAcpStatic } = await import('../../scripts/lib/preflight.mjs');
+  const tmpDir = await makeTmpDir();
+  try {
+    const bin = await makeFakeGeminiLayout(tmpDir, '0.4.2');
+    // Corrupt the decoy at .../dist/package.json with invalid JSON
+    await fs.writeFile(
+      path.join(tmpDir, 'lib', 'node_modules', '@google', 'gemini-cli', 'dist', 'package.json'),
+      '{ not valid json',
+    );
+    // Real package.json one level up still wins
+    assert.equal(detectGeminiAcpStatic(bin), true);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
 test('detectPointerFile: detects "# Pointer" pattern', async () => {
   const { detectPointerFile } = await import('../../scripts/lib/preflight.mjs');
   const content = '# Pointer — Agent Session Enhancement Spec\nCanonical: docs/specs/AGENT_SESSION_ENHANCEMENT.md';

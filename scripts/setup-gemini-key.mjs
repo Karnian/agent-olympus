@@ -344,6 +344,16 @@ async function main() {
 
   process.stdout.write(`      ✓ keychain item written\n`);
 
+  // Surface partition-list status — users who miss this see passwords prompts
+  // on every subsequent gemini spawn (the whole reason the wizard exists).
+  if (writeResult.partitionListSet) {
+    process.stdout.write(
+      `      ✓ partition list granted to /usr/bin/security (zero-prompt reads enabled)\n`
+    );
+  } else if (writeResult.partitionWarning) {
+    process.stderr.write(`      ⚠ ${writeResult.partitionWarning}\n`);
+  }
+
   // [2/3] Verify via the resolver — we want to confirm /usr/bin/security can
   // read WITHOUT a password prompt. The wizard grants /usr/bin/security
   // trusted access, so the resolver should hit without delay.

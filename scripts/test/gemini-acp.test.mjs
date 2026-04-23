@@ -396,12 +396,37 @@ test('buildEnhancedPath: includes known search paths', () => {
 // ─── startServer ─────────────────────────────────────────────────────────────
 
 test('startServer: returns handle with correct structure', async () => {
-  // We call startServer — the gemini binary likely doesn't exist in CI,
-  // so the process will error asynchronously. We suppress the error event
-  // and only check the structural shape of the handle.
+  // This test ORIGINALLY assumed the gemini binary is absent (CI scenario)
+  // and the spawn would fail async-ENOENT. On dev machines with gemini
+  // installed, the spawn succeeds and gemini CLI boots — which runs its
+  // keytar layer and reads the shared `gemini-cli-api-key` keychain item.
+  // If that item's partition list does not include `apple-tool:,apple:`,
+  // macOS prompts the user for their login password on every test run.
+  //
+  // We can't reliably prevent gemini's internal keytar init from outside,
+  // and we can't replicate a "gemini does not exist" environment without
+  // intrusive PATH manipulation. So: skip the real-spawn path when a real
+  // gemini binary is discoverable. The structural invariants of the handle
+  // are already fully covered by the `buildHandle()`-based hermetic tests
+  // throughout this file — this test only adds "does startServer actually
+  // shell out" confidence, which is worth sacrificing to keep `npm test`
+  // prompt-free.
+  //
+  // Also pass `credentialSource: 'env'` so OUR resolver takes the env-only
+  // path and doesn't read the shared keychain itself. This alone would not
+  // be sufficient (gemini CLI's own keytar still inits), hence the skip.
+  const { resolveBinary } = await import('../lib/tmux-session.mjs');
+  const geminiBin = resolveBinary('gemini');
+  if (geminiBin && geminiBin !== 'gemini') {
+    // Real binary present — skip to avoid keytar prompt.
+    return;
+  }
   let handle;
   try {
-    handle = startServer({ cwd: '/tmp' });
+    handle = startServer({
+      cwd: '/tmp',
+      credential: { credentialSource: 'env' },
+    });
   } catch {
     // Synchronous spawn failure — skip
     return;
