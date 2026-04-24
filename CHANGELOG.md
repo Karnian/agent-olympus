@@ -1,5 +1,44 @@
 # Changelog
 
+## [1.1.4] - 2026-04-23
+
+### Fix — Wizard now applies macOS keychain partition list; preflight no longer spawns `gemini --help`
+
+Builds on the 1.1.3 Gemini Keychain rewrite. Two independent causes for the password prompt turned out to still be in place after 1.1.3, and both are closed here.
+
+**(1) Wizard writes partition list, not just the `-T` ACL** — `scripts/lib/ao-keychain-write.mjs`
+
+`security add-generic-password -U -T /usr/bin/security …` grants the item's ACL, but macOS Sonoma+ also checks the item's **partition list**. `-T` and partition list are separate gates; Apple's own docs describe them independently. Without `apple-tool:,apple:` in the partition list, `/usr/bin/security -w` still prompts for the login password on every read — exactly the symptom 1.1.3 was supposed to eliminate.
+
+The wizard now runs `security set-generic-password-partition-list -s <service> -a <account> -S "apple-tool:,apple:"` as a second step. `-k` is intentionally omitted so macOS prompts via the TTY (stdin inheritance) instead of taking the password on argv (visible via `ps`). When stdin is NOT a TTY (pipe / CI mode), the partition-list step is skipped and a clear warning surfaces the one-line manual command the user can run on a TTY later. The add-step is untouched — 1.1.3 installations that ran the old wizard can either re-run `/setup-gemini-auth` on v1.1.4 or run the surfaced command once.
+
+Return shape extends with optional fields; the existing `{ ok, error, exitCode, stderr }` contract is preserved:
+```js
+{ ok, error, exitCode, stderr,
+  partitionListSet, partitionSkipped, partitionWarning, partitionExitCode }
+```
+`ok` still reflects the add-generic-password step only — a failed partition-list step is surfaced via `partitionListSet: false` + a user-readable warning, never as a hard failure (the item IS written either way).
+
+**(2) `preflight.detectCapabilities` no longer spawns `gemini --help`** — `scripts/lib/preflight.mjs`
+
+`gemini --help` boots the gemini CLI's keytar layer as a startup side effect — *before* the help text is printed. If the user has a `gemini-cli-api-key` keychain item (created by `gemini /auth`), that keytar init reads the item via Apple's Security.framework directly, *not* through `/usr/bin/security`. So the partition-list grant on the AO item doesn't help, and capability detection triggers a password prompt on every 60-minute cache miss.
+
+`detectGeminiAcpStatic()` replaces the spawn with a static lookup: walk up from the gemini binary's `realpath` to find `@google/gemini-cli`'s package.json, compare the `version` against the `--experimental-acp` threshold (0.4.0+). If the package.json can't be found (bundled single-file installs), default optimistically to `true` — worker-spawn already demotes to `gemini-exec` on ACP handshake failure, so the downside is a single failed handshake once per session, not permanent breakage.
+
+Side effects: `preflight.test.mjs` drops from ~4.3s to ~1.3s (no more 5s `gemini --help` timeout budget per test run).
+
+**(3) `gemini-acp.test.mjs` no longer spawns the real gemini binary on dev machines**
+
+`startServer: returns handle with correct structure` assumed gemini is absent (CI scenario) and the spawn would ENOENT-fail asynchronously. On dev machines with gemini installed, the spawn succeeded and gemini CLI's keytar layer initialized — triggering a password prompt on `npm test`. The test now skips the real-spawn path when a gemini binary is discoverable, and also passes `credentialSource: 'env'` as a belt-and-suspenders so our OWN resolver doesn't read the shared keychain item either. Handle shape invariants remain fully covered by the `buildHandle()`-based hermetic tests that dominate the file.
+
+**Production runtime impact: none.** `worker-spawn.mjs` loads `autonomy.json` and explicitly passes `geminiCredential` to every adapter spawn (acp / exec / tmux fallback), so production callers never depend on the resolver's default `'auto'` behavior. Only tests and direct `startServer({})` calls were affected.
+
+**Migration for existing 1.1.3 users with the prompt still firing**:
+- Easiest: re-run `/setup-gemini-auth` (wizard is idempotent; `-U` updates in place).
+- Equivalent one-liner on a TTY: `security set-generic-password-partition-list -s "agent-olympus.gemini-api-key" -a "default-api-key" -S "apple-tool:,apple:"`.
+
+**Tests**: 2009 total (was 1994 in 1.1.3). New coverage — ao-keychain-write: 10 partition-list path tests (TTY gating, custom service/account, non-zero exit, ENOENT, SIGTERM, ordering vs add-failure, `partitionList: 'skip'` opt-out, never-leak-apikey invariant). preflight: 7 detectGeminiAcpStatic tests (null binPath, ≥0.4.0 threshold, <0.4.0 rejection, realpath symlink hop, missing package.json fallback, decoy package.json walk-past, malformed-JSON walk-past).
+
 ## [1.1.3] - 2026-04-19
 
 ### Fix — Eliminate the repeating macOS Keychain password prompt on Gemini spawns

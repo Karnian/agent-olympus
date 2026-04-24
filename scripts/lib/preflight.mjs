@@ -10,7 +10,7 @@
  */
 
 import { promises as fs } from 'node:fs';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
@@ -181,6 +181,79 @@ export function meetsMinVersion(versionStr, minMajor, minMinor, minPatch) {
  * }>}
  */
 /**
+ * Detect gemini CLI's `--acp` support STATICALLY (no spawn).
+ *
+ * Why not spawn `gemini --help` and grep the output: on macOS, the gemini CLI
+ * boots its keytar layer during startup — before help text is printed. If the
+ * user stores an API key in the shared `gemini-cli-api-key` keychain item
+ * (the one gemini CLI creates via `gemini /auth`), keytar's ACL lookup
+ * prompts the user for their login password on EVERY capability probe,
+ * even though `--help` never actually needs the credential. The partition
+ * list grant we apply to our AO keychain item doesn't help because keytar
+ * uses Apple's Security.framework directly, not `/usr/bin/security`.
+ *
+ * Instead, we walk up from the binary path to find
+ * `@google/gemini-cli/package.json` and compare its `version` against the
+ * threshold where `--experimental-acp` first shipped (observed in ≥ 0.4.0;
+ * plain `--acp` added later as the promoted alias). If the package.json
+ * lookup fails (unusual install layouts, bundled single-file executables),
+ * we fall back to `true` — worker-spawn will auto-demote to `gemini-exec`
+ * on ACP handshake failure, so an optimistic assumption is safe.
+ *
+ * @param {string|null} geminiBin - resolved absolute path to gemini binary
+ * @returns {boolean}
+ */
+export function detectGeminiAcpStatic(geminiBin) {
+  if (!geminiBin) return false;
+  const version = readGeminiPackageVersion(geminiBin);
+  if (version === null) {
+    // Package.json not found. Default true: worker-spawn's adapter selection
+    // will demote to gemini-exec on ACP failure, so the downside is a single
+    // failed handshake once per session, not a permanent breakage.
+    return true;
+  }
+  return meetsMinVersion(version, 0, 4, 0);
+}
+
+/**
+ * Walk up from the gemini binary's realpath looking for the
+ * `@google/gemini-cli` package.json. Returns the version string or null.
+ *
+ * Typical layouts handled:
+ *   - nvm/node:      /usr/local/lib/node_modules/@google/gemini-cli/dist/index.js
+ *                    → ../package.json (name: @google/gemini-cli)
+ *   - homebrew:      /opt/homebrew/lib/node_modules/@google/gemini-cli/...
+ *   - pnpm:          /.../gemini-cli/.../dist/index.js
+ *   - bin symlinks:  /usr/local/bin/gemini → ../lib/node_modules/@google/gemini-cli/dist/index.js
+ *
+ * @param {string} binPath
+ * @returns {string|null}
+ */
+function readGeminiPackageVersion(binPath) {
+  let real;
+  try { real = realpathSync(binPath); } catch { return null; }
+  let dir = path.dirname(real);
+  // Walk up to 10 levels — enough for typical npm/pnpm layouts without being
+  // unbounded on pathological inputs.
+  for (let i = 0; i < 10; i++) {
+    const pjPath = path.join(dir, 'package.json');
+    if (existsSync(pjPath)) {
+      try {
+        const pj = JSON.parse(readFileSync(pjPath, 'utf8'));
+        if (pj && typeof pj === 'object' && pj.name === '@google/gemini-cli'
+            && typeof pj.version === 'string') {
+          return pj.version;
+        }
+      } catch { /* bad json → keep walking */ }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
  * Async helper: run a command and return stdout, or null on failure.
  */
 async function tryExecAsync(cmd, args, opts) {
@@ -232,15 +305,15 @@ export async function detectCapabilities() {
   const hasClaudeCli = !!claudePath;
   const hasGitWorktree = gitWorktreeOut !== null;
 
-  // --- Wave 2: dependent version/feature checks (parallel where independent) ---
-  const [codexVersionOut, geminiHelpOut] = await Promise.all([
-    hasCodex
-      ? tryExecAsync(resolveBinary('codex'), ['--version'], execOpts)
-      : Promise.resolve(null),
-    hasGeminiCli
-      ? tryExecAsync(resolveBinary('gemini'), ['--help'], execOpts)
-      : Promise.resolve(null),
-  ]);
+  // --- Wave 2: dependent version/feature checks ---
+  // codex --version: safe to spawn (no credential side effects).
+  // gemini: NO SPAWN. `gemini --help` boots keytar, which prompts for login
+  // password on macOS when the user has a gemini-cli-api-key keychain item.
+  // We detect --acp support statically from the CLI's package.json instead.
+  // See detectGeminiAcpStatic for details.
+  const codexVersionOut = hasCodex
+    ? await tryExecAsync(resolveBinary('codex'), ['--version'], execOpts)
+    : null;
 
   let hasCodexExecJson = false;
   let hasCodexAppServer = false;
@@ -248,7 +321,7 @@ export async function detectCapabilities() {
     hasCodexExecJson = meetsMinVersion(codexVersionOut.trim(), 0, 116, 0);
   }
 
-  const hasGeminiAcp = geminiHelpOut ? /--acp|--experimental-acp/i.test(geminiHelpOut) : false;
+  const hasGeminiAcp = detectGeminiAcpStatic(geminiBin);
 
   // --- Wave 3: codex app-server (depends on Wave 2) ---
   if (hasCodexExecJson) {
