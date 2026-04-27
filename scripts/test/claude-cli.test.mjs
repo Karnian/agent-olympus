@@ -21,6 +21,18 @@ function makeMockChild() {
   child.kill = mock.fn((sig) => {
     if (sig === 'SIGTERM' || sig === 'SIGKILL') child.killed = true;
   });
+  // Real Node child_process always emits 'close' after 'exit' once stdio
+  // streams have drained. The Bug B fix in collect() listens on 'close',
+  // so the mock must mirror real semantics. Auto-fire 'close' after 'exit'
+  // (issue #64).
+  const origEmit = child.emit.bind(child);
+  child.emit = (event, ...args) => {
+    const result = origEmit(event, ...args);
+    if (event === 'exit') {
+      queueMicrotask(() => origEmit('close', ...args));
+    }
+    return result;
+  };
   return child;
 }
 
