@@ -387,6 +387,20 @@ function _flushPartial(handle) {
  * @returns {ClaudeCliMonitorResult}
  */
 export function monitor(handle) {
+  // Bug C analog (issue #64, applied to claude-cli): a `result` event with no
+  // classified error AND no _errorField is the authoritative completion
+  // signal. If it's present, treat as completed regardless of any transient
+  // 'failed' flip caused by the spawn-side exit handler racing ahead of the
+  // queued result event.
+  if (
+    handle._resultEvent
+    && !classifyResultEvent(handle._resultEvent)
+    && !handle._errorField
+    && handle.status !== 'completed'
+  ) {
+    handle.status = 'completed';
+  }
+
   const result = {
     status: handle.status,
     output: handle._output,
@@ -394,9 +408,15 @@ export function monitor(handle) {
   };
 
   if (handle.status === 'failed') {
+    // Bug A fix (issue #64, applied to claude-cli): NEVER fall back to
+    // handle._output for error classification. handle._output carries the
+    // assistant's response text; classifying it would label legitimate
+    // responses mentioning "auth"/"api key" as auth_failed. Use only
+    // structured fields (errorField / result.result / stderr) which carry
+    // actual error signals.
     const stderr = handle._stderrChunks.join('');
     const resultEvt = handle._resultEvent;
-    const errorText = handle._errorField || resultEvt?.result || stderr || handle._output;
+    const errorText = handle._errorField || resultEvt?.result || stderr;
     const category = classifyResultEvent(resultEvt) || mapClaudeCliError(errorText);
 
     result.error = {
@@ -455,7 +475,15 @@ export function collect(handle, timeoutMs = 120000) {
       });
     }, timeoutMs);
 
-    handle.process.on('exit', () => {
+    // Bug B fix (issue #64, applied to claude-cli): listen on 'close' instead
+    // of 'exit'. The 'exit' event can fire while stream-json 'data' events
+    // containing the final `result` event are still queued in the libuv pipe;
+    // resolving on exit captures stale state before the result drains.
+    // 'close' fires only after both the process has exited AND the stdio
+    // streams have closed, guaranteeing all 'data' events have been processed.
+    // Caveat: if a descendant inherits stdout fd and keeps it open, 'close'
+    // can be delayed; the timeout above protects that path.
+    handle.process.on('close', () => {
       clearTimeout(timeout);
       _flushPartial(handle);
       resolve(monitor(handle));

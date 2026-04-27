@@ -39,6 +39,20 @@ function createMockChildProcess() {
     child.killed = true;
     child.emit('exit', 0, signal);
   };
+  // Real Node child_process always emits 'close' after 'exit' once stdio
+  // streams have drained. The Bug B fix in collect() listens on 'close',
+  // so the mock must mirror real semantics. Auto-fire 'close' after 'exit'
+  // (issue #64).
+  const origEmit = child.emit.bind(child);
+  child.emit = (event, ...args) => {
+    const result = origEmit(event, ...args);
+    if (event === 'exit') {
+      // Use queueMicrotask so any synchronous 'exit' listeners (in spawn())
+      // run first — matches Node's ordering where 'close' follows 'exit'.
+      queueMicrotask(() => origEmit('close', ...args));
+    }
+    return result;
+  };
   return child;
 }
 
@@ -524,6 +538,88 @@ test('collect: flushes partial buffer on exit (no trailing newline)', async () =
 
   assert.equal(result.status, 'completed', 'should be completed after flush');
   assert.ok(result.events.length > 0, 'flushed event should appear');
+});
+
+// ─── Issue #64 regression: auth_failed false-positive + exit/close race ──────
+
+test('issue #64 (Bug A): agent_message containing "API key" must NOT be classified as auth_failed', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+  // Simulate a successful turn whose response body legitimately mentions
+  // "API key" (e.g. a code review). handle._output is populated, stderr is
+  // empty. We then force handle.status='failed' to exercise the classifier
+  // — without the Bug A fix, the body would be fed into the classifier and
+  // matched as auth_failed.
+  handle._output = 'Review of auth.ts:\n1. Rotate the API key on every deploy.\n2. ...';
+  handle._stderrChunks = []; // empty stderr
+  handle.status = 'failed';
+  handle._exitCode = 1;
+
+  const result = monitor(handle);
+  assert.equal(result.status, 'failed');
+  assert.ok(result.error, 'failed status must surface an error object');
+  assert.notEqual(
+    result.error.category,
+    'auth_failed',
+    'response body must NEVER feed the classifier — was misclassifying legit code reviews as auth_failed',
+  );
+  assert.equal(result.error.category, 'unknown', 'empty stderr → unknown category');
+});
+
+test('issue #64 (Bug C): turn.completed in handle._events overrides transient failed status', () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child);
+  // Simulate the race: spawn-side exit handler flipped status to 'failed'
+  // (non-zero exit code, status was 'running'), but the queued turn.completed
+  // 'data' event eventually parsed and pushed into handle._events.
+  handle._events.push({ type: 'thread.started', thread_id: 't1' });
+  handle._events.push({ type: 'item.completed', item: { type: 'agent_message', text: 'Done.' } });
+  handle._events.push({ type: 'turn.completed', usage: { input_tokens: 10, output_tokens: 5 } });
+  handle._output = 'Done.\n';
+  handle.status = 'failed'; // transient flip from spawn's exit handler
+  handle._exitCode = 1;
+
+  const result = monitor(handle);
+  assert.equal(result.status, 'completed', 'turn.completed in events must override transient failed');
+  assert.ok(!('error' in result), 'completed status must NOT carry an error object');
+});
+
+test('issue #64 (Bug B): collect() listener is on close, NOT exit (race fix)', async () => {
+  // This test verifies the listener-attachment contract: collect() must NOT
+  // resolve on 'exit' alone. We emit exit WITHOUT a follow-up close and
+  // confirm collect() does not resolve until close fires (or the timeout
+  // catches it). Use a custom mock that does NOT auto-fire close.
+  const child = new EventEmitter();
+  child.stdin = new Writable({ write(c, e, cb) { cb(); } });
+  child.stdout = new Readable({ read() {} });
+  child.stderr = new Readable({ read() {} });
+  child.pid = 99988;
+  child.killed = false;
+  child.kill = (signal = 'SIGTERM') => { child.killed = true; };
+  // No auto-close — manual control.
+  const handle = createHandle(child);
+
+  const collectPromise = collect(handle, 200); // 200ms timeout safety
+  let resolved = false;
+  collectPromise.then(() => { resolved = true; });
+
+  // Fire exit alone — Bug-B-unfixed code would resolve here with stale state.
+  child.emit('exit', 0);
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+  assert.equal(resolved, false, 'collect() must NOT resolve on exit alone — must wait for close');
+
+  // Now push late stdout data — this is what the bug missed.
+  child.stdout.push(
+    JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 5, output_tokens: 2 } }) + '\n'
+  );
+  await new Promise((r) => setImmediate(r));
+
+  // Fire close — collect() should now resolve with the drained data.
+  child.emit('close', 0);
+  const result = await collectPromise;
+  assert.equal(result.status, 'completed', 'data drained before close → completed');
+  assert.ok(!('error' in result));
 });
 
 // ─── shutdown ─────────────────────────────────────────────────────────────────

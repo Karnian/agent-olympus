@@ -299,6 +299,17 @@ export function spawn(prompt, opts = {}) {
  * @returns {GeminiMonitorResult}
  */
 export function monitor(handle) {
+  // Bug C analog (issue #64, applied to gemini-exec): a successfully parsed
+  // gemini.result event with no error is the authoritative completion signal.
+  // If it's present, treat as completed regardless of any transient 'failed'
+  // flip caused by the spawn-side exit handler racing ahead of queued data.
+  const hasSuccessfulResult = handle._events.some(
+    (e) => e && e.type === 'gemini.result' && !e.error,
+  );
+  if (hasSuccessfulResult && handle.status !== 'completed') {
+    handle.status = 'completed';
+  }
+
   const result = {
     status: handle.status,
     output: handle._output,
@@ -306,8 +317,14 @@ export function monitor(handle) {
   };
 
   if (handle.status === 'failed') {
+    // Bug A fix (issue #64, applied to gemini-exec): NEVER fall back to
+    // handle._output for error classification. handle._output carries the
+    // model's response text; classifying it would label legitimate responses
+    // mentioning "API key"/"authentication" as auth_failed. If stderr is
+    // empty, return whatever the classifier produces from empty input
+    // ('unknown') rather than misclassifying response text.
     const stderr = handle._stderrChunks.join('');
-    const category = mapGeminiExecError(stderr || handle._output);
+    const category = mapGeminiExecError(stderr);
     result.error = {
       category,
       message: stderr || 'Gemini process failed',
@@ -374,8 +391,19 @@ export function collect(handle, timeoutMs = 30000) {
       try { shutdown(handle, 3000); } catch {}
     }, timeoutMs);
 
-    handle.process.on('exit', () => {
+    // Bug B fix (issue #64, applied to gemini-exec): listen on 'close' instead
+    // of 'exit'. The 'exit' event can fire while stdout 'data' events
+    // containing the final JSON response are still queued in the libuv pipe;
+    // resolving on exit captures stale state before the response drains.
+    // 'close' fires only after both the process has exited AND the stdio
+    // streams have closed, guaranteeing all 'data' events have been processed.
+    // Caveat: if a descendant inherits stdout fd and keeps it open, 'close'
+    // can be delayed; the timeout above protects that path. spawn()'s own
+    // 'exit' handler is intentionally untouched — it owns _exitCode/PID
+    // lifecycle, not the completion contract.
+    handle.process.on('close', () => {
       clearTimeout(timeout);
+      _flushOutput(handle);
       resolve(monitor(handle));
     });
   });

@@ -242,6 +242,18 @@ export function spawn(prompt, opts = {}) {
  * @returns {MonitorResult}
  */
 export function monitor(handle) {
+  // Bug C fix (issue #64): turn.completed is Codex's authoritative final
+  // signal. If it has been parsed into handle._events, treat the turn as
+  // completed regardless of whether handle.status was transiently flipped to
+  // 'failed' by the spawn-side exit handler racing ahead of a queued
+  // turn.completed 'data' event. Defense-in-depth — Bug B (collect() listening
+  // on 'close' instead of 'exit') is the primary fix; this guard catches any
+  // remaining ordering hazard at monitor() time.
+  const hasTurnCompleted = handle._events.some((e) => e && e.type === 'turn.completed');
+  if (hasTurnCompleted && handle.status !== 'completed') {
+    handle.status = 'completed';
+  }
+
   const result = {
     status: handle.status,
     output: handle._output,
@@ -249,8 +261,15 @@ export function monitor(handle) {
   };
 
   if (handle.status === 'failed') {
+    // Bug A fix (issue #64): NEVER fall back to handle._output for error
+    // classification. handle._output carries agent_message body text, and the
+    // classifier's first rule (/authentication|API key/i) trivially matches
+    // legitimate code-review responses, producing false `auth_failed` labels.
+    // If stderr is empty, return 'unknown' rather than misclassifying response
+    // text. Structured error fields from parsed JSONL events are a future
+    // enhancement (separate PR).
     const stderr = handle._stderrChunks.join('');
-    const category = mapJsonlErrorToCategory(stderr || handle._output);
+    const category = mapJsonlErrorToCategory(stderr);
     result.error = {
       category,
       message: stderr || 'Codex process failed',
@@ -325,7 +344,16 @@ export function collect(handle, timeoutMs = 30000) {
       });
     }, timeoutMs);
 
-    handle.process.on('exit', () => {
+    // Bug B fix (issue #64): listen on 'close' instead of 'exit'. The 'exit'
+    // event can fire while stdout 'data' events containing turn.completed are
+    // still queued in the libuv pipe — resolving on exit captures stale state
+    // before the final event drains. 'close' fires only after both the process
+    // has exited AND the stdio streams have closed, guaranteeing all 'data'
+    // events have been processed. Caveat: if a descendant inherits stdout fd
+    // and keeps it open, 'close' can be delayed; the timeout above protects
+    // that path. spawn()'s own 'exit' handler is intentionally untouched —
+    // it owns _exitCode/PID lifecycle, not the completion contract.
+    handle.process.on('close', () => {
       clearTimeout(timeout);
       flushPartial(handle);
       resolve(monitor(handle));
