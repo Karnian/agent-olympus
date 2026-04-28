@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.1.5] - 2026-04-29
+
+### Docs — Sync user-facing docs with v1.1.4 ground truth
+
+Patch release covering documentation drift only. No runtime, behavior, or API changes. README.md, README.ko.md, AGENTS.md, and CLAUDE.md drifted from the codebase across v1.0.6 → v1.1.4 — counts went stale, v1.1.x feature blocks never landed in the user-facing docs, and the Codex permission-mirroring bullets still described the pre-1.1.0 approval-axis model.
+
+**Counts synced to ground truth** (verified by `find`/`ls`/`node --test`):
+- 35 skills (was "34" — `setup-gemini-auth` was added in 1.1.3 but never counted in README/AGENTS).
+- 77 test files / 2012 passing as of 1.1.4 (was "1500+ tests, 69 files, v1.0.6: 1587 passing").
+- 52 lib files in `scripts/lib/` enumerated in CLAUDE.md and AGENTS.md (was 46 — `ao-keychain-write`, `architect-scope`, `gemini-credential`, `light-mode`, `model-usage`, `stage-escalation` were missing).
+
+**v1.1.x feature bullets added to both READMEs**:
+- `/ask` async path (v1.0.4 — `async / status / collect / cancel / list` subcommands and `runner_done` sentinel).
+- Plan A permission mirroring (v1.1.0 — multi-scope union, broad-vs-scoped split with literal `Tool` or `Tool(*)` only counting as broad, fail-closed deny/ask, host-sandbox intersection).
+- Gemini credential auto-resolver (v1.1.1 — runtime resolution from macOS Keychain / Linux libsecret with split-TTL cache).
+- Layered autonomy config (v1.1.2 — `defaults ← global ← project` merge with CI kill-switch + symlink guard).
+- Gemini Keychain wizard (v1.1.3 + v1.1.4 partition-list grant — `/setup-gemini-auth` eliminates the per-spawn macOS password prompt).
+- Layered Opus-skew reduction (v1.1.0+ — per-subagent `model-usage.jsonl` measurement + escalation-first routing).
+
+**Codex bullet rewritten — sandbox axis, not approval axis** (was incorrect since 1.1.0). README.md / README.ko.md now state: broad `Bash(*)` + broad `Write(*)` → `danger-full-access`, broad Write/Edit or `acceptEdits` → `workspace-write`, scoped-only grants demote to `suggest`. Approval policy held at `never` (codex 0.118+ is non-interactive). AGENTS.md `codex-approval.mjs` description annotated with "(v1.1.0)".
+
+**README.ko.md backfill** — three v0.9.8 bullets (Robust hook execution / Native Teams config fallback / Gemini permission mirroring) that were in README.md but never translated; added per Codex cross-review.
+
+**CHANGELOG fix** — v1.1.4 test count corrected from 2009 to 2012 (the actual `node --test` final tally).
+
+**Cross-validation** — every edit went through Codex review before the next file. Round 1 (README.md) caught: stale "scoped Write/Edit → workspace-write" wording, "literal `Tool(*)` only" missing the bare `Tool` form, and a CHANGELOG number drift. Round 2 (README.ko.md) caught the v0.9.8 backfill gap. Rounds 3 (AGENTS.md) and 4 (CLAUDE.md) passed first try.
+
+**Files**: `README.md`, `README.ko.md`, `AGENTS.md`, `CLAUDE.md`, `CHANGELOG.md`, `package.json`, `.claude-plugin/plugin.json`.
+
 ## [1.1.4] - 2026-04-23
 
 ### Fix — Wizard now applies macOS keychain partition list; preflight no longer spawns `gemini --help`
@@ -37,7 +66,7 @@ Side effects: `preflight.test.mjs` drops from ~4.3s to ~1.3s (no more 5s `gemini
 - Easiest: re-run `/setup-gemini-auth` (wizard is idempotent; `-U` updates in place).
 - Equivalent one-liner on a TTY: `security set-generic-password-partition-list -s "agent-olympus.gemini-api-key" -a "default-api-key" -S "apple-tool:,apple:"`.
 
-**Tests**: 2009 total (was 1994 in 1.1.3). New coverage — ao-keychain-write: 10 partition-list path tests (TTY gating, custom service/account, non-zero exit, ENOENT, SIGTERM, ordering vs add-failure, `partitionList: 'skip'` opt-out, never-leak-apikey invariant). preflight: 7 detectGeminiAcpStatic tests (null binPath, ≥0.4.0 threshold, <0.4.0 rejection, realpath symlink hop, missing package.json fallback, decoy package.json walk-past, malformed-JSON walk-past).
+**Tests**: 2012 total (was 1994 in 1.1.3). New coverage — ao-keychain-write: 10 partition-list path tests (TTY gating, custom service/account, non-zero exit, ENOENT, SIGTERM, ordering vs add-failure, `partitionList: 'skip'` opt-out, never-leak-apikey invariant). preflight: 7 detectGeminiAcpStatic tests (null binPath, ≥0.4.0 threshold, <0.4.0 rejection, realpath symlink hop, missing package.json fallback, decoy package.json walk-past, malformed-JSON walk-past).
 
 ## [1.1.3] - 2026-04-19
 

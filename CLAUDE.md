@@ -16,16 +16,18 @@ Both orchestrators autonomously loop until the task is fully complete (build pas
 agents/     → Agent persona definitions (.md files with model and role)
 skills/     → User-facing skills (SKILL.md with triggers, steps, workflow)
 scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
-scripts/lib → Shared libraries (stdin, intent-patterns, tmux-session, inbox-outbox, checkpoint,
-              wisdom, worker-status, worktree, fs-atomic, provider-detect, config-validator,
-              autonomy, cost-estimate, changelog, pr-create, ci-watch, notify, model-router,
-              worker-spawn, preflight, input-guard, stuck-recovery, run-artifacts,
-              session-registry, permission-detect, codex-approval, codex-exec, codex-appserver,
-              claude-cli, gemini-exec, gemini-acp, gemini-approval, host-sandbox-detect,
-              resolve-binary, artifact-pipe, browser-handoff, design-identity, memory,
-              micro-skill-scope, review-router, subagent-context, taste-memory,
-              ui-reference, ui-remediate, ui-smell-scan, ask-jobs)
-scripts/test → node:test based unit tests (1500+ tests, 69 files)
+scripts/lib → Shared libraries (52 files; stdin, intent-patterns, tmux-session, inbox-outbox,
+              checkpoint, wisdom, worker-status, worktree, fs-atomic, provider-detect,
+              config-validator, autonomy, cost-estimate, changelog, pr-create, ci-watch,
+              notify, model-router, worker-spawn, preflight, input-guard, stuck-recovery,
+              run-artifacts, session-registry, permission-detect, codex-approval, codex-exec,
+              codex-appserver, claude-cli, gemini-exec, gemini-acp, gemini-approval,
+              gemini-credential, ao-keychain-write, host-sandbox-detect, resolve-binary,
+              artifact-pipe, browser-handoff, design-identity, memory, micro-skill-scope,
+              review-router, subagent-context, taste-memory, ui-reference, ui-remediate,
+              ui-smell-scan, ask-jobs, architect-scope, light-mode, model-usage,
+              stage-escalation)
+scripts/test → node:test based unit tests (2000+ tests, 77 files; v1.1.4: 2012 passing)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -488,7 +490,7 @@ Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), G
 ## Testing
 
 ```bash
-# Run unit tests (1500+ tests, 69 files)
+# Run unit tests (2000+ tests, 77 files; v1.1.4: 2012 passing)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

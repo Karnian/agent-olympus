@@ -6,7 +6,7 @@
 
 Agent Olympus is a standalone Claude Code plugin that transforms how you build software. Give it a task, and it orchestrates specialized AI agents to complete it autonomously — analyzing requirements, planning execution, implementing changes, verifying results, and fixing issues until everything passes.
 
-Two orchestrators, 19 specialized agents, 34 workflow skills. Zero npm dependencies.
+Two orchestrators, 19 specialized agents, 35 workflow skills. Zero npm dependencies.
 
 ## What It Does
 
@@ -23,7 +23,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 
 - **Two orchestrators**: Atlas (hub-and-spoke) and Athena (peer-to-peer team)
 - **19 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Hermes (spec), Executor, Designer (UI/UX), **Aphrodite (design review)**, Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Themis (quality gate), Ask, Atlas, Athena
-- **34 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, tdd, systematic-debug, brainstorm, finish-branch, design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review, harness-init, sessions, **teach-design, normalize, polish, typeset, arrange, taste, ui-remediate, resume-handoff**
+- **35 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, tdd, systematic-debug, brainstorm, finish-branch, design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review, harness-init, sessions, setup-gemini-auth, **teach-design, normalize, polish, typeset, arrange, taste, ui-remediate, resume-handoff**
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
 - **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs; intent-aware query expansion
 - **Zero npm dependencies**: Node.js built-ins only
@@ -43,7 +43,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Visual verification** *(v0.8)*: Optional Claude Preview MCP screenshot after UI changes
 - **UI/UX design review** *(v0.8.3)*: Aphrodite agent + 5 design skills — critique (Nielsen+Gestalt), a11y audit (WCAG 2.2 AA), design system audit (token leaks), UX copy review, unified UI review
 - **L-scale resilience** *(v0.8.8)*: `input-guard` library prevents sub-agent silent failures on large documents — auto-summarizes oversized inputs while preserving story IDs and acceptance criteria. `preflight` library detects and clears stale pointer files in `.ao/` before each run
-- **Codex permission mirroring** *(v0.9.5)*: Automatically detects Claude's permission level and mirrors it to Codex's approval mode (`full-auto`, `auto-edit`, `suggest`). Configurable via `.ao/autonomy.json` `codex.approval` (default: `auto` = auto-detect from Claude settings)
+- **Codex permission mirroring** *(v0.9.5, reworked in v1.1.0)*: Automatically detects Claude's merged permission level (across managed/user/project scopes) and mirrors it to Codex's **sandbox axis** — broad `Bash(*)`+broad `Write(*)` → `danger-full-access`; broad Write/Edit or `acceptEdits` → `workspace-write`; scoped-only grants demote to `suggest`. Approval policy is held at `never` (codex 0.118+ is non-interactive). `.ao/autonomy.json` `codex.approval` overrides default auto-detection
 - **Robust hook execution** *(v0.9.8)*: `run.sh` shell wrapper resolves node from nvm/volta/fnm/mise in restricted PATH hook environments; `run.sh || node run.cjs` fallback for Windows; `buildEnhancedPath()` injected into all capability detection child processes
 - **Native Teams config fallback** *(v0.9.8)*: `.ao/autonomy.json` `nativeTeams: true` enables Native Agent Teams without `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` env var
 - **Gemini permission mirroring** *(v0.9.8)*: `.ao/autonomy.json` `gemini.approval` — auto-detect or override Gemini approval mode (`yolo`, `auto_edit`, `plan`, `default`)
@@ -53,7 +53,13 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Taste memory** *(v1.0.2, adapted from gstack)*: `.ao/memory/taste.jsonl` accumulates user aesthetic preferences across sessions; replayed to designer/aphrodite (1KB cap, 200-entry FIFO, explicit `/taste prune` grammar)
 - **Browser pause + manual continue** *(v1.0.2, adapted from gstack)*: `/resume-handoff` — on CAPTCHA/auth/MFA, persists sanitized URL + breadcrumb to `.ao/state/browser-handoff.json` (16 sensitive param strip, allow-list breadcrumb, 24h TTL). Deterministic exact-resume deferred to v1.0.3.
 - **Cascade artifact archival pipe** *(v1.0.2, adapted from gstack)*: `.ao/artifacts/pipe/<runId>/<stage>/{inbox,outbox}/` structured stage handoffs (6 canonical stages, 100KB/file + 10MB/run caps, atomic writes). Archival only, NOT prompt-history isolation.
-- **1500+ unit tests**: Comprehensive test suite using `node:test` across 69 test files (v1.0.6: 1587 passing)
+- **`/ask` async path** *(v1.0.4)*: `async / status / collect / cancel / list` subcommands for long-running Codex/Gemini queries that exceed the 120s sync timeout. Job-based with detached runners, JSONL artifact streams, and a `runner_done` sentinel for crash-safe completion reconciliation
+- **Plan A permission mirroring** *(v1.1.0)*: Detection reads allow/deny/ask lists from ALL Claude scopes (managed/user/project) and merges with union semantics. Broad-vs-scoped split (only literal `Tool` or `Tool(*)` promotes a tier — wildcard variants like `Bash(*:*)` map to `suggest`). Fail-closed deny/ask rules. Host-sandbox intersection (passive LSM/AppArmor/SELinux/Landlock detection) prevents privilege expansion when the Codex worker would outrun the host's actual sandbox
+- **Gemini credential auto-resolver** *(v1.1.1)*: Spawns Gemini workers with `GEMINI_API_KEY` resolved from macOS Keychain or Linux libsecret at runtime — no need to export the key into your shell. Per-`(platform, service, account)` cache with split TTL (24h hit / 60s error / 30s miss). Auto-invalidates on `auth_failed` so `gemini /auth` recovery works in-session
+- **Layered autonomy config** *(v1.1.2)*: `.ao/autonomy.json` resolution merges `defaults ← global ← project`, where the global layer is `AO_AUTONOMY_CONFIG` env override OR the first existing file under `$XDG_CONFIG_HOME/agent-olympus/`, `~/.config/agent-olympus/`, or `~/.ao/`. CI kill-switch skips global layer on shared runners (CI / GITHUB_ACTIONS / etc.) unless `AO_AUTONOMY_CONFIG` is set. Symlink guard rejects global configs escaping allowed roots
+- **Gemini Keychain wizard** *(v1.1.3, partition-list fix in v1.1.4)*: `/setup-gemini-auth` creates an AO-owned Keychain item with `/usr/bin/security` pre-listed as trusted, eliminating the macOS password prompt every Gemini worker spawn would otherwise trigger. Scoped to keychain users — OAuth/Vertex/env-var paths are unaffected
+- **Layered Opus-skew reduction** *(v1.1.0+)*: Per-subagent model usage logging (`ao-model-usage.jsonl`, schemaVersion:1) for measurement; escalation-first routing pipeline that defaults to Sonnet/Haiku and only promotes to Opus on demonstrated need. Summarise with `node scripts/usage-report.mjs`
+- **2000+ unit tests**: Comprehensive test suite using `node:test` across 77 test files (v1.1.4: 2012 passing)
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -300,7 +306,7 @@ User Request
 | **writer** | Haiku | Documentation specialist — clear, accurate technical docs and code comments |
 | **ask** | Sonnet | Quick single-shot dispatcher — routes questions to Codex/Gemini workers |
 
-## Skills (34 Total)
+## Skills (35 Total)
 
 | Skill | Level | Aliases | Use Case |
 |-------|-------|---------|----------|
@@ -338,6 +344,7 @@ User Request
 | **taste** *(v1.0.2)* | 2 | `taste`, `취향`, `aesthetic-memory` | Persist user aesthetic preferences into `.ao/memory/taste.jsonl` (gstack-inspired) |
 | **ui-remediate** *(v1.0.2)* | 4 | `ui-remediate`, `UI개선`, `ui-fix-chain` | Sequential audit→normalize→polish→re-audit convergence chain |
 | **resume-handoff** *(v1.0.2)* | 2 | `resume-handoff`, `브라우저이어서`, `browser-resume` | Resume work after browser pause (CAPTCHA/auth/MFA) via sanitized handoff state |
+| **setup-gemini-auth** *(v1.1.3)* | 1 | `setup-gemini-auth`, `제미니키체인`, `gemini keychain` | macOS-only wizard that creates an AO-owned Keychain item to eliminate the per-spawn password prompt for Gemini API-key users |
 
 ## Architecture
 
@@ -537,7 +544,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (1587+ tests across 69 files as of v1.0.6) covers the core hook libraries. To run:
+A `node:test` based test suite (2012+ tests across 77 files as of v1.1.4) covers the core hook libraries. To run:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'
