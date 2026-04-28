@@ -1,7 +1,7 @@
 # Agent Olympus
 
 Standalone multi-model orchestrator plugin for Claude Code.
-Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 19 specialized agents, 34 skills, Claude + Codex + Gemini multi-model execution, and adapter-based worker infrastructure.
+Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 19 specialized agents, 35 skills, Claude + Codex + Gemini multi-model execution, and adapter-based worker infrastructure.
 
 ## Architecture
 
@@ -47,7 +47,7 @@ agent-olympus/
 │   ├── hephaestus.md             — Codex deep worker (Sonnet)
 │   ├── ask.md                    — Quick Codex/Gemini query agent (Sonnet)
 │   └── themis.md                 — Quality gate: tests/lint/AC verification (Sonnet)
-├── skills/                       — 34 user-facing skills (workflow recipes)
+├── skills/                       — 35 user-facing skills (workflow recipes)
 │   ├── atlas/SKILL.md            — /atlas: autonomous sub-agent pipeline
 │   ├── athena/SKILL.md           — /athena: autonomous team pipeline
 │   ├── plan/SKILL.md             — /plan: forward/reverse product planning
@@ -81,7 +81,8 @@ agent-olympus/
 │   ├── typeset/SKILL.md          — /typeset: typography-only pass (font, hierarchy, sizing)
 │   ├── taste/SKILL.md            — /taste: record/list/prune aesthetic preferences
 │   ├── teach-design/SKILL.md     — /teach-design: capture brand identity for auto-injection
-│   └── resume-handoff/SKILL.md   — /resume-handoff: read browser handoff state for manual resume
+│   ├── resume-handoff/SKILL.md   — /resume-handoff: read browser handoff state for manual resume
+│   └── setup-gemini-auth/SKILL.md — /setup-gemini-auth: macOS Keychain wizard for Gemini API-key users (v1.1.3)
 ├── scripts/                      — Hook scripts (Node.js ESM, zero dependencies)
 │   ├── run.cjs                   — Cross-platform hook runner with version fallback
 │   ├── intent-gate.mjs           — UserPromptSubmit: classify intent (EN/KO/JA/ZH)
@@ -90,7 +91,7 @@ agent-olympus/
 │   ├── concurrency-release.mjs   — PostToolUse: release task from concurrency pool
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (1500+ tests, 69 files)
+│   ├── test/                     — node:test unit tests (2000+ tests, 77 files; v1.1.4: 2012 passing)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
@@ -116,7 +117,7 @@ agent-olympus/
 │       ├── stuck-recovery.mjs    — Detect and recover from stuck worker states
 │       ├── run-artifacts.mjs     — Per-run event log, summary, and verification storage
 │       ├── session-registry.mjs  — Cross-session metadata tracking and crash recovery
-│       ├── codex-approval.mjs    — Claude permission detection → Codex approval mode mirroring
+│       ├── codex-approval.mjs    — Claude permission detection → Codex sandbox-axis mirroring + host-sandbox intersection (v1.1.0)
 │       ├── gemini-approval.mjs   — Claude permission detection → Gemini approval mode mirroring
 │       ├── gemini-exec.mjs       — Gemini exec adapter (single-turn JSON spawn)
 │       ├── gemini-acp.mjs        — Gemini ACP adapter (multi-turn JSON-RPC 2.0)
@@ -137,7 +138,13 @@ agent-olympus/
 │       ├── subagent-context.mjs  — Subagent context builder for hook injection
 │       ├── ui-reference.mjs      — UI reference material loader for design skills
 │       ├── ui-remediate.mjs      — UI remediation chain orchestrator
-│       └── ui-smell-scan.mjs     — UI smell detection heuristics
+│       ├── ui-smell-scan.mjs     — UI smell detection heuristics
+│       ├── ao-keychain-write.mjs — macOS Keychain item writer with partition-list grant (v1.1.3+)
+│       ├── architect-scope.mjs   — Architect agent scope/blast-radius calculator
+│       ├── gemini-credential.mjs — Gemini API key auto-resolver (env/Keychain/libsecret) (v1.1.1+)
+│       ├── light-mode.mjs        — Atlas/Athena lightweight execution path
+│       ├── model-usage.mjs       — Per-subagent model usage logger for Opus-skew analysis (v1.1.0+)
+│       └── stage-escalation.mjs  — Escalation-first model routing for orchestrator stages
 ├── config/
 │   └── model-routing.jsonc       — Intent→model routing configuration
 └── hooks/
@@ -248,6 +255,7 @@ agent-olympus/
 | `/taste` | "취향", "aesthetic" | Record, list, and prune aesthetic preferences for auto-injection |
 | `/teach-design` | "디자인학습", "brand-capture" | Capture project brand identity for designer/aphrodite subagents |
 | `/resume-handoff` | "재개", "resume" | Read persisted browser handoff state for manual resume |
+| `/setup-gemini-auth` | "제미니키체인", "gemini keychain" | macOS-only one-time wizard to create AO-owned Keychain item (v1.1.3) |
 
 ## Hooks
 
