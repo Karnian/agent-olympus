@@ -152,14 +152,32 @@ node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs list --older-than 3600         # olde
   cross-fall back. If you ask for codex and codex isn't installed, you get
   exit 2 — even if gemini is available. Use `/ask auto` for "whichever works."
 - Permission mirroring: both `gemini-exec` and `codex-exec` read
-  `.ao/autonomy.json` and Claude's permission allow-list to determine the
-  correct sandbox/approval mode. `codex-exec` mirrors host permissions to the
-  Codex sandbox axis (`Bash(*)+Write(*)` → `danger-full-access`, `Write(*)` →
-  `workspace-write`), with approval policy held at `never` (codex 0.118+ docs:
-  *"never for non-interactive runs"*). When the host has neither `Bash(*)` nor
-  `Write(*)/Edit(*)`, codex cannot run usefully — `/ask auto` transparently
-  falls back to `gemini-exec` if available, and explicit `/ask codex` exits
-  with code 2.
+  `.ao/autonomy.json`, Claude's permission allow-list (settings files),
+  AND the runtime `permission_mode` captured by the SessionStart /
+  UserPromptSubmit hooks (v1.1.6+). The two layers merge **upgrade-only**:
+  runtime `bypassPermissions` can promote `suggest` → `full-auto`, but it
+  cannot revoke an explicit settings allow grant. `codex-exec` mirrors the
+  resolved tier to the Codex sandbox axis (`Bash(*)+Write(*)` →
+  `danger-full-access`, `Write(*)` → `workspace-write`), with approval
+  policy held at `never` (codex 0.118+ docs: *"never for non-interactive
+  runs"*).
+- **Read-only fallback** *(v1.1.6+, fixes #67/#68)*: when the resolved tier
+  is `suggest` (no broad allow grants AND no runtime mode could promote
+  it), `/ask codex` no longer exits with code 2. It runs codex under the
+  `read-only` sandbox (`-s read-only -a never`) with a system-prompt
+  guard prepended (`READ-ONLY MODE — do not edit files...`) and a
+  `git status --porcelain` pre/post check as defense-in-depth. Pure
+  analysis/review prompts work fine; write/exec attempts are sandbox-
+  blocked. The read-only fallback is `/ask`-only — Atlas/Athena workers
+  still demote codex to claude on suggest tier so orchestrator completion
+  tracking isn't fooled by "I applied the change" hallucinations.
+- **Diagnostics**: run `node scripts/diagnose-sandbox.mjs --explain-permissions`
+  to see the full per-layer breakdown — settings flags, runtime cache
+  state (with `naiveLevel` vs `clamped` showing whether managed deny /
+  disableBypass downgraded the runtime tier), host sandbox, final level,
+  and the narrative reason. Use this to verify that
+  `--dangerously-skip-permissions` was captured, or to figure out why
+  `/ask codex` ended up in read-only mode.
 - Artifacts persist in `.ao/artifacts/ask/` for later reference.
 - Can be used inside Atlas/Athena workflows for quick model consultations.
 

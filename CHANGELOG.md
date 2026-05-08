@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.1.6] - 2026-05-09
+
+### Fix — Runtime permission_mode capture + `/ask codex` read-only fallback (#67/#68/#69)
+
+Three open issues collapsed into one root cause: `permission-detect.mjs` read Claude Code's settings files but never observed runtime session state. Hosts launched with `--dangerously-skip-permissions` or `--permission-mode` had a settings-file mirror returning `suggest`, codex was demoted, and `/ask codex` exited with code 2 — even for pure read-only review prompts. This release fixes both the detection gap (#69) and the over-conservative demote (#67/#68) in a single coordinated change, validated through three sequential codex cross-reviews.
+
+**Runtime detection layer (#69)** — new `scripts/lib/runtime-permissions.mjs` (capture/load helpers, schemaVersion:1, 30-min TTL, atomic writes, fail-safe-null on every error path) plus a new `scripts/runtime-permissions-capture.mjs` hook registered on `SessionStart` and `UserPromptSubmit` (async, silent observer). The hook reads `permission_mode` from hook stdin (snake_case + camelCase + nested variants are all probed; first match wins) or `CLAUDE_PERMISSION_MODE` / `CLAUDE_CODE_PERMISSION_MODE` env, and persists to `.ao/state/ao-runtime-permissions.json`. `permission-detect.mjs` reads the cache as an upgrade-only override on top of the settings union — runtime can promote a tier (because it represents actual host trust) but never demote one (because explicit allow lists remain authoritative).
+
+**Pipeline-aware merge (codex review round-1 WARN)** — `detectClaudePermissions` now accepts `opts.effectiveDefaultMode` so the runtime mode flows through the SAME deny/ask/disableBypassPermissionsMode pipeline as the settings layer. A managed `disableBypassPermissionsMode: true` drops the runtime `bypassPermissions` implicit grant (collapsing to `suggest` unless an explicit allow list compensates — does NOT silently fall through to `acceptEdits`). Bash deny in any scope still invalidates a runtime broad bash grant. `acceptEdits` runtime grants Write+Edit only.
+
+**Managed-only flag is honored (codex review round-2 WARN)** — `allowManagedPermissionRulesOnly: true` (managed scope) suppresses non-managed implicit grants. Runtime overrides are by definition non-managed, so a runtime `bypassPermissions` no longer bypasses the managed-only ceiling. Settings-side managed-scope `defaultMode` continues to grant implicit broad as before (organizations can still ship a baseline trust level via managed config).
+
+**`/ask codex` read-only fallback (#67/#68)** — when `resolveCodexApproval` returns `suggest`, `scripts/ask.mjs buildSpawnOpts` now sets `level='suggest'` + `_readonlyFallback=true` instead of flagging `_demoted`. The adapter runs under codex's `-s read-only -a never` sandbox (no FS writes, no shell network), and the runner prepends a `READONLY_GUARD_HEADER` system prompt directing the model not to claim it edited anything. The sync path also runs `git status --porcelain` before/after as defense-in-depth — codex's first-round review flagged that read-only sandbox is not "FS-untouchable", so the prompt header + post-check are belt-and-suspenders against MCP-server leaks or model hallucinations.
+
+**Fail-closed catch (codex review round-1 BLOCK)** — the previous `try { ... } catch { /* fall through */ }` left `opts.level` undefined when permission resolution threw, which routed `codex-exec` to its legacy `--dangerously-bypass-approvals-and-sandbox` path (full sandbox on unverified failure). Fixed: catch now pins `level='suggest'` + `_readonlyFallback=true` so the spawn always lands in the most restrictive sandbox. Source-level regex guard added to ask.test.mjs to prevent regression.
+
+**Atlas/Athena worker boundary preserved** — the read-only fallback is `/ask`-only. Worker-spawn's `demoteCodexWorkersIfNeeded` continues to demote codex orchestrator workers to claude on suggest tier, because a structured-output worker reporting "I applied the change" without actually doing so would confuse the orchestrator's completion tracking.
+
+**Diagnostics** — new `node scripts/diagnose-sandbox.mjs --explain-permissions` flag prints the full settings-flag breakdown, runtime cache state (with `naiveLevel` vs `clamped` field showing whether managed deny/disableBypass downgraded the runtime tier), host sandbox tier, final level, and the narrative reason for the chosen source. New `explainPermissionLevel()` exported from `permission-detect.mjs` for programmatic access.
+
+**Cross-review** — codex 0.125.0 was consulted three times: round-1 caught the BLOCK + the WARN about deny/ask flow; round-2 caught `allowManagedPermissionRulesOnly` bypass + 2 wording WARNs + 1 test-coverage WARN; round-3 caught residual stale comments saying "downgrade to acceptEdits" instead of "drop implicit grant". All BLOCK+WARN closed before merge.
+
+**Files** (9 changed): `scripts/lib/runtime-permissions.mjs` (NEW, 299L), `scripts/runtime-permissions-capture.mjs` (NEW, 77L), `scripts/lib/permission-detect.mjs` (+154L), `scripts/ask.mjs` (+199L), `scripts/diagnose-sandbox.mjs` (+110L), `hooks/hooks.json` (+12L), `scripts/test/runtime-permissions.test.mjs` (NEW, 597L), `scripts/test/runtime-permissions-capture.test.mjs` (NEW, 150L), `scripts/test/ask.test.mjs` (+90L). Suite: 2075 tests, all passing on this release.
+
+**Honest scope limits** — still NOT observable: `--allowedTools` / `--disallowedTools` / `--tools` CLI flags, `--settings` inline overrides. There is no documented stdin/env signal for these. Mitigation: `diagnose-sandbox --explain-permissions` shows "no runtime layer captured" so users know to use `.ao/autonomy.json codex.approval` as the explicit escape hatch. Mid-session Shift+Tab toggles are picked up on the next UserPromptSubmit (~1 turn lag), not instantly. Read-only fallback is `/ask`-only; Atlas/Athena worker demotion behavior is unchanged.
+
 ## [1.1.5] - 2026-04-29
 
 ### Docs — Sync user-facing docs with v1.1.4 ground truth

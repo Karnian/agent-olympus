@@ -41,11 +41,34 @@ import {
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn as nodeSpawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { detectCapabilities } from './lib/preflight.mjs';
 import { resolveGeminiApproval } from './lib/gemini-approval.mjs';
 import { resolveCodexApproval, shouldDemoteCodexWorker } from './lib/codex-approval.mjs';
+import { explainPermissionLevel } from './lib/permission-detect.mjs';
 import { loadAutonomyConfig } from './lib/autonomy.mjs';
 import * as askJobs from './lib/ask-jobs.mjs';
+
+/**
+ * System-prompt guard prepended to `/ask codex` prompts when the host has not
+ * granted the broad permissions codex needs to actually edit files. The
+ * adapter still runs under codex's `read-only` sandbox tier (no FS writes,
+ * no shell network), but the prompt prefix tells the model to ALSO refrain
+ * from claiming it edited anything in its response — defense-in-depth
+ * against the "I applied the change" hallucination codex flagged in our
+ * cross-review (#67 codex consultation, 2026-05-08).
+ */
+const READONLY_GUARD_HEADER = (
+  '⚠️ READ-ONLY MODE — host permissions do not grant write access.\n' +
+  'Rules for this turn:\n' +
+  '  1. Do NOT edit files, run shell commands, or claim to have applied any change.\n' +
+  '  2. Reply with analysis, suggestions, or explanations only.\n' +
+  '  3. If the user asked for an edit, output the proposed diff/snippet inline ' +
+  'without writing it to disk.\n' +
+  '  4. If a question genuinely requires execution, say so explicitly so the user ' +
+  'can re-invoke with broader permissions.\n\n' +
+  '──── User prompt below ────\n\n'
+);
 
 const COLLECT_TIMEOUT_MS = 120_000;       // Sync path only
 const RUNNER_COLLECT_TIMEOUT_MS = 86_400_000; // Runner: 24h (spec §4.3 step 11)
@@ -186,7 +209,28 @@ async function loadAdapter(adapterName) {
 
 /**
  * Build adapter-specific spawn options (codex level, gemini approvalMode).
- * Preserved from v1.0.3 unchanged. Exported for tests.
+ *
+ * Codex demotion behavior (issue #67/#68/#69)
+ * ───────────────────────────────────────────
+ * Historically, when `resolveCodexApproval` returned `suggest` (host had no
+ * broad allow grants and no runtime override picked it up), `/ask codex`
+ * exited with code 2 ("demoted") and refused to spawn. That blocked the
+ * common case of asking codex a read-only review question on a host with
+ * deliberately narrow permissions.
+ *
+ * New behavior: the suggest-tier path now FALLS BACK to codex's `read-only`
+ * sandbox (`-s read-only -a never`) instead of demoting. The adapter runs
+ * with no FS write capability and no shell network, which is enough for any
+ * pure analysis/review prompt. The caller marks `opts._readonlyFallback =
+ * true` so the spawn path can prepend a system-prompt guard and the post-
+ * adapter step can verify nothing leaked through (`git diff --quiet`).
+ *
+ * Atlas/Athena workers and other non-`/ask` callers DO NOT use this fallback
+ * — they still demote to a Claude worker (preserves the existing safety:
+ * a structured-output worker reporting "I applied the change" without
+ * actually doing so would confuse the orchestrator).
+ *
+ * Exported for tests.
  */
 export function buildSpawnOpts(adapterName) {
   if (_injected.buildSpawnOpts) return _injected.buildSpawnOpts(adapterName);
@@ -196,24 +240,43 @@ export function buildSpawnOpts(adapterName) {
       const autonomy = loadAutonomyConfig(process.cwd());
       const level = resolveCodexApproval(autonomy, { cwd: process.cwd() });
       if (shouldDemoteCodexWorker(level)) {
-        opts._demoted = true;
-        opts._demotionReason = (
-          `host permission level (${level}) too low for non-interactive codex. ` +
-          `Codex sandbox is coarse (danger-full-access or workspace-write); if your ` +
-          `Claude settings use scoped Bash grants (e.g. Bash(git:*)) or scoped ` +
-          `deny/ask rules, they cannot be honored by codex, so the mirror ` +
-          `conservatively demotes. Fix any of: ` +
-          `(1) add \`"codex": { "approval": "full-auto" }\` to .ao/autonomy.json ` +
-          `(explicit override — bypasses scoped deny/ask in mirror); ` +
-          `(2) add LITERAL "Bash(*)" + "Write(*)" to permissions.allow in ` +
-          `.claude/settings.local.json and remove any scoped Bash/Write deny/ask; ` +
-          `(3) set permissions.defaultMode = "bypassPermissions". ` +
-          `Or use \`/ask auto\` to fall back to gemini.`
-        );
+        // Issue #67/#68/#69: instead of demoting, run codex at suggest level
+        // (mapped to `-s read-only -a never`). Pure-analysis prompts work
+        // fine; write/exec attempts are blocked by the sandbox.
+        opts.level = level;
+        opts._readonlyFallback = true;
+
+        // Build the diagnostic explanation once so callers (status, error
+        // logs, post-run notices) can show WHY we fell back instead of
+        // running with broader access.
+        try {
+          const explain = explainPermissionLevel({ cwd: process.cwd() });
+          opts._readonlyExplanation = explain.chosenSourceReason;
+          opts._permissionExplain = explain;
+        } catch {
+          opts._readonlyExplanation =
+            'host permissions resolved to suggest tier; running codex under ' +
+            'read-only sandbox (no FS writes, no shell network).';
+        }
       } else {
         opts.level = level;
       }
-    } catch { /* fall through */ }
+    } catch (err) {
+      // Fail CLOSED — codex review (#67) flagged this catch as a security
+      // regression. A thrown error here means we couldn't resolve the host's
+      // permission tier (corrupt autonomy.json, fs error, …). The previous
+      // `/* fall through */` left `opts.level` undefined, which made
+      // codex-exec.mjs fall back to `--dangerously-bypass-approvals-and-sandbox`
+      // (legacy bypass) — i.e. unverified failure → maximum permissions.
+      // We now pin the safest possible level + flag the read-only fallback
+      // so the spawn still produces useful output without ever exceeding
+      // the most restrictive sandbox.
+      opts.level = 'suggest';
+      opts._readonlyFallback = true;
+      opts._readonlyExplanation =
+        `permission resolution threw (${err && err.message ? err.message : err}); ` +
+        `failing closed to read-only sandbox to avoid the legacy bypass path.`;
+    }
   } else if (adapterName === 'gemini-exec') {
     try {
       const autonomy = loadAutonomyConfig(process.cwd());
@@ -244,6 +307,14 @@ function modelLabel(adapterName) {
 /**
  * Sync-path single-shot runner: spawn → collect → shutdown (always).
  * Exported for tests.
+ *
+ * Read-only fallback (issue #67/#68/#69): when `opts._readonlyFallback` is set
+ * (codex on a suggest-tier host), prepend `READONLY_GUARD_HEADER` to the
+ * prompt so the model is reminded NOT to claim it edited anything. After
+ * collect, run `git diff --quiet` as a defense-in-depth check; if the tree
+ * changed, log a warning to stderr (the adapter shouldn't be able to write
+ * under `-s read-only`, but a misbehaving MCP server inside the codex CLI
+ * could still leak through, so we surface it).
  */
 export async function runOnce(adapterName, prompt, _testInject = {}) {
   const adapter = _testInject.adapter || _injected.adapter || (await loadAdapter(adapterName));
@@ -256,9 +327,24 @@ export async function runOnce(adapterName, prompt, _testInject = {}) {
     return { ok: false, output: '', error: `demoted: ${msg}`, artifactPath: null, demoted: true };
   }
 
+  // Apply read-only guard header BEFORE the user prompt. The header prefix
+  // is stable so the model sees the same disclaimer every time. Atlas/Athena
+  // never set this flag — the fallback is a /ask-only feature.
+  const effectivePrompt = opts._readonlyFallback
+    ? READONLY_GUARD_HEADER + prompt
+    : prompt;
+
+  // Capture the pre-run git tree state for the defense-in-depth post-check.
+  // execFileSync with stdio:'pipe' so a missing git binary or non-repo cwd
+  // doesn't pollute hook output.
+  let preRunGitClean = null;
+  if (opts._readonlyFallback) {
+    preRunGitClean = isGitTreeClean(opts.cwd || process.cwd());
+  }
+
   let handle = null;
   try {
-    handle = adapter.spawn(prompt, opts);
+    handle = adapter.spawn(effectivePrompt, opts);
   } catch (err) {
     const msg = `Failed to spawn ${adapterName}: ${err && err.message ? err.message : String(err)}`;
     writeArtifact(path, `# Error\n\n${msg}\n`);
@@ -276,8 +362,31 @@ export async function runOnce(adapterName, prompt, _testInject = {}) {
       return { ok: false, output, error: `${cat}: ${msg}`, artifactPath: path };
     }
 
+    // Read-only post-check: if the tree was clean before the run and is
+    // dirty after, the codex sandbox failed to contain a write. We don't
+    // block — the response is still valid analysis — but we attach a
+    // warning so the user can investigate.
+    let readonlyViolation = null;
+    if (opts._readonlyFallback && preRunGitClean === true) {
+      const postRunGitClean = isGitTreeClean(opts.cwd || process.cwd());
+      if (postRunGitClean === false) {
+        readonlyViolation =
+          'Read-only fallback: tree was clean before /ask but is now dirty. ' +
+          'Codex may have written outside its sandbox (MCP server, raw shell, ' +
+          'or a sandbox bug). Run `git status` to inspect.';
+      }
+    }
+
     writeArtifact(path, output + (output.endsWith('\n') ? '' : '\n'));
-    return { ok: true, output, error: null, artifactPath: path };
+    return {
+      ok: true,
+      output,
+      error: null,
+      artifactPath: path,
+      readonlyFallback: !!opts._readonlyFallback,
+      readonlyExplanation: opts._readonlyExplanation || null,
+      readonlyViolation,
+    };
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
     writeArtifact(path, `# Error\n\nUnexpected: ${msg}\n`);
@@ -286,6 +395,30 @@ export async function runOnce(adapterName, prompt, _testInject = {}) {
     if (handle) {
       try { await adapter.shutdown(handle); } catch { /* best-effort */ }
     }
+  }
+}
+
+/**
+ * Defense-in-depth helper: returns true if `git status --porcelain` is empty,
+ * false if it has any output, null on any failure (no git, not a repo, etc.).
+ * Used to detect whether the codex `read-only` sandbox failed to contain a
+ * write. The check is best-effort — a null return means "we couldn't tell"
+ * and the caller skips the warning.
+ *
+ * @param {string} cwd
+ * @returns {boolean | null}
+ */
+function isGitTreeClean(cwd) {
+  try {
+    const out = execFileSync('git', ['status', '--porcelain'], {
+      cwd,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2000,
+    });
+    return out.trim().length === 0;
+  } catch {
+    return null;
   }
 }
 
@@ -341,6 +474,10 @@ async function runSyncPath(model) {
   let result = await runOnce(adapterName, prompt);
 
   if (result.demoted) {
+    // Demotion is now reserved for paths that explicitly opt out of read-only
+    // fallback (Atlas/Athena workers — buildSpawnOpts above sets `_demoted`
+    // only when the fallback isn't appropriate). For `/ask` itself this
+    // branch is reachable only via test injection.
     if (model === 'auto' && adapterName === 'codex-exec' && caps.hasGeminiCli) {
       _writeStderr(`[ask] codex unavailable (${result.error}); falling back to gemini-exec\n`);
       adapterName = 'gemini-exec';
@@ -359,6 +496,24 @@ async function runSyncPath(model) {
 
   _writeStdout(result.output);
   if (!result.output.endsWith('\n')) _writeStdout('\n');
+
+  // Read-only fallback annotations — visible to the user so they understand
+  // why codex didn't run with full sandbox access and can override the
+  // detection if they prefer.
+  if (result.readonlyFallback) {
+    _writeStderr(
+      `[ask] codex ran in READ-ONLY mode (-s read-only). ` +
+      `${result.readonlyExplanation || ''}\n` +
+      `[ask]   To run codex with FS write access, either:\n` +
+      `[ask]     • set \`"codex": { "approval": "full-auto" }\` in .ao/autonomy.json (explicit override)\n` +
+      `[ask]     • restart Claude Code so the SessionStart hook can capture the runtime permission_mode\n` +
+      `[ask]     • add LITERAL "Bash(*)" + "Write(*)" to permissions.allow\n`
+    );
+    if (result.readonlyViolation) {
+      _writeStderr(`[ask] WARNING: ${result.readonlyViolation}\n`);
+    }
+  }
+
   _writeStderr(`[ask] artifact: ${result.artifactPath}\n`);
   return _exit(0);
 }
@@ -389,9 +544,9 @@ async function runAsyncLaunch(model) {
   }
 
   // §4.2 step 4a — dispatch-level codex→gemini fallback on demoted host.
-  // This mirrors the sync path at runSyncPath() so `/ask async auto` on a
-  // suggest-tier host transparently re-picks gemini. Explicit codex requests
-  // still exit 2 on demotion.
+  // Codex now uses read-only fallback (issue #67/#68/#69) instead of
+  // demoting at /ask, so `_demoted` is rare; it remains for paths where the
+  // adapter genuinely cannot run (e.g. gemini auth missing).
   let opts = buildSpawnOpts(adapterName);
   if (opts._demoted) {
     if (model === 'auto' && adapterName === 'codex-exec' && caps.hasGeminiCli) {
@@ -406,6 +561,15 @@ async function runAsyncLaunch(model) {
       _writeStderr(`[ask] ${modelLabel(adapterName)} unavailable: ${opts._demotionReason}\n`);
       return _exit(2);
     }
+  }
+  // If we landed on the read-only fallback, surface it to the user before
+  // the runner detaches — async callers won't see the per-run readonly
+  // explanation otherwise.
+  if (opts._readonlyFallback) {
+    _writeStderr(
+      `[ask] codex will run in READ-ONLY mode. ` +
+      `${opts._readonlyExplanation || ''}\n`
+    );
   }
 
   // Allocate jobId + ensure dirs exist + write prompt sidecar.
@@ -560,9 +724,17 @@ async function runJob(jobId) {
   }
 
   // Step 8 (deferred): spawn the adapter.
+  // Read-only fallback (issue #67/#68/#69): mirror runOnce by prepending the
+  // guard header to the prompt before spawn. We don't run the post-collect
+  // git diff check in the runner because (a) the runner is detached and
+  // we can't surface a warning to the user mid-stream, and (b) the runner's
+  // 24h collect window makes git state at finalize time meaningless. The
+  // sandbox itself is the primary defense — the prompt header is belt-and-
+  // suspenders.
+  const spawnPrompt = opts._readonlyFallback ? `${READONLY_GUARD_HEADER}${prompt}` : prompt;
   let handle;
   try {
-    handle = adapter.spawn(prompt, opts);
+    handle = adapter.spawn(spawnPrompt, opts);
   } catch (err) {
     const msg = err && err.message ? err.message : String(err);
     askJobs.writeRunnerSentinel(meta.artifactJsonlPath, {
