@@ -28,6 +28,7 @@ import {
   _internal,
 } from '../lib/runtime-permissions.mjs';
 import {
+  detectClaudePermissions,
   detectClaudePermissionLevel,
   detectClaudePermissionLevelFromSettings,
   explainPermissionLevel,
@@ -358,6 +359,156 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
       'full-auto',
     );
   });
+
+  // ─── Codex-review fixes (#69 WARN): runtime override must respect ────────
+  // managed deny lists and disableBypassPermissionsMode. The earlier
+  // implementation mapped runtime mode to a tier in isolation; the fix flows
+  // it through detectClaudePermissions's same broad/scoped + deny pipeline.
+
+  it('runtime bypassPermissions is clamped by deny: Bash(*) (no broad bash → auto-edit max)', () => {
+    writeSettings(cwd, 'projectLocal', {
+      permissions: { deny: ['Bash(*)'] },
+    });
+    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    // Without the fix this would have promoted to full-auto despite the
+    // deny — Codex flagged it as a security regression.
+    assert.equal(
+      detectClaudePermissionLevel({ cwd, home: '/nonexistent' }),
+      'auto-edit',
+      'broad Bash deny clamps runtime bypassPermissions',
+    );
+  });
+
+  it('runtime bypassPermissions is clamped by scoped Bash deny (still no broad bash)', () => {
+    writeSettings(cwd, 'projectLocal', {
+      permissions: { deny: ['Bash(curl:*)'] },
+    });
+    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    // Scoped deny invalidates the broad bash grant under coarse codex sandbox.
+    assert.equal(
+      detectClaudePermissionLevel({ cwd, home: '/nonexistent' }),
+      'auto-edit',
+      'scoped Bash deny clamps runtime bypassPermissions to auto-edit',
+    );
+  });
+
+  it('runtime bypassPermissions implicit grant is dropped by disableBypassPermissionsMode (collapses to suggest, not acceptEdits)', () => {
+    writeSettings(cwd, 'projectLocal', {
+      permissions: { disableBypassPermissionsMode: true },
+    });
+    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    // bypassDisabled → bypassActive=false → implicit broad DROPPED entirely.
+    // The runtime tier does NOT silently fall through to acceptEdits — it
+    // collapses to suggest unless an explicit allow list compensates.
+    assert.equal(
+      detectClaudePermissionLevel({ cwd, home: '/nonexistent' }),
+      'suggest',
+      'disableBypassPermissionsMode drops the implicit grant; no acceptEdits fallback',
+    );
+  });
+
+  it('runtime acceptEdits respects deny: Write(*) (no broad write → suggest)', () => {
+    writeSettings(cwd, 'projectLocal', {
+      permissions: { deny: ['Write(*)', 'Edit(*)'] },
+    });
+    captureRuntimePermissions({ permissionMode: 'acceptEdits' }, { cwd });
+    assert.equal(
+      detectClaudePermissionLevel({ cwd, home: '/nonexistent' }),
+      'suggest',
+      'broad Write+Edit deny invalidates runtime acceptEdits implicit broad',
+    );
+  });
+
+  it('runtime is clamped via opts.effectiveDefaultMode in detectClaudePermissions', () => {
+    writeSettings(cwd, 'projectLocal', {
+      permissions: { deny: ['Bash(*)'] },
+    });
+    // Direct exercise of the override knob — no runtime cache needed.
+    const flags = detectClaudePermissions({
+      cwd,
+      home: '/nonexistent',
+      effectiveDefaultMode: 'bypassPermissions',
+    });
+    assert.equal(flags.hasBashStar, false, 'broad Bash deny invalidates implicit grant');
+    assert.equal(flags.hasWriteStar, true, 'Write/Edit not denied → still broad');
+    assert.equal(flags.hasEditStar, true);
+  });
+
+  // ─── Codex round-2 review (WARN #2): allowManagedPermissionRulesOnly ─────
+  // must clamp runtime implicit grants. The flag means "only managed scope's
+  // allow list counts". A runtime `bypassPermissions` produces an implicit
+  // broad grant that's by definition non-managed — without the fix the runtime
+  // could promote to full-auto despite the org policy locking down to
+  // managed-only allow.
+
+  it('allowManagedPermissionRulesOnly clamps runtime bypassPermissions implicit grant', () => {
+    // Simulate a managed-only org: managed scope sets the flag + a narrow
+    // allow list. Runtime captures bypassPermissions (e.g. user launched
+    // claude --dangerously-skip-permissions).
+    const managedRoot = join(cwd, 'fake-managed');
+    mkdirSync(managedRoot, { recursive: true });
+    writeFileSync(join(managedRoot, 'managed-settings.json'), JSON.stringify({
+      permissions: {
+        allow: ['Read(*)'],
+        allowManagedPermissionRulesOnly: true,
+      },
+    }));
+    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    const level = detectClaudePermissionLevel({
+      cwd,
+      home: '/nonexistent',
+      managedRootOverride: managedRoot,
+    });
+    // Runtime implicit grant must NOT bypass managed-only ceiling.
+    assert.equal(level, 'suggest',
+      'allowManagedPermissionRulesOnly suppresses non-managed runtime implicit grants');
+  });
+
+  it('allowManagedPermissionRulesOnly does NOT clamp managed-scope defaultMode', () => {
+    // Managed admin can still grant broad implicit access to ALL users by
+    // setting defaultMode in the managed scope itself. This is intentional —
+    // the flag suppresses NON-managed grants only.
+    const managedRoot = join(cwd, 'fake-managed-implicit');
+    mkdirSync(managedRoot, { recursive: true });
+    writeFileSync(join(managedRoot, 'managed-settings.json'), JSON.stringify({
+      permissions: {
+        defaultMode: 'bypassPermissions',
+        allowManagedPermissionRulesOnly: true,
+      },
+    }));
+    const level = detectClaudePermissionLevel({
+      cwd,
+      home: '/nonexistent',
+      managedRootOverride: managedRoot,
+      skipRuntime: true, // isolate the managed-defaultMode signal
+    });
+    assert.equal(level, 'full-auto',
+      'managed-scope bypassPermissions still grants implicit broad even with managed-only flag');
+  });
+
+  it('multi-scope merge: user-level deny overrides project-level allow under runtime promotion', () => {
+    // Project allows broad Bash, user-level (lower precedence but merged)
+    // deny adds a scoped restriction. Even with runtime bypassPermissions,
+    // the deny union must invalidate the broad bash grant.
+    writeSettings(cwd, 'project', {
+      permissions: { allow: ['Bash(*)', 'Write(*)'] },
+    });
+    // Use a tmp HOME to write user-scope settings
+    const fakeHome = join(cwd, 'fake-home');
+    mkdirSync(join(fakeHome, '.claude'), { recursive: true });
+    writeFileSync(join(fakeHome, '.claude', 'settings.json'), JSON.stringify({
+      permissions: { deny: ['Bash(curl:*)'] },
+    }));
+    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    const level = detectClaudePermissionLevel({
+      cwd,
+      home: fakeHome,
+    });
+    // Bash deny union → no broad bash → max tier auto-edit. Runtime promotion
+    // doesn't bypass the union.
+    assert.equal(level, 'auto-edit',
+      'cross-scope deny union clamps runtime promotion');
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -400,13 +551,33 @@ describe('explainPermissionLevel', () => {
     assert.match(r.chosenSourceReason, /matches settings tier/);
   });
 
-  it('reports settings-wins when runtime is lower (upgrade-only)', () => {
+  it('reports tie (settings wins) when literal allow grants stay broad regardless of runtime mode', () => {
+    // Literal Bash(*)+Write(*) allow grants don't go away when runtime
+    // flips to 'default'. Both layers therefore compute full-auto, and
+    // settings wins the tie. This documents the desirable behavior:
+    // explicit allow lists are persistent and unaffected by mode flips.
     writeSettings(cwd, 'projectLocal', {
       permissions: { allow: ['Bash(*)', 'Write(*)'] },
     });
     captureRuntimePermissions({ permissionMode: 'default' }, { cwd });
     const r = explainPermissionLevel({ cwd, home: '/nonexistent' });
     assert.equal(r.finalLevel, 'full-auto');
+    assert.equal(r.chosenSource, 'settings');
+    assert.match(r.chosenSourceReason, /matches settings tier full-auto/);
+  });
+
+  it('reports upgrade-only policy when runtime IS strictly lower than settings (implicit-only path)', () => {
+    // Settings has only implicit broad via defaultMode=bypassPermissions
+    // (no literal allow). Runtime flips to 'default' → bypassActive=false →
+    // no implicit broad → runtimeLevel='suggest'. Strict downgrade.
+    writeSettings(cwd, 'projectLocal', {
+      permissions: { defaultMode: 'bypassPermissions' },
+    });
+    captureRuntimePermissions({ permissionMode: 'default' }, { cwd });
+    const r = explainPermissionLevel({ cwd, home: '/nonexistent' });
+    assert.equal(r.settingsLevel, 'full-auto', 'settings sees full-auto via implicit broad');
+    assert.equal(r.runtime?.level, 'suggest', 'runtime default has no implicit broad');
+    assert.equal(r.finalLevel, 'full-auto', 'upgrade-only policy keeps settings tier');
     assert.equal(r.chosenSource, 'settings');
     assert.match(r.chosenSourceReason, /upgrade-only policy/);
   });

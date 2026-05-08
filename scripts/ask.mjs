@@ -261,7 +261,22 @@ export function buildSpawnOpts(adapterName) {
       } else {
         opts.level = level;
       }
-    } catch { /* fall through */ }
+    } catch (err) {
+      // Fail CLOSED — codex review (#67) flagged this catch as a security
+      // regression. A thrown error here means we couldn't resolve the host's
+      // permission tier (corrupt autonomy.json, fs error, …). The previous
+      // `/* fall through */` left `opts.level` undefined, which made
+      // codex-exec.mjs fall back to `--dangerously-bypass-approvals-and-sandbox`
+      // (legacy bypass) — i.e. unverified failure → maximum permissions.
+      // We now pin the safest possible level + flag the read-only fallback
+      // so the spawn still produces useful output without ever exceeding
+      // the most restrictive sandbox.
+      opts.level = 'suggest';
+      opts._readonlyFallback = true;
+      opts._readonlyExplanation =
+        `permission resolution threw (${err && err.message ? err.message : err}); ` +
+        `failing closed to read-only sandbox to avoid the legacy bypass path.`;
+    }
   } else if (adapterName === 'gemini-exec') {
     try {
       const autonomy = loadAutonomyConfig(process.cwd());

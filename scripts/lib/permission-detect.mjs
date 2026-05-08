@@ -250,6 +250,27 @@ function listHasScoped(list, tool) {
  * mapping can distinguish "unrestricted shell trust" from "trust to edit
  * files in cwd".
  *
+ * `opts.effectiveDefaultMode` (added for issue #69 runtime override —
+ * codex review 2026-05-08 flagged the original implementation for missing
+ * managed deny / `disableBypassPermissionsMode` enforcement):
+ *
+ *   When a caller has captured a runtime `permission_mode` (via the
+ *   SessionStart / UserPromptSubmit hook) and wants to know "what tier
+ *   would the host be at if this mode were the active defaultMode?", they
+ *   pass it here. The override REPLACES the settings-derived `defaultMode`
+ *   ONLY for the implicit-broad computation; everything else flows through
+ *   the same deny/ask/disableBypassPermissionsMode pipeline. That means:
+ *     - `disableBypassPermissionsMode: true` (any scope) DROPS the implicit
+ *       broad grant from `bypassPermissions` entirely. The runtime tier
+ *       collapses to `suggest` unless an explicit allow list compensates —
+ *       it does NOT silently fall through to `acceptEdits`.
+ *     - any `Bash` deny in any scope still invalidates the runtime broad
+ *       Bash grant
+ *     - `acceptEdits` runtime grants Write+Edit only (not Bash)
+ *     - `allowManagedPermissionRulesOnly: true` (managed scope) suppresses
+ *       runtime implicit grants because the runtime override is by
+ *       definition non-managed.
+ *
  * @param {object} [opts]
  * @param {string} [opts.cwd]
  * @param {string} [opts.home]
@@ -257,6 +278,7 @@ function listHasScoped(list, tool) {
  * @param {string} [opts.platformOverride]
  * @param {object} [opts.env]
  * @param {object} [opts.fs]
+ * @param {string} [opts.effectiveDefaultMode] - Override settings defaultMode for implicit-broad computation
  * @returns {{
  *   hasBashStar: boolean,   hasBashScoped: boolean,
  *   hasWriteStar: boolean,  hasWriteScoped: boolean,
@@ -352,11 +374,41 @@ export function detectClaudePermissions(opts = {}) {
     // flows through the same fail-closed pipeline as the explicit allow list:
     //   - `bypassPermissions` (unless disabled) → implicit broad for ALL tools
     //   - `acceptEdits`                         → implicit broad for Write + Edit only
-    // This preserves the expected interaction with deny/ask rules: a host
-    // that sets `bypassPermissions` + `deny: Bash(*)` gets bash demoted while
-    // write/edit stay broad.
-    const bypassActive = defaultMode === 'bypassPermissions' && !bypassDisabled;
-    const acceptActive = defaultMode === 'acceptEdits';
+    // Interaction with deny/ask: `bypassPermissions` + `deny: Bash(*)` gets
+    // bash demoted while write/edit stay broad. Interaction with bypassDisabled:
+    // when `disableBypassPermissionsMode: true` is set in any scope,
+    // `bypassActive` becomes false (NOT downgraded to `acceptActive`) — the
+    // implicit grant is dropped entirely, mirroring how the resolved tier
+    // collapses to `suggest` unless an explicit allow list compensates.
+    //
+    // `opts.effectiveDefaultMode` (issue #69) lets callers override the
+    // settings defaultMode for this computation only — used by the runtime
+    // permission_mode merge in detectClaudePermissionLevel so deny/ask/
+    // bypassDisabled all apply to the runtime tier the same way they apply
+    // to the settings layer. Everything else (managedDetected, allowManagedOnly,
+    // the returned `defaultMode` field) reflects the on-disk settings.
+    //
+    // `allowManagedPermissionRulesOnly` interaction (codex review 2026-05-08
+    // residual WARN): when managed scope sets this flag, non-managed allow
+    // lists are suppressed via the `allow` assembly above. The same intent
+    // must apply to non-managed implicit grants — a runtime
+    // `permission_mode = bypassPermissions` (always non-managed) or a
+    // non-managed-scope settings defaultMode shouldn't be allowed to bypass
+    // the managed-only ceiling. We track whether the implicit grant comes
+    // from managed scope (the runtime override is never managed).
+    const effectiveDefaultMode =
+      typeof opts.effectiveDefaultMode === 'string' && opts.effectiveDefaultMode.length > 0
+        ? opts.effectiveDefaultMode
+        : defaultMode;
+    const implicitGrantIsNonManaged = !!opts.effectiveDefaultMode || (defaultModeScope !== 0);
+    const implicitSuppressedByManagedOnly = allowManagedOnly && implicitGrantIsNonManaged;
+    const bypassActive =
+      effectiveDefaultMode === 'bypassPermissions' &&
+      !bypassDisabled &&
+      !implicitSuppressedByManagedOnly;
+    const acceptActive =
+      effectiveDefaultMode === 'acceptEdits' &&
+      !implicitSuppressedByManagedOnly;
     const implicitBroad = {
       Bash:  bypassActive,
       Write: bypassActive || acceptActive,
@@ -483,12 +535,27 @@ export function detectClaudePermissionLevel(opts = {}) {
 
   if (opts.skipRuntime) return settingsLevel;
 
-  // Runtime override — UPGRADE-ONLY. Failures fall back to settings cleanly.
+  // Runtime override — UPGRADE-ONLY. Codex review 2026-05-08 flagged that
+  // an earlier version mapped runtime mode to a tier IN ISOLATION, which
+  // missed managed deny lists and `disableBypassPermissionsMode`. The fix:
+  // re-run detection with the runtime mode AS IF it were the settings
+  // defaultMode, so the existing deny/ask/bypassDisabled pipeline applies.
+  // Failures fall back to settings cleanly (best-effort).
   let runtimeLevel = null;
   try {
     const rec = loadRuntimePermissions({ cwd: opts.cwd });
     if (rec && rec.permissionMode) {
-      runtimeLevel = permissionModeToLevel(rec.permissionMode);
+      const runtimeFlags = detectClaudePermissions({
+        ...opts,
+        effectiveDefaultMode: rec.permissionMode,
+      });
+      if (runtimeFlags.hasBashStar && runtimeFlags.hasWriteStar) {
+        runtimeLevel = 'full-auto';
+      } else if (runtimeFlags.hasWriteStar || runtimeFlags.hasEditStar) {
+        runtimeLevel = 'auto-edit';
+      } else {
+        runtimeLevel = 'suggest';
+      }
     }
   } catch {
     // Fail open — runtime override is best-effort.
@@ -497,7 +564,13 @@ export function detectClaudePermissionLevel(opts = {}) {
   if (!runtimeLevel) return settingsLevel;
 
   // Pick the higher tier (more permissive). Equal tiers → settings wins
-  // (canonical source).
+  // (canonical source). Note: runtime tier here has ALREADY been clamped
+  // by the deny/ask/bypassDisabled pipeline above, so a managed
+  // `disableBypassPermissionsMode: true` will have dropped the implicit
+  // broad grant from runtime `bypassPermissions` BEFORE this comparison
+  // (clamping it to whatever the explicit allow lists give, typically
+  // `suggest`). `allowManagedPermissionRulesOnly` similarly clamps non-
+  // managed runtime grants.
   const sRank = _LEVEL_RANK[settingsLevel] || 1;
   const rRank = _LEVEL_RANK[runtimeLevel] || 1;
   if (rRank > sRank) return runtimeLevel;
@@ -522,19 +595,37 @@ export function explainPermissionLevel(opts = {}) {
   const settingsLevel = detectClaudePermissionLevelFromSettings(opts);
 
   let runtime = null;
+  let runtimeWasClamped = false;
   try {
     const rec = loadRuntimePermissions({ cwd: opts.cwd });
-    if (rec) {
-      const lvl = permissionModeToLevel(rec.permissionMode);
-      if (lvl) {
-        runtime = {
-          mode: rec.permissionMode,
-          level: lvl,
-          source: rec.source,
-          ageMs: rec.ageMs,
-          sessionId: rec.sessionId,
-        };
+    if (rec && rec.permissionMode) {
+      // Naive level if the runtime mode were applied without any
+      // settings-side restrictions. We compare to the clamped level so
+      // the explanation can call out when managed deny / disableBypass
+      // demoted the runtime promotion.
+      const naiveLevel = permissionModeToLevel(rec.permissionMode);
+      const runtimeFlags = detectClaudePermissions({
+        ...opts,
+        effectiveDefaultMode: rec.permissionMode,
+      });
+      let clampedLevel;
+      if (runtimeFlags.hasBashStar && runtimeFlags.hasWriteStar) clampedLevel = 'full-auto';
+      else if (runtimeFlags.hasWriteStar || runtimeFlags.hasEditStar) clampedLevel = 'auto-edit';
+      else clampedLevel = 'suggest';
+
+      if (naiveLevel && clampedLevel && (_LEVEL_RANK[clampedLevel] || 1) < (_LEVEL_RANK[naiveLevel] || 1)) {
+        runtimeWasClamped = true;
       }
+      runtime = {
+        mode: rec.permissionMode,
+        level: clampedLevel,
+        naiveLevel: naiveLevel || null,
+        clamped: runtimeWasClamped,
+        bypassDisabled: runtimeFlags.bypassDisabled,
+        source: rec.source,
+        ageMs: rec.ageMs,
+        sessionId: rec.sessionId,
+      };
     }
   } catch { /* fall through */ }
 
@@ -547,7 +638,13 @@ export function explainPermissionLevel(opts = {}) {
   if (useRuntime) {
     chosenSourceReason =
       `Runtime ${runtime.mode} (from ${runtime.source}) promotes settings ` +
-      `tier ${settingsLevel} → ${runtime.level}.`;
+      `tier ${settingsLevel} → ${runtime.level}` +
+      (runtime.clamped
+        ? ` (clamped from ${runtime.naiveLevel} by deny/ask rules, ` +
+          `disableBypassPermissionsMode, or allowManagedPermissionRulesOnly ` +
+          `in some scope)`
+        : '') +
+      '.';
   } else if (runtime && rRank === sRank) {
     chosenSourceReason = `Runtime ${runtime.mode} matches settings tier ${settingsLevel} — settings wins (canonical).`;
   } else if (runtime && rRank < sRank) {

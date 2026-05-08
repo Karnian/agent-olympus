@@ -106,10 +106,13 @@ function atomicWrite(dest, content) {
  * Extract a `permission_mode` value from a Claude Code hook stdin payload.
  *
  * Claude Code's hook payload schema is documented in evolving terms across
- * releases — this function tries multiple plausible shapes so the capture is
- * robust against future schema additions:
+ * releases — this function tries multiple PLAUSIBLE/OBSERVED shapes so the
+ * capture is robust against future schema additions. None of the variants
+ * below are independently confirmed by an authoritative spec; the fallback
+ * chain is best-effort. First match wins, and unknown fields are ignored
+ * (rawStdinKeys is captured for diagnostics):
  *
- *   - top-level `permission_mode` (snake_case, current docs)
+ *   - top-level `permission_mode` (snake_case, expected primary form)
  *   - top-level `permissionMode` (camelCase, defensive)
  *   - `data.session.permission_mode`
  *   - `data.session.permissionMode`
