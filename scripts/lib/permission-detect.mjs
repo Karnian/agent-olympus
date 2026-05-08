@@ -31,6 +31,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { platform as osPlatform } from 'node:os';
+import { loadRuntimePermissions, permissionModeToLevel } from './runtime-permissions.mjs';
 
 /**
  * Read and parse a JSON file, returning null on any error.
@@ -406,7 +407,49 @@ export function detectClaudePermissions(opts = {}) {
 }
 
 /**
+ * Numeric tier helper for runtime-vs-settings ceiling-merge logic. Higher =
+ * more permissive. Mirrors the table used in codex-approval.PERM_TIER (kept
+ * private here to avoid a circular import).
+ */
+const _LEVEL_RANK = { 'full-auto': 3, 'auto-edit': 2, 'suggest': 1 };
+
+/**
+ * Map the broad/scoped flags from `detectClaudePermissions` to a tier level
+ * WITHOUT consulting the runtime override. Internal helper — exported so
+ * tests and `--explain-permissions` can show the settings-only baseline
+ * separately from the final level.
+ *
+ * @param {object} [opts] - Same as detectClaudePermissions
+ * @returns {'full-auto' | 'auto-edit' | 'suggest'}
+ */
+export function detectClaudePermissionLevelFromSettings(opts = {}) {
+  const p = detectClaudePermissions(opts);
+  if (p.hasBashStar && p.hasWriteStar) return 'full-auto';
+  if (p.hasWriteStar || p.hasEditStar) return 'auto-edit';
+  return 'suggest';
+}
+
+/**
  * Map detected Claude permissions to a Codex-style approval level string.
+ *
+ * **Two-layer resolution (issue #67/#68/#69)** — settings ⇧ runtime:
+ *   1. **Settings layer** (existing): merge allow/deny/ask across all scopes,
+ *      derive broad/scoped flags, map to a tier.
+ *   2. **Runtime layer** (NEW): read
+ *      `.ao/state/ao-runtime-permissions.json`, captured by the
+ *      `runtime-permissions-capture.mjs` hook from Claude Code's session
+ *      `permission_mode`. UPGRADE-ONLY — the runtime tier can promote the
+ *      settings tier, but never demote it.
+ *
+ * Why upgrade-only:
+ *   - Promotion is safe: a runtime `bypassPermissions` (from
+ *     `--dangerously-skip-permissions`) means the host actually accepts
+ *     arbitrary tool use, so honoring it removes an over-conservative
+ *     demotion of `/ask codex` and friends.
+ *   - Demotion would be unsafe: a user with `Bash(*)` literal in
+ *     `permissions.allow` and runtime `default` mode is still trusting tools
+ *     via the explicit allow list. Mid-session Shift+Tab into "default" is
+ *     usually a UI glance, not an instruction to revoke prior trust.
  *
  * Only BROAD grants promote a tier — scoped grants cannot promote because
  * codex's coarse sandbox tiers (read-only | workspace-write | danger-full-access)
@@ -416,24 +459,119 @@ export function detectClaudePermissions(opts = {}) {
  *   - `Bash(git:*)` alone → `suggest` (workspace-write still lets codex run
  *     arbitrary shell within cwd — `rm`, `curl`, etc. — not just git).
  *
- * Mapping (highest tier first):
+ * Settings mapping (highest tier first):
  *   1. Broad Bash AND broad Write              → full-auto
  *   2. Broad Write OR broad Edit               → auto-edit
  *   3. Otherwise                               → suggest
  *
- * `defaultMode` is already baked into the broad flags by detectClaudePermissions
- * (bypassPermissions → broad Bash+Write+Edit; acceptEdits → broad Write+Edit),
- * with deny/ask fail-closed applied uniformly.
+ * Runtime mapping (via permissionModeToLevel):
+ *   bypassPermissions → full-auto
+ *   acceptEdits       → auto-edit
+ *   default           → suggest
+ *   plan              → suggest
+ *
+ * `defaultMode` (from settings) is already baked into the broad flags by
+ * detectClaudePermissions, with deny/ask fail-closed applied uniformly.
  *
  * @param {object} [opts]
+ * @param {string} [opts.cwd]
+ * @param {boolean} [opts.skipRuntime] - Skip runtime override (testing/diagnostic)
  * @returns {'full-auto' | 'auto-edit' | 'suggest'}
  */
 export function detectClaudePermissionLevel(opts = {}) {
-  const p = detectClaudePermissions(opts);
+  const settingsLevel = detectClaudePermissionLevelFromSettings(opts);
 
-  if (p.hasBashStar && p.hasWriteStar) return 'full-auto';
-  if (p.hasWriteStar || p.hasEditStar) return 'auto-edit';
-  return 'suggest';
+  if (opts.skipRuntime) return settingsLevel;
+
+  // Runtime override — UPGRADE-ONLY. Failures fall back to settings cleanly.
+  let runtimeLevel = null;
+  try {
+    const rec = loadRuntimePermissions({ cwd: opts.cwd });
+    if (rec && rec.permissionMode) {
+      runtimeLevel = permissionModeToLevel(rec.permissionMode);
+    }
+  } catch {
+    // Fail open — runtime override is best-effort.
+  }
+
+  if (!runtimeLevel) return settingsLevel;
+
+  // Pick the higher tier (more permissive). Equal tiers → settings wins
+  // (canonical source).
+  const sRank = _LEVEL_RANK[settingsLevel] || 1;
+  const rRank = _LEVEL_RANK[runtimeLevel] || 1;
+  if (rRank > sRank) return runtimeLevel;
+  return settingsLevel;
+}
+
+/**
+ * Detailed breakdown of how `detectClaudePermissionLevel` arrived at its
+ * answer. Used by the `--explain-permissions` flag and tests; the structure
+ * is stable but the human-readable phrasing of `chosenSourceReason` is not.
+ *
+ * @param {object} [opts]
+ * @returns {{
+ *   settingsLevel: string,
+ *   runtime: { mode: string, level: string, source: string, ageMs: number, sessionId: string|null }|null,
+ *   finalLevel: string,
+ *   chosenSource: 'settings'|'runtime',
+ *   chosenSourceReason: string,
+ * }}
+ */
+export function explainPermissionLevel(opts = {}) {
+  const settingsLevel = detectClaudePermissionLevelFromSettings(opts);
+
+  let runtime = null;
+  try {
+    const rec = loadRuntimePermissions({ cwd: opts.cwd });
+    if (rec) {
+      const lvl = permissionModeToLevel(rec.permissionMode);
+      if (lvl) {
+        runtime = {
+          mode: rec.permissionMode,
+          level: lvl,
+          source: rec.source,
+          ageMs: rec.ageMs,
+          sessionId: rec.sessionId,
+        };
+      }
+    }
+  } catch { /* fall through */ }
+
+  const sRank = _LEVEL_RANK[settingsLevel] || 1;
+  const rRank = runtime ? (_LEVEL_RANK[runtime.level] || 1) : -1;
+  const useRuntime = runtime && rRank > sRank;
+  const finalLevel = useRuntime ? runtime.level : settingsLevel;
+
+  let chosenSourceReason;
+  if (useRuntime) {
+    chosenSourceReason =
+      `Runtime ${runtime.mode} (from ${runtime.source}) promotes settings ` +
+      `tier ${settingsLevel} → ${runtime.level}.`;
+  } else if (runtime && rRank === sRank) {
+    chosenSourceReason = `Runtime ${runtime.mode} matches settings tier ${settingsLevel} — settings wins (canonical).`;
+  } else if (runtime && rRank < sRank) {
+    chosenSourceReason =
+      `Runtime ${runtime.mode} (tier ${runtime.level}) is lower than settings ` +
+      `(tier ${settingsLevel}) — settings wins (upgrade-only policy; runtime ` +
+      `cannot revoke explicit allow grants).`;
+  } else if (settingsLevel === 'suggest') {
+    chosenSourceReason =
+      `No runtime override captured (no permission_mode in hook stdin or env). ` +
+      `Settings has no broad allow grants. If you launched Claude Code with ` +
+      `--dangerously-skip-permissions, restart your session so the SessionStart ` +
+      `hook can capture the runtime mode, or set .ao/autonomy.json codex.approval.`;
+  } else {
+    chosenSourceReason = `No runtime override; using settings tier ${settingsLevel}.`;
+  }
+
+  return {
+    settingsLevel,
+    runtime,
+    finalLevel,
+    chosenSource: useRuntime ? 'runtime' : 'settings',
+    chosenSourceReason,
+  };
 }
 
 /**

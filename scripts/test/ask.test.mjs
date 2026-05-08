@@ -325,6 +325,59 @@ test('runOnce: opts.cwd is forwarded to adapter.spawn', withTempCwd(async (cwd) 
   assert.equal(calls.spawnOpts[0].approvalMode, 'yolo', 'caller-supplied approvalMode forwarded');
 }));
 
+// ─── Read-only fallback (issue #67/#68/#69) ────────────────────────────────
+//
+// When buildSpawnOpts flags `_readonlyFallback`, runOnce must:
+//   1. Prepend the READONLY guard header to the prompt before adapter.spawn.
+//   2. Bubble `readonlyFallback: true` plus the explanation up to the result
+//      object so callers (runSyncPath, the status payload) can show the
+//      annotation to the user.
+
+test('runOnce: _readonlyFallback prepends guard header to prompt', withTempCwd(async (cwd) => {
+  const { adapter, calls } = makeFakeAdapter({
+    collectResult: { status: 'completed', output: 'analysis result' },
+  });
+  const result = await runOnce('codex-exec', 'review this design', {
+    adapter,
+    opts: {
+      cwd,
+      level: 'suggest',
+      _readonlyFallback: true,
+      _readonlyExplanation: 'no broad allow grants',
+    },
+  });
+
+  // Guard header must appear before the user prompt
+  const sentPrompt = calls.spawnArgs[0];
+  assert.match(sentPrompt, /READ-ONLY MODE/, 'guard header prefixed');
+  assert.match(sentPrompt, /Do NOT edit files/, 'guard header lists rules');
+  assert.ok(sentPrompt.includes('review this design'), 'user prompt preserved');
+  // The user prompt must come AFTER the header — order matters so the model
+  // reads the rules first, then the request.
+  const headerIdx = sentPrompt.indexOf('READ-ONLY MODE');
+  const userIdx = sentPrompt.indexOf('review this design');
+  assert.ok(headerIdx >= 0 && headerIdx < userIdx, 'header precedes user prompt');
+
+  // Result surfaces the fallback flag for runSyncPath to print
+  assert.equal(result.ok, true);
+  assert.equal(result.readonlyFallback, true);
+  assert.equal(result.readonlyExplanation, 'no broad allow grants');
+}));
+
+test('runOnce: NO guard header when _readonlyFallback is unset (normal path unchanged)', withTempCwd(async (cwd) => {
+  const { adapter, calls } = makeFakeAdapter({
+    collectResult: { status: 'completed', output: 'normal' },
+  });
+  await runOnce('codex-exec', 'a normal prompt', {
+    adapter,
+    opts: { cwd, level: 'full-auto' },
+  });
+
+  const sentPrompt = calls.spawnArgs[0];
+  assert.equal(sentPrompt, 'a normal prompt', 'no guard header when fallback not set');
+  assert.doesNotMatch(sentPrompt, /READ-ONLY MODE/);
+}));
+
 // ─── AC-9: Production gemini-approval plumbing ────────────────────────────
 //
 // The test above only proves runOnce forwards caller-supplied opts. To prove
@@ -407,7 +460,12 @@ test('AC-9: buildSpawnOpts(codex-exec) sets level=auto-edit when host has Write(
   assert.equal(opts._demoted, undefined);
 }));
 
-test('AC-9: buildSpawnOpts(codex-exec) flags _demoted when host is read-only/suggest', withTempCwd(async (cwd) => {
+test('AC-9: buildSpawnOpts(codex-exec) sets _readonlyFallback (not _demoted) on suggest tier — issue #67/#68/#69', withTempCwd(async (cwd) => {
+  // Issue #67/#68/#69: codex used to demote on suggest tier, blocking /ask
+  // codex on hosts with narrow permissions. The new behavior is to map to
+  // codex's `read-only` sandbox (`-s read-only -a never`) and prepend a
+  // system-prompt guard. Atlas/Athena workers still demote (unchanged via
+  // worker-spawn.demoteCodexWorkersIfNeeded), but /ask uses the fallback.
   const { mkdirSync, writeFileSync } = await import('node:fs');
   mkdirSync(join(cwd, '.claude'), { recursive: true });
   writeFileSync(
@@ -415,9 +473,12 @@ test('AC-9: buildSpawnOpts(codex-exec) flags _demoted when host is read-only/sug
     JSON.stringify({ permissions: { allow: ['Read(*)'] } })
   );
   const opts = buildSpawnOpts('codex-exec');
-  assert.equal(opts.level, undefined, 'demoted ops should not carry a level');
-  assert.equal(opts._demoted, true);
-  assert.match(opts._demotionReason, /suggest/);
+  assert.equal(opts._demoted, undefined,
+    '/ask no longer hard-demotes on suggest — falls back to read-only sandbox');
+  assert.equal(opts.level, 'suggest', 'level passed through so codex maps to read-only sandbox');
+  assert.equal(opts._readonlyFallback, true, 'readonly fallback flag set for runOnce');
+  assert.equal(typeof opts._readonlyExplanation, 'string', 'explanation string attached');
+  assert.ok(opts._permissionExplain, 'full explain payload attached for diagnostics');
 }));
 
 test('AC-9: buildSpawnOpts(codex-exec) honors .ao/autonomy.json codex.approval=full-auto override', withTempCwd(async (cwd) => {
@@ -431,7 +492,11 @@ test('AC-9: buildSpawnOpts(codex-exec) honors .ao/autonomy.json codex.approval=f
   assert.equal(opts.level, 'full-auto');
 }));
 
-test('AC-9: buildSpawnOpts(codex-exec) demotes when autonomy.json sets codex.approval=suggest', withTempCwd(async (cwd) => {
+test('AC-9: buildSpawnOpts(codex-exec) uses readonly fallback when autonomy.json codex.approval=suggest — issue #67/#68/#69', withTempCwd(async (cwd) => {
+  // Same fallback applies to explicit `codex.approval: "suggest"` in
+  // autonomy.json — the user has chosen to demote to read-only, but /ask
+  // still runs the prompt rather than refusing. The fallback path produces
+  // useful analysis output instead of exit 2.
   const { mkdirSync, writeFileSync } = await import('node:fs');
   mkdirSync(join(cwd, '.ao'), { recursive: true });
   writeFileSync(
@@ -439,7 +504,9 @@ test('AC-9: buildSpawnOpts(codex-exec) demotes when autonomy.json sets codex.app
     JSON.stringify({ codex: { approval: 'suggest' } })
   );
   const opts = buildSpawnOpts('codex-exec');
-  assert.equal(opts._demoted, true);
+  assert.equal(opts._demoted, undefined);
+  assert.equal(opts._readonlyFallback, true);
+  assert.equal(opts.level, 'suggest');
 }));
 
 test('AC-9: buildSpawnOpts(gemini-exec) honors .ao/autonomy.json gemini.approval=yolo override', withTempCwd(async (cwd) => {
