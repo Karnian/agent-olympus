@@ -90,8 +90,9 @@ agent-olympus/
 │   ├── concurrency-gate.mjs      — PreToolUse: enforce parallel task limits
 │   ├── concurrency-release.mjs   — PostToolUse: release task from concurrency pool
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
+│   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (2000+ tests, 77 files; v1.1.4: 2012 passing)
+│   ├── test/                     — node:test unit tests (2075+ tests, 79 files; v1.1.6: 2074/2075 passing)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
@@ -126,7 +127,8 @@ agent-olympus/
 │       ├── codex-appserver.mjs   — Codex app-server adapter (multi-turn JSON-RPC 2.0)
 │       ├── resolve-binary.mjs    — Binary resolution with caching + buildEnhancedPath()
 │       ├── host-sandbox-detect.mjs — Passive host sandbox detection (LSM, container, seccomp)
-│       ├── permission-detect.mjs — Unified permission detection (shared by all adapters)
+│       ├── permission-detect.mjs — Unified permission detection (settings + runtime layers, shared by all adapters)
+│       ├── runtime-permissions.mjs — Runtime permission_mode capture/load helpers (v1.1.6)
 │       ├── artifact-pipe.mjs     — Cascade artifact archival pipe for orchestrator stages
 │       ├── browser-handoff.mjs   — Browser pause state persistence for /resume-handoff
 │       ├── design-identity.mjs   — Brand identity loader/writer (.ao/memory/)
@@ -262,7 +264,9 @@ agent-olympus/
 | Event | Hook | Purpose |
 |-------|------|---------|
 | SessionStart | session-start | Inject prior wisdom + interrupted checkpoint context at session start |
+| SessionStart | runtime-permissions-capture | Capture runtime `permission_mode` from hook stdin/env to `.ao/state/ao-runtime-permissions.json` (async, v1.1.6) |
 | UserPromptSubmit | intent-gate | Classify user intent into 7 categories (multilingual) |
+| UserPromptSubmit | runtime-permissions-capture | Refresh runtime `permission_mode` cache so mid-session mode flips are picked up on next turn (async, v1.1.6) |
 | PreToolUse:Task | concurrency-gate | Enforce parallel task limits |
 | PreToolUse:Task | model-router | Inject model routing advice based on intent |
 | PreToolUse:Agent | concurrency-gate | Same limits for Agent tool |

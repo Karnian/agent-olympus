@@ -16,7 +16,7 @@ Both orchestrators autonomously loop until the task is fully complete (build pas
 agents/     → Agent persona definitions (.md files with model and role)
 skills/     → User-facing skills (SKILL.md with triggers, steps, workflow)
 scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
-scripts/lib → Shared libraries (52 files; stdin, intent-patterns, tmux-session, inbox-outbox,
+scripts/lib → Shared libraries (53 files; stdin, intent-patterns, tmux-session, inbox-outbox,
               checkpoint, wisdom, worker-status, worktree, fs-atomic, provider-detect,
               config-validator, autonomy, cost-estimate, changelog, pr-create, ci-watch,
               notify, model-router, worker-spawn, preflight, input-guard, stuck-recovery,
@@ -26,8 +26,8 @@ scripts/lib → Shared libraries (52 files; stdin, intent-patterns, tmux-session
               artifact-pipe, browser-handoff, design-identity, memory, micro-skill-scope,
               review-router, subagent-context, taste-memory, ui-reference, ui-remediate,
               ui-smell-scan, ask-jobs, architect-scope, light-mode, model-usage,
-              stage-escalation)
-scripts/test → node:test based unit tests (2000+ tests, 77 files; v1.1.4: 2012 passing)
+              stage-escalation, runtime-permissions)
+scripts/test → node:test based unit tests (2075+ tests, 79 files; v1.1.6: 2074/2075 passing)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -56,6 +56,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - **IntentGate** (`scripts/intent-gate.mjs`) — fires on UserPromptSubmit; classifies intent via pattern matching and saves routing context to `.ao/state/ao-intent.json` for downstream model routing. Categories: `visual-engineering`, `design-review`, `deep`, `quick`, `writing`, `artistry`, `planning`, `external-model`. The `external-model` category detects requests to query Codex/Gemini (e.g. "ask codex", "코덱스한테 물어봐", "cross-review") and injects capability-aware advice to use the `/ask` skill
 - **ModelRouter** (`scripts/model-router.mjs`) — fires on PreToolUse Task/Agent; reads intent state from IntentGate and injects model routing advice as `additionalContext` (advisory only, never blocks)
 - **SessionStart** (`scripts/session-start.mjs`) — fires at session start; injects prior wisdom and any interrupted checkpoint context into the conversation
+- **RuntimePermissionsCapture** (`scripts/runtime-permissions-capture.mjs`) — **[v1.1.6+]** fires on SessionStart + UserPromptSubmit (async, silent observer). Reads `permission_mode` from hook stdin (or `CLAUDE_PERMISSION_MODE` / `CLAUDE_CODE_PERMISSION_MODE` env) and persists to `.ao/state/ao-runtime-permissions.json` (schemaVersion:1, 30-min TTL, atomic write). Bridges the gap between Claude Code's settings-file mirror (`permission-detect.mjs`) and the runtime mode the user actually launched with (`--dangerously-skip-permissions`, `--permission-mode bypassPermissions`, etc.). Closes #67/#68/#69
 - **SubagentStart** (`scripts/subagent-start.mjs`) — fires when a subagent is spawned; injects token efficiency directive (non-haiku agents only) + wisdom context via `additionalContext`, filtered by `subagent_type` relevance
 - **Notification** (`scripts/notification.mjs`) — fires on `idle_prompt` and `permission_prompt` events; logs to `.ao/state/ao-notifications.json` for stall detection (async, non-blocking)
 - **SubagentStop** (`scripts/subagent-stop.mjs`) — fires when a subagent completes; captures results to `.ao/state/ao-subagent-results.json` (async, non-blocking); also triggers concurrency-release as safety net
@@ -90,6 +91,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/state/ao-notifications.json` — logged idle/permission prompt notifications for stall detection (capped at 50 entries, FIFO)
 - `.ao/state/ao-model-usage.jsonl` — per-subagent model usage log (schemaVersion:1) for Opus-skew analysis; written by `subagent-stop.mjs` via `scripts/lib/model-usage.mjs`; fallback file when no active run (capped at 1000 lines FIFO); per-run variant at `.ao/artifacts/runs/<runId>/model-usage.jsonl` (uncapped); summarise with `node scripts/usage-report.mjs [--run <runId>|--all|--json]`
 - `.ao/state/ao-plan-pending.json` — marker for plan execution routing fallback (created by PlanExecuteGate, consumed by SessionStart)
+- `.ao/state/ao-runtime-permissions.json` — **[v1.1.6+]** captured Claude Code runtime `permission_mode` (schemaVersion:1, 30-min TTL); written by `RuntimePermissionsCapture` hook on every SessionStart + UserPromptSubmit; read by `permission-detect.mjs` as an UPGRADE-ONLY override on top of the settings union. Runtime tier flows through the SAME deny/ask/disableBypassPermissionsMode/allowManagedPermissionRulesOnly pipeline as the settings defaultMode (via `detectClaudePermissions({effectiveDefaultMode})`), so runtime promotion can never bypass managed restrictions. Issues #67/#68/#69 fix.
 - `.ao/state/browser-handoff.json` — [v1.0.2+] browser pause state (sessionId + sanitized URL + sanitized breadcrumb); 24h TTL; created by US-006 browser-handoff.mjs; read by `/resume-handoff`
 - `.ao/state/ask-jobs/<jobId>.json` — [v1.0.4+] per-job metadata for the async `/ask` path (schemaVersion:1). **Single-writer rule:** only the detached `_run-job` runner process ever writes this file; `status`/`collect`/`cancel`/`list` subcommands are read-only. 24h SessionEnd sweep applies.
 - `.ao/state/ask-jobs/<jobId>.prompt` — [v1.0.4+] raw prompt sidecar for async `/ask` jobs; written by the async launcher and deleted by the runner on adapter spawn (mode 0o600).
@@ -239,7 +241,7 @@ Suggest-tier hosts cannot run codex usefully — a `read-only` sandbox would let
 
 The `-a` and `-s` flags are GLOBAL Codex CLI flags and MUST appear BEFORE the `exec` subcommand. `codex exec -a never` errors with `unexpected argument '-a'` in 0.118+.
 
-**Known limitation — settings-file mirror, not live session mirror.** Detection reads Claude Code's *settings files* only; it does NOT observe runtime session state. That means `--permission-mode`, `--allowedTools`, `--disallowedTools` CLI launch flags and mid-session mode flips (e.g. Shift+Tab) are invisible. If the host session's actual permissions are narrower than the on-disk settings, the worker may be mirrored to a broader tier. Workers still run under codex's sandbox (workspace-write at most) so damage is capped, but set `.ao/autonomy.json { codex: { approval: "suggest" } }` or explicit CLI flags if you need a strict ceiling.
+**Known limitation — settings-file mirror + runtime override (v1.1.6+).** Detection reads Claude Code's *settings files* AND, since v1.1.6, the runtime `permission_mode` captured by the `RuntimePermissionsCapture` hook on SessionStart + UserPromptSubmit. The two layers merge **upgrade-only** in `detectClaudePermissionLevel`: runtime can promote a tier (`bypassPermissions` settings-empty → `full-auto`) but never demote it (settings literal allow grants stay broad even when runtime mode flips to `default`). The runtime tier flows through the same deny/ask/disableBypassPermissionsMode/allowManagedPermissionRulesOnly pipeline as the settings defaultMode, so a managed deny on Bash still clamps a runtime `bypassPermissions` to `auto-edit`. **Still NOT observable**: `--allowedTools` / `--disallowedTools` / `--tools` CLI flags and `--settings` inline overrides — there is no documented stdin/env signal for these. Set `.ao/autonomy.json { codex: { approval: "suggest" } }` or run `node scripts/diagnose-sandbox.mjs --explain-permissions` if you need to verify the resolved tier.
 
 **Host sandbox intersection** (`scripts/lib/host-sandbox-detect.mjs`). The codex permission level derived from `permissions.allow` is now INTERSECTED with a passive host-sandbox detection (the more restrictive of the two wins). Signal priority:
 
@@ -490,7 +492,7 @@ Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), G
 ## Testing
 
 ```bash
-# Run unit tests (2000+ tests, 77 files; v1.1.4: 2012 passing)
+# Run unit tests (2075+ tests, 79 files; v1.1.6: 2074/2075 passing)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script
