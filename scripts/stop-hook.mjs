@@ -16,7 +16,131 @@
 import { readStdin } from './lib/stdin.mjs';
 import { loadCheckpoint } from './lib/checkpoint.mjs';
 import { execFileSync } from 'child_process';
-import { basename } from 'path';
+import { existsSync } from 'fs';
+import { basename, join } from 'path';
+
+/**
+ * Sensitive / noise path patterns that must never be auto-staged into a WIP
+ * commit. Applied identically to tracked modifications, untracked additions,
+ * and (as a final net) the already-staged index — a single source of truth so
+ * a secret cannot slip through one path while being blocked on another.
+ *
+ * Erring toward over-exclusion is deliberate: a false positive only leaves a
+ * file out of the auto-save (it stays in the working tree), whereas a false
+ * negative could commit — and a later autoPush // /finish-branch could push —
+ * a live credential.
+ *
+ * Detection is NAME-based and intentionally case-insensitive for credential
+ * file types (a `.PEM`/`.KEY` is as sensitive as a `.pem`). KNOWN LIMITATION:
+ * a secret whose path matches nothing here — e.g. its content copied/renamed
+ * into an innocuously-named file like `public.txt` — cannot be recognised by a
+ * path filter. Catching that would require scanning file CONTENT, which is out
+ * of scope for this WIP hook.
+ */
+const EXCLUDE_PATTERNS = [
+  /(^|\/)\.env/i,           // .env, .env.local, .env.production … at any depth
+  /^\.ao\/state\//,         // transient hook state
+  /^\.ao\/teams\//,         // tmux team inbox/outbox
+  /^\.claude\/worktrees\//, // Claude Code worktree gitlink noise
+  /credentials/i,
+  /secret/i,
+  /\.key$/i,
+  /\.pem$/i,
+  /(^|\/)\.npmrc$/i,        // npm authToken
+  /(^|\/)\.netrc$/i,        // machine login credentials
+  /(^|\/)id_rsa/i,          // SSH private keys (id_rsa, id_rsa.pub …)
+  /\.p12$/i,                // PKCS#12 keystore
+  /\.pfx$/i,                // PKCS#12 keystore (Windows)
+  /token/i,                 // *token* — auth tokens
+];
+
+/** True if `file` matches any sensitive/noise exclusion pattern. */
+function isExcluded(file) {
+  return EXCLUDE_PATTERNS.some(pat => pat.test(file));
+}
+
+/** Split NUL-delimited git output (`-z`) into clean path entries. */
+function splitZ(raw) {
+  return String(raw).split('\0').filter(Boolean);
+}
+
+/**
+ * Inspect the staged index and return the paths to unstage so no secret CONTENT
+ * is committed — an add / modify / type-change / rename-or-copy target whose
+ * path matches EXCLUDE_PATTERNS, OR a rename/copy whose ORIGINAL path did (a
+ * secret renamed to an innocuous name still carries secret content while the
+ * rename pair is staged; both halves are returned so the deletion diff is
+ * dropped too). Standalone deletions are ignored: removing a file exposes no
+ * new content, and the user may legitimately be deleting a secret.
+ *
+ * Uses `--name-status -M -z` so (a) renames are detected regardless of the
+ * user's `diff.renames` config and (b) non-ASCII paths stay raw instead of
+ * being octal-quoted (which would slip past the suffix patterns). Returns
+ * `null` when the index cannot be read, so callers can fail CLOSED.
+ *
+ * Limitation: once a secret is renamed to an innocuous name AND unstaged, git
+ * keeps no rename signal, so a path-pattern hook can no longer recognise it.
+ * This catches the staged-rename window, not that residual case.
+ */
+function listStagedSensitive() {
+  let raw;
+  try {
+    raw = execFileSync('git', ['diff', '--cached', '--name-status', '-M', '-z'], {
+      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch {
+    return null;
+  }
+  const tok = raw.split('\0');
+  const sensitive = [];
+  let i = 0;
+  while (i < tok.length) {
+    const status = tok[i];
+    if (!status) { i++; continue; }
+    if (status[0] === 'R' || status[0] === 'C') {
+      const oldPath = tok[i + 1];
+      const newPath = tok[i + 2];
+      i += 3;
+      if (newPath && (isExcluded(newPath) || isExcluded(oldPath))) {
+        sensitive.push(newPath);
+        // Also unstage the deletion half of a rename so the secret value does
+        // not surface as a removed-lines diff in the WIP commit.
+        if (oldPath) sensitive.push(oldPath);
+      }
+    } else {
+      const p = tok[i + 1];
+      i += 2;
+      // 'D' = deletion: removing a file leaks no content, so never flag it.
+      if (p && status[0] !== 'D' && isExcluded(p)) sensitive.push(p);
+    }
+  }
+  return sensitive;
+}
+
+/**
+ * Unstage `paths` from the index, leaving the working tree intact. Handles an
+ * unborn HEAD (no commits yet) where `git reset HEAD` is unavailable; there,
+ * `git rm -f --cached` force-removes the entry (`-f` overrides git's
+ * "staged content differs" guard that otherwise leaves the secret staged).
+ */
+function unstagePaths(paths) {
+  if (!paths || paths.length === 0) return;
+  let hasHead = true;
+  try {
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', 'HEAD'], { stdio: 'pipe' });
+  } catch {
+    hasHead = false;
+  }
+  try {
+    if (hasHead) {
+      execFileSync('git', ['reset', '-q', 'HEAD', '--', ...paths], { stdio: 'pipe' });
+    } else {
+      execFileSync('git', ['rm', '-q', '-f', '--cached', '--', ...paths], { stdio: 'pipe' });
+    }
+  } catch {
+    // Best-effort; the fail-closed re-check in main() is the real guarantee.
+  }
+}
 
 /**
  * Build a descriptive WIP commit message from staged file paths.
@@ -104,10 +228,30 @@ async function main() {
   try {
     await readStdin(2000); // Stop event data (not needed)
 
-    // 1. Confirm we are inside a git repo
+    // 1. Confirm we are inside a git repo and resolve its git dir
+    let gitDir;
     try {
-      execFileSync('git', ['rev-parse', '--git-dir'], { stdio: 'pipe' });
+      gitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
     } catch {
+      process.stdout.write('{}');
+      process.exit(0);
+    }
+    if (!gitDir) gitDir = '.git';
+
+    // 1.5 Skip the WIP commit while a merge / rebase / cherry-pick / revert is
+    //     in progress. `git commit -m` would otherwise silently finalize a
+    //     half-resolved operation. Let the user finish (or abort) it first.
+    const IN_PROGRESS_MARKERS = [
+      'MERGE_HEAD',
+      'rebase-merge',
+      'rebase-apply',
+      'CHERRY_PICK_HEAD',
+      'REVERT_HEAD',
+    ];
+    if (IN_PROGRESS_MARKERS.some(marker => existsSync(join(gitDir, marker)))) {
       process.stdout.write('{}');
       process.exit(0);
     }
@@ -141,55 +285,74 @@ async function main() {
     const phase = cp ? `phase-${cp.phase}` : 'manual';
     const fileCount = status.split('\n').filter(Boolean).length;
 
-    // Stage tracked modified/deleted files (safer than git add -A)
-    // This avoids staging: .env, secrets, .ao/state/ files
-    // Pathspec excludes .claude/worktrees/* gitlinks (HEAD pointer noise from
-    // Claude Code worktrees that change every session but aren't real work)
-    execFileSync(
-      'git',
-      ['add', '-u', '--', '.', ':(exclude,glob).claude/worktrees/**'],
-      { stdio: 'pipe' }
-    );
-
-    // Also stage new files, but exclude sensitive patterns
-    const untrackedRaw = execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
-      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-
-    if (untrackedRaw) {
-      const EXCLUDE_PATTERNS = [
-        /^\.env/,
-        /^\.ao\/state\//,
-        /^\.ao\/teams\//,
-        /^\.claude\/worktrees\//,
-        /credentials/i,
-        /secret/i,
-        /\.key$/,
-        /\.pem$/,
-      ];
-
-      const safeFiles = untrackedRaw.split('\n').filter(f => {
-        return f && !EXCLUDE_PATTERNS.some(pat => pat.test(f));
+    // Stage tracked modifications/deletions, EXCLUDING sensitive files.
+    // `git add -u` stages EVERY tracked change — including a tracked
+    // .env / credentials / *.key that was committed earlier — which previously
+    // leaked secrets into the WIP commit (and autoPush // /finish-branch could
+    // then push them). Instead, enumerate tracked working-tree changes (`-z`
+    // keeps non-ASCII paths raw so the patterns match) and filter them through
+    // the shared EXCLUDE_PATTERNS before an explicit add. (.claude/worktrees/
+    // gitlink noise is covered by EXCLUDE_PATTERNS too.)
+    let trackedChanged = '';
+    try {
+      trackedChanged = execFileSync('git', ['diff', '--name-only', '-z'], {
+        encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
       });
-
-      if (safeFiles.length > 0) {
-        execFileSync('git', ['add', '--', ...safeFiles], { stdio: 'pipe' });
-      }
+    } catch {
+      trackedChanged = '';
+    }
+    const safeTracked = splitZ(trackedChanged).filter(f => !isExcluded(f));
+    if (safeTracked.length > 0) {
+      execFileSync('git', ['add', '--', ...safeTracked], { stdio: 'pipe' });
     }
 
-    // Verify something is actually staged (edge case: all changes were untrackable)
-    const staged = execFileSync('git', ['diff', '--cached', '--name-only'], {
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    // Also stage new (untracked) files, applying the SAME exclusions.
+    let untrackedRaw = '';
+    try {
+      untrackedRaw = execFileSync('git', ['ls-files', '--others', '--exclude-standard', '-z'], {
+        encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch {
+      untrackedRaw = '';
+    }
+    const safeUntracked = splitZ(untrackedRaw).filter(f => !isExcluded(f));
+    if (safeUntracked.length > 0) {
+      execFileSync('git', ['add', '--', ...safeUntracked], { stdio: 'pipe' });
+    }
 
-    if (!staged) {
+    // Final safety net (fail CLOSED). Re-examine the staged index — rename pairs
+    // and non-ASCII paths included — for anything that would leak secret content
+    // by another route: pre-staged by the user, a `git mv` of a secret, etc.
+    // Unstage offenders, then re-check. If any sensitive entry still remains, or
+    // the index cannot be verified, SKIP the commit entirely rather than risk a
+    // leak (this hook is a throwaway save, not the user's deliberate commit).
+    let sensitive = listStagedSensitive();
+    if (sensitive && sensitive.length > 0) {
+      unstagePaths(sensitive);
+      sensitive = listStagedSensitive();
+    }
+    if (sensitive === null || sensitive.length > 0) {
+      process.stdout.write('{}');
+      process.exit(0);
+    }
+
+    // Verify something is actually staged (edge case: everything was excluded).
+    let stagedZ = '';
+    try {
+      stagedZ = execFileSync('git', ['diff', '--cached', '--name-only', '-z'], {
+        encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch {
+      stagedZ = '';
+    }
+    const stagedList = splitZ(stagedZ);
+    if (stagedList.length === 0) {
       process.stdout.write('{}');
       process.exit(0);
     }
 
     // 5. Build a descriptive WIP commit message from staged changes
-    const message = buildWipMessage(phase, staged);
+    const message = buildWipMessage(phase, stagedList.join('\n'));
     execFileSync('git', ['commit', '-m', message], { stdio: 'pipe' });
 
   } catch {

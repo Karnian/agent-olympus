@@ -91,6 +91,18 @@ function commitCount(dir) {
 }
 
 /**
+ * Get the list of file paths contained in the most recent commit.
+ * Returns an array (empty leading line from `--format=` trimmed away).
+ */
+function committedFiles(dir) {
+  return execSync('git show --name-only --format=', {
+    encoding: 'utf-8',
+    cwd: dir,
+    stdio: 'pipe',
+  }).trim().split('\n').filter(Boolean);
+}
+
+/**
  * Write an atlas/athena checkpoint file with the given phase.
  */
 function writeCheckpoint(dir, orchestrator, phase) {
@@ -516,5 +528,290 @@ describe('stop-hook: uses execFileSync for git commit (no shell injection)', () 
     runHook(tmpDir);
     const afterCount = commitCount(tmpDir);
     assert.equal(afterCount, beforeCount + 1, 'WIP commit should be created via execFileSync');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Secret-staging guard — tracked secrets must never enter a WIP commit.
+// Regression for: `git add -u` staged EVERY tracked change, so a previously
+// committed .env/credentials file got auto-committed (and could be pushed).
+// ---------------------------------------------------------------------------
+
+describe('stop-hook: tracked, modified .env is never staged into the WIP commit', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    // .env was committed in a prior life → it is now a TRACKED file.
+    writeFileSync(path.join(tmpDir, '.env'), 'SECRET=old\n', 'utf-8');
+    execSync('git add .env', { cwd: tmpDir, stdio: 'pipe' });
+    execSync('git commit -m "add env"', { cwd: tmpDir, stdio: 'pipe' });
+    // The user edits the secret (tracked modification) ...
+    writeFileSync(path.join(tmpDir, '.env'), 'SECRET=new-leaked-value\n', 'utf-8');
+    // ... alongside legitimate work.
+    writeFileSync(path.join(tmpDir, 'app.js'), 'export const ok = true;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('commits app.js but excludes the tracked .env modification', () => {
+    const beforeCount = commitCount(tmpDir);
+    runHook(tmpDir);
+    const afterCount = commitCount(tmpDir);
+    assert.equal(afterCount, beforeCount + 1, 'a WIP commit should be created for app.js');
+
+    const files = committedFiles(tmpDir);
+    assert.ok(files.includes('app.js'), `commit should contain app.js, got: ${files}`);
+    assert.ok(!files.includes('.env'), `WIP commit must NOT contain .env, got: ${files}`);
+  });
+});
+
+describe('stop-hook: a lone tracked .env modification produces no WIP commit', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    writeFileSync(path.join(tmpDir, '.env'), 'TOKEN=old\n', 'utf-8');
+    execSync('git add .env', { cwd: tmpDir, stdio: 'pipe' });
+    execSync('git commit -m "add env"', { cwd: tmpDir, stdio: 'pipe' });
+    writeFileSync(path.join(tmpDir, '.env'), 'TOKEN=leaked\n', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('creates no commit when the only change is a tracked secret', () => {
+    const beforeCount = commitCount(tmpDir);
+    runHook(tmpDir);
+    const afterCount = commitCount(tmpDir);
+    assert.equal(afterCount, beforeCount, 'no WIP commit should be created for a lone secret change');
+  });
+});
+
+describe('stop-hook: scrubs a pre-staged secret from the index', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    writeFileSync(path.join(tmpDir, '.env'), 'API=old\n', 'utf-8');
+    execSync('git add .env', { cwd: tmpDir, stdio: 'pipe' });
+    execSync('git commit -m "add env"', { cwd: tmpDir, stdio: 'pipe' });
+    // User explicitly stages the secret modification before the session ends ...
+    writeFileSync(path.join(tmpDir, '.env'), 'API=leaked\n', 'utf-8');
+    execSync('git add .env', { cwd: tmpDir, stdio: 'pipe' });
+    // ... plus an unstaged legit change.
+    writeFileSync(path.join(tmpDir, 'app.js'), 'export const ok = 1;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('removes the pre-staged .env so the WIP commit carries only app.js', () => {
+    const beforeCount = commitCount(tmpDir);
+    runHook(tmpDir);
+    const afterCount = commitCount(tmpDir);
+    assert.equal(afterCount, beforeCount + 1, 'a WIP commit should be created for app.js');
+
+    const files = committedFiles(tmpDir);
+    assert.ok(files.includes('app.js'), `commit should contain app.js, got: ${files}`);
+    assert.ok(!files.includes('.env'), `pre-staged .env must be scrubbed, got: ${files}`);
+  });
+});
+
+describe('stop-hook: excludes additional credential file patterns', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    writeFileSync(path.join(tmpDir, '.npmrc'), '//registry.npmjs.org/:_authToken=abc', 'utf-8');
+    writeFileSync(path.join(tmpDir, '.netrc'), 'machine x login y password z', 'utf-8');
+    writeFileSync(path.join(tmpDir, 'id_rsa'), 'PRIVATE KEY', 'utf-8');
+    writeFileSync(path.join(tmpDir, 'cert.p12'), 'binary', 'utf-8');
+    writeFileSync(path.join(tmpDir, 'cert.pfx'), 'binary', 'utf-8');
+    writeFileSync(path.join(tmpDir, 'auth-token.json'), '{"t":"x"}', 'utf-8');
+    // One legit file so a commit is actually produced.
+    writeFileSync(path.join(tmpDir, 'safe.js'), 'const ok = 1;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('commits only safe.js, never the credential files', () => {
+    const beforeCount = commitCount(tmpDir);
+    runHook(tmpDir);
+    const afterCount = commitCount(tmpDir);
+    assert.equal(afterCount, beforeCount + 1, 'a WIP commit should be created for safe.js');
+
+    const files = committedFiles(tmpDir);
+    assert.deepEqual(files, ['safe.js'], `only safe.js should be committed, got: ${files}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// In-progress operation guard — never finalize a half-resolved merge/rebase.
+// ---------------------------------------------------------------------------
+
+describe('stop-hook: skips WIP commit during an in-progress merge', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    // Dirty work that would normally be auto-committed ...
+    writeFileSync(path.join(tmpDir, 'feature.js'), 'const wip = true;', 'utf-8');
+    // ... but a merge is in progress.
+    writeFileSync(path.join(tmpDir, '.git', 'MERGE_HEAD'), `${'0'.repeat(40)}\n`, 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('creates no commit while .git/MERGE_HEAD exists', () => {
+    const beforeCount = commitCount(tmpDir);
+    const output = runHook(tmpDir);
+    const afterCount = commitCount(tmpDir);
+    assert.deepEqual(output, {});
+    assert.equal(afterCount, beforeCount, 'no WIP commit should be created mid-merge');
+  });
+});
+
+describe('stop-hook: skips WIP commit during cherry-pick / revert / rebase', () => {
+  for (const marker of ['CHERRY_PICK_HEAD', 'REVERT_HEAD']) {
+    it(`creates no commit while .git/${marker} exists`, async () => {
+      const tmpDir = await makeTmpDir();
+      try {
+        initGitRepo(tmpDir);
+        writeFileSync(path.join(tmpDir, 'wip.js'), 'const x = 1;', 'utf-8');
+        writeFileSync(path.join(tmpDir, '.git', marker), `${'0'.repeat(40)}\n`, 'utf-8');
+        const beforeCount = commitCount(tmpDir);
+        runHook(tmpDir);
+        assert.equal(commitCount(tmpDir), beforeCount, `no commit expected during ${marker}`);
+      } finally {
+        await removeTmpDir(tmpDir);
+      }
+    });
+  }
+
+  it('creates no commit while .git/rebase-merge exists', async () => {
+    const tmpDir = await makeTmpDir();
+    try {
+      initGitRepo(tmpDir);
+      writeFileSync(path.join(tmpDir, 'wip.js'), 'const x = 1;', 'utf-8');
+      mkdirSync(path.join(tmpDir, '.git', 'rebase-merge'), { recursive: true });
+      const beforeCount = commitCount(tmpDir);
+      runHook(tmpDir);
+      assert.equal(commitCount(tmpDir), beforeCount, 'no commit expected during rebase');
+    } finally {
+      await removeTmpDir(tmpDir);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hardening from the Codex cross-review of the secret-staging fix:
+//   - non-ASCII paths (git octal-quotes them without -z, slipping the patterns)
+//   - .env at a nested depth
+//   - unborn HEAD: pre-staged-then-modified secret (git rm --cached fails open
+//     without -f, leaving the secret staged)
+//   - a staged `git mv` of a secret (rename hides the sensitive name)
+// ---------------------------------------------------------------------------
+
+describe('stop-hook: a non-ASCII secret filename is still excluded (-z, no octal quoting)', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    writeFileSync(path.join(tmpDir, '비밀.pem'), 'PRIVATE KEY', 'utf-8'); // "secret".pem
+    writeFileSync(path.join(tmpDir, 'safe.js'), 'const ok = 1;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('commits only safe.js, never the non-ASCII .pem', () => {
+    runHook(tmpDir);
+    // Only safe.js should be present; the quoted secret must not appear at all.
+    assert.deepEqual(committedFiles(tmpDir), ['safe.js'],
+      `non-ASCII secret leaked: ${committedFiles(tmpDir)}`);
+  });
+});
+
+describe('stop-hook: a nested .env (subdirectory) is excluded', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    mkdirSync(path.join(tmpDir, 'config'), { recursive: true });
+    writeFileSync(path.join(tmpDir, 'config', '.env'), 'SECRET=x\n', 'utf-8');
+    writeFileSync(path.join(tmpDir, 'safe.js'), 'const ok = 1;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('commits only safe.js, never config/.env', () => {
+    runHook(tmpDir);
+    const files = committedFiles(tmpDir);
+    assert.ok(files.includes('safe.js'), `commit should contain safe.js, got: ${files}`);
+    assert.ok(!files.includes('config/.env'), `nested .env must be excluded, got: ${files}`);
+  });
+});
+
+describe('stop-hook: unborn HEAD — a pre-staged then modified secret is never committed', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    // Fresh repo with NO initial commit → HEAD is unborn.
+    execSync('git init -q', { cwd: tmpDir, stdio: 'pipe' });
+    execSync('git config user.email "test@example.com"', { cwd: tmpDir, stdio: 'pipe' });
+    execSync('git config user.name "Test"', { cwd: tmpDir, stdio: 'pipe' });
+    writeFileSync(path.join(tmpDir, '.env'), 'SECRET=a\n', 'utf-8');
+    execSync('git add .env', { cwd: tmpDir, stdio: 'pipe' });            // staged addition
+    writeFileSync(path.join(tmpDir, '.env'), 'SECRET=a\nmore\n', 'utf-8'); // index != worktree
+    writeFileSync(path.join(tmpDir, 'app.js'), 'export const ok = 1;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('commits app.js but force-unstages the pre-staged .env (git rm -f --cached path)', () => {
+    runHook(tmpDir);
+    let files = [];
+    try {
+      files = execSync('git show --name-only --format=', {
+        cwd: tmpDir, encoding: 'utf-8', stdio: 'pipe',
+      }).trim().split('\n').filter(Boolean);
+    } catch {
+      // No commit at all would also be safe, but we expect app.js to be saved.
+    }
+    assert.ok(!files.includes('.env'), `.env must never be committed on unborn HEAD, got: ${files}`);
+    assert.ok(files.includes('app.js'), `app.js should still be saved, got: ${files}`);
+  });
+});
+
+describe('stop-hook: a staged `git mv` of a secret keeps the secret out of the commit', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    writeFileSync(path.join(tmpDir, '.env'), 'SECRET=v\n', 'utf-8');
+    execSync('git add .env', { cwd: tmpDir, stdio: 'pipe' });
+    execSync('git commit -qm "add env"', { cwd: tmpDir, stdio: 'pipe' });
+    // Rename the secret to an innocuous name (git mv auto-stages the rename) ...
+    execSync('git mv .env public.txt', { cwd: tmpDir, stdio: 'pipe' });
+    // ... plus a legit untracked change so a commit is warranted.
+    writeFileSync(path.join(tmpDir, 'app.js'), 'export const ok = 1;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('commits app.js but not the renamed secret (public.txt)', () => {
+    runHook(tmpDir);
+    const files = committedFiles(tmpDir);
+    assert.ok(files.includes('app.js'), `commit should contain app.js, got: ${files}`);
+    assert.ok(!files.includes('public.txt'),
+      `the renamed secret (public.txt) must not be committed, got: ${files}`);
+  });
+});
+
+describe('stop-hook: credential extension matching is case-insensitive', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    // Uppercase extensions are common for Windows certs — must still be excluded.
+    writeFileSync(path.join(tmpDir, 'cert.PEM'), 'X', 'utf-8');
+    writeFileSync(path.join(tmpDir, 'priv.KEY'), 'X', 'utf-8');
+    writeFileSync(path.join(tmpDir, 'safe.js'), 'const ok = 1;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('commits only safe.js, never cert.PEM / priv.KEY', () => {
+    runHook(tmpDir);
+    assert.deepEqual(committedFiles(tmpDir), ['safe.js'],
+      `uppercase-extension secret leaked: ${committedFiles(tmpDir)}`);
   });
 });
