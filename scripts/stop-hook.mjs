@@ -75,19 +75,26 @@ function splitZ(raw) {
  * dropped too). Standalone deletions are ignored: removing a file exposes no
  * new content, and the user may legitimately be deleting a secret.
  *
- * Uses `--name-status -M -z` so (a) renames are detected regardless of the
- * user's `diff.renames` config and (b) non-ASCII paths stay raw instead of
- * being octal-quoted (which would slip past the suffix patterns). Returns
- * `null` when the index cannot be read, so callers can fail CLOSED.
+ * Uses `--name-status -M10% -z` so (a) renames are detected regardless of the
+ * user's `diff.renames` config, (b) non-ASCII paths stay raw instead of being
+ * octal-quoted (which would slip past the suffix patterns), and (c) a secret
+ * that was EDITED before being renamed to a safe name (`.env` → `public.txt`
+ * with changed content) is still paired as a rename — the default 50% threshold
+ * misses those, reporting `D .env` + `A public.txt`, and the deletion half is
+ * ignored so the safe-named secret would commit. 10% catches a moderately-edited
+ * secret; the safe direction of a false rename-pair (unstaging an innocent file)
+ * matches this hook's over-exclusion stance. Returns `null` when the index
+ * cannot be read, so callers can fail CLOSED.
  *
- * Limitation: once a secret is renamed to an innocuous name AND unstaged, git
- * keeps no rename signal, so a path-pattern hook can no longer recognise it.
- * This catches the staged-rename window, not that residual case.
+ * Residual: a secret rewritten to <10% similarity, or renamed AND unstaged so no
+ * rename signal survives, escapes the name net — the blob-hash content net
+ * backstops byte-identical copies; a fully-rewritten secret is out of scope for
+ * this throwaway WIP hook.
  */
 function listStagedSensitive() {
   let raw;
   try {
-    raw = execFileSync('git', ['diff', '--cached', '--name-status', '-M', '-z'], {
+    raw = execFileSync('git', ['diff', '--cached', '--name-status', '-M10%', '-z'], {
       encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch {
@@ -382,22 +389,28 @@ async function main() {
       execFileSync('git', ['add', '--', ...safeUntracked], { stdio: 'pipe' });
     }
 
-    // Final safety net (fail CLOSED). Re-examine the staged index — rename pairs
-    // and non-ASCII paths included — for anything that would leak secret content
-    // by another route: pre-staged by the user, a `git mv` of a secret, etc.
-    // Unstage offenders, then re-check. If any sensitive entry still remains, or
-    // the index cannot be verified, SKIP the commit entirely rather than risk a
-    // leak (this hook is a throwaway save, not the user's deliberate commit).
-    // Content-identity net (runs BEFORE the name/rename net): unstage secret
-    // BYTES surfacing under a safe name (mv/cp of a tracked secret), which the
-    // name filter and staged-rename detection both miss. Best-effort.
-    unstageStagedStolenBlobs();
-
+    // Final safety net (fail CLOSED). Re-examine the staged index for anything
+    // that would leak secret content by another route — pre-staged by the user,
+    // a `git mv` of a secret, etc. If any sensitive entry remains, or the index
+    // cannot be verified, SKIP the commit entirely rather than risk a leak (this
+    // hook is a throwaway save, not the user's deliberate commit).
+    //
+    // ORDER MATTERS. The rename-aware NAME net runs FIRST so a staged rename is
+    // unstaged as a PAIR (both the safe-named destination AND the `D <secret>`
+    // deletion half). Running the blob net first would unstage only the
+    // destination, orphaning the deletion into a corrupted half-rename WIP commit
+    // (`D .env` committed while the renamed content is left untracked).
     let sensitive = listStagedSensitive();
     if (sensitive && sensitive.length > 0) {
       unstagePaths(sensitive);
-      sensitive = listStagedSensitive();
     }
+    // Content-identity net SECOND: catch secret BYTES surfacing under a safe name
+    // that the name net cannot pair — a `cp .env safe.txt` (both staged, not a
+    // rename) or a rename git scored below the -M threshold. Best-effort.
+    unstageStagedStolenBlobs();
+
+    // Fail-closed verification after BOTH nets.
+    sensitive = listStagedSensitive();
     if (sensitive === null || sensitive.length > 0) {
       process.stdout.write('{}');
       process.exit(0);

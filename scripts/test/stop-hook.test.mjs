@@ -788,12 +788,52 @@ describe('stop-hook: a staged `git mv` of a secret keeps the secret out of the c
   });
   after(async () => { await removeTmpDir(tmpDir); });
 
-  it('commits app.js but not the renamed secret (public.txt)', () => {
+  it('commits app.js but not the renamed secret (public.txt) and leaves no dangling .env deletion', () => {
     runHook(tmpDir);
     const files = committedFiles(tmpDir);
     assert.ok(files.includes('app.js'), `commit should contain app.js, got: ${files}`);
     assert.ok(!files.includes('public.txt'),
       `the renamed secret (public.txt) must not be committed, got: ${files}`);
+    // F4 regression: the rename must be unstaged as a PAIR. If only the safe
+    // destination were unstaged, the orphaned `D .env` would commit (a corrupted
+    // half-rename that also surfaces the secret as removed lines).
+    assert.ok(!files.includes('.env'),
+      `the .env deletion half must not be committed (dangling half-rename), got: ${files}`);
+  });
+});
+
+describe('stop-hook: a CHANGED-content rename of a secret to a safe name is still scrubbed (F2)', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    // HEAD has the secret.
+    const secret = 'API_KEY=topsecret\nDB_PASS=hunter2\nTOKEN_VAL=abc123\nAWS_SECRET=zzz999\n';
+    writeFileSync(path.join(tmpDir, '.env'), secret, 'utf-8');
+    execSync('git add .env', { cwd: tmpDir, stdio: 'pipe' });
+    execSync('git commit -qm "add env"', { cwd: tmpDir, stdio: 'pipe' });
+    // Rename .env → public.txt AND heavily edit it: keep the 4 secret lines but
+    // append 8 unrelated ones, so similarity (~16%) is BELOW git's default 50%
+    // rename threshold — git reports `D .env` + `A public.txt`, NOT a rename `R`,
+    // so the deletion is ignored and the safe-named secret would slip through —
+    // but ABOVE the hook's lowered -M10%, so the name net re-pairs and scrubs it.
+    execSync('rm .env', { cwd: tmpDir, stdio: 'pipe' });
+    let filler = '';
+    for (let i = 1; i <= 8; i++) filler += `unrelated_setting_${String(i).padStart(2, '0')}=brand new config line\n`;
+    writeFileSync(path.join(tmpDir, 'public.txt'), secret + filler, 'utf-8');
+    writeFileSync(path.join(tmpDir, 'app.js'), 'export const ok = 1;', 'utf-8');
+    execSync('git add -A', { cwd: tmpDir, stdio: 'pipe' }); // stages D .env + A public.txt + A app.js
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('commits app.js but never the changed-content secret (public.txt)', () => {
+    runHook(tmpDir);
+    const files = committedFiles(tmpDir);
+    assert.ok(files.includes('app.js'), `commit should contain app.js, got: ${files}`);
+    assert.ok(!files.includes('public.txt'),
+      `a moderately-edited secret renamed to a safe name must not be committed, got: ${files}`);
+    assert.ok(!files.includes('.env'),
+      `the .env deletion half must not be committed, got: ${files}`);
   });
 });
 
