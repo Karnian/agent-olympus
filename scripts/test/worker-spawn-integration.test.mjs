@@ -16,11 +16,13 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawn as nodeSpawn } from 'node:child_process';
+import { setTimeout as sleep } from 'node:timers/promises';
 
-import { spawnTeam } from '../lib/worker-spawn.mjs';
+import { spawnTeam, shutdownTeam } from '../lib/worker-spawn.mjs';
 
 // ─── Fake adapter factory ─────────────────────────────────────────────────────
 
@@ -515,6 +517,219 @@ test('spawnTeam integration: codex-exec spawn throw yields failed worker', async
     assert.equal(state.workers[0].status, 'failed');
     assert.match(state.workers[0].error || '', /exec spawn boom/);
   } finally {
+    ws.cleanup();
+  }
+});
+
+// ─── State-serialization defect regression (_liveHandle strip) ──────────────
+//
+// saveTeamState must NEVER persist `_liveHandle` — it is a LIVE ChildProcess /
+// JSON-RPC handle. JSON.stringify does not throw on it; it deep-serializes a
+// husk that (a) leaks `spawnargs` (the full prompt) + stream buffers into
+// .ao/state and (b) drops `.kill`, so a fresh process that reloads the husk
+// orphans the real detached process group in shutdownTeam. These tests inject
+// a fake adapter whose spawn() returns a husk-shaped handle and assert it never
+// reaches disk, plus that shutdownTeam still kills a real worker via _handle.pid.
+
+/**
+ * Fake codex-exec adapter whose spawn() returns a handle that mimics the
+ * dangerous shape of a real ChildProcess wrapper: a `.kill` function (silently
+ * dropped by JSON), a circular self-reference (would throw "circular structure"
+ * if the replacer ever recursed into it), and a `secret` present ONLY on the
+ * live handle (never on the worker's own prompt fields).
+ */
+function makeLiveHandleAdapter(secret, pid = 999001) {
+  return {
+    'codex-exec': {
+      spawn: () => {
+        const handle = {
+          pid,
+          _output: `stream-buffer ${secret}`,
+          spawnargs: ['codex', 'exec', '--json', secret],
+          status: 'running',
+          kill: () => {}, // function — silently dropped by JSON.stringify
+        };
+        handle.process = handle; // circular ref — replacer must not recurse here
+        return handle;
+      },
+      monitor: () => ({ status: 'running', output: '' }),
+      shutdown: async () => {},
+    },
+  };
+}
+
+test('saveTeamState regression: _liveHandle is undefined after a disk round-trip', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    const modules = makeLiveHandleAdapter('LIVEHANDLE_ONLY_SECRET_roundtrip');
+    const workers = [{ type: 'codex', name: 'c1', prompt: 'benign worker prompt' }];
+    const caps = { hasCodexExecJson: true };
+
+    await spawnTeam('rt', workers, ws.cwd, caps, { adapters: modules });
+
+    // Re-load exactly as a fresh orchestrator process (separate node invocation) would.
+    const loaded = JSON.parse(
+      readFileSync(join(ws.cwd, '.ao', 'state', 'team-rt.json'), 'utf-8'),
+    );
+
+    assert.equal(loaded.workers[0]._liveHandle, undefined,
+      '_liveHandle must be stripped on save (documented invariant)');
+    // The serializable metadata handle survives for the PID-kill fallback.
+    assert.equal(loaded.workers[0]._handle.pid, 999001,
+      '_handle.pid must survive for the shutdownTeam fallback');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('saveTeamState regression: no _liveHandle-only secret (prompt/spawnargs/buffer) leaks to disk', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    const secret = 'LIVEHANDLE_ONLY_SECRET_noleak';
+    const modules = makeLiveHandleAdapter(secret);
+    // The worker's own prompt is deliberately distinct from the secret, so any
+    // match in the persisted file can only come from the leaked _liveHandle.
+    const workers = [{ type: 'codex', name: 'c1', prompt: 'do the benign task' }];
+    const caps = { hasCodexExecJson: true };
+
+    // Must NOT throw despite the circular live handle (the replacer never recurses in).
+    const state = await spawnTeam('noleak', workers, ws.cwd, caps, { adapters: modules });
+    assert.equal(state.workers[0].status, 'running');
+
+    const raw = readFileSync(join(ws.cwd, '.ao', 'state', 'team-noleak.json'), 'utf-8');
+    assert.equal(raw.includes(secret), false,
+      'live-handle-only content (spawnargs / stream buffer) must not be persisted');
+    assert.equal(raw.includes('_liveHandle'), false,
+      'the _liveHandle key itself must not appear in the persisted state');
+    // Sanity: we did not over-strip — the legitimate worker prompt is still kept.
+    assert.equal(raw.includes('do the benign task'), true,
+      'the worker prompt (originalPrompt) is a deliberate field and must survive');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('shutdownTeam regression: disk-loaded state kills the orphaned detached process via _handle.pid', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  const children = [];
+  try {
+    // Fake adapter spawns a REAL detached child (process-group leader). It only
+    // dies on the shutdown signal within the test window; the 15s self-exit is a
+    // safety net so a hard-killed test runner can't leave the fixture orphaned.
+    const modules = {
+      'codex-exec': {
+        spawn: () => {
+          const child = nodeSpawn(
+            process.execPath,
+            ['-e', 'setTimeout(() => process.exit(0), 15000); setInterval(() => {}, 1000)'],
+            { detached: true, stdio: 'ignore' },
+          );
+          child.unref();
+          children.push(child);
+          return {
+            pid: child.pid,
+            process: child,
+            kill: (sig = 'SIGTERM') => { try { child.kill(sig); } catch {} },
+            _output: '',
+            status: 'running',
+          };
+        },
+        monitor: () => ({ status: 'running', output: '' }),
+        shutdown: async (h) => { try { h.kill('SIGTERM'); } catch {} },
+      },
+    };
+    const workers = [{ type: 'codex', name: 'c1', prompt: 'long-running task' }];
+    const caps = { hasCodexExecJson: true };
+
+    await spawnTeam('orphan', workers, ws.cwd, caps, { adapters: modules });
+    const pid = children[0].pid;
+
+    // Disk state carries the pid but NOT the live handle — exactly what a fresh
+    // orchestrator process sees when it loads the team state to shut it down.
+    const loaded = JSON.parse(
+      readFileSync(join(ws.cwd, '.ao', 'state', 'team-orphan.json'), 'utf-8'),
+    );
+    assert.equal(loaded.workers[0]._liveHandle, undefined);
+    assert.equal(loaded.workers[0]._handle.pid, pid);
+
+    // Sanity: the worker process is alive before shutdown.
+    assert.doesNotThrow(() => process.kill(pid, 0),
+      'worker process should be alive before shutdownTeam');
+
+    await shutdownTeam('orphan', ws.cwd);
+
+    // The detached process group must have been signaled (and reaped).
+    let dead = false;
+    for (let i = 0; i < 100; i++) {
+      try { process.kill(pid, 0); } catch { dead = true; break; }
+      await sleep(20);
+    }
+    assert.equal(dead, true,
+      'shutdownTeam must kill the orphaned detached process via the _handle.pid fallback');
+  } finally {
+    for (const c of children) {
+      try { process.kill(-c.pid, 'SIGKILL'); } catch {}
+      try { c.kill('SIGKILL'); } catch {}
+    }
+    ws.cleanup();
+  }
+});
+
+test('shutdownTeam regression: a PRE-FIX husk _liveHandle does not block the _handle.pid fallback', async () => {
+  // Upgrade path (codex cross-review finding): a team-*.json written by the OLD
+  // no-replacer saveTeamState still carries a truthy but function-less husk on
+  // _liveHandle. shutdownTeam must NOT prefer that husk (its adapter shutdown
+  // would no-op) and must still signal the detached group via _handle.pid.
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  const children = [];
+  try {
+    const child = nodeSpawn(
+      process.execPath,
+      ['-e', 'setTimeout(() => process.exit(0), 15000); setInterval(() => {}, 1000)'],
+      { detached: true, stdio: 'ignore' },
+    );
+    child.unref();
+    children.push(child);
+    const pid = child.pid;
+
+    // Hand-write a legacy state file: a JSON-serialized ChildProcess husk (all
+    // methods dropped) on _liveHandle, plus the serializable _handle.pid.
+    mkdirSync(join(ws.cwd, '.ao', 'state'), { recursive: true });
+    writeFileSync(
+      join(ws.cwd, '.ao', 'state', 'team-legacy.json'),
+      JSON.stringify({
+        teamName: 'legacy', phase: 'running', cwd: ws.cwd,
+        workers: [{
+          name: 'c1', type: 'codex', status: 'running', _adapterName: 'codex-exec',
+          _handle: { pid },
+          _liveHandle: {
+            pid,
+            status: 'running',
+            _output: '',
+            spawnargs: ['codex', 'exec', '--json'],
+            // .process survives as a plain object — NO .kill function (husk).
+            process: { pid, spawnargs: ['codex', 'exec', '--json'] },
+          },
+        }],
+      }),
+    );
+
+    assert.doesNotThrow(() => process.kill(pid, 0), 'fixture alive before shutdown');
+
+    await shutdownTeam('legacy', ws.cwd);
+
+    let dead = false;
+    for (let i = 0; i < 150; i++) {
+      try { process.kill(pid, 0); } catch { dead = true; break; }
+      await sleep(20);
+    }
+    assert.equal(dead, true,
+      'a function-less husk _liveHandle must fall through to the _handle.pid group kill');
+  } finally {
+    for (const c of children) {
+      try { process.kill(-c.pid, 'SIGKILL'); } catch {}
+      try { c.kill('SIGKILL'); } catch {}
+    }
     ws.cleanup();
   }
 });

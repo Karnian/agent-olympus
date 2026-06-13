@@ -23,6 +23,18 @@ const ARTIFACTS_DIR = '.ao/artifacts';
 const STALL_THRESHOLD_MS = 5 * 60 * 1000;
 
 /**
+ * Grace period (ms) before escalating an orphaned-process-group kill from
+ * SIGTERM to SIGKILL in the disk-loaded shutdown fallback. Matches the
+ * per-adapter shutdown contract (codex/gemini/claude all SIGTERM → SIGKILL).
+ * The fallback polls for early exit, so a healthy worker that honors SIGTERM
+ * returns well before this ceiling.
+ */
+const KILL_GRACE_MS = 2000;
+
+/** Promise-based sleep — zero deps, used by the kill-escalation poll loop. */
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+/**
  * Compute a short hash of a string for cheap equality comparison.
  * @param {string} str
  * @returns {string}
@@ -109,11 +121,41 @@ async function loadRequiredAdapters(adapterNames) {
 
 // ─── State persistence ──────────────────────────────────────────────────────
 
+/**
+ * Worker keys that hold a LIVE, non-serializable adapter handle and MUST be
+ * stripped before the team state is written to disk.
+ *
+ * `_liveHandle` is the live ChildProcess (gemini-exec/claude-cli/codex-exec)
+ * or JSON-RPC client (codex-appserver/gemini-acp) returned by `adapter.spawn`.
+ * `JSON.stringify` does NOT throw on it — it deep-serializes the enumerable
+ * props into a ~7KB+ blob that (a) leaks `spawnargs` (the full prompt for
+ * gemini-exec/claude-cli) and in-flight stream buffers into `.ao/state`, and
+ * (b) silently drops the `.kill`/`.process` methods, producing a truthy
+ * husk that LOOKS like a handle but cannot be signaled. Reloaded from disk in
+ * a fresh process, that husk poisons `shutdownTeam` (handle.kill is not a
+ * function → orphaned detached process groups), `monitorTeam` (frozen
+ * save-time snapshot), and `collectResults` (empty `_output`).
+ *
+ * The serializable subset the orchestrator actually needs across process
+ * boundaries lives on `_handle` ({ pid, threadId, sessionId, ... }), which is
+ * preserved. Stripping `_liveHandle` here restores the documented invariant:
+ * a disk-loaded `_liveHandle` is always `undefined`.
+ * @type {ReadonlySet<string>}
+ */
+const NON_SERIALIZABLE_WORKER_KEYS = new Set(['_liveHandle']);
+
 function saveTeamState(teamName, state) {
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   atomicWriteFileSync(
     join(STATE_DIR, `team-${teamName}.json`),
-    JSON.stringify(state, null, 2)
+    // Replacer runs for every key at every depth; returning `undefined` for an
+    // object property omits it entirely (and never recurses into the live
+    // handle, so circular ChildProcess refs can't blow up serialization).
+    JSON.stringify(
+      state,
+      (key, value) => (NON_SERIALIZABLE_WORKER_KEYS.has(key) ? undefined : value),
+      2
+    )
   );
 }
 
@@ -121,6 +163,89 @@ function loadTeamState(teamName) {
   const path = join(STATE_DIR, `team-${teamName}.json`);
   try { return JSON.parse(readFileSync(path, 'utf-8')); }
   catch { return null; }
+}
+
+/**
+ * True only for a REAL in-process adapter handle — one that still owns its live
+ * methods. A handle deserialized from disk (a pre-fix "husk" written by the old
+ * no-replacer `saveTeamState`) loses every function to JSON, so it is truthy
+ * but useless: dispatching it to the adapter shutdown throws "kill is not a
+ * function" and the real process group is never signaled. Callers MUST gate the
+ * adapter-shutdown path on this and fall back to PID-group cleanup otherwise.
+ *
+ * All adapter handles wrap a live ChildProcess on `.process` (with a `.kill`
+ * method); exec/cli handles also expose a top-level `.kill`. A husk has neither.
+ * @param {any} h
+ * @returns {boolean}
+ */
+function isLiveHandle(h) {
+  return !!h && (typeof h.kill === 'function' || typeof h.process?.kill === 'function');
+}
+
+/**
+ * Signal one or more detached worker process GROUPS, escalating SIGTERM →
+ * SIGKILL. Used as the disk-loaded shutdown fallback when the in-memory
+ * `_liveHandle` is gone (stripped by `saveTeamState`) but the serializable
+ * `_handle.pid` survives.
+ *
+ * All non-tmux adapters spawn with `detached: true`, so each worker pid is a
+ * process-group leader (pgid === pid). Two deliberate hardening choices:
+ *
+ *  - GROUP-scoped liveness & signaling only. We probe and signal `-pid` (the
+ *    whole group), never the bare pid. `kill(-pgid, 0)` reports the group alive
+ *    while ANY member survives, so a descendant that outlives the leader is
+ *    still caught and SIGKILLed — a bare-leader probe would miss it. Dropping
+ *    the bare-pid fallback also removes a PID-reuse hazard: once the group is
+ *    gone, a bare `kill(pid)` could land on an unrelated reused pid.
+ *  - `pid > 1` guard. `process.kill(-0, ...)` targets the CALLER's own group
+ *    (would kill the orchestrator) and `-1` broadcasts to every signalable
+ *    process; only real worker pids ≥ 2 are eligible.
+ *
+ * Known limitation: pid/pgid identity is not validated against process start
+ * time, so a fully-recycled pgid is theoretically reachable. This matches the
+ * per-adapter `shutdown` functions (which also signal `-pid` without identity
+ * checks); start-time validation is a separate hardening.
+ *
+ * @param {Array<number>} pids - Worker pids from `_handle.pid`
+ * @param {number} [graceMs=KILL_GRACE_MS] - Ceiling before SIGKILL escalation
+ * @returns {Promise<void>}
+ */
+async function killProcessGroups(pids, graceMs = KILL_GRACE_MS) {
+  const targets = (Array.isArray(pids) ? pids : []).filter(
+    (p) => Number.isInteger(p) && p > 1
+  );
+  if (targets.length === 0) return;
+
+  // Probe the GROUP, not the leader: succeeds while any member is alive, throws
+  // ESRCH only once the whole group is gone.
+  const groupAlive = (pgid) => {
+    try { process.kill(-pgid, 0); return true; }
+    catch { return false; }
+  };
+  const signalGroup = (pgid, sig) => {
+    try { process.kill(-pgid, sig); } catch { /* group gone or not permitted */ }
+  };
+
+  const alive = new Set();
+  for (const pgid of targets) {
+    if (!groupAlive(pgid)) continue; // whole group already gone
+    signalGroup(pgid, 'SIGTERM');
+    alive.add(pgid);
+  }
+  if (alive.size === 0) return;
+
+  // Poll the group for graceful exit so a SIGTERM-honoring worker returns fast;
+  // escalate the survivors' groups to SIGKILL once the grace ceiling is hit.
+  const deadline = Date.now() + Math.max(0, graceMs);
+  while (alive.size > 0 && Date.now() < deadline) {
+    await sleep(50);
+    for (const pgid of [...alive]) {
+      if (!groupAlive(pgid)) alive.delete(pgid);
+    }
+  }
+  for (const pgid of alive) {
+    signalGroup(pgid, 'SIGKILL');
+  }
 }
 
 // ─── Adapter selection ──────────────────────────────────────────────────────
@@ -265,11 +390,13 @@ export function detectCodexError(output) {
  * descriptor for the orchestrator to spawn a Claude fallback.
  * Adapter-aware: calls the correct shutdown method based on _adapterName.
  *
- * IMPORTANT: `_liveHandle` is an in-memory process reference that cannot survive
- * JSON serialization. When loading team state from disk, `_liveHandle` will always
- * be undefined. Callers with an in-process reference to the live team state should
- * pass it via `opts.liveState` to enable adapter-specific graceful shutdown.
- * Without it, falls back to tmux session cleanup.
+ * IMPORTANT: `_liveHandle` is an in-memory adapter handle that is STRIPPED by
+ * `saveTeamState` (see NON_SERIALIZABLE_WORKER_KEYS), so a state loaded from
+ * disk never carries it. Callers with an in-process reference to the live team
+ * state should pass it via `opts.liveState` to enable adapter-specific graceful
+ * shutdown. For disk-loaded state, this falls back to signaling the detached
+ * process group via the serializable `_handle.pid`, and finally to tmux session
+ * cleanup when no pid was recorded (tmux workers, or spawn-time failures).
  *
  * @param {string} teamName
  * @param {string} workerName
@@ -285,17 +412,22 @@ export async function reassignToClaude(teamName, workerName, originalPrompt, fai
     const state = opts.liveState || loadTeamState(teamName);
     const worker = state?.workers?.find(w => w.name === workerName);
     const adapterName = worker?._adapterName || 'tmux';
-    // _liveHandle is ephemeral (non-serializable) — only present when state is in-memory
-    const liveHandle = worker?._liveHandle || worker?._handle;
-
     const registryEntry = ADAPTER_REGISTRY[adapterName];
-    if (registryEntry && liveHandle) {
+
+    if (registryEntry && isLiveHandle(worker?._liveHandle)) {
+      // In-process live handle (opts.liveState): graceful adapter shutdown.
       try {
         const adapterModule = await registryEntry.loader();
-        await adapterModule[registryEntry.shutdownFn](liveHandle);
+        await adapterModule[registryEntry.shutdownFn](worker._liveHandle);
       } catch {}
+    } else if (registryEntry && Number.isInteger(worker?._handle?.pid)) {
+      // Disk-loaded state: _liveHandle was stripped on save (or survives only as
+      // a function-less husk from a pre-fix state file). Either way isLiveHandle
+      // is false, so signal the detached process group via the serializable pid
+      // so a failed worker's process can't be orphaned.
+      await killProcessGroups([worker._handle.pid]);
     } else {
-      // Fallback: tmux cleanup (also used when _liveHandle is unavailable from disk-loaded state)
+      // tmux worker (or no recorded pid): session cleanup.
       const session = sessionOverride || sessionName(teamName, workerName);
       try { killSession(session); } catch {}
     }
@@ -682,7 +814,11 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
     const registryEntry = ADAPTER_REGISTRY[adapterName];
     const adapterModule = registryEntry ? adapterModules[adapterName] : null;
 
-    if (registryEntry && adapterModule && worker[registryEntry.handleKey]) {
+    // Only an in-process live handle can be monitored via its adapter. A
+    // disk-loaded handle is either stripped (undefined) or a function-less husk
+    // whose status/_output froze at save time; isLiveHandle() rejects both so we
+    // don't report stale data as live, falling back to the tmux/honest path.
+    if (registryEntry && adapterModule && isLiveHandle(worker[registryEntry.handleKey])) {
       monitorResult = monitorAdapterWorker(worker, adapterModule, registryEntry);
     } else {
       monitorResult = monitorTmuxWorker(worker);
@@ -790,9 +926,16 @@ export function collectResults(teamName) {
 
       const adapter = worker._adapterName || 'tmux';
 
-      // All non-tmux adapters store output in _liveHandle._output
+      // Non-tmux adapters expose live output on _liveHandle._output, but that
+      // only exists for a REAL in-process handle. Across process boundaries
+      // (the common case — orchestrator steps reload state from disk where
+      // _liveHandle is stripped) adapter output is NOT recoverable here; those
+      // workers deliver results via the outbox (read above). Reaching a
+      // function-less husk's _output is also pointless — it was empty at save
+      // time. Proper cross-process adapter-output capture needs a supervisor /
+      // adapter-owned state file (tracked separately).
       const registryEntry = ADAPTER_REGISTRY[adapter];
-      if (registryEntry && worker._liveHandle) {
+      if (registryEntry && isLiveHandle(worker._liveHandle)) {
         const output = worker._liveHandle._output;
         if (output) results[worker.name] = output;
       } else if (worker.session) {
@@ -819,20 +962,37 @@ export function collectResults(teamName) {
 export async function shutdownTeam(teamName, cwd) {
   // Shutdown non-tmux workers first (appserver + codex-exec child processes)
   const state = loadTeamState(teamName);
-  if (state) {
+  const orphanPids = [];
+  if (state && Array.isArray(state.workers)) {
     for (const worker of state.workers) {
       const adapter = worker._adapterName || 'tmux';
       const registryEntry = ADAPTER_REGISTRY[adapter];
-      if (registryEntry && worker._liveHandle) {
+      if (!registryEntry) continue; // tmux workers handled by killTeamSessions below
+
+      if (isLiveHandle(worker._liveHandle)) {
+        // In-process live handle (same-process shutdown — rare, since callers
+        // re-load state from disk in a fresh node process). Graceful adapter
+        // shutdown owns its own SIGTERM → SIGKILL escalation.
         try {
           const adapterModule = await registryEntry.loader();
           await adapterModule[registryEntry.shutdownFn](worker._liveHandle);
         } catch {
           // Best-effort cleanup
         }
+      } else if (Number.isInteger(worker._handle?.pid) && worker._handle.pid > 1) {
+        // Disk-loaded state: _liveHandle was stripped by saveTeamState, or it
+        // survives only as a function-less husk from a PRE-FIX state file (old
+        // no-replacer saveTeamState). isLiveHandle() rejects the husk so we
+        // don't waste the shutdown on a no-op and skip the kill — without this
+        // the real detached process group is never signaled and codex/gemini/
+        // claude workers leak as orphans. Collect pids and signal in one pass.
+        orphanPids.push(worker._handle.pid);
       }
     }
   }
+
+  // Signal orphaned detached process groups (SIGTERM → grace → SIGKILL).
+  await killProcessGroups(orphanPids);
 
   // Kill tmux sessions
   const killed = killTeamSessions(teamName);
