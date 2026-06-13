@@ -348,7 +348,10 @@ export function parseExitMarker(output, nonce = null) {
   const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const esc = escRe(WORKER_EXIT_MARKER);
   const noncePart = (typeof nonce === 'string' && nonce.length) ? `${escRe(nonce)}:` : '';
-  const re = new RegExp(`^${esc}:${noncePart}(\\d+)`, 'gm');
+  // Anchor the code to line end (`[ \t\r]*$`) so (a) CRLF panes parse, and (b) an
+  // unscoped parse can NEVER misread a nonce-scoped line: `__AO_EXIT__:0abc:7`
+  // no longer matches `(\d+)` as `0`, because `abc` (not EOL) follows the digit.
+  const re = new RegExp(`^${esc}:${noncePart}(\\d+)[ \\t\\r]*$`, 'gm');
   let m;
   let last = null;
   while ((m = re.exec(output)) !== null) last = m[1];
@@ -389,12 +392,12 @@ export function classifyTmuxWorker(worker, paneOutput) {
     worker?.status === 'running' || worker?.status === 'failed' || worker?.status === 'retry';
   const exitCode = (hasPane && resolvable) ? parseExitMarker(paneOutput, worker?._exitNonce) : null;
 
-  // Supplementary Codex-only signature scan — only while still running, only to
-  // ENRICH a failure / fast-fail BEFORE the sentinel lands. Provisional: never
-  // overrides a real exit code, and a later exit-0 sentinel reverses it.
-  let errorDetection = { failed: false };
+  // Supplementary Codex-only signature scan for a STILL-RUNNING worker: enables
+  // fast-fail BEFORE the sentinel lands. Gated to 'running' so it can never
+  // prematurely collapse a 'retry' worker that has no exit code yet.
+  let runningSig = { failed: false };
   if (worker?.type === 'codex' && worker?.status === 'running' && hasPane) {
-    errorDetection = detectCodexError(paneOutput);
+    runningSig = detectCodexError(paneOutput);
   }
 
   let status = worker?.status;
@@ -405,17 +408,23 @@ export function classifyTmuxWorker(worker, paneOutput) {
       status = 'completed';
     } else {
       status = 'failed';
-      // Prefer the richer Codex category (preserves the crash→retry path in
-      // monitorTeam); otherwise report a generic non-zero exit.
-      error = errorDetection.failed
-        ? { category: errorDetection.reason, message: errorDetection.message || 'Codex tmux error' }
+      // Re-derive the Codex category from the pane (not just the running-only
+      // scan) so a worker re-evaluated from 'failed'/'retry' keeps its richer
+      // category — e.g. 'crash', which preserves the crash→retry path in
+      // monitorTeam — instead of decaying to a generic 'nonzero_exit' on the
+      // next poll. (F6)
+      const sig = runningSig.failed
+        ? runningSig
+        : (worker?.type === 'codex' && hasPane ? detectCodexError(paneOutput) : { failed: false });
+      error = sig.failed
+        ? { category: sig.reason, message: sig.message || 'Codex tmux error' }
         : { category: 'nonzero_exit', message: `Worker command exited with status ${exitCode}` };
     }
-  } else if (errorDetection.failed) {
+  } else if (runningSig.failed) {
     status = 'failed';
     error = {
-      category: errorDetection.reason,
-      message: errorDetection.message || 'Codex tmux error',
+      category: runningSig.reason,
+      message: runningSig.message || 'Codex tmux error',
     };
   }
 

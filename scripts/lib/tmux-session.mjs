@@ -320,11 +320,19 @@ export function listTeamSessions(teamName) {
  */
 function withExitMarker(cliCommand, safeFile, nonce) {
   const marker = nonce ? `${WORKER_EXIT_MARKER}:${nonce}` : WORKER_EXIT_MARKER;
-  // The leading `echo ""` guarantees the marker starts at column 0 even when the
-  // CLI's last output line had no trailing newline — so the line-anchored parser
-  // (parseExitMarker, `^…`) reliably matches the EXECUTED echo and never the
-  // typed command echo (where the marker sits mid-line after `echo "`).
-  return `${cliCommand}; __ao_ec=$?; rm -f "${safeFile}"; echo ""; echo "${marker}:$__ao_ec"`;
+  // `<cli> || __ao_ec=$?` rather than `<cli>; __ao_ec=$?` so the exit capture
+  // survives a pane shell under `set -e` (errexit): a bare failing command at
+  // statement level would terminate the shell before `$?` is read, leaving NO
+  // sentinel and a worker stuck `running` until stall detection. The left
+  // operand of `||` is exempt from errexit, so a non-zero CLI is captured rather
+  // than killing the shell. Crucially `<cli>` stays the FIRST simple command, so
+  // composeWorkerCommand's `KEY="val" ` env prefix still exports into the CLI's
+  // environment — a compound `if …`/`{ …; }` could NOT be prefixed that way.
+  // `${__ao_ec:-0}` defaults to 0 on success (the var is never set then).
+  // The leading `echo ""` puts the marker at column 0 for the line-anchored
+  // parser, so it matches the EXECUTED echo, never the typed command echo (where
+  // the marker sits mid-line after `echo "`).
+  return `${cliCommand} || __ao_ec=$?; rm -f "${safeFile}"; echo ""; echo "${marker}:\${__ao_ec:-0}"`;
 }
 
 export function buildWorkerCommand(worker, opts = {}) {
