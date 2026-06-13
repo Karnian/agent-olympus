@@ -52,17 +52,22 @@ export function sanitizeName(name) {
 }
 
 /**
- * Escape a string for safe embedding inside a double-quoted shell argument
- * that will be passed via tmux send-keys.
+ * Escape a string for embedding inside a DOUBLE-quoted shell argument passed via
+ * tmux send-keys.
  *
- * tmux send-keys forwards the string literally to the terminal, which means
- * the shell running inside the pane interprets it.  We must escape every
- * character that has special meaning to the shell:
+ * PREFER `shellQuote()` for encoding arbitrary VALUES — it is byte-for-byte safe.
+ * This function is retained for the controlled prompt-file path (a /tmp UUID
+ * path with no shell metacharacters) and for back-compat, but it has a known
+ * flaw: the `!`→`\!` rule is only sound in INTERACTIVE bash (history expansion);
+ * inside double quotes in POSIX sh / non-interactive bash a backslash before `!`
+ * is NOT special, so `\!` survives literally and corrupts the value. Do not use
+ * it for values that may contain `!`.
+ *
  *   "  →  \"   (closes the surrounding double-quote)
  *   \  →  \\   (escape character — must come first)
  *   $  →  \$   (variable expansion)
  *   `  →  \`   (command substitution)
- *   !  →  \!   (history expansion in bash)
+ *   !  →  \!   (history expansion — interactive bash only; see caveat above)
  */
 export function sanitizeForShellArg(str) {
   return String(str)
@@ -72,6 +77,31 @@ export function sanitizeForShellArg(str) {
     .replace(/`/g, '\\`')
     .replace(/!/g, '\\!');
 }
+
+/**
+ * Encode an arbitrary string as ONE shell word using POSIX single-quote
+ * quoting: wrap in '…' and rewrite every embedded apostrophe as the classic
+ * '\'' sequence (close-quote, escaped literal quote, reopen-quote).
+ *
+ * Inside single quotes NOTHING is special — not $ ` \ ! " or newline — so the
+ * value reaches the pane shell byte-for-byte. This is preferred over
+ * `sanitizeForShellArg` (double-quote + backslash escaping), whose `!`→`\!`
+ * rule is WRONG inside double quotes: in POSIX sh and non-interactive bash a
+ * backslash before `!` is not special, so `\!` survives literally and corrupts
+ * any value containing `!` (e.g. `worker!` → `worker\!` in the pane).
+ *
+ * The returned string INCLUDES its own surrounding quotes — callers must NOT
+ * wrap it again (use `KEY=${shellQuote(v)}`, not `KEY="${shellQuote(v)}"`).
+ *
+ * @param {string} str
+ * @returns {string} e.g. `abc` → `'abc'`, `a'b` → `'a'\''b'`, `x!` → `'x!'`
+ */
+export function shellQuote(str) {
+  return `'${String(str).replace(/'/g, "'\\''")}'`;
+}
+
+/** A valid POSIX shell identifier for an env var name (no metacharacters). */
+const VALID_ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /**
  * Write a prompt to a unique temp file and return the file path.
@@ -136,11 +166,11 @@ export function createTeamSession(teamName, workers, cwd) {
       // Inject resolved PATH so CLIs (codex, claude, etc.) are always findable,
       // even when the tmux shell doesn't inherit the parent's full PATH.
       // send-keys types this literally into the pane (no outer shell), so the
-      // PATH value is sanitized once and wrapped in double-quotes — the same
-      // single-level escaping used for env values in composeWorkerCommand().
+      // PATH value is single-quoted — byte-for-byte safe, same encoding as env
+      // values in composeWorkerCommand() (shellQuote supplies its own quotes).
       const resolvedPath = buildResolvedPath();
       try {
-        execFileSync(tmux, ['send-keys', '-t', name, `export PATH="${sanitizeForShellArg(resolvedPath)}"`, 'Enter'], { stdio: 'pipe' });
+        execFileSync(tmux, ['send-keys', '-t', name, `export PATH=${shellQuote(resolvedPath)}`, 'Enter'], { stdio: 'pipe' });
       } catch {}
 
       results.push({
@@ -203,9 +233,15 @@ export function createTeamSession(teamName, workers, cwd) {
  */
 export function composeWorkerCommand(command, env = {}) {
   const envStr = Object.entries(env)
-    // Env values are sanitized so they can be embedded inside double-quotes.
-    // This is the ONLY escaping applied — the pane shell consumes it directly.
-    .map(([k, v]) => `${k}="${sanitizeForShellArg(v)}"`)
+    // Defense-in-depth: skip any key that isn't a valid shell identifier so a
+    // malformed/injected name can't turn the prefix into an arbitrary command
+    // (matches the `-e KEY=VAL` guard in createTeamSession). Production only
+    // passes fixed AO_* keys, so this drops nothing in practice.
+    .filter(([k]) => VALID_ENV_KEY.test(k))
+    // Single-quote the VALUE so it reaches the pane shell byte-for-byte —
+    // sidesteps the `!`/`$`/backtick/backslash hazards of double-quote escaping
+    // (see shellQuote). shellQuote supplies its own quotes, so no `"…"` wrapper.
+    .map(([k, v]) => `${k}=${shellQuote(v)}`)
     .join(' ');
 
   return envStr ? `${envStr} ${command}` : command;

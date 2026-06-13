@@ -99,9 +99,25 @@ test('composeWorkerCommand: does NOT re-escape the command (single escaping leve
   assert.ok(!out.includes('\\$'), 'must not contain escaped dollar signs');
 });
 
-test('composeWorkerCommand: prefixes env as KEY="value" with single-level escaping', () => {
+test("composeWorkerCommand: prefixes env as KEY='value' via single-quote encoding", () => {
   const out = composeWorkerCommand('run', { A: 'x', B: 'has "quote" and $var' });
-  assert.equal(out, 'A="x" B="has \\"quote\\" and \\$var" run');
+  assert.equal(out, `A='x' B='has "quote" and $var' run`);
+  // Single-quote encoding adds no backslash escapes here (the old !-buggy path
+  // would have produced \" and \$).
+  assert.ok(!out.includes('\\'), 'single-quote encoding adds no backslashes for these values');
+});
+
+test('composeWorkerCommand: single-quotes values containing ! and embedded apostrophes', () => {
+  // `!` must survive verbatim — the double-quote `\!` rule corrupted it. An
+  // embedded apostrophe is rewritten as the classic '\'' sequence.
+  assert.equal(composeWorkerCommand('run', { A: 'boom!' }), `A='boom!' run`);
+  assert.equal(composeWorkerCommand('run', { A: "it's" }), `A='it'\\''s' run`);
+});
+
+test('composeWorkerCommand: skips env keys that are not valid shell identifiers', () => {
+  // Defense-in-depth: a malformed/injected key must not become a command.
+  const out = composeWorkerCommand('run', { GOOD_1: 'a', 'bad-key': 'b', 'x;rm -rf /': 'c', '': 'd' });
+  assert.equal(out, `GOOD_1='a' run`);
 });
 
 test('composeWorkerCommand: empty / missing env returns the command unchanged', () => {
@@ -222,13 +238,33 @@ test('round-trip: prompt content survives the "$(cat file)" substitution intact'
   }
 });
 
-test('round-trip: env value reaches the child process environment intact', () => {
-  // Mirrors production: `AO_X="val" <binary> ...` sets AO_X in the SPAWNED
-  // process's environment (read via getenv), not via `$AO_X` on the same line.
-  // We deliberately read it inside a nested `sh -c` so the var is resolved from
-  // the inherited child env — `FOO=bar cmd "$FOO"` would expand $FOO too early.
-  const envValue = 'team "1" $x';
-  const composed = composeWorkerCommand(`sh -c 'printf "%s" "$AO_NOTE"'`, { AO_NOTE: envValue });
-  const out = execFileSync('sh', ['-c', composed], { encoding: 'utf-8' });
-  assert.equal(out, envValue, `env value mangled: ${JSON.stringify(out)}`);
+// Run an env value through composeWorkerCommand and a REAL shell, reading it
+// back from the SPAWNED process's environment (production semantics: the value
+// is set in the child's env, read via getenv — not via `$VAR` on the same line,
+// which `FOO=bar cmd "$FOO"` would expand too early). The nested `sh -c`
+// resolves $AO_NOTE from the inherited child env. printf "%s" preserves the
+// value byte-for-byte (no trailing newline added, internal bytes intact).
+function envRoundTrip(value) {
+  const composed = composeWorkerCommand(`sh -c 'printf "%s" "$AO_NOTE"'`, { AO_NOTE: value });
+  return execFileSync('sh', ['-c', composed], { encoding: 'utf-8' });
+}
+
+test('round-trip: env value reaches the child env intact (single-quote encoding)', () => {
+  // Packs every char the OLD double-quote path mishandled: `!` (the `\!`
+  // corruption inside double quotes), plus $, backtick, ", and an apostrophe.
+  const value = `bang! $x \`bt\` "dq" it's end`;
+  assert.equal(envRoundTrip(value), value, `env value mangled`);
+});
+
+test('round-trip: env value with a newline + tab survives intact', () => {
+  // Single quotes preserve newlines/tabs literally; the old escaper did not
+  // touch newlines either, but this locks the behavior in.
+  const value = 'line1\nline2\tmid';
+  assert.equal(envRoundTrip(value), value, `multiline env value mangled`);
+});
+
+test('round-trip: a `!`-bearing value is NOT corrupted (regression for the \\! bug)', () => {
+  // Direct discrimination: the double-quote path produced `worker\!`; single
+  // quotes yield `worker!`.
+  assert.equal(envRoundTrip('worker!'), 'worker!');
 });
