@@ -815,3 +815,42 @@ describe('stop-hook: credential extension matching is case-insensitive', () => {
       `uppercase-extension secret leaked: ${committedFiles(tmpDir)}`);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F1 (Codex cross-review of the unified branch): the UNSTAGED rename bypass.
+// `mv .env public.txt` (plain shell, NOT `git mv`) leaves the .env deletion
+// unstaged and public.txt untracked — the rename pair is never both staged, so
+// `-M` cannot pair them and the safe name dodges the pattern filter. The
+// blob-hash content net (unstageStagedStolenBlobs) must still catch it.
+// ---------------------------------------------------------------------------
+
+describe('stop-hook: an UNSTAGED rename of a tracked secret does not leak its content', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    writeFileSync(path.join(tmpDir, '.env'), 'API_KEY=supersecret\n', 'utf-8');
+    execSync('git add .env', { cwd: tmpDir, stdio: 'pipe' });
+    execSync('git commit -qm "add env"', { cwd: tmpDir, stdio: 'pipe' });
+    // Plain shell mv — NOT git mv. .env → unstaged deletion; public.txt →
+    // untracked addition carrying the byte-identical secret content.
+    execSync('mv .env public.txt', { cwd: tmpDir, stdio: 'pipe' });
+    writeFileSync(path.join(tmpDir, 'app.js'), 'export const ok = 1;', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('commits app.js but never public.txt nor the secret content', () => {
+    runHook(tmpDir);
+    const files = committedFiles(tmpDir);
+    assert.ok(files.includes('app.js'), `commit should contain app.js, got: ${files}`);
+    assert.ok(!files.includes('public.txt'),
+      `the renamed-away secret (public.txt) must not be committed, got: ${files}`);
+    // Defense-in-depth: the secret bytes must not reach the commit by ANY route.
+    let head = '';
+    try {
+      head = execSync('git show HEAD', { cwd: tmpDir, encoding: 'utf-8', stdio: 'pipe' });
+    } catch {}
+    assert.ok(!head.includes('supersecret'),
+      'secret content must never reach the WIP commit via a renamed safe-named file');
+  });
+});

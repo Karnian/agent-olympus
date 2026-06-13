@@ -31,11 +31,13 @@ import { basename, join } from 'path';
  * a live credential.
  *
  * Detection is NAME-based and intentionally case-insensitive for credential
- * file types (a `.PEM`/`.KEY` is as sensitive as a `.pem`). KNOWN LIMITATION:
- * a secret whose path matches nothing here — e.g. its content copied/renamed
- * into an innocuously-named file like `public.txt` — cannot be recognised by a
- * path filter. Catching that would require scanning file CONTENT, which is out
- * of scope for this WIP hook.
+ * file types (a `.PEM`/`.KEY` is as sensitive as a `.pem`). The name filter is
+ * backstopped by a CONTENT (blob-hash) net — `unstageStagedStolenBlobs()` —
+ * that catches a secret whose bytes are copied/renamed into an innocuously-
+ * named file (`mv .env public.txt`): the safe-named blob hash matches a known
+ * secret blob and is unstaged. Residual gap: a secret that was NEVER tracked
+ * (no HEAD blob to match) and is renamed to a safe name still escapes both
+ * nets — out of scope for this throwaway WIP hook.
  */
 const EXCLUDE_PATTERNS = [
   /(^|\/)\.env/i,           // .env, .env.local, .env.production … at any depth
@@ -140,6 +142,66 @@ function unstagePaths(paths) {
   } catch {
     // Best-effort; the fail-closed re-check in main() is the real guarantee.
   }
+}
+
+/**
+ * Content-identity net for the rename/copy-to-safe-name bypass: a tracked
+ * secret whose BYTES are moved into an innocuously-named file escapes the
+ * name filter (the safe name matches no EXCLUDE_PATTERN, and the rename pair is
+ * not both staged so `-M` can't pair them). Collect the blob hashes of every
+ * EXCLUDE_PATTERNS file in HEAD, then unstage any staged entry whose blob hash
+ * matches but whose PATH is not itself excluded — i.e. secret content surfacing
+ * under a safe name. Catches `mv .env safe.txt` and `cp .env safe.txt`
+ * (byte-identical content).
+ *
+ * Fail-safe: returns [] on any git error (the name net + fail-closed re-check
+ * in main() still apply); never throws.
+ *
+ * @returns {string[]} paths unstaged
+ */
+function unstageStagedStolenBlobs() {
+  let secretShas;
+  try {
+    // Every blob in HEAD whose path matches an exclusion pattern. `-z` keeps
+    // paths raw (no octal quoting); format: "<mode> <type> <sha>\t<path>".
+    const tree = execFileSync('git', ['ls-tree', '-r', '-z', 'HEAD'], {
+      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    secretShas = new Set();
+    for (const ent of tree.split('\0')) {
+      if (!ent) continue;
+      const tab = ent.indexOf('\t');
+      if (tab === -1) continue;
+      const sha = ent.slice(0, tab).split(' ')[2];
+      const path = ent.slice(tab + 1);
+      if (sha && isExcluded(path)) secretShas.add(sha);
+    }
+  } catch {
+    return [];
+  }
+  if (secretShas.size === 0) return [];
+
+  let stagedRaw;
+  try {
+    // Staged entries with blob shas; format: "<mode> <sha> <stage>\t<path>".
+    stagedRaw = execFileSync('git', ['ls-files', '-s', '-z'], {
+      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch {
+    return [];
+  }
+  const toUnstage = [];
+  for (const ent of stagedRaw.split('\0')) {
+    if (!ent) continue;
+    const tab = ent.indexOf('\t');
+    if (tab === -1) continue;
+    const sha = ent.slice(0, tab).split(' ')[1];
+    const path = ent.slice(tab + 1);
+    // Secret CONTENT under a path the name filter did not catch.
+    if (sha && secretShas.has(sha) && !isExcluded(path)) toUnstage.push(path);
+  }
+  if (toUnstage.length > 0) unstagePaths(toUnstage);
+  return toUnstage;
 }
 
 /**
@@ -326,6 +388,11 @@ async function main() {
     // Unstage offenders, then re-check. If any sensitive entry still remains, or
     // the index cannot be verified, SKIP the commit entirely rather than risk a
     // leak (this hook is a throwaway save, not the user's deliberate commit).
+    // Content-identity net (runs BEFORE the name/rename net): unstage secret
+    // BYTES surfacing under a safe name (mv/cp of a tracked secret), which the
+    // name filter and staged-rename detection both miss. Best-effort.
+    unstageStagedStolenBlobs();
+
     let sensitive = listStagedSensitive();
     if (sensitive && sensitive.length > 0) {
       unstagePaths(sensitive);

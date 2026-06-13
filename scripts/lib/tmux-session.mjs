@@ -226,7 +226,11 @@ export function spawnWorkerInSession(sessionName, command, env = {}) {
 
 export function capturePane(sessionName, lines = 80) {
   try {
-    return execFileSync(resolveBinary('tmux'), ['capture-pane', '-pt', sessionName, '-S', `-${lines}`], {
+    // `-J` joins wrapped lines so a long logical line (e.g. the `__AO_EXIT__:…`
+    // exit sentinel on a narrow pane) is captured intact rather than split
+    // across physical rows — otherwise parseExitMarker would miss a wrapped
+    // marker and the worker would look stuck until stall detection.
+    return execFileSync(resolveBinary('tmux'), ['capture-pane', '-pJt', sessionName, '-S', `-${lines}`], {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim();
@@ -303,12 +307,24 @@ export function listTeamSessions(teamName) {
  * monitor never mistakes the echoed (unexpanded `$__ao_ec`) command line for a
  * real exit code.
  *
+ * When `nonce` is supplied it is interpolated into the emitted line
+ * (`__AO_EXIT__:<nonce>:<code>`) so the consumer can require a per-invocation
+ * secret — worker OUTPUT that happens to print `__AO_EXIT__:0` cannot forge a
+ * completion because it does not know the random nonce. The nonce is restricted
+ * to hex by the caller, so it carries no shell metacharacters.
+ *
  * @param {string} cliCommand - the CLI invocation (no trailing cleanup)
  * @param {string} safeFile    - sanitized prompt-file path to remove
+ * @param {string} [nonce]     - per-invocation hex token to scope the marker
  * @returns {string}
  */
-function withExitMarker(cliCommand, safeFile) {
-  return `${cliCommand}; __ao_ec=$?; rm -f "${safeFile}"; echo "${WORKER_EXIT_MARKER}:$__ao_ec"`;
+function withExitMarker(cliCommand, safeFile, nonce) {
+  const marker = nonce ? `${WORKER_EXIT_MARKER}:${nonce}` : WORKER_EXIT_MARKER;
+  // The leading `echo ""` guarantees the marker starts at column 0 even when the
+  // CLI's last output line had no trailing newline — so the line-anchored parser
+  // (parseExitMarker, `^…`) reliably matches the EXECUTED echo and never the
+  // typed command echo (where the marker sits mid-line after `echo "`).
+  return `${cliCommand}; __ao_ec=$?; rm -f "${safeFile}"; echo ""; echo "${marker}:$__ao_ec"`;
 }
 
 export function buildWorkerCommand(worker, opts = {}) {
@@ -319,6 +335,9 @@ export function buildWorkerCommand(worker, opts = {}) {
   // withExitMarker() once the CLI returns.
   const promptFile = writePromptFile(worker.prompt);
   const safeFile = sanitizeForShellArg(promptFile);
+  // Per-invocation hex nonce (from the caller) scopes the exit sentinel so
+  // worker output can't forge a completion. Omitted → legacy unscoped marker.
+  const exitNonce = opts.exitNonce;
 
   switch (worker.type) {
     case 'codex': {
@@ -328,7 +347,7 @@ export function buildWorkerCommand(worker, opts = {}) {
       const autonomyConfig = opts.autonomyConfig || loadAutonomyConfig(opts.cwd || process.cwd());
       const level = resolveCodexApproval(autonomyConfig, { cwd: opts.cwd });
       const codexArgs = buildCodexExecArgs(level).join(' '); // "-a never -s <sandbox>"
-      return withExitMarker(`"${resolveBinary('codex')}" ${codexArgs} exec "$(cat "${safeFile}")"`, safeFile);
+      return withExitMarker(`"${resolveBinary('codex')}" ${codexArgs} exec "$(cat "${safeFile}")"`, safeFile, exitNonce);
     }
     case 'gemini': {
       // Mirror Claude's permission level to Gemini approval mode
@@ -336,10 +355,10 @@ export function buildWorkerCommand(worker, opts = {}) {
       const gMode = resolveGeminiApproval(gAutonomy, { cwd: opts.cwd });
       const gFlag = geminiApprovalFlag(gMode);
       const gFlagPart = gFlag ? ` ${gFlag}` : '';
-      return withExitMarker(`"${resolveBinary('gemini')}"${gFlagPart} -p "$(cat "${safeFile}")"`, safeFile);
+      return withExitMarker(`"${resolveBinary('gemini')}"${gFlagPart} -p "$(cat "${safeFile}")"`, safeFile, exitNonce);
     }
     case 'claude':
     default:
-      return withExitMarker(`"${resolveBinary('claude')}" --print "$(cat "${safeFile}")"`, safeFile);
+      return withExitMarker(`"${resolveBinary('claude')}" --print "$(cat "${safeFile}")"`, safeFile, exitNonce);
   }
 }

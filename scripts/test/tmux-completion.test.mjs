@@ -62,6 +62,35 @@ test('parseExitMarker: takes the LAST match when several are present', () => {
   assert.equal(parseExitMarker(`${M}:1\nrerun\n${M}:0`), 0);
 });
 
+// --- F2: per-invocation nonce makes the marker unforgeable by worker output ---
+
+test('parseExitMarker (F2): a nonce-scoped marker is read only with the matching nonce', () => {
+  const nonce = 'deadbeefcafe1234';
+  assert.equal(parseExitMarker(`work done\n${M}:${nonce}:0\n$ `, nonce), 0);
+  assert.equal(parseExitMarker(`crashed\n${M}:${nonce}:137\n$ `, nonce), 137);
+});
+
+test('parseExitMarker (F2): worker output forging a bare marker cannot fake completion', () => {
+  const nonce = 'deadbeefcafe1234';
+  // A worker that prints `__AO_EXIT__:0` (e.g. echoing docs/code) must NOT be
+  // accepted when a nonce is expected — it doesn't know the random token.
+  assert.equal(parseExitMarker(`evil: ${M}:0\n${M}:0\nstill running\n`, nonce), null);
+  // A wrong/guessed nonce is rejected too.
+  assert.equal(parseExitMarker(`${M}:0000000000000000:0\n$ `, nonce), null);
+});
+
+test('parseExitMarker (F2): nonce-scoped marker still ignores the unexpanded typed echo', () => {
+  const nonce = 'abc123def456';
+  const typedEcho = `"/bin/claude" --print "$(cat "/tmp/p.txt")"; __ao_ec=$?; rm -f "/tmp/p.txt"; echo "${M}:${nonce}:$__ao_ec"`;
+  assert.equal(parseExitMarker(typedEcho, nonce), null);
+});
+
+test('parseExitMarker (F2): line-anchored — a marker mid-line (not column 0) is ignored', () => {
+  // Only the EXECUTED echo, alone at line start, counts. A marker embedded in
+  // prose/argv mid-line must not match.
+  assert.equal(parseExitMarker(`the worker said ${M}:0 in passing\n`), null);
+});
+
 // ---------------------------------------------------------------------------
 // classifyTmuxWorker — the pure decision logic
 // ---------------------------------------------------------------------------
@@ -123,13 +152,48 @@ test('classifyTmuxWorker: null pane output → running, empty output, no crash',
   assert.equal(r.error, undefined);
 });
 
+// --- F3: the exit sentinel is authoritative across polls, even after a
+//        provisional signature-only failure on an earlier poll ---
+
+test('classifyTmuxWorker (F3): a provisionally-failed worker is rescued by a later exit-0', () => {
+  // Poll N flagged it failed on a transient "rate limit … retrying" line (no
+  // sentinel yet). Poll N+1's pane now carries the real exit-0 sentinel — the
+  // worker recovered. Old code gated parsing on status==='running', so the
+  // sentinel was ignored and the worker stayed falsely failed.
+  const worker = { status: 'failed', type: 'codex', session: 's' };
+  const r = classifyTmuxWorker(worker, `Error: rate limit exceeded\nretrying\nRecovered.\n${M}:0\n$ `);
+  assert.equal(r.status, 'completed');
+  assert.equal(r.error, undefined);
+});
+
+test('classifyTmuxWorker (F3): a failed worker with no sentinel stays failed', () => {
+  const worker = { status: 'failed', type: 'codex', session: 's' };
+  const r = classifyTmuxWorker(worker, 'still retrying\nError: rate limit exceeded\n$ ');
+  assert.equal(r.status, 'failed');
+});
+
+test('classifyTmuxWorker (F3): a nonzero sentinel keeps a failed worker failed', () => {
+  const worker = { status: 'failed', type: 'claude', session: 's' };
+  const r = classifyTmuxWorker(worker, `boom\n${M}:1\n$ `);
+  assert.equal(r.status, 'failed');
+  assert.equal(r.error.category, 'nonzero_exit');
+});
+
+test('classifyTmuxWorker (F2): the nonce on the worker scopes the sentinel match', () => {
+  const worker = { status: 'running', type: 'claude', session: 's', _exitNonce: 'n0nce1234' };
+  // Correct nonce in the pane → completed.
+  assert.equal(classifyTmuxWorker(worker, `done\n${M}:n0nce1234:0\n$ `).status, 'completed');
+  // A bare/forged marker without the nonce → not accepted → still running.
+  assert.equal(classifyTmuxWorker(worker, `evil ${M}:0\n${M}:0\nworking\n`).status, 'running');
+});
+
 // ---------------------------------------------------------------------------
 // Producer ↔ consumer round-trip through a real shell:
 // buildWorkerCommand's sentinel must round-trip back through parseExitMarker.
 // A fake `claude` on PATH lets us choose the exit code deterministically.
 // ---------------------------------------------------------------------------
 
-function runProducerConsumer(exitCode) {
+function runProducerConsumer(exitCode, nonce) {
   const dir = mkdtempSync(join(tmpdir(), 'ao-exit-'));
   const origPath = process.env.PATH;
   // Fake CLI: ignore args, exit with the requested code.
@@ -139,11 +203,11 @@ function runProducerConsumer(exitCode) {
 
   let command;
   try {
-    command = buildWorkerCommand({ type: 'claude', prompt: 'do the thing' }, { cwd: tmpdir(), autonomyConfig: {} });
+    command = buildWorkerCommand({ type: 'claude', prompt: 'do the thing' }, { cwd: tmpdir(), autonomyConfig: {}, exitNonce: nonce });
     // The trailing `echo` exits 0, so sh -c never throws regardless of the CLI's
     // code — we read the sentinel from stdout, exactly like capturePane would.
     const out = execFileSync('sh', ['-c', command], { encoding: 'utf-8' });
-    return parseExitMarker(out);
+    return parseExitMarker(out, nonce);
   } finally {
     process.env.PATH = origPath;
     clearBinCache();
@@ -163,4 +227,10 @@ test('round-trip: a CLI that exits 0 yields a sentinel parseExitMarker reads as 
 test('round-trip: a CLI that exits 7 yields a sentinel parseExitMarker reads as 7', () => {
   // $? is captured BEFORE `rm` clobbers it — proves the ordering in withExitMarker.
   assert.equal(runProducerConsumer(7), 7);
+});
+
+test('round-trip (F2): a nonce-scoped sentinel round-trips through a real shell', () => {
+  const nonce = 'feedface00112233';
+  assert.equal(runProducerConsumer(0, nonce), 0);
+  assert.equal(runProducerConsumer(7, nonce), 7);
 });

@@ -1,4 +1,4 @@
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession, WORKER_EXIT_MARKER } from './tmux-session.mjs';
 import { readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
 import { addWisdom } from './wisdom.mjs';
@@ -323,21 +323,32 @@ function monitorAdapterWorker(worker, adapterModule, registryEntry) {
 // ─── Tmux adapter helpers (inline — wraps existing tmux-session functions) ──
 
 /**
- * Parse the explicit `__AO_EXIT__:<code>` sentinel that buildWorkerCommand
- * emits after a worker's CLI exits (see WORKER_EXIT_MARKER in tmux-session.mjs).
+ * Parse the explicit `__AO_EXIT__[:<nonce>]:<code>` sentinel that
+ * buildWorkerCommand emits after a worker's CLI exits (see WORKER_EXIT_MARKER
+ * in tmux-session.mjs).
  *
- * The typed command line is echoed into the pane too, but it carries the
- * UNEXPANDED `__AO_EXIT__:$__ao_ec`; the `\d+` class can only match the
- * EXECUTED echo's output (`__AO_EXIT__:0`), never that echo. The LAST match
- * wins so a re-polled or re-run pane reports the most recent exit.
+ * Two anti-forgery measures:
+ *   - LINE ANCHORING (`^`, multiline): the typed command line is echoed into
+ *     the pane too, but there the marker is preceded by `echo "`, so it is
+ *     never at line start — only the EXECUTED echo's output, alone on its line,
+ *     matches. (Also dodges the unexpanded `$__ao_ec`, which has no digit.)
+ *   - NONCE: when `nonce` is supplied (production), the marker must carry that
+ *     per-invocation random token. Worker OUTPUT that prints a bare
+ *     `__AO_EXIT__:0` therefore cannot forge a completion — it doesn't know the
+ *     nonce. With no nonce (legacy/tests) the unscoped marker is accepted.
+ *
+ * The LAST match wins so a re-polled or re-run pane reports the most recent exit.
  *
  * @param {string} output - captured pane text
- * @returns {number|null} exit code, or null if no sentinel is present yet
+ * @param {string|null} [nonce] - per-invocation token the marker must carry
+ * @returns {number|null} exit code, or null if no matching sentinel is present
  */
-export function parseExitMarker(output) {
+export function parseExitMarker(output, nonce = null) {
   if (!output || typeof output !== 'string') return null;
-  const esc = WORKER_EXIT_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const re = new RegExp(`${esc}:(\\d+)`, 'g');
+  const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const esc = escRe(WORKER_EXIT_MARKER);
+  const noncePart = (typeof nonce === 'string' && nonce.length) ? `${escRe(nonce)}:` : '';
+  const re = new RegExp(`^${esc}:${noncePart}(\\d+)`, 'gm');
   let m;
   let last = null;
   while ((m = re.exec(output)) !== null) last = m[1];
@@ -366,17 +377,25 @@ export function parseExitMarker(output) {
  * @returns {{ status: string, output: string, error?: { category: string, message: string } }}
  */
 export function classifyTmuxWorker(worker, paneOutput) {
-  const isRunning = worker?.status === 'running' && !!paneOutput;
+  const hasPane = !!paneOutput;
 
-  // Supplementary Codex-only signature scan — enriches a failure with a precise
-  // category (auth_failed / rate_limited / crash / ...) and enables fast-fail
-  // before the sentinel lands. Not sufficient on its own to declare success.
+  // The exit sentinel is AUTHORITATIVE and provider-agnostic. Parse it whenever
+  // the worker is still resolvable — 'running', OR a provisional 'failed'/'retry'
+  // from an EARLIER signature-only poll — so a transient error line (e.g. "rate
+  // limit … retrying") the worker recovered from cannot permanently mask a later
+  // `__AO_EXIT__:0`. A terminal 'completed' (or not-yet-started 'pending') is
+  // never re-classified. (F3) The nonce scopes the marker against forgery. (F2)
+  const resolvable =
+    worker?.status === 'running' || worker?.status === 'failed' || worker?.status === 'retry';
+  const exitCode = (hasPane && resolvable) ? parseExitMarker(paneOutput, worker?._exitNonce) : null;
+
+  // Supplementary Codex-only signature scan — only while still running, only to
+  // ENRICH a failure / fast-fail BEFORE the sentinel lands. Provisional: never
+  // overrides a real exit code, and a later exit-0 sentinel reverses it.
   let errorDetection = { failed: false };
-  if (worker?.type === 'codex' && isRunning) {
+  if (worker?.type === 'codex' && worker?.status === 'running' && hasPane) {
     errorDetection = detectCodexError(paneOutput);
   }
-
-  const exitCode = isRunning ? parseExitMarker(paneOutput) : null;
 
   let status = worker?.status;
   let error;
@@ -821,7 +840,11 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
         continue;
       }
 
-      const command = buildWorkerCommand(worker, { cwd: session?.worktreePath || cwd });
+      // Per-invocation nonce scopes this worker's exit sentinel so its own
+      // output can't forge a completion. Persisted on the worker (serializable
+      // string) and read back by classifyTmuxWorker → parseExitMarker.
+      const exitNonce = randomBytes(8).toString('hex');
+      const command = buildWorkerCommand(worker, { cwd: session?.worktreePath || cwd, exitNonce });
       const env = {
         AO_TEAM_NAME: teamName,
         AO_WORKER_NAME: worker.name,
@@ -831,6 +854,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
       const spawned = spawnWorkerInSession(session.session, command, env);
       state.workers[i].status = spawned ? 'running' : 'failed';
       state.workers[i].startedAt = new Date().toISOString();
+      state.workers[i]._exitNonce = exitNonce;
       state.workers[i].session = session.session;
       state.workers[i].worktreePath = session?.worktreePath || null;
       state.workers[i].branchName = session?.branchName || null;
