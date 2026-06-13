@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession } from './tmux-session.mjs';
+import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession, WORKER_EXIT_MARKER } from './tmux-session.mjs';
 import { readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
 import { addWisdom } from './wisdom.mjs';
 import { cleanupTeamWorktrees } from './worktree.mjs';
@@ -323,41 +323,101 @@ function monitorAdapterWorker(worker, adapterModule, registryEntry) {
 // ─── Tmux adapter helpers (inline — wraps existing tmux-session functions) ──
 
 /**
- * Monitor a tmux-based worker via capturePane + error detection.
- * Returns a MonitorResult-shaped object.
+ * Parse the explicit `__AO_EXIT__:<code>` sentinel that buildWorkerCommand
+ * emits after a worker's CLI exits (see WORKER_EXIT_MARKER in tmux-session.mjs).
  *
- * @param {Object} worker - Worker state object with session, type, etc.
- * @returns {{ status: string, output: string, error?: { category: string, message: string }, stalled?: boolean, stalledMs?: number }}
+ * The typed command line is echoed into the pane too, but it carries the
+ * UNEXPANDED `__AO_EXIT__:$__ao_ec`; the `\d+` class can only match the
+ * EXECUTED echo's output (`__AO_EXIT__:0`), never that echo. The LAST match
+ * wins so a re-polled or re-run pane reports the most recent exit.
+ *
+ * @param {string} output - captured pane text
+ * @returns {number|null} exit code, or null if no sentinel is present yet
  */
-function monitorTmuxWorker(worker) {
-  const paneOutput = worker.session ? capturePane(worker.session, 200) : null;
+export function parseExitMarker(output) {
+  if (!output || typeof output !== 'string') return null;
+  const esc = WORKER_EXIT_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`${esc}:(\\d+)`, 'g');
+  let m;
+  let last = null;
+  while ((m = re.exec(output)) !== null) last = m[1];
+  return last === null ? null : Number.parseInt(last, 10);
+}
 
-  // Error detection for codex workers in tmux path
+/**
+ * Pure classifier for a tmux worker's status from its captured pane text.
+ * Extracted from monitorTmuxWorker so the completion/failure decision is unit
+ * testable without a live tmux process.
+ *
+ * Decision order:
+ *   1. EXPLICIT exit sentinel (`parseExitMarker`) is authoritative and
+ *      provider-agnostic — `0` → completed, non-zero → failed. This replaces
+ *      the old "a shell prompt came back" heuristic, which reported every
+ *      failed/no-op/syntax-error worker (codex, claude, AND gemini) as
+ *      `completed` — a silent success.
+ *   2. No sentinel yet, but a known Codex error signature is present → failed
+ *      fast (richer category than a bare non-zero exit).
+ *   3. Otherwise → still `running`. We do NOT infer completion from a returned
+ *      prompt; a genuine hang is caught by the activity-based stall detector in
+ *      monitorTeam, not by guessing.
+ *
+ * @param {Object} worker - { status, type, session, ... }
+ * @param {string|null} paneOutput - captured pane text (or null)
+ * @returns {{ status: string, output: string, error?: { category: string, message: string } }}
+ */
+export function classifyTmuxWorker(worker, paneOutput) {
+  const isRunning = worker?.status === 'running' && !!paneOutput;
+
+  // Supplementary Codex-only signature scan — enriches a failure with a precise
+  // category (auth_failed / rate_limited / crash / ...) and enables fast-fail
+  // before the sentinel lands. Not sufficient on its own to declare success.
   let errorDetection = { failed: false };
-  if (worker.type === 'codex' && worker.status === 'running' && paneOutput) {
+  if (worker?.type === 'codex' && isRunning) {
     errorDetection = detectCodexError(paneOutput);
   }
 
-  // Completion detection: shell prompt returns
-  let isDone = false;
-  if (!errorDetection.failed && paneOutput && worker.status === 'running') {
-    const lastLines = paneOutput.split('\n').slice(-5).join('\n');
-    isDone = /[$%]\s*$/.test(lastLines.trim());
-  }
+  const exitCode = isRunning ? parseExitMarker(paneOutput) : null;
 
-  const result = {
-    status: isDone ? 'completed' : (errorDetection.failed ? 'failed' : worker.status),
-    output: paneOutput ? paneOutput.slice(-500) : '',
-  };
+  let status = worker?.status;
+  let error;
 
-  if (errorDetection.failed) {
-    result.error = {
+  if (exitCode !== null) {
+    if (exitCode === 0) {
+      status = 'completed';
+    } else {
+      status = 'failed';
+      // Prefer the richer Codex category (preserves the crash→retry path in
+      // monitorTeam); otherwise report a generic non-zero exit.
+      error = errorDetection.failed
+        ? { category: errorDetection.reason, message: errorDetection.message || 'Codex tmux error' }
+        : { category: 'nonzero_exit', message: `Worker command exited with status ${exitCode}` };
+    }
+  } else if (errorDetection.failed) {
+    status = 'failed';
+    error = {
       category: errorDetection.reason,
       message: errorDetection.message || 'Codex tmux error',
     };
   }
 
+  const result = {
+    status,
+    output: paneOutput ? paneOutput.slice(-500) : '',
+  };
+  if (error) result.error = error;
   return result;
+}
+
+/**
+ * Monitor a tmux-based worker via capturePane + the explicit exit sentinel.
+ * Thin wrapper around the pure classifyTmuxWorker().
+ *
+ * @param {Object} worker - Worker state object with session, type, etc.
+ * @returns {{ status: string, output: string, error?: { category: string, message: string } }}
+ */
+function monitorTmuxWorker(worker) {
+  const paneOutput = worker.session ? capturePane(worker.session, 200) : null;
+  return classifyTmuxWorker(worker, paneOutput);
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
