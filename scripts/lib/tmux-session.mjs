@@ -13,6 +13,16 @@ export { resolveBinary } from './resolve-binary.mjs';
 const SESSION_PREFIX = 'ao-team';
 
 /**
+ * Sentinel token echoed into the tmux pane after a worker's CLI exits, so the
+ * monitor can read an EXPLICIT, provider-agnostic exit status instead of
+ * inferring completion from a returned shell prompt (which marked every failed
+ * or no-op worker `completed` — a silent success). Shared with the consumer
+ * (`parseExitMarker` in worker-spawn.mjs) as the single source of truth so the
+ * producer and parser can never drift. Format in the pane: `__AO_EXIT__:<code>`.
+ */
+export const WORKER_EXIT_MARKER = '__AO_EXIT__';
+
+/**
  * Build a robust PATH string that includes all known binary directories.
  * Delegates to buildEnhancedPath() in resolve-binary.mjs.
  * Kept as a named export for backward compatibility with existing callers.
@@ -125,9 +135,12 @@ export function createTeamSession(teamName, workers, cwd) {
 
       // Inject resolved PATH so CLIs (codex, claude, etc.) are always findable,
       // even when the tmux shell doesn't inherit the parent's full PATH.
+      // send-keys types this literally into the pane (no outer shell), so the
+      // PATH value is sanitized once and wrapped in double-quotes — the same
+      // single-level escaping used for env values in composeWorkerCommand().
       const resolvedPath = buildResolvedPath();
       try {
-        execFileSync(tmux, ['send-keys', '-t', name, `export PATH="${resolvedPath}"`, 'Enter'], { stdio: 'pipe' });
+        execFileSync(tmux, ['send-keys', '-t', name, `export PATH="${sanitizeForShellArg(resolvedPath)}"`, 'Enter'], { stdio: 'pipe' });
       } catch {}
 
       results.push({
@@ -160,21 +173,51 @@ export function createTeamSession(teamName, workers, cwd) {
   return results;
 }
 
-export function spawnWorkerInSession(sessionName, command, env = {}) {
+/**
+ * Compose the exact command string that `spawnWorkerInSession` types into the
+ * tmux pane. Returned verbatim as the send-keys argument.
+ *
+ * This is the SINGLE, authoritative escaping level for the tmux fallback path.
+ * `tmux send-keys` types its argument literally into the pane — we spawn tmux
+ * via execFileSync argv, NOT a shell string, so there is no intermediate shell
+ * to consume an escaping layer. The returned string must therefore already be
+ * valid shell as-is for the pane's shell to interpret.
+ *
+ * Escaping happens exactly ONCE, at the value level:
+ *   - env values are escaped via sanitizeForShellArg() and wrapped in double
+ *     quotes so an odd value can't break out of its KEY="value" assignment.
+ *   - `command` comes from buildWorkerCommand(), which already quotes the
+ *     binary path, the `"$(cat "<file>")"` substitution, and the trailing
+ *     `rm -f "<file>"` at the correct single level.
+ *
+ * DO NOT re-escape the composed string. Before commit d9abd9e the send-keys
+ * call went through execSync(`tmux send-keys ... "${cmd}"`) where /bin/sh
+ * stripped one escaping layer; that migration to execFileSync argv removed the
+ * outer shell, so a second sanitizeForShellArg() pass now leaks backslashes
+ * into the pane verbatim — turning `"$(cat ...)"` into the literal text
+ * `\"\$(cat ...)\"`, a shell syntax error that silently no-ops the worker.
+ *
+ * @param {string} command - command produced by buildWorkerCommand()
+ * @param {Object} [env]    - worker env vars to prefix as KEY="value"
+ * @returns {string} the exact string passed as the send-keys argument
+ */
+export function composeWorkerCommand(command, env = {}) {
   const envStr = Object.entries(env)
     // Env values are sanitized so they can be embedded inside double-quotes.
+    // This is the ONLY escaping applied — the pane shell consumes it directly.
     .map(([k, v]) => `${k}="${sanitizeForShellArg(v)}"`)
     .join(' ');
 
-  const fullCommand = envStr ? `${envStr} ${command}` : command;
+  return envStr ? `${envStr} ${command}` : command;
+}
 
-  // `tmux send-keys` passes the argument string directly to the terminal.
-  // Wrap in double-quotes and escape the content so that special shell
-  // characters inside `fullCommand` cannot break out of the argument.
-  const safeCommand = sanitizeForShellArg(fullCommand);
+export function spawnWorkerInSession(sessionName, command, env = {}) {
+  // composeWorkerCommand() applies the single correct escaping level — see its
+  // docstring for why the composed string must NOT be re-escaped here.
+  const fullCommand = composeWorkerCommand(command, env);
 
   try {
-    execFileSync(resolveBinary('tmux'), ['send-keys', '-t', sessionName, safeCommand, 'Enter'], { stdio: 'pipe' });
+    execFileSync(resolveBinary('tmux'), ['send-keys', '-t', sessionName, fullCommand, 'Enter'], { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -244,11 +287,36 @@ export function listTeamSessions(teamName) {
   }
 }
 
+/**
+ * Append the exit-status sentinel to a worker's CLI command.
+ *
+ * Ordering is load-bearing:
+ *   1. run the CLI;
+ *   2. capture its exit code into `__ao_ec` BEFORE anything else — `rm` would
+ *      otherwise clobber `$?`;
+ *   3. clean up the prompt file;
+ *   4. echo `__AO_EXIT__:<code>` LAST so it is the final pane line before the
+ *      shell prompt, where `parseExitMarker` reliably finds it.
+ *
+ * Portable across sh/bash/zsh (`$?`, simple var, `echo`). The marker prefix is
+ * literal; only the executed echo prints a digit after the colon, so the
+ * monitor never mistakes the echoed (unexpanded `$__ao_ec`) command line for a
+ * real exit code.
+ *
+ * @param {string} cliCommand - the CLI invocation (no trailing cleanup)
+ * @param {string} safeFile    - sanitized prompt-file path to remove
+ * @returns {string}
+ */
+function withExitMarker(cliCommand, safeFile) {
+  return `${cliCommand}; __ao_ec=$?; rm -f "${safeFile}"; echo "${WORKER_EXIT_MARKER}:$__ao_ec"`;
+}
+
 export function buildWorkerCommand(worker, opts = {}) {
   // Write the prompt to a temp file to avoid shell injection via inline quoting.
   // The command reads the file contents and passes them to the CLI via stdin
   // where possible, or via a subshell cat when the CLI only accepts a positional
-  // argument.  The temp file is cleaned up by a trailing `; rm -f <path>`.
+  // argument. The temp file is removed and an exit-status sentinel emitted by
+  // withExitMarker() once the CLI returns.
   const promptFile = writePromptFile(worker.prompt);
   const safeFile = sanitizeForShellArg(promptFile);
 
@@ -260,7 +328,7 @@ export function buildWorkerCommand(worker, opts = {}) {
       const autonomyConfig = opts.autonomyConfig || loadAutonomyConfig(opts.cwd || process.cwd());
       const level = resolveCodexApproval(autonomyConfig, { cwd: opts.cwd });
       const codexArgs = buildCodexExecArgs(level).join(' '); // "-a never -s <sandbox>"
-      return `"${resolveBinary('codex')}" ${codexArgs} exec "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
+      return withExitMarker(`"${resolveBinary('codex')}" ${codexArgs} exec "$(cat "${safeFile}")"`, safeFile);
     }
     case 'gemini': {
       // Mirror Claude's permission level to Gemini approval mode
@@ -268,10 +336,10 @@ export function buildWorkerCommand(worker, opts = {}) {
       const gMode = resolveGeminiApproval(gAutonomy, { cwd: opts.cwd });
       const gFlag = geminiApprovalFlag(gMode);
       const gFlagPart = gFlag ? ` ${gFlag}` : '';
-      return `"${resolveBinary('gemini')}"${gFlagPart} -p "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
+      return withExitMarker(`"${resolveBinary('gemini')}"${gFlagPart} -p "$(cat "${safeFile}")"`, safeFile);
     }
     case 'claude':
     default:
-      return `"${resolveBinary('claude')}" --print "$(cat "${safeFile}")"; rm -f "${safeFile}"`;
+      return withExitMarker(`"${resolveBinary('claude')}" --print "$(cat "${safeFile}")"`, safeFile);
   }
 }
