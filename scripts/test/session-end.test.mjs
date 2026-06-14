@@ -391,6 +391,36 @@ describe('session-end: PROTECTED_NAMES allow-list defense', () => {
 // Fail-safe — always valid JSON
 // ---------------------------------------------------------------------------
 
+describe('session-end: F1 — active supervisor run protected, stale terminal run swept', () => {
+  let tmpDir; let activeRun; let staleRun;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    const supBase = path.join(tmpDir, '.ao', 'state', 'supervisor');
+    const aRun = 'a1a1a1a1a1a1a1a1'; const aWrk = 'b2b2b2b2b2b2b2b2';
+    activeRun = path.join(supBase, aRun);
+    mkdirSync(activeRun, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(activeRun, `${aWrk}.snapshot.json`),
+      JSON.stringify({ schemaVersion: 1, runId: aRun, workerRunId: aWrk, status: 'running', supervisorPid: process.pid, updatedAt: Date.now() }));
+    setMtime(activeRun, STALE_MS + 3600000); // ancient dir, but the run is ACTIVE
+
+    const sRun = 'c3c3c3c3c3c3c3c3'; const sWrk = 'd4d4d4d4d4d4d4d4';
+    staleRun = path.join(supBase, sRun);
+    mkdirSync(staleRun, { recursive: true, mode: 0o700 });
+    const snapFile = path.join(staleRun, `${sWrk}.snapshot.json`);
+    writeFileSync(snapFile,
+      JSON.stringify({ schemaVersion: 1, runId: sRun, workerRunId: sWrk, status: 'completed', supervisorPid: 999999, updatedAt: Date.now() - (STALE_MS + 3600000) }));
+    setMtime(snapFile, STALE_MS + 3600000);
+    setMtime(staleRun, STALE_MS + 3600000);
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('keeps the active run and removes the stale terminal run', () => {
+    runHook(tmpDir);
+    assert.ok(existsSync(activeRun), 'an active supervisor run must NOT be swept mid-flight');
+    assert.ok(!existsSync(staleRun), 'a stale terminal supervisor run should be swept');
+  });
+});
+
 describe('session-end: fail-safe — always valid JSON', () => {
   it('outputs valid JSON for non-JSON stdin', () => {
     const raw = execSync(`echo 'not json' | node "${SCRIPT}"`, {

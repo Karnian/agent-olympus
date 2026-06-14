@@ -11,6 +11,15 @@ import { buildRecoveryStrategy } from './stuck-recovery.mjs';
 import { detectClaudePermissionLevel, claudePermissionModeFlag } from './permission-detect.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
 import {
+  snapshotPath as supSnapshotPath,
+  outputPath as supOutputPath,
+  readSnapshot as supReadSnapshot,
+  isValidId as supIsValidId,
+  isTerminalStatus as supIsTerminalStatus,
+  isHeartbeatFresh as supIsHeartbeatFresh,
+  STARTUP_GRACE_MS as SUP_STARTUP_GRACE_MS,
+} from './supervisor-state.mjs';
+import {
   resolveCodexApproval,
   shouldDemoteCodexWorker,
   detectHostSandbox,
@@ -353,6 +362,112 @@ function monitorAdapterWorker(worker, adapterModule, registryEntry) {
   }
 }
 
+// ─── Supervisor (disk-snapshot) worker helpers (F1) ─────────────────────────
+// A supervisor worker is monitored/collected/shutdown via the DISK snapshot the
+// detached supervisor writes — the only reliable channel across the
+// fresh-process-per-poll boundary. Gated on an EXPLICIT descriptor so these
+// paths stay dormant until spawnTeam actually launches supervisors (P4): every
+// disk-loaded adapter worker already lacks a live handle, so "known adapter +
+// no live handle" alone is NOT a sufficient gate.
+
+/** Grace for the supervisor process group — must exceed the adapter's own 5s. */
+const SUPERVISOR_KILL_GRACE_MS = 8000;
+
+/** True only for a worker launched via the supervisor (P4 sets these fields). */
+export function isSupervisorWorker(state, worker) {
+  return !!(
+    state && supIsValidId(state.runId) && typeof state.projectRoot === 'string' &&
+    worker && worker._handle &&
+    supIsValidId(worker._handle.workerRunId) &&
+    Number.isInteger(worker._handle.supervisorPid) && worker._handle.supervisorPid > 1
+  );
+}
+
+/**
+ * Tri-state liveness for MONITORING (distinct from readProcStartId's kill-path
+ * fail-open): identity match → 'alive'; different identity → 'dead'; pid exists
+ * (incl. EPERM — exists but not signalable) but identity unreadable →
+ * 'alive-unverified'; ESRCH → 'dead'.
+ */
+export function probePidLiveness(pid, startId) {
+  if (!Number.isInteger(pid) || pid <= 1) return 'dead';
+  const cur = readProcStartId(pid);
+  if (cur !== null && startId) return cur === startId ? 'alive' : 'dead';
+  try { process.kill(pid, 0); return 'alive-unverified'; }
+  catch (e) { return e && e.code === 'EPERM' ? 'alive-unverified' : 'dead'; }
+}
+
+/** Monitor a supervisor worker from its disk snapshot. Returns a MonitorResult. */
+export function monitorSupervisorWorker(state, worker, now) {
+  const h = worker._handle;
+  let snapPath;
+  try { snapPath = supSnapshotPath(state.projectRoot, state.runId, h.workerRunId); }
+  catch { return { status: 'failed', output: '', error: { category: 'supervisor_invalid', message: 'invalid supervisor paths' } }; }
+
+  const r = supReadSnapshot(snapPath, { runId: state.runId, workerRunId: h.workerRunId });
+
+  if (r.kind === 'ok') {
+    const s = r.snapshot;
+    const tail = typeof s.outputTail === 'string' ? s.outputTail : '';
+    if (supIsTerminalStatus(s.status)) {
+      if (s.status === 'completed') return { status: 'completed', output: tail };
+      // failed | cancelled → failed, preserving category (cancelled → 'cancelled').
+      const cat = (s.error && s.error.category) || (s.status === 'cancelled' ? 'cancelled' : 'unknown');
+      const msg = (s.error && s.error.message) || s.status;
+      return { status: 'failed', output: tail, error: { category: cat, message: msg } };
+    }
+    // running → a DEAD supervisor is a definitive crash (immediate).
+    if (probePidLiveness(s.supervisorPid, s.supervisorStartId) === 'dead') {
+      return { status: 'failed', output: tail, error: { category: 'crash', message: 'supervisor died before completion' } };
+    }
+    // A stale heartbeat on a still-alive pid (wedged worker, but also a transient
+    // suspend/resume or >stale-threshold GC pause): require confirmation across
+    // TWO consecutive polls before declaring a crash, so a healthy-but-paused
+    // worker isn't false-crashed. `_staleSeen` latches the first observation.
+    if (!supIsHeartbeatFresh(s, now)) {
+      if (worker._supStaleSeen) {
+        return { status: 'failed', output: tail, error: { category: 'crash', message: 'supervisor heartbeat stale across two polls' } };
+      }
+      return { status: 'running', output: tail, _staleSeen: true };
+    }
+    return { status: 'running', output: tail };
+  }
+
+  if (r.kind === 'missing') {
+    const startedMs = Date.parse(worker.startedAt || '') || 0;
+    const age = now - startedMs;
+    // Within the startup grace (and NOT future-dated) → still starting up.
+    if (startedMs && age >= 0 && age <= SUP_STARTUP_GRACE_MS) return { status: 'running', output: '' };
+    // Past grace (or a future/invalid startedAt) with NO snapshot → the
+    // supervisor failed to come up (it writes its first snapshot immediately).
+    return { status: 'failed', output: '', error: { category: 'crash', message: 'supervisor produced no snapshot' } };
+  }
+
+  // corrupt | unsupported | mismatch → state is untrustworthy; fail DIRECTLY
+  // (a non-'crash' category so monitorTeam does NOT retry a corrupt run).
+  return { status: 'failed', output: '', error: { category: 'supervisor_invalid', message: `supervisor snapshot ${r.kind}` } };
+}
+
+/**
+ * Shut down a supervisor worker SUPERVISOR-FIRST: signal the supervisor group
+ * (its SIGTERM handler gracefully shuts the adapter down), WAIT for it, then
+ * re-read the snapshot and reap a SURVIVING adapter group as the orphan fallback
+ * (in case the supervisor died before cleanup). Both via F3 startId-checked kills.
+ */
+export async function shutdownSupervisorWorker(state, worker) {
+  const h = worker._handle;
+  // Phase 1: the supervisor (longer grace than the adapter's own 5s).
+  await killProcessGroups([{ pid: h.supervisorPid, startId: h.supervisorStartId }], SUPERVISOR_KILL_GRACE_MS);
+  // Phase 2: re-read AFTER phase 1 so an adapterPid recorded during the race is
+  // seen; reap it only if it survived the supervisor's graceful shutdown.
+  try {
+    const r = supReadSnapshot(supSnapshotPath(state.projectRoot, state.runId, h.workerRunId), { runId: state.runId, workerRunId: h.workerRunId });
+    if (r.kind === 'ok' && Number.isInteger(r.snapshot.adapterPid) && r.snapshot.adapterPid > 1) {
+      await killProcessGroups([{ pid: r.snapshot.adapterPid, startId: r.snapshot.adapterStartId }], KILL_GRACE_MS);
+    }
+  } catch { /* supervisor-only kill already done */ }
+}
+
 // ─── Tmux adapter helpers (inline — wraps existing tmux-session functions) ──
 
 /**
@@ -545,7 +660,10 @@ export async function reassignToClaude(teamName, workerName, originalPrompt, fai
     const adapterName = worker?._adapterName || 'tmux';
     const registryEntry = ADAPTER_REGISTRY[adapterName];
 
-    if (registryEntry && isLiveHandle(worker?._liveHandle)) {
+    if (isSupervisorWorker(state, worker)) {
+      // Supervisor worker: supervisor-first graceful shutdown + adapter reap (F3).
+      await shutdownSupervisorWorker(state, worker);
+    } else if (registryEntry && isLiveHandle(worker?._liveHandle)) {
       // In-process live handle (opts.liveState): graceful adapter shutdown.
       try {
         const adapterModule = await registryEntry.loader();
@@ -959,21 +1077,31 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
     let monitorResult;
     const registryEntry = ADAPTER_REGISTRY[adapterName];
     const adapterModule = registryEntry ? adapterModules[adapterName] : null;
+    const now = Date.now();
 
-    // Only an in-process live handle can be monitored via its adapter. A
-    // disk-loaded handle is either stripped (undefined) or a function-less husk
-    // whose status/_output froze at save time; isLiveHandle() rejects both so we
-    // don't report stale data as live, falling back to the tmux/honest path.
+    // Reader order (Codex-mandated): an in-process live handle → the supervisor's
+    // disk snapshot → tmux/legacy. The supervisor branch is gated on an explicit
+    // descriptor (isSupervisorWorker) so it stays dormant until spawnTeam (P4)
+    // launches supervisors; a disk-loaded handle is stripped/husk so isLiveHandle
+    // rejects it.
     if (registryEntry && adapterModule && isLiveHandle(worker[registryEntry.handleKey])) {
       monitorResult = monitorAdapterWorker(worker, adapterModule, registryEntry);
+    } else if (isSupervisorWorker(state, worker)) {
+      monitorResult = monitorSupervisorWorker(state, worker, now);
     } else {
       monitorResult = monitorTmuxWorker(worker);
+    }
+
+    // Latch the supervisor stale-heartbeat 2-poll confirmation across polls.
+    if (monitorResult._staleSeen) {
+      if (!worker._supStaleSeen) { state.workers[i]._supStaleSeen = true; stateChanged = true; }
+    } else if (worker._supStaleSeen) {
+      delete state.workers[i]._supStaleSeen; stateChanged = true;
     }
 
     // ─── Activity-based stall detection (adapter-agnostic) ───
     const currentHash = quickHash(monitorResult.output);
     const prevHash = worker.lastOutputHash || null;
-    const now = Date.now();
 
     if (currentHash !== prevHash) {
       state.workers[i].lastOutputHash = currentHash;
@@ -1081,7 +1209,14 @@ export function collectResults(teamName) {
       // time. Proper cross-process adapter-output capture needs a supervisor /
       // adapter-owned state file (tracked separately).
       const registryEntry = ADAPTER_REGISTRY[adapter];
-      if (registryEntry && isLiveHandle(worker._liveHandle)) {
+      if (isSupervisorWorker(state, worker)) {
+        // Supervisor worker: the durable output file is authoritative across the
+        // fresh-process boundary.
+        try {
+          const op = supOutputPath(state.projectRoot, state.runId, worker._handle.workerRunId);
+          if (existsSync(op)) { const o = readFileSync(op, 'utf-8'); if (o) results[worker.name] = o; }
+        } catch { /* best-effort */ }
+      } else if (registryEntry && isLiveHandle(worker._liveHandle)) {
         const output = worker._liveHandle._output;
         if (output) results[worker.name] = output;
       } else if (worker.session) {
@@ -1109,8 +1244,14 @@ export async function shutdownTeam(teamName, cwd) {
   // Shutdown non-tmux workers first (appserver + codex-exec child processes)
   const state = loadTeamState(teamName);
   const orphanPids = [];
+  const supWorkers = [];
   if (state && Array.isArray(state.workers)) {
     for (const worker of state.workers) {
+      if (isSupervisorWorker(state, worker)) {
+        // Handled supervisor-first below (signal supervisor → wait → reap adapter).
+        supWorkers.push(worker);
+        continue;
+      }
       const adapter = worker._adapterName || 'tmux';
       const registryEntry = ADAPTER_REGISTRY[adapter];
       if (!registryEntry) continue; // tmux workers handled by killTeamSessions below
@@ -1138,6 +1279,8 @@ export async function shutdownTeam(teamName, cwd) {
     }
   }
 
+  // Supervisor workers: supervisor-first graceful shutdown, then adapter reap.
+  for (const w of supWorkers) { await shutdownSupervisorWorker(state, w); }
   // Signal orphaned detached process groups (SIGTERM → grace → SIGKILL).
   await killProcessGroups(orphanPids);
 

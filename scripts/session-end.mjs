@@ -11,6 +11,8 @@ import { readFileSync, readdirSync, statSync, unlinkSync, rmSync } from 'node:fs
 import { join } from 'node:path';
 import { atomicWriteFileSync } from './lib/fs-atomic.mjs';
 import { finalizeSession, getCurrentSessionId, pruneSessions } from './lib/session-registry.mjs';
+import { readSnapshot as readSupSnapshot, isHeartbeatFresh as supHeartbeatFresh } from './lib/supervisor-state.mjs';
+import { readProcStartId } from './lib/proc-identity.mjs';
 
 const STALE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -43,6 +45,35 @@ const PROTECTED_NAMES = new Set([
  * @param {number} now - current timestamp (ms)
  * @returns {number}
  */
+/**
+ * True if a supervisor run dir holds a still-ACTIVE worker — a `running`
+ * snapshot with a fresh heartbeat, or whose supervisorPid is still alive. Such a
+ * run must NOT be swept mid-flight (F1).
+ */
+function isSupervisorRunActive(runDir, now) {
+  try {
+    for (const f of readdirSync(runDir)) {
+      if (!f.endsWith('.snapshot.json')) continue;
+      const r = readSupSnapshot(join(runDir, f));
+      if (r.kind !== 'ok' || r.snapshot.status !== 'running') continue;
+      if (supHeartbeatFresh(r.snapshot, now)) return true;
+      const pid = r.snapshot.supervisorPid;
+      if (Number.isInteger(pid) && pid > 1) {
+        // Verify IDENTITY so a reused PID can't keep a dead run alive forever:
+        // if we recorded a startId and can read the live one, they must match.
+        const recorded = r.snapshot.supervisorStartId;
+        if (recorded) {
+          const cur = readProcStartId(pid);
+          if (cur !== null) { if (cur === recorded) return true; continue; }
+        }
+        try { process.kill(pid, 0); return true; }
+        catch (e) { if (e && e.code === 'EPERM') return true; }
+      }
+    }
+  } catch { /* unreadable → not provably active */ }
+  return false;
+}
+
 function cleanStaleFiles(dir, now) {
   let cleaned = 0;
   try {
@@ -52,6 +83,24 @@ function cleanStaleFiles(dir, now) {
       // end up in .ao/state/ (defensive; primary storage is .ao/memory/).
       if (PROTECTED_NAMES.has(entry)) continue;
       const fullPath = join(dir, entry);
+      // F1: the supervisor tree is run-scoped — NEVER wholesale-delete it by its
+      // own mtime. Sweep per-run, skipping runs that are still active.
+      if (entry === 'supervisor') {
+        try {
+          if (statSync(fullPath).isDirectory()) {
+            for (const runId of readdirSync(fullPath)) {
+              const runDir = join(fullPath, runId);
+              try {
+                const rstat = statSync(runDir);
+                if (!rstat.isDirectory()) continue;
+                if (isSupervisorRunActive(runDir, now)) continue;
+                if (now - rstat.mtimeMs > STALE_MS) { rmSync(runDir, { recursive: true, force: true }); cleaned++; }
+              } catch { /* skip */ }
+            }
+            continue;
+          }
+        } catch { /* fall through to default handling */ }
+      }
       try {
         const stat = statSync(fullPath);
         if (now - stat.mtimeMs > STALE_MS) {
