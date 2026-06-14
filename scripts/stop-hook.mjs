@@ -94,7 +94,12 @@ function splitZ(raw) {
 function listStagedSensitive() {
   let raw;
   try {
-    raw = execFileSync('git', ['diff', '--cached', '--name-status', '-M10%', '-z'], {
+    // `-l1000` sets the rename-detection limit explicitly so a user's low
+    // `diff.renameLimit` (or `0`) can't make git SKIP rename detection (it would
+    // then emit `D <secret>` + `A <safe>` and the renamed secret would slip the
+    // name net). Residual: a WIP staging >1000 add/delete pairs still exceeds the
+    // exhaustive window — out of scope for this throwaway hook.
+    raw = execFileSync('git', ['diff', '--cached', '--name-status', '-M10%', '-l1000', '-z'], {
       encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch {

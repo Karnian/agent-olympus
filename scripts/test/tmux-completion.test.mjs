@@ -193,7 +193,7 @@ test('classifyTmuxWorker (F2): the nonce on the worker scopes the sentinel match
 // A fake `claude` on PATH lets us choose the exit code deterministically.
 // ---------------------------------------------------------------------------
 
-function runProducerConsumer(exitCode, nonce, { errexit = false } = {}) {
+function runProducerConsumer(exitCode, nonce, { errexit = false, presetEc = null } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'ao-exit-'));
   const origPath = process.env.PATH;
   // Fake CLI: ignore args, exit with the requested code.
@@ -204,9 +204,12 @@ function runProducerConsumer(exitCode, nonce, { errexit = false } = {}) {
   let command;
   try {
     command = buildWorkerCommand({ type: 'claude', prompt: 'do the thing' }, { cwd: tmpdir(), autonomyConfig: {}, exitNonce: nonce });
+    // presetEc simulates a REUSED pane where a prior command left `__ao_ec` set,
+    // so we can prove the success path doesn't inherit a stale code.
+    const script = presetEc === null ? command : `__ao_ec=${presetEc}; ${command}`;
     // The trailing `echo` exits 0, so sh -c never throws regardless of the CLI's
     // code — we read the sentinel from stdout, exactly like capturePane would.
-    const shArgs = errexit ? ['-e', '-c', command] : ['-c', command];
+    const shArgs = errexit ? ['-e', '-c', script] : ['-c', script];
     const out = execFileSync('sh', shArgs, { encoding: 'utf-8' });
     return parseExitMarker(out, nonce);
   } finally {
@@ -234,6 +237,16 @@ test('round-trip (F2): a nonce-scoped sentinel round-trips through a real shell'
   const nonce = 'feedface00112233';
   assert.equal(runProducerConsumer(0, nonce), 0);
   assert.equal(runProducerConsumer(7, nonce), 7);
+});
+
+test('round-trip (reused pane): a successful command does NOT inherit a stale exit code', () => {
+  // Regression: `cli || __ao_ec=$?` only assigned on failure, so a prior
+  // command's non-zero code leaked into this command's success. The
+  // `cli && __ao_ec=0 || __ao_ec=$?` form always assigns → success reports 0
+  // even when __ao_ec was preset to 99 by a "previous" command in the pane.
+  assert.equal(runProducerConsumer(0, 'reuse00112233aa', { presetEc: 99 }), 0);
+  // A genuine failure still reports its own code, not the stale one.
+  assert.equal(runProducerConsumer(5, 'reuse00112233bb', { presetEc: 99 }), 5);
 });
 
 test('round-trip (F5): the sentinel survives a pane shell under `set -e` (errexit)', () => {

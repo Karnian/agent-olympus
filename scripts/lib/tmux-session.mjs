@@ -356,19 +356,24 @@ export function listTeamSessions(teamName) {
  */
 function withExitMarker(cliCommand, safeFile, nonce) {
   const marker = nonce ? `${WORKER_EXIT_MARKER}:${nonce}` : WORKER_EXIT_MARKER;
-  // `<cli> || __ao_ec=$?` rather than `<cli>; __ao_ec=$?` so the exit capture
-  // survives a pane shell under `set -e` (errexit): a bare failing command at
-  // statement level would terminate the shell before `$?` is read, leaving NO
-  // sentinel and a worker stuck `running` until stall detection. The left
-  // operand of `||` is exempt from errexit, so a non-zero CLI is captured rather
-  // than killing the shell. Crucially `<cli>` stays the FIRST simple command, so
-  // composeWorkerCommand's `KEY="val" ` env prefix still exports into the CLI's
-  // environment — a compound `if …`/`{ …; }` could NOT be prefixed that way.
-  // `${__ao_ec:-0}` defaults to 0 on success (the var is never set then).
+  // `<cli> && __ao_ec=0 || __ao_ec=$?` rather than `<cli>; __ao_ec=$?`:
+  //  - ERREXIT-SAFE: a bare failing command at statement level would terminate a
+  //    pane shell under `set -e` before `$?` is read (no sentinel → stuck worker).
+  //    Operands of `&&`/`||` are exempt from errexit, so a non-zero CLI is
+  //    captured instead of killing the shell.
+  //  - ALWAYS ASSIGNS `__ao_ec` (0 on success via the `&& __ao_ec=0` arm, the
+  //    real code on failure via `|| __ao_ec=$?`). A plain `<cli> || __ao_ec=$?`
+  //    only assigns on failure, so in a REUSED pane a prior command's non-zero
+  //    code leaks into this command's success (`${__ao_ec:-0}` only covers
+  //    UNSET, not a stale value) — emitting a false failure. `__ao_ec=0` never
+  //    fails, so the `&& … || …` chain is a safe two-way assignment.
+  //  - `<cli>` stays the FIRST simple command so composeWorkerCommand's
+  //    `KEY='val' ` env prefix still exports into the CLI's environment — a
+  //    compound `if …`/`{ …; }` could NOT be prefixed that way.
   // The leading `echo ""` puts the marker at column 0 for the line-anchored
   // parser, so it matches the EXECUTED echo, never the typed command echo (where
   // the marker sits mid-line after `echo "`).
-  return `${cliCommand} || __ao_ec=$?; rm -f "${safeFile}"; echo ""; echo "${marker}:\${__ao_ec:-0}"`;
+  return `${cliCommand} && __ao_ec=0 || __ao_ec=$?; rm -f "${safeFile}"; echo ""; echo "${marker}:$__ao_ec"`;
 }
 
 export function buildWorkerCommand(worker, opts = {}) {

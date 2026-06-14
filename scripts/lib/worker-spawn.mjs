@@ -416,9 +416,19 @@ export function classifyTmuxWorker(worker, paneOutput) {
       const sig = runningSig.failed
         ? runningSig
         : (worker?.type === 'codex' && hasPane ? detectCodexError(paneOutput) : { failed: false });
-      error = sig.failed
-        ? { category: sig.reason, message: sig.message || 'Codex tmux error' }
-        : { category: 'nonzero_exit', message: `Worker command exited with status ${exitCode}` };
+      if (sig.failed) {
+        error = { category: sig.reason, message: sig.message || 'Codex tmux error' };
+      } else if (worker?.errorReason && worker.errorReason !== 'nonzero_exit') {
+        // The signature line scrolled out of the 200-line pane window, but an
+        // earlier poll already persisted a richer category — keep it rather than
+        // decay to nonzero_exit. (Codex F4 on the F6 fix)
+        error = {
+          category: worker.errorReason,
+          message: worker.errorMessage || `Worker command exited with status ${exitCode}`,
+        };
+      } else {
+        error = { category: 'nonzero_exit', message: `Worker command exited with status ${exitCode}` };
+      }
     }
   } else if (runningSig.failed) {
     status = 'failed';

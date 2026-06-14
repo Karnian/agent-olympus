@@ -256,11 +256,14 @@ test('round-trip: env value reaches the child env intact (single-quote encoding)
   assert.equal(envRoundTrip(value), value, `env value mangled`);
 });
 
-test('round-trip: env value with a newline + tab survives intact', () => {
-  // Single quotes preserve newlines/tabs literally; the old escaper did not
-  // touch newlines either, but this locks the behavior in.
+test('shellQuote ENCODER preserves a newline + tab losslessly (encoder-level)', () => {
+  // This asserts the shellQuote ENCODING is lossless via a real `sh -c` — NOT
+  // that such a value survives the tmux transport. tmux `send-keys` typed into
+  // an interactive pane cannot reliably carry a tab (triggers completion) or a
+  // newline (acts as Enter); production env values (AO_TEAM_NAME / worker name /
+  // type) are single-line, so this is an encoder guarantee, not a transport one.
   const value = 'line1\nline2\tmid';
-  assert.equal(envRoundTrip(value), value, `multiline env value mangled`);
+  assert.equal(envRoundTrip(value), value, `shellQuote mangled a multiline value`);
 });
 
 test('round-trip: a `!`-bearing value is NOT corrupted (regression for the \\! bug)', () => {
