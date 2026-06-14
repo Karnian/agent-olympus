@@ -1,16 +1,18 @@
 import { createHash, randomBytes } from 'crypto';
+import { spawn } from 'child_process';
+import { fileURLToPath } from 'url';
 import { readProcStartId } from './proc-identity.mjs';
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession, WORKER_EXIT_MARKER } from './tmux-session.mjs';
 import { readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
 import { addWisdom } from './wisdom.mjs';
 import { cleanupTeamWorktrees } from './worktree.mjs';
 import { mkdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import { buildRecoveryStrategy } from './stuck-recovery.mjs';
-import { detectClaudePermissionLevel, claudePermissionModeFlag } from './permission-detect.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
 import {
+  manifestPath as supManifestPath,
   snapshotPath as supSnapshotPath,
   outputPath as supOutputPath,
   readSnapshot as supReadSnapshot,
@@ -25,6 +27,9 @@ import {
   detectHostSandbox,
   buildHostSandboxWarning,
 } from './codex-approval.mjs';
+
+/** Absolute path to the supervisor CLI (launched detached per adapter worker). */
+const SUPERVISOR_SCRIPT = fileURLToPath(new URL('./adapter-worker-supervisor.mjs', import.meta.url));
 
 const STATE_DIR = '.ao/state';
 const ARTIFACTS_DIR = '.ao/artifacts';
@@ -111,23 +116,6 @@ const ADAPTER_REGISTRY = {
     errorLabel: 'Gemini exec',
   },
 };
-
-/**
- * Lazily load adapter modules needed by the given adapter names.
- * @param {string[]} adapterNames
- * @returns {Promise<Object.<string, Object>>} Map of adapter name -> loaded module
- */
-async function loadRequiredAdapters(adapterNames) {
-  const modules = {};
-  const unique = [...new Set(adapterNames)];
-  for (const name of unique) {
-    const entry = ADAPTER_REGISTRY[name];
-    if (entry) {
-      modules[name] = await entry.loader();
-    }
-  }
-  return modules;
-}
 
 // ─── State persistence ──────────────────────────────────────────────────────
 
@@ -751,10 +739,11 @@ export function demoteCodexWorkersIfNeeded(workers, level) {
  * Spawn a team of workers via the appropriate adapters.
  *
  * Production call signature is `spawnTeam(teamName, workers, cwd, capabilities)`.
- * Tests can pass a fifth `_inject` parameter to supply fake adapter modules
- * (bypassing `loadRequiredAdapters` dynamic imports) and a fake
- * `createTeamSession` (bypassing real tmux). Production callers MUST NOT
- * pass `_inject`; the parameter is prefixed with `_` to make that clear.
+ * Tests can pass a fifth `_inject` parameter to supply a fake `spawnSupervisor`
+ * (recorder / fake child instead of a real detached supervisor), a `supervisor`
+ * override ({ adapterName, env } — used to route the manifest to the env-gated
+ * fixture adapter), and a fake `createTeamSession` (bypassing real tmux).
+ * Production callers MUST NOT pass `_inject`; the `_` prefix makes that clear.
  *
  * @param {string} teamName
  * @param {Array<Object>} workers
@@ -814,21 +803,19 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
     throw new Error('tmux is not installed. Run: brew install tmux');
   }
 
-  // Adapter modules: tests inject pre-built fake modules, production uses
-  // dynamic import via the registry. Tests MUST supply every adapter name
-  // they use in the workers array; missing adapters yield nulls (same as
-  // prod when the adapter isn't needed).
-  const adapterModules = _inject?.adapters
-    ? { ..._inject.adapters }
-    : await loadRequiredAdapters(adapterNames.filter(a => a !== 'tmux'));
-  const codexExec = adapterModules['codex-exec'] || null;
-  const codexAppServer = adapterModules['codex-appserver'] || null;
-  const claudeCli = adapterModules['claude-cli'] || null;
-  const geminiExec = adapterModules['gemini-exec'] || null;
-  const geminiAcp = adapterModules['gemini-acp'] || null;
+  // FLIP (P4): adapter workers no longer spawn in-process here — each is run by
+  // a DETACHED supervisor that loads the adapter itself and writes disk
+  // snapshots/output. So spawnTeam no longer loads adapter modules.
 
+  // FLIP (P4): a run identity scopes the supervisor's disk files so a STALE
+  // supervisor from a prior same-name run can't be read as current. projectRoot
+  // is ABSOLUTE so a detached supervisor (different cwd) resolves paths correctly.
+  const runId = randomBytes(8).toString('hex');
+  const projectRoot = resolve(cwd);
   const state = {
     teamName,
+    runId,
+    projectRoot,
     workers: workers.map((w, i) => ({
       ...w,
       status: 'pending',
@@ -841,6 +828,46 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
     phase: 'spawning',
     startedAt: new Date().toISOString(),
     cwd
+  };
+
+  // Launch a DETACHED supervisor for one adapter worker. The manifest carries
+  // DATA only (paths are derived from the run IDs, never trusted from it); the
+  // fixture adapter is unreachable in production (AO_SUPERVISOR_ALLOW_FIXTURE is
+  // stripped from the child env). Tests inject `_inject.spawnSupervisor` (a
+  // recorder / fake child) and `_inject.supervisor` (fixture adapterName + env).
+  const spawnSupervisorFn = _inject?.spawnSupervisor
+    || ((script, mPath, opts) => { const c = spawn(process.execPath, [script, mPath], opts); c.unref(); return c; });
+  const launchSupervisor = (i) => {
+    const worker = workers[i];
+    const adapterName = adapterNames[i];
+    const workerRunId = randomBytes(8).toString('hex');
+    const wantsGemini = adapterName === 'gemini-exec' || adapterName === 'gemini-acp';
+    const manifest = {
+      schemaVersion: 1, runId, workerRunId, teamName,
+      workerName: worker.name, adapterName,
+      projectRoot, cwd: worker.cwd || projectRoot, prompt: worker.prompt || '',
+      level: codexLevel, model: worker.model || null,
+      systemPrompt: worker.systemPrompt || null, maxBudgetUsd: worker.maxBudgetUsd || null,
+      approvalMode: worker.approvalMode || null,
+      geminiCredential: wantsGemini ? geminiCredential : null,
+      timeoutMs: Number.isInteger(worker.timeoutMs) ? worker.timeoutMs : 600000,
+    };
+    if (worker.fixture) manifest.fixture = worker.fixture;                       // test-only params
+    if (_inject?.supervisor?.adapterName) manifest.adapterName = _inject.supervisor.adapterName; // test-only
+    try {
+      const mPath = supManifestPath(projectRoot, runId, workerRunId);
+      atomicWriteFileSync(mPath, JSON.stringify(manifest));
+      const env = { ...process.env };
+      delete env.AO_SUPERVISOR_ALLOW_FIXTURE;                                    // never expose the fixture in prod
+      if (_inject?.supervisor?.env) Object.assign(env, _inject.supervisor.env); // test-only
+      const child = spawnSupervisorFn(SUPERVISOR_SCRIPT, mPath, { detached: true, stdio: 'ignore', cwd: projectRoot, env });
+      state.workers[i].status = 'running';
+      state.workers[i].startedAt = new Date().toISOString();
+      state.workers[i]._handle = { supervisorPid: child.pid, supervisorStartId: readProcStartId(child.pid), runId, workerRunId };
+    } catch (err) {
+      state.workers[i].status = 'failed';
+      state.workers[i].error = err.message;
+    }
   };
 
   // Spawn tmux workers first (need sessions created in batch).
@@ -878,127 +905,11 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
   for (let i = 0; i < workers.length; i++) {
     const worker = workers[i];
 
-    if (adapterNames[i] === 'codex-appserver') {
-      // Spawn via codex-appserver adapter (multi-turn)
-      let serverHandle = null;
-      try {
-        serverHandle = codexAppServer.startServer({ cwd });
-        // Initialize handshake (required before any other method)
-        const initResult = await codexAppServer.initializeServer(serverHandle);
-        if (initResult.error) {
-          throw new Error(initResult.error.message || 'Failed to initialize server');
-        }
-        // Create thread and start first turn.
-        // Pass `level` so the new permission-mirroring path in createThread
-        // sets both approvalPolicy ('never') and sandbox (mapped from level).
-        // `serviceName` replaces the removed `--session-source` CLI flag
-        // (codex 0.118+) — observability tag for Athena/Atlas workers.
-        const threadResult = await codexAppServer.createThread(serverHandle, {
-          cwd,
-          level: codexLevel,
-          ephemeral: true,
-          serviceName: `agent-olympus:${teamName}`,
-        });
-        if (threadResult.error) {
-          throw new Error(threadResult.error.message || 'Failed to create thread');
-        }
-        const turnResult = await codexAppServer.startTurn(serverHandle, worker.prompt);
-        if (turnResult.error) {
-          throw new Error(turnResult.error.message || 'Failed to start turn');
-        }
-        state.workers[i].status = 'running';
-        state.workers[i].startedAt = new Date().toISOString();
-        state.workers[i]._handle = { pid: serverHandle.pid, threadId: serverHandle.threadId, turnId: serverHandle.turnId };
-        state.workers[i]._liveHandle = serverHandle;
-      } catch (err) {
-        state.workers[i].status = 'failed';
-        state.workers[i].error = err.message;
-        // Cleanup: kill the server process to prevent orphaned detached processes
-        if (serverHandle) {
-          try { await codexAppServer.shutdownServer(serverHandle, 2000); } catch {}
-        }
-      }
-    } else if (adapterNames[i] === 'claude-cli') {
-      // Spawn via claude-cli adapter (headless Claude Code -p mode)
-      try {
-        const permLevel = detectClaudePermissionLevel({ cwd });
-        const handle = claudeCli.spawn(worker.prompt, {
-          cwd,
-          model: worker.model,
-          appendSystemPrompt: worker.systemPrompt,
-          maxBudgetUsd: worker.maxBudgetUsd,
-          permissionMode: claudePermissionModeFlag(permLevel),
-        });
-        state.workers[i].status = 'running';
-        state.workers[i].startedAt = new Date().toISOString();
-        state.workers[i]._handle = { pid: handle.pid }; // sessionId populated async via init event
-        state.workers[i]._liveHandle = handle;
-      } catch (err) {
-        state.workers[i].status = 'failed';
-        state.workers[i].error = err.message;
-      }
-    } else if (adapterNames[i] === 'codex-exec') {
-      // Spawn via codex-exec adapter.
-      // Pass `level` so spawn() builds `-a never -s <sandbox>` global flags
-      // mirroring the host Claude permission tier (Codex 0.118+).
-      try {
-        const handle = codexExec.spawn(worker.prompt, { cwd, level: codexLevel });
-        state.workers[i].status = 'running';
-        state.workers[i].startedAt = new Date().toISOString();
-        state.workers[i]._handle = { pid: handle.pid }; // Serializable subset
-        state.workers[i]._liveHandle = handle; // Non-serializable, for in-process monitoring
-      } catch (err) {
-        state.workers[i].status = 'failed';
-        state.workers[i].error = err.message;
-      }
-    } else if (adapterNames[i] === 'gemini-acp') {
-      // Spawn via gemini-acp adapter (multi-turn ACP JSON-RPC 2.0)
-      let serverHandle = null;
-      try {
-        serverHandle = geminiAcp.startServer({ cwd, credential: geminiCredential });
-        const initResult = await geminiAcp.initializeServer(serverHandle);
-        if (initResult?.error) {
-          throw new Error(initResult.error.message || 'Failed to initialize Gemini ACP server');
-        }
-        const sessionResult = await geminiAcp.createSession(serverHandle, {
-          cwd,
-          approvalMode: worker.approvalMode,
-          model: worker.model,
-        });
-        if (sessionResult?.error) {
-          throw new Error(sessionResult.error.message || 'Failed to create Gemini session');
-        }
-        // Fire-and-forget: sendPrompt returns a promise but we don't await it
-        // so the worker starts running immediately (like codex-appserver's startTurn)
-        geminiAcp.sendPrompt(serverHandle, worker.prompt).catch(() => {});
-        state.workers[i].status = 'running';
-        state.workers[i].startedAt = new Date().toISOString();
-        state.workers[i]._handle = { pid: serverHandle.pid, sessionId: serverHandle._sessionId };
-        state.workers[i]._liveHandle = serverHandle;
-      } catch (err) {
-        state.workers[i].status = 'failed';
-        state.workers[i].error = err.message;
-        if (serverHandle) {
-          try { await geminiAcp.shutdownServer(serverHandle, 2000); } catch {}
-        }
-      }
-    } else if (adapterNames[i] === 'gemini-exec') {
-      // Spawn via gemini-exec adapter (single-turn)
-      try {
-        const handle = geminiExec.spawn(worker.prompt, {
-          cwd,
-          model: worker.model,
-          approvalMode: worker.approvalMode,
-          credential: geminiCredential,
-        });
-        state.workers[i].status = 'running';
-        state.workers[i].startedAt = new Date().toISOString();
-        state.workers[i]._handle = { pid: handle.pid };
-        state.workers[i]._liveHandle = handle;
-      } catch (err) {
-        state.workers[i].status = 'failed';
-        state.workers[i].error = err.message;
-      }
+    if (adapterNames[i] !== 'tmux') {
+      // FLIP (P4): a DETACHED supervisor owns the adapter's live handle and
+      // writes the disk snapshot/output a fresh-process orchestrator reads.
+      // No in-process adapter spawn / _liveHandle anymore.
+      launchSupervisor(i);
     } else {
       // Spawn via tmux
       const session = sessions[tmuxIdx++];

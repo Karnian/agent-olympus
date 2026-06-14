@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { spawnTeam, shutdownTeam, readProcStartId } from '../lib/worker-spawn.mjs';
+import { spawnTeam, shutdownTeam, monitorTeam, collectResults, readProcStartId } from '../lib/worker-spawn.mjs';
 
 // ─── Fake adapter factory ─────────────────────────────────────────────────────
 
@@ -143,7 +143,36 @@ function makeFakeAdapters() {
     },
   };
 
-  return { modules, calls };
+  // FLIP (P4): spawnTeam now launches a DETACHED supervisor instead of spawning
+  // adapters in-process. This recorder stands in for that launch — it reads the
+  // DATA manifest spawnTeam wrote and records the SAME `calls` shape (mapping
+  // adapterName + level/model), so the existing wiring assertions still hold
+  // without spawning real processes or real adapters.
+  let _supPid = 900000;
+  const spawnSupervisor = (_script, manifestPath, _opts) => {
+    let m = {};
+    try { m = JSON.parse(readFileSync(manifestPath, 'utf-8')); } catch { /* leave empty */ }
+    const rec = { prompt: m.prompt, opts: { level: m.level, model: m.model, approvalMode: m.approvalMode } };
+    switch (m.adapterName) {
+      case 'codex-exec': calls.codexExecSpawn.push(rec); break;
+      case 'codex-appserver':
+        calls.codexAppServerStart.push({ opts: {} });
+        calls.codexAppServerCreateThread.push({ opts: { level: m.level } });
+        calls.codexAppServerStartTurn.push({ prompt: m.prompt });
+        break;
+      case 'claude-cli': calls.claudeCliSpawn.push(rec); break;
+      case 'gemini-exec': calls.geminiExecSpawn.push(rec); break;
+      case 'gemini-acp':
+        calls.geminiAcpStart.push({ opts: {} });
+        calls.geminiAcpCreateSession.push({ opts: { approvalMode: m.approvalMode, model: m.model } });
+        calls.geminiAcpSendPrompt.push({ prompt: m.prompt });
+        break;
+      default: break;
+    }
+    return { pid: ++_supPid };
+  };
+
+  return { modules, calls, spawnSupervisor };
 }
 
 // ─── Temp workspace helper ────────────────────────────────────────────────────
@@ -204,12 +233,12 @@ function makeWorkspace(allow = ['Bash(*)', 'Write(*)']) {
 test('spawnTeam integration: codex worker with full-auto host → codex-exec receives level=full-auto', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
-    const { modules, calls } = makeFakeAdapters();
+    const { calls, spawnSupervisor } = makeFakeAdapters();
     const workers = [{ type: 'codex', name: 'c1', prompt: 'do it' }];
     const caps = { hasCodexExecJson: true, hasCodexAppServer: false };
 
     const state = await spawnTeam('team-1', workers, ws.cwd, caps, {
-      adapters: modules,
+      spawnSupervisor,
     });
 
     assert.equal(calls.codexExecSpawn.length, 1, 'codex-exec.spawn should be called exactly once');
@@ -225,11 +254,11 @@ test('spawnTeam integration: codex worker with full-auto host → codex-exec rec
 test('spawnTeam integration: codex worker with Write(*) only host → level=auto-edit', async () => {
   const ws = makeWorkspace(['Write(*)']);
   try {
-    const { modules, calls } = makeFakeAdapters();
+    const { calls, spawnSupervisor } = makeFakeAdapters();
     const workers = [{ type: 'codex', name: 'c1', prompt: 'do it' }];
     const caps = { hasCodexExecJson: true };
 
-    await spawnTeam('team-2', workers, ws.cwd, caps, { adapters: modules });
+    await spawnTeam('team-2', workers, ws.cwd, caps, { spawnSupervisor });
 
     assert.equal(calls.codexExecSpawn[0].opts.level, 'auto-edit');
   } finally {
@@ -240,19 +269,20 @@ test('spawnTeam integration: codex worker with Write(*) only host → level=auto
 test('spawnTeam integration: codex worker with suggest host → DEMOTED to claude-cli', async () => {
   const ws = makeWorkspace(['Read(*)']); // no Bash, no Write, no Edit → suggest
   try {
-    const { modules, calls } = makeFakeAdapters();
+    const { calls, spawnSupervisor } = makeFakeAdapters();
     const workers = [{ type: 'codex', name: 'c1', prompt: 'analyze', model: 'gpt-5' }];
     const caps = { hasCodexExecJson: true, hasClaudeCli: true };
 
-    const state = await spawnTeam('team-3', workers, ws.cwd, caps, { adapters: modules });
+    const state = await spawnTeam('team-3', workers, ws.cwd, caps, { spawnSupervisor });
 
     // Codex path should NOT be called — worker was demoted before adapter selection
     assert.equal(calls.codexExecSpawn.length, 0, 'codex-exec should NOT be called on demoted worker');
     assert.equal(calls.codexAppServerStart.length, 0);
     // Claude-cli should receive the demoted worker
     assert.equal(calls.claudeCliSpawn.length, 1);
-    // The provider-specific `model` field must be stripped
-    assert.equal(calls.claudeCliSpawn[0].opts.model, undefined,
+    // The provider-specific `model` field must be stripped (the supervisor
+    // manifest carries `model: null` for a demoted worker, never the codex name).
+    assert.ok(!calls.claudeCliSpawn[0].opts.model,
       'demoted worker must not carry codex model name into claude-cli');
 
     assert.equal(state.workers[0].type, 'claude');
@@ -267,11 +297,11 @@ test('spawnTeam integration: codex worker with suggest host → DEMOTED to claud
 test('spawnTeam integration: codex-appserver receives level via createThread', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
-    const { modules, calls } = makeFakeAdapters();
+    const { calls, spawnSupervisor } = makeFakeAdapters();
     const workers = [{ type: 'codex', name: 'c1', prompt: 'ship it' }];
     const caps = { hasCodexExecJson: true, hasCodexAppServer: true };
 
-    await spawnTeam('team-4', workers, ws.cwd, caps, { adapters: modules });
+    await spawnTeam('team-4', workers, ws.cwd, caps, { spawnSupervisor });
 
     // appserver should win over exec because caps says both
     assert.equal(calls.codexAppServerStart.length, 1);
@@ -288,7 +318,7 @@ test('spawnTeam integration: codex-appserver receives level via createThread', a
 test('spawnTeam integration: mixed team with codex + claude + gemini', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
-    const { modules, calls } = makeFakeAdapters();
+    const { calls, spawnSupervisor } = makeFakeAdapters();
     const workers = [
       { type: 'codex', name: 'c1', prompt: 'task-1' },
       { type: 'claude', name: 'cl1', prompt: 'task-2' },
@@ -301,7 +331,7 @@ test('spawnTeam integration: mixed team with codex + claude + gemini', async () 
     };
 
     const state = await spawnTeam('team-5', workers, ws.cwd, caps, {
-      adapters: modules,
+      spawnSupervisor,
     });
 
     assert.equal(calls.codexExecSpawn.length, 1);
@@ -321,11 +351,11 @@ test('spawnTeam integration: AO_HOST_SANDBOX_LEVEL=read-only downgrades codex to
     // demoteCodexWorkersIfNeeded routes everything to claude-cli.
     process.env.AO_HOST_SANDBOX_LEVEL = 'read-only';
 
-    const { modules, calls } = makeFakeAdapters();
+    const { calls, spawnSupervisor } = makeFakeAdapters();
     const workers = [{ type: 'codex', name: 'c1', prompt: 'do it' }];
     const caps = { hasCodexExecJson: true, hasCodexAppServer: true, hasClaudeCli: true };
 
-    await spawnTeam('team-6', workers, ws.cwd, caps, { adapters: modules });
+    await spawnTeam('team-6', workers, ws.cwd, caps, { spawnSupervisor });
 
     // Codex paths must NOT be called because demotion happens before adapter selection
     assert.equal(calls.codexExecSpawn.length, 0);
@@ -341,11 +371,11 @@ test('spawnTeam integration: autonomy.codex.approval=auto-edit is intersected wi
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']); // would be full-auto
   try {
     ws.writeAutonomy({ codex: { approval: 'auto-edit' } });
-    const { modules, calls } = makeFakeAdapters();
+    const { calls, spawnSupervisor } = makeFakeAdapters();
     const workers = [{ type: 'codex', name: 'c1', prompt: 'do' }];
     const caps = { hasCodexExecJson: true };
 
-    await spawnTeam('team-7', workers, ws.cwd, caps, { adapters: modules });
+    await spawnTeam('team-7', workers, ws.cwd, caps, { spawnSupervisor });
 
     // autonomy sets the ceiling to auto-edit → host unknown → effective stays auto-edit
     assert.equal(calls.codexExecSpawn[0].opts.level, 'auto-edit');
@@ -357,14 +387,14 @@ test('spawnTeam integration: autonomy.codex.approval=auto-edit is intersected wi
 test('spawnTeam integration: workers state has _adapterName after spawn', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
-    const { modules } = makeFakeAdapters();
+    const { spawnSupervisor } = makeFakeAdapters();
     const workers = [
       { type: 'codex', name: 'c1', prompt: 'a' },
       { type: 'claude', name: 'cl1', prompt: 'b' },
     ];
     const caps = { hasCodexExecJson: true, hasClaudeCli: true };
 
-    const state = await spawnTeam('team-8', workers, ws.cwd, caps, { adapters: modules });
+    const state = await spawnTeam('team-8', workers, ws.cwd, caps, { spawnSupervisor });
 
     assert.equal(state.workers[0]._adapterName, 'codex-exec');
     assert.equal(state.workers[1]._adapterName, 'claude-cli');
@@ -379,11 +409,11 @@ test('spawnTeam integration: fire-and-forget wisdom warning does not block spawn
   // forget and best-effort.
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
-    const { modules, calls } = makeFakeAdapters();
+    const { calls, spawnSupervisor } = makeFakeAdapters();
     const workers = [{ type: 'codex', name: 'c1', prompt: 'a' }];
     const caps = { hasCodexExecJson: true };
 
-    const state = await spawnTeam('team-9', workers, ws.cwd, caps, { adapters: modules });
+    const state = await spawnTeam('team-9', workers, ws.cwd, caps, { spawnSupervisor });
 
     assert.equal(state.workers[0].status, 'running');
     assert.equal(calls.codexExecSpawn.length, 1);
@@ -397,7 +427,7 @@ test('spawnTeam integration: fire-and-forget wisdom warning does not block spawn
 test('spawnTeam integration: tmux fallback uses injected createTeamSession', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
-    const { modules } = makeFakeAdapters();
+    const { spawnSupervisor } = makeFakeAdapters();
     const tmuxCalls = [];
     const fakeCreateTeamSession = (teamName, tmuxWorkers, cwd) => {
       tmuxCalls.push({ teamName, count: tmuxWorkers.length, cwd });
@@ -417,7 +447,7 @@ test('spawnTeam integration: tmux fallback uses injected createTeamSession', asy
     // that our injected createTeamSession was called with the right shape.
     try {
       await spawnTeam('team-tmux', workers, ws.cwd, caps, {
-        adapters: modules,
+        spawnSupervisor,
         validateTmux: () => true,
         createTeamSession: fakeCreateTeamSession,
       });
@@ -437,14 +467,14 @@ test('spawnTeam integration: tmux fallback uses injected createTeamSession', asy
 test('spawnTeam integration: validateTmux failure throws clear error', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
-    const { modules } = makeFakeAdapters();
+    const { spawnSupervisor } = makeFakeAdapters();
     const workers = [{ type: 'codex', name: 'c1', prompt: 'a' }];
     const caps = {}; // empty caps → tmux path
 
     let err;
     try {
       await spawnTeam('team-notmux', workers, ws.cwd, caps, {
-        adapters: modules,
+        spawnSupervisor,
         validateTmux: () => false,
       });
     } catch (e) {
@@ -458,219 +488,107 @@ test('spawnTeam integration: validateTmux failure throws clear error', async () 
 });
 
 // ─── Failure / cleanup paths ───────────────────────────────────────────────
+// Adapter-internal failures (init / createThread / spawn errors) now occur
+// INSIDE the detached supervisor and surface via the snapshot — covered in
+// adapter-worker-supervisor.test.mjs. Here we cover spawnTeam's OWN launch failure.
 
-test('spawnTeam integration: appserver initializeServer failure yields failed worker + shutdown', async () => {
+test('spawnTeam integration: a supervisor launch failure marks the worker failed', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
-    const { modules, calls } = makeFakeAdapters();
-    modules['codex-appserver'].initializeServer = async (handle) => {
-      calls.codexAppServerInit.push({ handle });
-      return { error: { code: -1, message: 'init boom' } };
-    };
-    let shutdownCalled = false;
-    modules['codex-appserver'].shutdownServer = async () => { shutdownCalled = true; };
-
-    const workers = [{ type: 'codex', name: 'c1', prompt: 'a' }];
-    const caps = { hasCodexAppServer: true, hasCodexExecJson: true };
-
-    const state = await spawnTeam('team-fail', workers, ws.cwd, caps, { adapters: modules });
-
-    assert.equal(state.workers[0].status, 'failed');
-    assert.match(state.workers[0].error || '', /init boom/);
-    assert.equal(shutdownCalled, true, 'failed appserver must be shutdown to prevent orphaned process');
-  } finally {
-    ws.cleanup();
-  }
-});
-
-test('spawnTeam integration: appserver createThread failure yields failed worker', async () => {
-  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
-  try {
-    const { modules } = makeFakeAdapters();
-    modules['codex-appserver'].createThread = async () => ({
-      error: { code: -1, message: 'create thread boom' },
-    });
-
-    const workers = [{ type: 'codex', name: 'c1', prompt: 'a' }];
-    const caps = { hasCodexAppServer: true, hasCodexExecJson: true };
-
-    const state = await spawnTeam('team-fail2', workers, ws.cwd, caps, { adapters: modules });
-
-    assert.equal(state.workers[0].status, 'failed');
-    assert.match(state.workers[0].error || '', /create thread boom/);
-  } finally {
-    ws.cleanup();
-  }
-});
-
-test('spawnTeam integration: codex-exec spawn throw yields failed worker', async () => {
-  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
-  try {
-    const { modules } = makeFakeAdapters();
-    modules['codex-exec'].spawn = () => { throw new Error('exec spawn boom'); };
-
     const workers = [{ type: 'codex', name: 'c1', prompt: 'a' }];
     const caps = { hasCodexExecJson: true };
-
-    const state = await spawnTeam('team-fail3', workers, ws.cwd, caps, { adapters: modules });
-
+    const spawnSupervisor = () => { throw new Error('launch boom'); };
+    const state = await spawnTeam('team-launchfail', workers, ws.cwd, caps, { spawnSupervisor });
     assert.equal(state.workers[0].status, 'failed');
-    assert.match(state.workers[0].error || '', /exec spawn boom/);
+    assert.match(state.workers[0].error || '', /launch boom/);
   } finally {
     ws.cleanup();
   }
 });
 
-// ─── State-serialization defect regression (_liveHandle strip) ──────────────
+// ─── State-serialization regression (_liveHandle strip, upgrade path) ───────
 //
-// saveTeamState must NEVER persist `_liveHandle` — it is a LIVE ChildProcess /
-// JSON-RPC handle. JSON.stringify does not throw on it; it deep-serializes a
-// husk that (a) leaks `spawnargs` (the full prompt) + stream buffers into
-// .ao/state and (b) drops `.kill`, so a fresh process that reloads the husk
-// orphans the real detached process group in shutdownTeam. These tests inject
-// a fake adapter whose spawn() returns a husk-shaped handle and assert it never
-// reaches disk, plus that shutdownTeam still kills a real worker via _handle.pid.
+// POST-FLIP (P4): spawnTeam launches a DETACHED supervisor and persists only a
+// serializable `_handle` ({supervisorPid, supervisorStartId, runId, workerRunId})
+// — it never creates an in-process `_liveHandle` anymore. The `_liveHandle`
+// strip in saveTeamState (NON_SERIALIZABLE_WORKER_KEYS) is now an UPGRADE
+// safety net: a team-*.json written by an OLD version still carries a husk on
+// `_liveHandle`, and re-saving it must drop that husk so its leaked `spawnargs`
+// (the full prompt) + stream buffers never re-reach disk and a fresh process can
+// still kill the real detached group via the serializable `_handle.pid`.
 
-/**
- * Fake codex-exec adapter whose spawn() returns a handle that mimics the
- * dangerous shape of a real ChildProcess wrapper: a `.kill` function (silently
- * dropped by JSON), a circular self-reference (would throw "circular structure"
- * if the replacer ever recursed into it), and a `secret` present ONLY on the
- * live handle (never on the worker's own prompt fields).
- */
-function makeLiveHandleAdapter(secret, pid = 999001) {
-  return {
-    'codex-exec': {
-      spawn: () => {
-        const handle = {
-          pid,
-          _output: `stream-buffer ${secret}`,
-          spawnargs: ['codex', 'exec', '--json', secret],
-          status: 'running',
-          kill: () => {}, // function — silently dropped by JSON.stringify
-        };
-        handle.process = handle; // circular ref — replacer must not recurse here
-        return handle;
-      },
-      monitor: () => ({ status: 'running', output: '' }),
-      shutdown: async () => {},
-    },
-  };
-}
-
-test('saveTeamState regression: _liveHandle is undefined after a disk round-trip', async () => {
+test('spawnTeam regression: persists only a serializable supervisor descriptor (no _liveHandle)', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
-    const modules = makeLiveHandleAdapter('LIVEHANDLE_ONLY_SECRET_roundtrip');
+    const { spawnSupervisor } = makeFakeAdapters();
     const workers = [{ type: 'codex', name: 'c1', prompt: 'benign worker prompt' }];
     const caps = { hasCodexExecJson: true };
 
-    await spawnTeam('rt', workers, ws.cwd, caps, { adapters: modules });
+    await spawnTeam('rt', workers, ws.cwd, caps, { spawnSupervisor });
 
     // Re-load exactly as a fresh orchestrator process (separate node invocation) would.
     const loaded = JSON.parse(
       readFileSync(join(ws.cwd, '.ao', 'state', 'team-rt.json'), 'utf-8'),
     );
 
+    // Post-flip there is no in-process live handle to strip — the invariant is
+    // that none is ever persisted, and the handle that IS persisted is fully
+    // serializable (PIDs + run ids), which is what the fresh-process
+    // monitor/shutdown path relies on.
     assert.equal(loaded.workers[0]._liveHandle, undefined,
-      '_liveHandle must be stripped on save (documented invariant)');
-    // The serializable metadata handle survives for the PID-kill fallback.
-    assert.equal(loaded.workers[0]._handle.pid, 999001,
-      '_handle.pid must survive for the shutdownTeam fallback');
+      '_liveHandle must never be persisted (documented invariant)');
+    assert.equal(typeof loaded.workers[0]._handle.supervisorPid, 'number',
+      '_handle.supervisorPid must survive for the fresh-process monitor/shutdown path');
+    assert.equal(typeof loaded.workers[0]._handle.workerRunId, 'string',
+      '_handle.workerRunId must survive to locate the supervisor snapshot/output');
+    // The prompt is preserved as a deliberate field (originalPrompt), not lost.
+    assert.equal(loaded.workers[0].originalPrompt, 'benign worker prompt');
   } finally {
     ws.cleanup();
   }
 });
 
-test('saveTeamState regression: no _liveHandle-only secret (prompt/spawnargs/buffer) leaks to disk', async () => {
+test('saveTeamState regression: re-saving a legacy _liveHandle husk strips it (upgrade path)', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
     const secret = 'LIVEHANDLE_ONLY_SECRET_noleak';
-    const modules = makeLiveHandleAdapter(secret);
-    // The worker's own prompt is deliberately distinct from the secret, so any
-    // match in the persisted file can only come from the leaked _liveHandle.
-    const workers = [{ type: 'codex', name: 'c1', prompt: 'do the benign task' }];
-    const caps = { hasCodexExecJson: true };
+    // A team-*.json written by the OLD in-process spawn path: a JSON husk on
+    // _liveHandle carrying spawnargs/stream-buffer secrets (its .kill was already
+    // dropped by the original round-trip). The worker's own prompt is deliberately
+    // distinct from the secret, so any match in the re-saved file can only come
+    // from the leaked husk.
+    mkdirSync(join(ws.cwd, '.ao', 'state'), { recursive: true });
+    writeFileSync(
+      join(ws.cwd, '.ao', 'state', 'team-noleak.json'),
+      JSON.stringify({
+        teamName: 'noleak', phase: 'running', cwd: ws.cwd,
+        workers: [{
+          name: 'c1', type: 'codex', status: 'running', _adapterName: 'codex-exec',
+          originalPrompt: 'do the benign task',
+          _handle: { pid: 999001 },
+          _liveHandle: {
+            pid: 999001, status: 'running',
+            _output: `stream-buffer ${secret}`,
+            spawnargs: ['codex', 'exec', '--json', secret],
+            process: { pid: 999001, spawnargs: ['codex', 'exec', '--json', secret] },
+          },
+        }],
+      }),
+    );
 
-    // Must NOT throw despite the circular live handle (the replacer never recurses in).
-    const state = await spawnTeam('noleak', workers, ws.cwd, caps, { adapters: modules });
-    assert.equal(state.workers[0].status, 'running');
+    // monitorTeam loads the legacy state and re-saves it (a running worker flips
+    // lastActivityAt → stateChanged), which is the public trigger of the strip.
+    monitorTeam('noleak');
 
     const raw = readFileSync(join(ws.cwd, '.ao', 'state', 'team-noleak.json'), 'utf-8');
     assert.equal(raw.includes(secret), false,
-      'live-handle-only content (spawnargs / stream buffer) must not be persisted');
+      'live-handle-only content (spawnargs / stream buffer) must not survive a re-save');
     assert.equal(raw.includes('_liveHandle'), false,
-      'the _liveHandle key itself must not appear in the persisted state');
+      'the _liveHandle key itself must be stripped on re-save');
     // Sanity: we did not over-strip — the legitimate worker prompt is still kept.
     assert.equal(raw.includes('do the benign task'), true,
       'the worker prompt (originalPrompt) is a deliberate field and must survive');
   } finally {
-    ws.cleanup();
-  }
-});
-
-test('shutdownTeam regression: disk-loaded state kills the orphaned detached process via _handle.pid', async () => {
-  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
-  const children = [];
-  try {
-    // Fake adapter spawns a REAL detached child (process-group leader). It only
-    // dies on the shutdown signal within the test window; the 15s self-exit is a
-    // safety net so a hard-killed test runner can't leave the fixture orphaned.
-    const modules = {
-      'codex-exec': {
-        spawn: () => {
-          const child = nodeSpawn(
-            process.execPath,
-            ['-e', 'setTimeout(() => process.exit(0), 15000); setInterval(() => {}, 1000)'],
-            { detached: true, stdio: 'ignore' },
-          );
-          child.unref();
-          children.push(child);
-          return {
-            pid: child.pid,
-            process: child,
-            kill: (sig = 'SIGTERM') => { try { child.kill(sig); } catch {} },
-            _output: '',
-            status: 'running',
-          };
-        },
-        monitor: () => ({ status: 'running', output: '' }),
-        shutdown: async (h) => { try { h.kill('SIGTERM'); } catch {} },
-      },
-    };
-    const workers = [{ type: 'codex', name: 'c1', prompt: 'long-running task' }];
-    const caps = { hasCodexExecJson: true };
-
-    await spawnTeam('orphan', workers, ws.cwd, caps, { adapters: modules });
-    const pid = children[0].pid;
-
-    // Disk state carries the pid but NOT the live handle — exactly what a fresh
-    // orchestrator process sees when it loads the team state to shut it down.
-    const loaded = JSON.parse(
-      readFileSync(join(ws.cwd, '.ao', 'state', 'team-orphan.json'), 'utf-8'),
-    );
-    assert.equal(loaded.workers[0]._liveHandle, undefined);
-    assert.equal(loaded.workers[0]._handle.pid, pid);
-
-    // Sanity: the worker process is alive before shutdown.
-    assert.doesNotThrow(() => process.kill(pid, 0),
-      'worker process should be alive before shutdownTeam');
-
-    await shutdownTeam('orphan', ws.cwd);
-
-    // The detached process group must have been signaled (and reaped).
-    let dead = false;
-    for (let i = 0; i < 100; i++) {
-      try { process.kill(pid, 0); } catch { dead = true; break; }
-      await sleep(20);
-    }
-    assert.equal(dead, true,
-      'shutdownTeam must kill the orphaned detached process via the _handle.pid fallback');
-  } finally {
-    for (const c of children) {
-      try { process.kill(-c.pid, 'SIGKILL'); } catch {}
-      try { c.kill('SIGKILL'); } catch {}
-    }
     ws.cleanup();
   }
 });
@@ -847,6 +765,55 @@ test('shutdownTeam (F3): a MATCHING startId still kills the orphaned group', { s
       try { process.kill(-c.pid, 'SIGKILL'); } catch {}
       try { c.kill('SIGKILL'); } catch {}
     }
+    ws.cleanup();
+  }
+});
+
+// ─── P4 crown acceptance: the FLIP end-to-end through a REAL detached supervisor ─
+// Not a fake recorder — spawnTeam launches the actual adapter-worker-supervisor.mjs
+// as a detached child against the env-gated `fixture` adapter, the supervisor
+// writes its snapshot/output to disk, and a FRESH monitorTeam/collectResults call
+// (the fresh-process-per-poll model) reads completion + durable output back. This
+// is the whole point of P4: adapter workers now report across the process boundary.
+
+test('spawnTeam E2E: a real detached fixture supervisor reports completion + durable output to disk', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']); // full-auto host → no demotion
+  let supervisorPid = null;
+  try {
+    // No injected spawnSupervisor → the REAL detached spawn path runs. We only
+    // redirect the manifest's adapter to the fixture and unlock it in the child
+    // env (production strips AO_SUPERVISOR_ALLOW_FIXTURE, so this is test-only).
+    const workers = [{
+      type: 'codex', name: 'w', prompt: 'compute the answer',
+      fixture: { exitCode: 0, output: 'E2E-DURABLE-OUTPUT', delayMs: 50 },
+    }];
+    const caps = { hasCodexExecJson: true }; // → codex-exec → non-tmux → launchSupervisor
+
+    const state = await spawnTeam('e2e', workers, ws.cwd, caps, {
+      supervisor: { adapterName: 'fixture', env: { AO_SUPERVISOR_ALLOW_FIXTURE: '1' } },
+    });
+    supervisorPid = state.workers[0]?._handle?.supervisorPid || null;
+    assert.equal(state.workers[0].status, 'running', 'worker is running right after launch');
+    assert.equal(typeof supervisorPid, 'number', 'a real supervisor pid was recorded');
+
+    // Fresh-process model: poll monitorTeam (re-reads disk every call) until the
+    // supervisor's terminal snapshot lands.
+    let status = null;
+    for (let i = 0; i < 200; i++) {
+      status = monitorTeam('e2e');
+      if (status?.workers?.[0]?.status === 'completed') break;
+      if (status?.workers?.[0]?.status === 'failed') break;
+      await sleep(25);
+    }
+    assert.equal(status.workers[0].status, 'completed',
+      'monitorTeam must observe the detached supervisor completion across the process boundary');
+
+    // collectResults reads the durable output file the supervisor wrote.
+    const results = collectResults('e2e');
+    assert.equal(results.w, 'E2E-DURABLE-OUTPUT',
+      'collectResults must return the supervisor-written durable output');
+  } finally {
+    if (supervisorPid) { try { process.kill(-supervisorPid, 'SIGKILL'); } catch {} }
     ws.cleanup();
   }
 });
