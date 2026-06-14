@@ -30,13 +30,13 @@
 
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { spawn } from 'child_process';
-import { pathToFileURL } from 'url';
 import { readProcStartId } from './proc-identity.mjs';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import {
   snapshotPath, outputPath, writeSnapshot, isValidId,
   HEARTBEAT_INTERVAL_MS,
 } from './supervisor-state.mjs';
+import { buildExecOpts, buildAppserverThreadOpts, buildGeminiAcpSessionOpts } from './supervisor-opts.mjs';
 
 /** Practical ceiling so a manifest can't overflow Node's 32-bit timer (→ 1ms). */
 const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24h
@@ -152,34 +152,9 @@ function onAdapterPid(pid) {
   }
 }
 
-// ─── Pure manifest → adapter-call option builders ───────────────────────────
-// Exported so the manifest→adapter-call WIRING is unit-testable without spawning
-// the detached process. A regression here silently drops a worker option (e.g.
-// the gemini model went to startServer, which ignores it, instead of
-// createSession) and otherwise only surfaces at runtime. run* below MUST use
-// these so the tested contract is the one production runs.
-
-/** codex-exec | claude-cli | gemini-exec spawn() options. credential is the
- * CONFIG (not the key — the adapter resolves it in-process so the key never
- * touches the manifest on disk). */
-export function buildExecOpts(m) {
-  return {
-    cwd: m.cwd, model: m.model, level: m.level,
-    appendSystemPrompt: m.systemPrompt, maxBudgetUsd: m.maxBudgetUsd,
-    approvalMode: m.approvalMode, credential: m.geminiCredential,
-  };
-}
-
-/** codex-appserver createThread() options. */
-export function buildAppserverThreadOpts(m) {
-  return { cwd: m.cwd, level: m.level, ephemeral: true, serviceName: `agent-olympus:${m.teamName}` };
-}
-
-/** gemini-acp createSession() options. `model` MUST live here (→
- * unstable_setSessionModel); startServer ignores it. */
-export function buildGeminiAcpSessionOpts(m) {
-  return { cwd: m.cwd, approvalMode: m.approvalMode, model: m.model };
-}
+// Pure manifest → adapter-call option builders live in ./supervisor-opts.mjs so
+// they are unit-testable without importing this CLI (which runs main() on
+// import). run* below MUST use them so the tested contract is what production runs.
 
 async function runExec(mod, m) {
   const h = mod.spawn(m.prompt, buildExecOpts(m));
@@ -323,9 +298,8 @@ async function main() {
   }
 }
 
-// Auto-run ONLY when executed directly as the CLI (node
-// adapter-worker-supervisor.mjs <manifest>), NOT when imported by a unit test
-// for the exported pure builders above.
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  main();
-}
+// Runs unconditionally as the detached CLI (node adapter-worker-supervisor.mjs
+// <manifest>). NOT importable for unit tests — the pure option builders that need
+// testing live in ./supervisor-opts.mjs precisely so this can stay unconditional
+// (a path-equality guard was not symlink/realpath-alias safe).
+main();

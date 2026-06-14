@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { manifestPath, snapshotPath, outputPath, readSnapshot } from '../lib/supervisor-state.mjs';
-import { buildExecOpts, buildAppserverThreadOpts, buildGeminiAcpSessionOpts } from '../lib/adapter-worker-supervisor.mjs';
+import { buildExecOpts, buildAppserverThreadOpts, buildGeminiAcpSessionOpts } from '../lib/supervisor-opts.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SUPERVISOR = resolve(HERE, '..', 'lib', 'adapter-worker-supervisor.mjs');
@@ -193,11 +193,13 @@ test('supervisor: invalid manifest (bad runId) → exit 2', async () => {
   });
 });
 
-// ─── Pure manifest → adapter-call option builders ───────────────────────────
+// ─── Pure manifest → adapter-call option builders (scripts/lib/supervisor-opts.mjs) ─
 // Direct contract tests for the manifest→adapter wiring (no spawn). These guard
 // the seam where the gemini model was once routed to startServer (ignored)
 // instead of createSession — a regression a fake-recorder integration test
 // could not catch because the recorder mirrored the manifest, not production.
+// The builders live in their own module so testing them never imports the
+// supervisor CLI (which runs main() on import).
 
 test('buildGeminiAcpSessionOpts: model rides on createSession (→ unstable_setSessionModel), not startServer', () => {
   const m = { cwd: '/p', approvalMode: 'yolo', model: 'gemini-2.5-pro', geminiCredential: { account: 'x' } };
@@ -232,9 +234,9 @@ test('buildAppserverThreadOpts: carries level + ephemeral + per-team serviceName
   assert.equal(opts.serviceName, 'agent-olympus:sprint-x');
 });
 
-test('option builders: importing the supervisor module does NOT run the CLI (main is guarded)', () => {
-  // If the import had run main(), the test process would have exited(2) on the
-  // missing manifest arg before reaching here. Reaching this line proves the
-  // import.meta.url === argv[1] guard holds.
+test('option builders: live in a CLI-free module (importing them does not run a supervisor)', () => {
+  // supervisor-opts.mjs has no main()/side effects, so importing the builders is
+  // pure — no path-equality guard needed (and none can silently break a real
+  // spawn). Reaching this line at all confirms the import had no CLI side effect.
   assert.equal(typeof buildExecOpts, 'function');
 });

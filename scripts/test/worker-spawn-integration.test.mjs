@@ -16,13 +16,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnTeam, shutdownTeam, monitorTeam, collectResults, readProcStartId } from '../lib/worker-spawn.mjs';
+import { manifestPath as supManifestPath, snapshotPath as supSnapshotPath, outputPath as supOutputPath, writeSnapshot as supWriteSnapshot, readSnapshot as supReadSnapshot } from '../lib/supervisor-state.mjs';
+
+const WORKER_SPAWN_PATH = fileURLToPath(new URL('../lib/worker-spawn.mjs', import.meta.url));
 
 // ─── Fake adapter factory ─────────────────────────────────────────────────────
 
@@ -410,6 +414,32 @@ test('spawnTeam integration: a supervisor launch failure marks the worker failed
   }
 });
 
+test('spawnTeam integration (P5): a spawn handle with no pid is treated as a launch failure', async () => {
+  // A real async spawn failure (ENOENT/EAGAIN) returns a handle with
+  // pid === undefined. The synchronous pid guard must fail the worker rather
+  // than persist an unmonitorable "running" worker with supervisorPid undefined.
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    const workers = [{ type: 'codex', name: 'c1', prompt: 'a' }];
+    const caps = { hasCodexExecJson: true };
+    const spawnSupervisor = () => ({ pid: undefined }); // no synchronous throw, but no pid
+    const state = await spawnTeam('team-nopid', workers, ws.cwd, caps, { spawnSupervisor });
+    assert.equal(state.workers[0].status, 'failed');
+    assert.match(state.workers[0].error || '', /no pid/);
+    // The pid guard throws BEFORE the _handle assignment, so no unmonitorable
+    // supervisor descriptor is persisted.
+    assert.equal(state.workers[0]._handle?.supervisorPid, undefined);
+
+    // The prompt-bearing manifest must NOT be left behind on a launch failure
+    // (the supervisor never started to clear it).
+    const runDir = dirname(supManifestPath(ws.cwd, state.runId, '0'.repeat(16)));
+    const leftover = readdirSync(runDir).filter((f) => f.endsWith('.manifest.json'));
+    assert.deepEqual(leftover, [], 'a failed launch must clean up its manifest');
+  } finally {
+    ws.cleanup();
+  }
+});
+
 // ─── State-serialization regression (_liveHandle strip, upgrade path) ───────
 //
 // POST-FLIP (P4): spawnTeam launches a DETACHED supervisor and persists only a
@@ -716,6 +746,106 @@ test('spawnTeam E2E: a real detached fixture supervisor reports completion + dur
     const results = collectResults('e2e');
     assert.equal(results.w, 'E2E-DURABLE-OUTPUT',
       'collectResults must return the supervisor-written durable output');
+  } finally {
+    if (supervisorPid) { try { process.kill(-supervisorPid, 'SIGKILL'); } catch {} }
+    ws.cleanup();
+  }
+});
+
+// ─── P5 hardening ───────────────────────────────────────────────────────────
+
+test('spawnTeam (P5 stale generation): a re-spawn under the same team name ignores the prior run snapshot', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    const caps = { hasCodexExecJson: true };
+
+    // Run 1 launches and (pretend) its supervisor completed — a snapshot is on disk.
+    const { spawnSupervisor: rec1 } = makeFakeAdapters();
+    const s1 = await spawnTeam('regen', [{ type: 'codex', name: 'w', prompt: 'first' }], ws.cwd, caps, { spawnSupervisor: rec1 });
+    const run1 = s1.runId, wrk1 = s1.workers[0]._handle.workerRunId;
+    supWriteSnapshot(supSnapshotPath(ws.cwd, run1, wrk1),
+      { runId: run1, workerRunId: wrk1, supervisorPid: process.pid, status: 'completed', outputTail: 'STALE-RUN-1' }, Date.now());
+
+    // Run 2 re-uses the team NAME but gets a fresh runId — it overwrites team-regen.json.
+    const { spawnSupervisor: rec2 } = makeFakeAdapters();
+    const s2 = await spawnTeam('regen', [{ type: 'codex', name: 'w', prompt: 'second' }], ws.cwd, caps, { spawnSupervisor: rec2 });
+    assert.notEqual(s2.runId, run1, 'each spawn must scope a fresh run identity');
+
+    // monitorTeam reads run 2's state; run 2 has no snapshot yet (within startup
+    // grace) → running. The stale run-1 "completed" snapshot must NOT leak in.
+    const status = monitorTeam('regen');
+    assert.equal(status.workers[0].status, 'running',
+      "a prior run's completed snapshot must not be read as the current run's result");
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('shutdownTeam (P5): a duplicate shutdown of a real fixture team is a safe no-op', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  let supervisorPid = null;
+  try {
+    const workers = [{ type: 'codex', name: 'w', prompt: 'long', fixture: { exitCode: 0, output: 'x', delayMs: 8000 } }];
+    const state = await spawnTeam('dupshut', workers, ws.cwd, { hasCodexExecJson: true }, {
+      supervisor: { adapterName: 'fixture', env: { AO_SUPERVISOR_ALLOW_FIXTURE: '1' } },
+    });
+    supervisorPid = state.workers[0]?._handle?.supervisorPid || null;
+    assert.equal(typeof supervisorPid, 'number');
+
+    await shutdownTeam('dupshut', ws.cwd);
+    let dead = false;
+    for (let i = 0; i < 150; i++) {
+      try { process.kill(supervisorPid, 0); } catch { dead = true; break; }
+      await sleep(20);
+    }
+    assert.equal(dead, true, 'first shutdown reaps the supervisor');
+
+    // Second shutdown: supervisor pid is gone (identity no longer matches). Must
+    // not throw and must not signal an unrelated recycled pid.
+    await assert.doesNotReject(shutdownTeam('dupshut', ws.cwd), 'a duplicate shutdownTeam is idempotent');
+  } finally {
+    if (supervisorPid) { try { process.kill(-supervisorPid, 'SIGKILL'); } catch {} }
+    ws.cleanup();
+  }
+});
+
+test('spawnTeam (P5 orphan survival): the detached supervisor completes AFTER its launcher process exits', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  let supervisorPid = null;
+  try {
+    // A separate launcher process calls spawnTeam then exits 0 immediately. The
+    // fixture's 1.2s delay guarantees the supervisor is still mid-run when the
+    // launcher dies, so a terminal snapshot afterwards proves orphan survival.
+    const launcher = `
+      const { spawnTeam } = await import(${JSON.stringify(pathToFileURL(WORKER_SPAWN_PATH).href)});
+      const { writeFileSync } = await import('fs');
+      const workers = [{ type: 'codex', name: 'w', prompt: 'x', fixture: { exitCode: 0, output: 'ORPHAN-SURVIVES', delayMs: 1200 } }];
+      const state = await spawnTeam('orphan', workers, process.cwd(), { hasCodexExecJson: true }, {
+        supervisor: { adapterName: 'fixture', env: { AO_SUPERVISOR_ALLOW_FIXTURE: '1' } },
+      });
+      writeFileSync('ids.json', JSON.stringify({ runId: state.runId, workerRunId: state.workers[0]._handle.workerRunId, supervisorPid: state.workers[0]._handle.supervisorPid }));
+      process.exit(0);
+    `;
+    writeFileSync(join(ws.cwd, 'launcher.mjs'), `(async () => {${launcher}})();`);
+
+    // Run the launcher and WAIT for it to fully exit before we look for results.
+    const child = nodeSpawn(process.execPath, [join(ws.cwd, 'launcher.mjs')], { cwd: ws.cwd, stdio: 'ignore' });
+    const launcherExit = await new Promise((res) => child.on('exit', (code) => res(code)));
+    assert.equal(launcherExit, 0, 'launcher exited cleanly');
+
+    const ids = JSON.parse(readFileSync(join(ws.cwd, 'ids.json'), 'utf-8'));
+    supervisorPid = ids.supervisorPid;
+
+    // The launcher is now dead. Poll the snapshot the ORPHANED supervisor owns.
+    let snap = null;
+    for (let i = 0; i < 300; i++) {
+      const r = supReadSnapshot(supSnapshotPath(ws.cwd, ids.runId, ids.workerRunId), { runId: ids.runId, workerRunId: ids.workerRunId });
+      if (r.kind === 'ok' && (r.snapshot.status === 'completed' || r.snapshot.status === 'failed')) { snap = r.snapshot; break; }
+      await sleep(25);
+    }
+    assert.ok(snap, 'the orphaned supervisor must eventually write a terminal snapshot');
+    assert.equal(snap.status, 'completed', 'the orphan supervisor ran to completion after its launcher died');
+    assert.equal(readFileSync(supOutputPath(ws.cwd, ids.runId, ids.workerRunId), 'utf-8'), 'ORPHAN-SURVIVES');
   } finally {
     if (supervisorPid) { try { process.kill(-supervisorPid, 'SIGKILL'); } catch {} }
     ws.cleanup();

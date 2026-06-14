@@ -867,8 +867,9 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
     };
     if (worker.fixture) manifest.fixture = worker.fixture;                       // test-only params
     if (_inject?.supervisor?.adapterName) manifest.adapterName = _inject.supervisor.adapterName; // test-only
+    let mPath = null;
     try {
-      const mPath = supManifestPath(projectRoot, runId, workerRunId);
+      mPath = supManifestPath(projectRoot, runId, workerRunId);
       atomicWriteFileSync(mPath, JSON.stringify(manifest));
       const env = { ...process.env };
       delete env.AO_SUPERVISOR_ALLOW_FIXTURE;                                    // never expose the fixture in prod
@@ -886,6 +887,13 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
     } catch (err) {
       state.workers[i].status = 'failed';
       state.workers[i].error = err.message;
+      // The manifest carries the raw prompt; on a launch failure the supervisor
+      // never started to clear it (it truncates+unlinks on startup), so do that
+      // here rather than leak the prompt until the 24h stale sweep.
+      if (mPath) {
+        try { atomicWriteFileSync(mPath, ''); } catch { /* best-effort */ }
+        try { unlinkSync(mPath); } catch { /* best-effort */ }
+      }
     }
   };
 

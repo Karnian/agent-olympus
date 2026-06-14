@@ -227,6 +227,46 @@ test('shutdownSupervisorWorker: kills the supervisor AND reaps a surviving adapt
   });
 });
 
+test('shutdownSupervisorWorker (P5 launch race): kills the supervisor with NO snapshot yet', async () => {
+  // shutdownTeam fires right after spawnTeam, before the supervisor wrote its
+  // first snapshot. Phase 1 must still kill the supervisor by its recorded pid
+  // (Phase 2's snapshot re-read is a no-op when missing). The supervisor's own
+  // SIGTERM handler is what shuts the adapter down in this window.
+  await withRoot(async (root) => {
+    const sup = spawnDetached();
+    try {
+      const worker = mkWorker({ _handle: { workerRunId: WRK, supervisorPid: sup.pid, supervisorStartId: readProcStartId(sup.pid) } });
+      // Deliberately NO writeSnapshot — the file does not exist yet.
+      assert.doesNotThrow(() => process.kill(-sup.pid, 0), 'supervisor alive before');
+
+      await shutdownSupervisorWorker(mkState(root), worker); // must not throw on the missing snapshot
+
+      assert.equal(await groupDead(sup.pid), true, 'supervisor reaped via pid alone (no snapshot)');
+    } finally {
+      try { process.kill(-sup.pid, 'SIGKILL'); } catch {}
+    }
+  });
+});
+
+test('shutdownSupervisorWorker (P5): idempotent — a second call on an already-dead supervisor is a safe no-op', async () => {
+  await withRoot(async (root) => {
+    const sup = spawnDetached();
+    const worker = mkWorker({ _handle: { workerRunId: WRK, supervisorPid: sup.pid, supervisorStartId: readProcStartId(sup.pid) } });
+    writeSnapshot(snapshotPath(root, RUN, WRK), {
+      runId: RUN, workerRunId: WRK, status: 'running',
+      supervisorPid: sup.pid, supervisorStartId: readProcStartId(sup.pid),
+    }, Date.now());
+
+    await shutdownSupervisorWorker(mkState(root), worker);
+    assert.equal(await groupDead(sup.pid), true, 'supervisor dead after first shutdown');
+
+    // Second call: the pid is gone (and its identity no longer matches). Must not
+    // throw, and must not signal a recycled pid (startId check protects it).
+    await assert.doesNotReject(shutdownSupervisorWorker(mkState(root), worker),
+      'a duplicate shutdown must be a safe no-op');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // monitorTeam / collectResults wiring (disk team-state, fresh-process model)
 // ---------------------------------------------------------------------------
