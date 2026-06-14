@@ -28,7 +28,7 @@
  * Zero npm deps.
  */
 
-import { readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
 import { readProcStartId } from './proc-identity.mjs';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
@@ -213,6 +213,15 @@ async function runFixture(m) {
     onAdapterPid(child.pid);
   }
   if (delay) await new Promise((r) => setTimeout(r, delay));
+  // Test-only gate (deterministic ordering proofs, e.g. orphan-survival): block
+  // completion until a file appears, bounded by the worker timeout (the watchdog
+  // at timeoutMs+2000 is the ultimate backstop if the gate is never created).
+  if (typeof fx.waitForFile === 'string' && fx.waitForFile) {
+    const deadline = nowMs() + (Number.isInteger(m.timeoutMs) ? m.timeoutMs : 600_000);
+    while (!existsSync(fx.waitForFile) && nowMs() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
   const exitCode = Number.isInteger(fx.exitCode) ? fx.exitCode : 0;
   if (exitCode === 0) return { status: 'completed', output: out, error: null };
   const category = typeof fx.category === 'string' && /^[a-z_]+$/.test(fx.category) ? fx.category : 'nonzero_exit';

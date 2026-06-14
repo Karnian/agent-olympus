@@ -813,13 +813,15 @@ test('spawnTeam (P5 orphan survival): the detached supervisor completes AFTER it
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   let supervisorPid = null;
   try {
-    // A separate launcher process calls spawnTeam then exits 0 immediately. The
-    // fixture's 1.2s delay guarantees the supervisor is still mid-run when the
-    // launcher dies, so a terminal snapshot afterwards proves orphan survival.
+    // DETERMINISTIC ordering proof (no timing race): the fixture blocks on a gate
+    // file that this test creates ONLY after it has confirmed the launcher exited
+    // AND observed a live "running" snapshot. So completion provably happens after
+    // the launcher died — not by a lucky delay.
+    const gatePath = join(ws.cwd, 'gate.release');
     const launcher = `
       const { spawnTeam } = await import(${JSON.stringify(pathToFileURL(WORKER_SPAWN_PATH).href)});
       const { writeFileSync } = await import('fs');
-      const workers = [{ type: 'codex', name: 'w', prompt: 'x', fixture: { exitCode: 0, output: 'ORPHAN-SURVIVES', delayMs: 1200 } }];
+      const workers = [{ type: 'codex', name: 'w', prompt: 'x', fixture: { exitCode: 0, output: 'ORPHAN-SURVIVES', waitForFile: ${JSON.stringify(gatePath)} } }];
       const state = await spawnTeam('orphan', workers, process.cwd(), { hasCodexExecJson: true }, {
         supervisor: { adapterName: 'fixture', env: { AO_SUPERVISOR_ALLOW_FIXTURE: '1' } },
       });
@@ -836,14 +838,27 @@ test('spawnTeam (P5 orphan survival): the detached supervisor completes AFTER it
     const ids = JSON.parse(readFileSync(join(ws.cwd, 'ids.json'), 'utf-8'));
     supervisorPid = ids.supervisorPid;
 
-    // The launcher is now dead. Poll the snapshot the ORPHANED supervisor owns.
+    // The launcher is DEAD. Confirm the orphaned supervisor is alive and blocked
+    // on the gate (a "running" snapshot) — this is the survival proof: it outlived
+    // its parent and is still working, deterministically (gate not yet created).
+    let running = false;
+    for (let i = 0; i < 200; i++) {
+      const r = supReadSnapshot(supSnapshotPath(ws.cwd, ids.runId, ids.workerRunId), { runId: ids.runId, workerRunId: ids.workerRunId });
+      if (r.kind === 'ok' && r.snapshot.status === 'running') { running = true; break; }
+      if (r.kind === 'ok' && r.snapshot.status !== 'running') break; // would mean it finished before the gate — fail below
+      await sleep(25);
+    }
+    assert.equal(running, true, 'the orphaned supervisor must be alive and running after its launcher died (gate still closed)');
+
+    // Release the gate; only NOW can the supervisor complete.
+    writeFileSync(gatePath, '');
     let snap = null;
-    for (let i = 0; i < 300; i++) {
+    for (let i = 0; i < 200; i++) {
       const r = supReadSnapshot(supSnapshotPath(ws.cwd, ids.runId, ids.workerRunId), { runId: ids.runId, workerRunId: ids.workerRunId });
       if (r.kind === 'ok' && (r.snapshot.status === 'completed' || r.snapshot.status === 'failed')) { snap = r.snapshot; break; }
       await sleep(25);
     }
-    assert.ok(snap, 'the orphaned supervisor must eventually write a terminal snapshot');
+    assert.ok(snap, 'the orphaned supervisor must write a terminal snapshot once the gate opens');
     assert.equal(snap.status, 'completed', 'the orphan supervisor ran to completion after its launcher died');
     assert.equal(readFileSync(supOutputPath(ws.cwd, ids.runId, ids.workerRunId), 'utf-8'), 'ORPHAN-SURVIVES');
   } finally {

@@ -454,6 +454,14 @@ export async function shutdownSupervisorWorker(state, worker) {
       await killProcessGroups([{ pid: r.snapshot.adapterPid, startId: r.snapshot.adapterStartId }], KILL_GRACE_MS);
     }
   } catch { /* supervisor-only kill already done */ }
+  // Phase 3: scrub the prompt-bearing manifest. The supervisor truncates+unlinks
+  // it on startup, but a shutdown in the launch race (SIGTERM before main() read
+  // it) would leave the prompt on disk until the 24h sweep — clear it here too.
+  try {
+    const mPath = supManifestPath(state.projectRoot, state.runId, h.workerRunId);
+    try { atomicWriteFileSync(mPath, ''); } catch { /* best-effort */ }
+    try { unlinkSync(mPath); } catch { /* best-effort */ }
+  } catch { /* bad ids → nothing to scrub */ }
 }
 
 // ─── Tmux adapter helpers (inline — wraps existing tmux-session functions) ──

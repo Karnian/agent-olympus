@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,7 +18,7 @@ import {
   monitorTeam,
   collectResults,
 } from '../lib/worker-spawn.mjs';
-import { writeSnapshot, snapshotPath, outputPath, HEARTBEAT_STALE_MS } from '../lib/supervisor-state.mjs';
+import { writeSnapshot, snapshotPath, outputPath, manifestPath, HEARTBEAT_STALE_MS } from '../lib/supervisor-state.mjs';
 import { atomicWriteFileSync } from '../lib/fs-atomic.mjs';
 import { readProcStartId } from '../lib/proc-identity.mjs';
 
@@ -264,6 +264,25 @@ test('shutdownSupervisorWorker (P5): idempotent — a second call on an already-
     // throw, and must not signal a recycled pid (startId check protects it).
     await assert.doesNotReject(shutdownSupervisorWorker(mkState(root), worker),
       'a duplicate shutdown must be a safe no-op');
+  });
+});
+
+test('shutdownSupervisorWorker (P5): scrubs the prompt-bearing manifest (launch-race leak)', async () => {
+  // If shutdown lands before the supervisor's main() read+deleted the manifest,
+  // the prompt would leak until the 24h sweep. shutdownSupervisorWorker must
+  // truncate+unlink it. Use a dead supervisorPid so the kill is a no-op and only
+  // the manifest scrub is under test.
+  await withRoot((root) => {
+    const mp = manifestPath(root, RUN, WRK);
+    writeSnapshot(snapshotPath(root, RUN, WRK), { runId: RUN, workerRunId: WRK, supervisorPid: 999999, status: 'running' }, Date.now());
+    mkdirSync(join(root, '.ao', 'state', 'supervisor', RUN), { recursive: true });
+    writeFileSync(mp, JSON.stringify({ schemaVersion: 1, runId: RUN, workerRunId: WRK, prompt: 'SECRET-PROMPT-must-not-linger' }));
+    assert.equal(existsSync(mp), true, 'manifest exists before shutdown');
+
+    const worker = mkWorker({ _handle: { workerRunId: WRK, supervisorPid: 999999, supervisorStartId: 'gone' } });
+    return shutdownSupervisorWorker(mkState(root), worker).then(() => {
+      assert.equal(existsSync(mp), false, 'shutdown must scrub the prompt-bearing manifest');
+    });
   });
 });
 
