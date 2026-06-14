@@ -691,14 +691,16 @@ tmux send-keys -t "atlas-gemini-<N>" "\"$GEMINI_BIN\" <approval-flag> -p \"<impl
 # Cleanup: tmux kill-session -t "atlas-gemini-<N>"
 ```
 
+**Worker execution & monitoring model (supervisor).** Non-tmux adapter workers (codex-exec, codex-appserver, claude-cli, gemini-exec, gemini-acp) run inside a **detached supervisor** that `spawnTeam()` launches per worker — NOT in your process. The supervisor owns the adapter and writes completion/failure/output to disk, so `monitorTeam(teamSlug)` (re-reading disk on every call) is the canonical monitor and survives the fresh-process polling model. The per-adapter failure detection below happens inside that supervisor and surfaces through `monitorTeam`'s returned `w.status` / `w.errorReason`; `collectResults(teamSlug)` returns each worker's durable output, and `shutdownTeam(teamSlug)` reaps the supervisor (and any orphaned adapter group). You do NOT `capturePane` supervisor workers — that is the tmux-fallback path only.
+
 **Codex/Gemini failure detection and Claude fallback:**
 
-The monitoring system detects failures via the active adapter:
+The monitoring system detects failures via the active adapter (inside the supervisor for non-tmux workers):
 
 ```javascript
 import { detectCodexError, reassignToClaude, selectAdapter } from './scripts/lib/worker-spawn.mjs';
 
-// monitorTeam() handles adapter dispatch automatically.
+// monitorTeam() handles adapter dispatch automatically (supervisor snapshot or tmux pane).
 // For codex-appserver: failures detected via structured CodexErrorInfo + mapAppServerErrorCode()
 // For codex-exec: failures detected via item.status="failed" + mapJsonlErrorToCategory()
 // For tmux: failures detected via detectCodexError(paneOutput) regex patterns

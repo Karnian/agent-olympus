@@ -557,9 +557,25 @@ saveCheckpoint('athena', {
 └── Loop (max 10 monitor iterations)
 ```
 
-**Codex failure detection and Claude fallback:**
+**Worker execution & monitoring model (supervisor).** Non-tmux adapter workers (codex-exec, codex-appserver, claude-cli, gemini-exec, gemini-acp) do NOT run in your process — `spawnTeam()` launches a **detached supervisor** per worker that owns the adapter and writes its completion/failure/output to disk. So the canonical monitor loop is:
 
-During each monitoring iteration, for every active Codex worker, pass its pane output to `detectCodexError()` (from `scripts/lib/worker-spawn.mjs`):
+```javascript
+import { monitorTeam, collectResults, shutdownTeam } from './scripts/lib/worker-spawn.mjs';
+
+const status = monitorTeam(teamSlug);   // re-reads disk every call — safe across the fresh-process polling model
+for (const w of status.workers) {
+  // w.status: 'running' | 'completed' | 'failed' | 'retry'
+  // w.errorReason / w.errorMessage: set for failures (auth_failed/rate_limited/crash/timeout/…)
+  // w.lastOutput: latest snapshot output tail
+}
+const results = collectResults(teamSlug);  // durable per-worker output (supervisor-written file or outbox)
+```
+
+`monitorTeam` already classifies supervisor workers from their disk snapshot (including the error category) and applies one crash-retry — you react to the returned `w.status`/`w.errorReason`, you do NOT need to `capturePane` them. The per-worker `capturePane` + `detectCodexError` snippets below are the **tmux-fallback path** (only for workers running under the legacy tmux adapter).
+
+**Codex failure detection and Claude fallback (tmux fallback path):**
+
+During each monitoring iteration, for every active **tmux** Codex worker, pass its pane output to `detectCodexError()` (from `scripts/lib/worker-spawn.mjs`):
 
 ```javascript
 import { detectCodexError, reassignToClaude } from './scripts/lib/worker-spawn.mjs';
@@ -945,7 +961,7 @@ Clean up:
 - Shut down Codex + Gemini workers properly via adapter lifecycle:
   ```javascript
   import { shutdownTeam } from './scripts/lib/worker-spawn.mjs';
-  await shutdownTeam(teamSlug);  // graceful adapter shutdown (codex appserver interrupt, gemini-acp teardown, exec SIGTERM, tmux kill)
+  await shutdownTeam(teamSlug);  // supervisor-first: signals each worker's detached supervisor group (whose SIGTERM handler shuts the adapter down), then reaps any orphaned adapter group; tmux workers killed directly
   ```
 - Remove `.ao/teams/<slug>/`
 - Remove `.ao/state/athena-state.json`, `.ao/prd.json`
