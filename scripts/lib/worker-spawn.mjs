@@ -750,7 +750,8 @@ export function demoteCodexWorkersIfNeeded(workers, level) {
  * @param {string} cwd
  * @param {Object} [capabilities]
  * @param {Object} [_inject] - Test-only dependency injection
- * @param {Object} [_inject.adapters] - { 'codex-exec'?, 'codex-appserver'?, 'claude-cli'?, 'gemini-exec'?, 'gemini-acp'? }
+ * @param {Function} [_inject.spawnSupervisor] - Replaces the detached supervisor spawn (recorder / fake child)
+ * @param {Object} [_inject.supervisor] - { adapterName?, env? } — route the manifest to the env-gated fixture adapter
  * @param {Function} [_inject.createTeamSession] - Replaces tmux session creation
  * @param {Function} [_inject.validateTmux] - Replaces tmux install check
  */
@@ -836,7 +837,19 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
   // stripped from the child env). Tests inject `_inject.spawnSupervisor` (a
   // recorder / fake child) and `_inject.supervisor` (fixture adapterName + env).
   const spawnSupervisorFn = _inject?.spawnSupervisor
-    || ((script, mPath, opts) => { const c = spawn(process.execPath, [script, mPath], opts); c.unref(); return c; });
+    || ((script, mPath, opts) => {
+      const c = spawn(process.execPath, [script, mPath], opts);
+      // An ASYNC spawn failure (ENOENT/EAGAIN/resource limit) is reported via the
+      // child's 'error' event — with no listener Node re-throws it as an uncaught
+      // exception in the orchestrator. Swallow it here (single-line stderr note);
+      // the worker writes no snapshot, so monitorSupervisorWorker's
+      // missing-snapshot-past-grace path (P3) marks it crashed on the next poll.
+      c.on('error', (err) => {
+        try { process.stderr.write(JSON.stringify({ event: 'supervisor_spawn_error', message: String(err?.message || err) }) + '\n'); } catch {}
+      });
+      c.unref();
+      return c;
+    });
   const launchSupervisor = (i) => {
     const worker = workers[i];
     const adapterName = adapterNames[i];
@@ -861,6 +874,12 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
       delete env.AO_SUPERVISOR_ALLOW_FIXTURE;                                    // never expose the fixture in prod
       if (_inject?.supervisor?.env) Object.assign(env, _inject.supervisor.env); // test-only
       const child = spawnSupervisorFn(SUPERVISOR_SCRIPT, mPath, { detached: true, stdio: 'ignore', cwd: projectRoot, env });
+      // A failed spawn can return a handle with pid === undefined (the 'error'
+      // fires async). Treat a missing pid as a launch failure NOW rather than
+      // persisting an unmonitorable "running" worker with no supervisor pid.
+      if (!child || !Number.isInteger(child.pid)) {
+        throw new Error('supervisor spawn returned no pid (launch failed)');
+      }
       state.workers[i].status = 'running';
       state.workers[i].startedAt = new Date().toISOString();
       state.workers[i]._handle = { supervisorPid: child.pid, supervisorStartId: readProcStartId(child.pid), runId, workerRunId };

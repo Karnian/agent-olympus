@@ -1,14 +1,14 @@
 /**
  * Integration tests for scripts/lib/worker-spawn.mjs spawnTeam().
  *
- * Uses the `_inject` parameter on spawnTeam to supply fake adapter modules
- * (bypassing dynamic imports) and fake tmux session creation. Verifies the
- * end-to-end wiring:
+ * Uses the `_inject` parameter on spawnTeam to supply a fake `spawnSupervisor`
+ * (recording the detached-supervisor launch instead of spawning a real child)
+ * and fake tmux session creation. Verifies the end-to-end wiring:
  *   1. permission resolution (host sandbox intersection)
  *   2. codex worker demotion when level = 'suggest'
- *   3. `level` forwarding to codex-exec and codex-appserver spawn calls
+ *   3. `level`/`model` forwarding into the supervisor manifest
  *   4. adapter selection routes post-demotion
- *   5. team state shape after spawn
+ *   5. team state shape after spawn (serializable supervisor descriptor)
  *
  * Unit tests for each helper live in `worker-spawn.test.mjs`; this file is
  * specifically for end-to-end `spawnTeam()` invocations.
@@ -27,9 +27,10 @@ import { spawnTeam, shutdownTeam, monitorTeam, collectResults, readProcStartId }
 // ─── Fake adapter factory ─────────────────────────────────────────────────────
 
 /**
- * Build a set of fake adapter modules that record every call. Tests inject
- * the returned `modules` map via `_inject.adapters` and then assert on
- * `calls` to verify the wiring.
+ * Build a fake `spawnSupervisor` that records every launch. Tests inject the
+ * returned `spawnSupervisor` via `_inject.spawnSupervisor`; it reads the DATA
+ * manifest spawnTeam wrote and records into `calls` (mapping adapterName +
+ * level/model) so the wiring can be asserted without spawning real processes.
  */
 function makeFakeAdapters() {
   const calls = {
@@ -44,103 +45,6 @@ function makeFakeAdapters() {
     geminiAcpInit: [],
     geminiAcpCreateSession: [],
     geminiAcpSendPrompt: [],
-  };
-
-  const modules = {
-    'codex-exec': {
-      spawn: (prompt, opts) => {
-        calls.codexExecSpawn.push({ prompt, opts: { ...opts } });
-        return { pid: 1001, _output: '', status: 'running', _adapterName: 'codex-exec' };
-      },
-      monitor: () => ({ status: 'running', output: '' }),
-      shutdown: () => {},
-    },
-    'codex-appserver': {
-      startServer: (opts) => {
-        calls.codexAppServerStart.push({ opts: { ...opts } });
-        // Mirror production invariants — handle starts uninitialized.
-        return {
-          pid: 2001,
-          threadId: null,
-          turnId: null,
-          status: 'starting',
-          _initialized: false,
-          _adapterName: 'codex-appserver',
-        };
-      },
-      initializeServer: async (handle) => {
-        calls.codexAppServerInit.push({ handle });
-        // Production contract: initializeServer sets _initialized=true and
-        // flips status to 'ready'. Tests that skip this can't call
-        // createThread (production throws on !handle._initialized).
-        handle._initialized = true;
-        handle.status = 'ready';
-        return {};
-      },
-      createThread: async (handle, opts) => {
-        calls.codexAppServerCreateThread.push({ opts: { ...opts } });
-        // Enforce the production invariant instead of silently succeeding.
-        if (!handle._initialized) {
-          return { error: { code: -10, message: 'Server not initialized' } };
-        }
-        handle.threadId = 'th-fake-1';
-        return { threadId: 'th-fake-1' };
-      },
-      startTurn: async (handle, prompt) => {
-        calls.codexAppServerStartTurn.push({ prompt });
-        if (!handle.threadId) {
-          return { error: { code: -10, message: 'No active thread' } };
-        }
-        handle.turnId = 'tu-fake-1';
-        return { turnId: 'tu-fake-1' };
-      },
-      shutdownServer: async () => {},
-      monitor: () => ({ status: 'running', output: '' }),
-    },
-    'claude-cli': {
-      spawn: (prompt, opts) => {
-        calls.claudeCliSpawn.push({ prompt, opts: { ...opts } });
-        return { pid: 3001, _output: '', status: 'running' };
-      },
-      monitor: () => ({ status: 'running', output: '' }),
-      shutdown: () => {},
-    },
-    'gemini-exec': {
-      spawn: (prompt, opts) => {
-        calls.geminiExecSpawn.push({ prompt, opts: { ...opts } });
-        return { pid: 4001, _output: '', status: 'running' };
-      },
-      monitor: () => ({ status: 'running', output: '' }),
-      shutdown: () => {},
-    },
-    'gemini-acp': {
-      startServer: (opts) => {
-        calls.geminiAcpStart.push({ opts: { ...opts } });
-        return { pid: 5001, _sessionId: null, _initialized: false, _warnings: [] };
-      },
-      initializeServer: async (handle) => {
-        calls.geminiAcpInit.push({ handle });
-        handle._initialized = true;
-        return {};
-      },
-      createSession: async (handle, opts) => {
-        calls.geminiAcpCreateSession.push({ opts: { ...opts } });
-        if (!handle._initialized) {
-          return { error: { code: -10, message: 'Server not initialized' } };
-        }
-        handle._sessionId = 'sess-fake';
-        return {};
-      },
-      sendPrompt: async (handle, prompt) => {
-        calls.geminiAcpSendPrompt.push({ prompt });
-        if (!handle._sessionId) {
-          return { error: { code: -10, message: 'No active session' } };
-        }
-        return {};
-      },
-      shutdownServer: async () => {},
-      monitor: () => ({ status: 'running', output: '' }),
-    },
   };
 
   // FLIP (P4): spawnTeam now launches a DETACHED supervisor instead of spawning
@@ -172,7 +76,7 @@ function makeFakeAdapters() {
     return { pid: ++_supPid };
   };
 
-  return { modules, calls, spawnSupervisor };
+  return { calls, spawnSupervisor };
 }
 
 // ─── Temp workspace helper ────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { manifestPath, snapshotPath, outputPath, readSnapshot } from '../lib/supervisor-state.mjs';
+import { buildExecOpts, buildAppserverThreadOpts, buildGeminiAcpSessionOpts } from '../lib/adapter-worker-supervisor.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SUPERVISOR = resolve(HERE, '..', 'lib', 'adapter-worker-supervisor.mjs');
@@ -190,4 +191,50 @@ test('supervisor: invalid manifest (bad runId) → exit 2', async () => {
     const { code } = await waitExit(child);
     assert.equal(code, 2);
   });
+});
+
+// ─── Pure manifest → adapter-call option builders ───────────────────────────
+// Direct contract tests for the manifest→adapter wiring (no spawn). These guard
+// the seam where the gemini model was once routed to startServer (ignored)
+// instead of createSession — a regression a fake-recorder integration test
+// could not catch because the recorder mirrored the manifest, not production.
+
+test('buildGeminiAcpSessionOpts: model rides on createSession (→ unstable_setSessionModel), not startServer', () => {
+  const m = { cwd: '/p', approvalMode: 'yolo', model: 'gemini-2.5-pro', geminiCredential: { account: 'x' } };
+  const opts = buildGeminiAcpSessionOpts(m);
+  assert.equal(opts.model, 'gemini-2.5-pro', 'model MUST be present so the session model is actually set');
+  assert.equal(opts.approvalMode, 'yolo');
+  assert.equal(opts.cwd, '/p');
+  // The credential is a startServer concern — it must NOT leak into session opts.
+  assert.equal('credential' in opts, false);
+});
+
+test('buildExecOpts: threads model/level/systemPrompt/maxBudgetUsd/approvalMode/credential', () => {
+  const m = {
+    cwd: '/w', model: 'gpt-5', level: 'full-auto', systemPrompt: 'be terse',
+    maxBudgetUsd: 2.5, approvalMode: 'auto_edit', geminiCredential: { account: 'a' },
+  };
+  const opts = buildExecOpts(m);
+  assert.equal(opts.cwd, '/w');
+  assert.equal(opts.model, 'gpt-5');
+  assert.equal(opts.level, 'full-auto');
+  assert.equal(opts.appendSystemPrompt, 'be terse', 'systemPrompt maps to appendSystemPrompt');
+  assert.equal(opts.maxBudgetUsd, 2.5);
+  assert.equal(opts.approvalMode, 'auto_edit');
+  assert.deepEqual(opts.credential, { account: 'a' });
+});
+
+test('buildAppserverThreadOpts: carries level + ephemeral + per-team serviceName', () => {
+  const opts = buildAppserverThreadOpts({ cwd: '/w', level: 'workspace-write', teamName: 'sprint-x' });
+  assert.equal(opts.cwd, '/w');
+  assert.equal(opts.level, 'workspace-write');
+  assert.equal(opts.ephemeral, true);
+  assert.equal(opts.serviceName, 'agent-olympus:sprint-x');
+});
+
+test('option builders: importing the supervisor module does NOT run the CLI (main is guarded)', () => {
+  // If the import had run main(), the test process would have exited(2) on the
+  // missing manifest arg before reaching here. Reaching this line proves the
+  // import.meta.url === argv[1] guard holds.
+  assert.equal(typeof buildExecOpts, 'function');
 });

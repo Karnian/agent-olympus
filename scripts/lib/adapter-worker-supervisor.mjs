@@ -30,6 +30,7 @@
 
 import { readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { spawn } from 'child_process';
+import { pathToFileURL } from 'url';
 import { readProcStartId } from './proc-identity.mjs';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import {
@@ -151,15 +152,37 @@ function onAdapterPid(pid) {
   }
 }
 
-async function runExec(mod, m) {
-  // credential config (NOT the key — the adapter resolves it in-process so the
-  // key never touches the manifest on disk), model, approvalMode all threaded
-  // through to match the working worker-spawn paths.
-  const h = mod.spawn(m.prompt, {
+// ─── Pure manifest → adapter-call option builders ───────────────────────────
+// Exported so the manifest→adapter-call WIRING is unit-testable without spawning
+// the detached process. A regression here silently drops a worker option (e.g.
+// the gemini model went to startServer, which ignores it, instead of
+// createSession) and otherwise only surfaces at runtime. run* below MUST use
+// these so the tested contract is the one production runs.
+
+/** codex-exec | claude-cli | gemini-exec spawn() options. credential is the
+ * CONFIG (not the key — the adapter resolves it in-process so the key never
+ * touches the manifest on disk). */
+export function buildExecOpts(m) {
+  return {
     cwd: m.cwd, model: m.model, level: m.level,
     appendSystemPrompt: m.systemPrompt, maxBudgetUsd: m.maxBudgetUsd,
     approvalMode: m.approvalMode, credential: m.geminiCredential,
-  });
+  };
+}
+
+/** codex-appserver createThread() options. */
+export function buildAppserverThreadOpts(m) {
+  return { cwd: m.cwd, level: m.level, ephemeral: true, serviceName: `agent-olympus:${m.teamName}` };
+}
+
+/** gemini-acp createSession() options. `model` MUST live here (→
+ * unstable_setSessionModel); startServer ignores it. */
+export function buildGeminiAcpSessionOpts(m) {
+  return { cwd: m.cwd, approvalMode: m.approvalMode, model: m.model };
+}
+
+async function runExec(mod, m) {
+  const h = mod.spawn(m.prompt, buildExecOpts(m));
   liveHandle = h; liveShutdown = mod.shutdown;
   onAdapterPid(h.pid);
   return normalize(await mod.collect(h, m.timeoutMs));
@@ -173,7 +196,7 @@ async function runCodexAppserver(mod, m) {
   // throwing → generic crash, so P3 retry/reassignment routes correctly.
   const init = await mod.initializeServer(h);
   if (init && init.error) return normalize({ status: 'failed', error: init.error });
-  const thread = await mod.createThread(h, { cwd: m.cwd, level: m.level, ephemeral: true, serviceName: `agent-olympus:${m.teamName}` });
+  const thread = await mod.createThread(h, buildAppserverThreadOpts(m));
   if (thread && thread.error) return normalize({ status: 'failed', error: thread.error });
   const turn = await mod.startTurn(h, m.prompt);
   if (turn && turn.error) return normalize({ status: 'failed', error: turn.error });
@@ -181,12 +204,14 @@ async function runCodexAppserver(mod, m) {
 }
 
 async function runGeminiAcp(mod, m) {
-  const h = mod.startServer({ cwd: m.cwd, credential: m.geminiCredential, model: m.model });
+  // model belongs on createSession (→ unstable_setSessionModel), NOT startServer
+  // which ignores it. Mirrors the pre-FLIP in-process worker-spawn path.
+  const h = mod.startServer({ cwd: m.cwd, credential: m.geminiCredential });
   liveHandle = h; liveShutdown = mod.shutdownServer;
   onAdapterPid(h.pid);
   const init = await mod.initializeServer(h);
   if (init && init.error) return normalize({ status: 'failed', error: init.error });
-  const sess = await mod.createSession(h, { cwd: m.cwd, approvalMode: m.approvalMode });
+  const sess = await mod.createSession(h, buildGeminiAcpSessionOpts(m));
   if (sess && sess.error) return normalize({ status: 'failed', error: sess.error });
   // sendPrompt collects internally (do NOT double-collect). Fall back to
   // collectPromptResult only if it resolves without a status.
@@ -298,4 +323,9 @@ async function main() {
   }
 }
 
-main();
+// Auto-run ONLY when executed directly as the CLI (node
+// adapter-worker-supervisor.mjs <manifest>), NOT when imported by a unit test
+// for the exported pure builders above.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}
