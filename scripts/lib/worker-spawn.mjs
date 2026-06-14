@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'crypto';
+import { execFileSync } from 'child_process';
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession, WORKER_EXIT_MARKER } from './tmux-session.mjs';
 import { readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
 import { addWisdom } from './wisdom.mjs';
@@ -183,38 +184,76 @@ function isLiveHandle(h) {
 }
 
 /**
+ * Read a stable, per-process START-TIME identity for `pid` — a value a recycled
+ * PID cannot reproduce. Used to detect PID reuse before signaling a stored pid
+ * (F3). Recorded on `_handle.startId` at spawn and re-checked at shutdown.
+ *
+ * Linux: `/proc/<pid>/stat` field 22 (starttime in clock ticks since boot).
+ * macOS/BSD: `ps -o lstart=` (1-second resolution — PID reuse within 1s is
+ * implausible). Returns `null` on any failure so callers FAIL OPEN (fall back to
+ * the documented group-signal) rather than skip a needed kill.
+ *
+ * @param {number} pid
+ * @returns {string|null}
+ */
+export function readProcStartId(pid) {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  // Linux /proc: comm (field 2) is parenthesized and may contain spaces/parens,
+  // so split AFTER the last ')'. starttime is field 22 → index 19 of the rest
+  // (field 3 = state = index 0).
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+    const rp = stat.lastIndexOf(')');
+    if (rp !== -1) {
+      const after = stat.slice(rp + 1).trim().split(/\s+/);
+      const starttime = after[19];
+      if (starttime && /^\d+$/.test(starttime)) return `lin:${starttime}`;
+    }
+  } catch { /* not Linux, or pid gone */ }
+  // macOS / BSD fallback.
+  try {
+    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000,
+    }).trim();
+    if (out) return `ps:${out}`;
+  } catch { /* pid gone, or ps unavailable */ }
+  return null;
+}
+
+/**
  * Signal one or more detached worker process GROUPS, escalating SIGTERM →
  * SIGKILL. Used as the disk-loaded shutdown fallback when the in-memory
  * `_liveHandle` is gone (stripped by `saveTeamState`) but the serializable
- * `_handle.pid` survives.
+ * `_handle` survives.
  *
- * All non-tmux adapters spawn with `detached: true`, so each worker pid is a
- * process-group leader (pgid === pid). Two deliberate hardening choices:
+ * Accepts `{ pid, startId }` items (preferred — enables PID-reuse validation) or
+ * bare pids (back-compat). All non-tmux adapters spawn with `detached: true`, so
+ * each worker pid is a process-group leader (pgid === pid). Hardening choices:
  *
+ *  - PID-REUSE GUARD (F3). When a `startId` was recorded at spawn and the leader
+ *    pid is STILL ALIVE with a DIFFERENT start-time, the pid was recycled by an
+ *    unrelated process — we NEVER signal its group (protect the stranger over
+ *    reaping our own orphan). When the start-time can't be read (the leader
+ *    already exited but a descendant keeps the group alive, or the platform
+ *    doesn't expose it), we FAIL OPEN to the group-signal — preserving the
+ *    descendant-survival reap below.
  *  - GROUP-scoped liveness & signaling only. We probe and signal `-pid` (the
  *    whole group), never the bare pid. `kill(-pgid, 0)` reports the group alive
  *    while ANY member survives, so a descendant that outlives the leader is
- *    still caught and SIGKILLed — a bare-leader probe would miss it. Dropping
- *    the bare-pid fallback also removes a PID-reuse hazard: once the group is
- *    gone, a bare `kill(pid)` could land on an unrelated reused pid.
- *  - `pid > 1` guard. `process.kill(-0, ...)` targets the CALLER's own group
- *    (would kill the orchestrator) and `-1` broadcasts to every signalable
- *    process; only real worker pids ≥ 2 are eligible.
+ *    still caught and SIGKILLed.
+ *  - `pid > 1` guard. `process.kill(-0, ...)` targets the CALLER's own group and
+ *    `-1` broadcasts to every signalable process; only real worker pids ≥ 2 are
+ *    eligible.
  *
- * Known limitation: pid/pgid identity is not validated against process start
- * time, so a fully-recycled pgid is theoretically reachable. This matches the
- * per-adapter `shutdown` functions (which also signal `-pid` without identity
- * checks); start-time validation is a separate hardening.
- *
- * @param {Array<number>} pids - Worker pids from `_handle.pid`
+ * @param {Array<number|{pid:number,startId?:string|null}>} targets
  * @param {number} [graceMs=KILL_GRACE_MS] - Ceiling before SIGKILL escalation
  * @returns {Promise<void>}
  */
-async function killProcessGroups(pids, graceMs = KILL_GRACE_MS) {
-  const targets = (Array.isArray(pids) ? pids : []).filter(
-    (p) => Number.isInteger(p) && p > 1
-  );
-  if (targets.length === 0) return;
+async function killProcessGroups(targets, graceMs = KILL_GRACE_MS) {
+  const items = (Array.isArray(targets) ? targets : [])
+    .map((t) => (typeof t === 'number' ? { pid: t, startId: null } : t))
+    .filter((t) => t && Number.isInteger(t.pid) && t.pid > 1);
+  if (items.length === 0) return;
 
   // Probe the GROUP, not the leader: succeeds while any member is alive, throws
   // ESRCH only once the whole group is gone.
@@ -225,12 +264,21 @@ async function killProcessGroups(pids, graceMs = KILL_GRACE_MS) {
   const signalGroup = (pgid, sig) => {
     try { process.kill(-pgid, sig); } catch { /* group gone or not permitted */ }
   };
+  // True only when we have a recorded baseline AND the live leader's identity
+  // DIFFERS — i.e. the pid was provably recycled. Unknown/unreadable → false
+  // (fail open).
+  const isRecycled = (item) => {
+    if (!item.startId) return false;
+    const cur = readProcStartId(item.pid);
+    return cur !== null && cur !== item.startId;
+  };
 
   const alive = new Set();
-  for (const pgid of targets) {
-    if (!groupAlive(pgid)) continue; // whole group already gone
-    signalGroup(pgid, 'SIGTERM');
-    alive.add(pgid);
+  for (const item of items) {
+    if (isRecycled(item)) continue;       // recycled pid — protect the stranger
+    if (!groupAlive(item.pid)) continue;  // whole group already gone
+    signalGroup(item.pid, 'SIGTERM');
+    alive.add(item.pid);
   }
   if (alive.size === 0) return;
 
@@ -522,8 +570,9 @@ export async function reassignToClaude(teamName, workerName, originalPrompt, fai
       // Disk-loaded state: _liveHandle was stripped on save (or survives only as
       // a function-less husk from a pre-fix state file). Either way isLiveHandle
       // is false, so signal the detached process group via the serializable pid
-      // so a failed worker's process can't be orphaned.
-      await killProcessGroups([worker._handle.pid]);
+      // so a failed worker's process can't be orphaned. Pass startId so a
+      // recycled pid is detected and skipped (F3).
+      await killProcessGroups([{ pid: worker._handle.pid, startId: worker._handle.startId }]);
     } else {
       // tmux worker (or no recorded pid): session cleanup.
       const session = sessionOverride || sessionName(teamName, workerName);
@@ -881,6 +930,16 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
     }
   }
 
+  // Record a start-time identity for each adapter worker's process-group leader
+  // so a later (fresh-process) shutdown can detect PID reuse before signaling
+  // its group (F3). Serializable string → survives the disk round-trip. tmux
+  // workers have no `_handle.pid` and are skipped.
+  for (const w of state.workers) {
+    if (w?._handle && Number.isInteger(w._handle.pid)) {
+      w._handle.startId = readProcStartId(w._handle.pid);
+    }
+  }
+
   state.phase = 'running';
   saveTeamState(teamName, state);
   return state;
@@ -1088,8 +1147,9 @@ export async function shutdownTeam(teamName, cwd) {
         // no-replacer saveTeamState). isLiveHandle() rejects the husk so we
         // don't waste the shutdown on a no-op and skip the kill — without this
         // the real detached process group is never signaled and codex/gemini/
-        // claude workers leak as orphans. Collect pids and signal in one pass.
-        orphanPids.push(worker._handle.pid);
+        // claude workers leak as orphans. Collect {pid,startId} and signal in
+        // one pass — startId lets killProcessGroups skip a recycled pid (F3).
+        orphanPids.push({ pid: worker._handle.pid, startId: worker._handle.startId });
       }
     }
   }

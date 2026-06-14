@@ -22,7 +22,7 @@ import { join } from 'node:path';
 import { spawn as nodeSpawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { spawnTeam, shutdownTeam } from '../lib/worker-spawn.mjs';
+import { spawnTeam, shutdownTeam, readProcStartId } from '../lib/worker-spawn.mjs';
 
 // ─── Fake adapter factory ─────────────────────────────────────────────────────
 
@@ -725,6 +725,107 @@ test('shutdownTeam regression: a PRE-FIX husk _liveHandle does not block the _ha
     }
     assert.equal(dead, true,
       'a function-less husk _liveHandle must fall through to the _handle.pid group kill');
+  } finally {
+    for (const c of children) {
+      try { process.kill(-c.pid, 'SIGKILL'); } catch {}
+      try { c.kill('SIGKILL'); } catch {}
+    }
+    ws.cleanup();
+  }
+});
+
+// ─── F3: PID-reuse identity validation in the disk-loaded shutdown fallback ──
+// killProcessGroups records a process START-TIME identity (_handle.startId) at
+// spawn and re-checks it before signaling — so a recycled pid (its number reused
+// by an unrelated process) is NOT signaled. When the identity can't be read it
+// FAILS OPEN to the documented group-signal.
+
+const START_ID_SUPPORTED = readProcStartId(process.pid) !== null;
+
+test('readProcStartId: stable for a live pid, null for bogus / pid<=1', () => {
+  const a = readProcStartId(process.pid);
+  const b = readProcStartId(process.pid);
+  assert.equal(a, b, 'same live process must yield a stable identity');
+  if (a !== null) assert.equal(typeof a, 'string');
+  assert.equal(readProcStartId(999999), null, 'a non-existent pid has no identity');
+  assert.equal(readProcStartId(1), null, 'pid<=1 is never a worker');
+  assert.equal(readProcStartId('x'), null, 'non-integer is rejected');
+});
+
+test('shutdownTeam (F3): a RECYCLED pid (startId mismatch) is NOT signaled', { skip: START_ID_SUPPORTED ? false : 'start-time identity unavailable on this platform' }, async () => {
+  // Recorded startId ≠ the live process's identity → killProcessGroups must
+  // treat the pid as recycled and protect the (unrelated) live process.
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  const children = [];
+  try {
+    const child = nodeSpawn(process.execPath,
+      ['-e', 'setTimeout(() => process.exit(0), 15000); setInterval(() => {}, 1000)'],
+      { detached: true, stdio: 'ignore' });
+    child.unref();
+    children.push(child);
+    const pid = child.pid;
+
+    mkdirSync(join(ws.cwd, '.ao', 'state'), { recursive: true });
+    writeFileSync(
+      join(ws.cwd, '.ao', 'state', 'team-recycled.json'),
+      JSON.stringify({
+        teamName: 'recycled', phase: 'running', cwd: ws.cwd,
+        workers: [{
+          name: 'c1', type: 'codex', status: 'running', _adapterName: 'codex-exec',
+          _handle: { pid, startId: 'recorded-at-spawn-DIFFERENT-from-live' },
+        }],
+      }),
+    );
+
+    assert.doesNotThrow(() => process.kill(pid, 0), 'fixture alive before shutdown');
+    await shutdownTeam('recycled', ws.cwd);
+
+    // The mismatch must spare the process — still alive after the grace window.
+    await sleep(300);
+    assert.doesNotThrow(() => process.kill(pid, 0),
+      'a recycled pid (startId mismatch) must NOT be signaled');
+  } finally {
+    for (const c of children) {
+      try { process.kill(-c.pid, 'SIGKILL'); } catch {}
+      try { c.kill('SIGKILL'); } catch {}
+    }
+    ws.cleanup();
+  }
+});
+
+test('shutdownTeam (F3): a MATCHING startId still kills the orphaned group', { skip: START_ID_SUPPORTED ? false : 'start-time identity unavailable on this platform' }, async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  const children = [];
+  try {
+    const child = nodeSpawn(process.execPath,
+      ['-e', 'setTimeout(() => process.exit(0), 15000); setInterval(() => {}, 1000)'],
+      { detached: true, stdio: 'ignore' });
+    child.unref();
+    children.push(child);
+    const pid = child.pid;
+    const startId = readProcStartId(pid); // the REAL identity, as recorded at spawn
+
+    mkdirSync(join(ws.cwd, '.ao', 'state'), { recursive: true });
+    writeFileSync(
+      join(ws.cwd, '.ao', 'state', 'team-match.json'),
+      JSON.stringify({
+        teamName: 'match', phase: 'running', cwd: ws.cwd,
+        workers: [{
+          name: 'c1', type: 'codex', status: 'running', _adapterName: 'codex-exec',
+          _handle: { pid, startId },
+        }],
+      }),
+    );
+
+    assert.doesNotThrow(() => process.kill(pid, 0), 'fixture alive before shutdown');
+    await shutdownTeam('match', ws.cwd);
+
+    let dead = false;
+    for (let i = 0; i < 150; i++) {
+      try { process.kill(pid, 0); } catch { dead = true; break; }
+      await sleep(20);
+    }
+    assert.equal(dead, true, 'a matching startId must NOT block the group kill');
   } finally {
     for (const c of children) {
       try { process.kill(-c.pid, 'SIGKILL'); } catch {}
