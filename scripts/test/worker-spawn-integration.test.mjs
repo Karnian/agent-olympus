@@ -752,6 +752,22 @@ test('readProcStartId: stable for a live pid, null for bogus / pid<=1', () => {
   assert.equal(readProcStartId('x'), null, 'non-integer is rejected');
 });
 
+test('readProcStartId (F3): identity is timezone-invariant', { skip: START_ID_SUPPORTED ? false : 'start-time identity unavailable on this platform' }, () => {
+  // The macOS `ps -o lstart=` path renders local time; without forcing TZ=UTC the
+  // SAME process yields different strings under different ambient TZ → a false
+  // "recycled" verdict between spawn and shutdown. Identity must be TZ-stable.
+  const orig = process.env.TZ;
+  try {
+    process.env.TZ = 'Asia/Seoul';
+    const a = readProcStartId(process.pid);
+    process.env.TZ = 'UTC';
+    const b = readProcStartId(process.pid);
+    assert.equal(a, b, 'start-time identity must not vary with ambient TZ');
+  } finally {
+    if (orig === undefined) delete process.env.TZ; else process.env.TZ = orig;
+  }
+});
+
 test('shutdownTeam (F3): a RECYCLED pid (startId mismatch) is NOT signaled', { skip: START_ID_SUPPORTED ? false : 'start-time identity unavailable on this platform' }, async () => {
   // Recorded startId ≠ the live process's identity → killProcessGroups must
   // treat the pid as recycled and protect the (unrelated) live process.

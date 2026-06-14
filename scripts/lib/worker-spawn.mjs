@@ -198,25 +198,39 @@ function isLiveHandle(h) {
  */
 export function readProcStartId(pid) {
   if (!Number.isInteger(pid) || pid <= 1) return null;
-  // Linux /proc: comm (field 2) is parenthesized and may contain spaces/parens,
-  // so split AFTER the last ')'. starttime is field 22 → index 19 of the rest
-  // (field 3 = state = index 0).
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
-    const rp = stat.lastIndexOf(')');
-    if (rp !== -1) {
-      const after = stat.slice(rp + 1).trim().split(/\s+/);
-      const starttime = after[19];
-      if (starttime && /^\d+$/.test(starttime)) return `lin:${starttime}`;
-    }
-  } catch { /* not Linux, or pid gone */ }
-  // macOS / BSD fallback.
+  // Platform DISPATCH — never mix schemes. A `lin:` baseline must not be compared
+  // against a `ps:` reading (e.g. if a /proc read transiently fails), which would
+  // be a false mismatch → false "recycled" → a real orphan left unsignaled.
+  if (process.platform === 'linux') {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+      // comm (field 2) is parenthesized and may contain spaces/parens → split
+      // AFTER the last ')'. starttime is field 22 → index 19 (field 3 = index 0).
+      const rp = stat.lastIndexOf(')');
+      if (rp !== -1) {
+        const starttime = stat.slice(rp + 1).trim().split(/\s+/)[19];
+        if (starttime && /^\d+$/.test(starttime)) {
+          // starttime is ticks-since-boot — scope it with boot_id so stale
+          // post-reboot state can't match a new same-pid/same-tick process.
+          let boot = '';
+          try { boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf-8').trim(); } catch { /* keep '' */ }
+          return `lin:${boot}:${starttime}`;
+        }
+      }
+    } catch { /* pid gone or /proc unreadable → null (fail open) */ }
+    return null;
+  }
+  // macOS / BSD: `ps -o lstart=` renders LOCAL time, so force TZ=UTC + LC_ALL=C
+  // to make the timestamp STABLE across ambient timezone/locale changes between
+  // spawn and a (possibly later, different-process) shutdown — otherwise the same
+  // process yields different strings and is falsely classified as recycled.
   try {
     const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
       encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000,
+      env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
     }).trim();
     if (out) return `ps:${out}`;
-  } catch { /* pid gone, or ps unavailable */ }
+  } catch { /* pid gone, or ps unavailable → null (fail open) */ }
   return null;
 }
 
@@ -273,12 +287,12 @@ async function killProcessGroups(targets, graceMs = KILL_GRACE_MS) {
     return cur !== null && cur !== item.startId;
   };
 
-  const alive = new Set();
+  const alive = new Map(); // pid → item, retained for re-validation before SIGKILL
   for (const item of items) {
     if (isRecycled(item)) continue;       // recycled pid — protect the stranger
     if (!groupAlive(item.pid)) continue;  // whole group already gone
     signalGroup(item.pid, 'SIGTERM');
-    alive.add(item.pid);
+    alive.set(item.pid, item);
   }
   if (alive.size === 0) return;
 
@@ -287,11 +301,15 @@ async function killProcessGroups(targets, graceMs = KILL_GRACE_MS) {
   const deadline = Date.now() + Math.max(0, graceMs);
   while (alive.size > 0 && Date.now() < deadline) {
     await sleep(50);
-    for (const pgid of [...alive]) {
+    for (const pgid of [...alive.keys()]) {
       if (!groupAlive(pgid)) alive.delete(pgid);
     }
   }
-  for (const pgid of alive) {
+  // RE-VALIDATE identity before the hard kill: during the grace window the
+  // original group can exit and its pgid be recycled, so a still-"alive" entry
+  // may now be a stranger's group. Skip any that became recycled. (F3-2)
+  for (const [pgid, item] of alive) {
+    if (isRecycled(item)) continue;
     signalGroup(pgid, 'SIGKILL');
   }
 }
@@ -928,16 +946,15 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
       state.workers[i].branchName = session?.branchName || null;
       state.workers[i].worktreeCreated = session?.worktreeCreated || false;
     }
-  }
 
-  // Record a start-time identity for each adapter worker's process-group leader
-  // so a later (fresh-process) shutdown can detect PID reuse before signaling
-  // its group (F3). Serializable string → survives the disk round-trip. tmux
-  // workers have no `_handle.pid` and are skipped.
-  for (const w of state.workers) {
-    if (w?._handle && Number.isInteger(w._handle.pid)) {
-      w._handle.startId = readProcStartId(w._handle.pid);
-    }
+    // Capture this worker's process-group start-time identity IMMEDIATELY after
+    // spawn (NOT in a post-loop pass): an early, short-lived adapter worker whose
+    // pid is recycled during a LATER worker's (possibly slow/awaited) spawn must
+    // not have a stranger's identity recorded as its baseline (F3 race). The
+    // serializable string survives the disk round-trip a fresh-process shutdown
+    // relies on. tmux workers have no `_handle.pid` and are skipped.
+    const _wh = state.workers[i]?._handle;
+    if (_wh && Number.isInteger(_wh.pid)) _wh.startId = readProcStartId(_wh.pid);
   }
 
   state.phase = 'running';
