@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'crypto';
-import { execFileSync } from 'child_process';
+import { readProcStartId } from './proc-identity.mjs';
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession, WORKER_EXIT_MARKER } from './tmux-session.mjs';
 import { readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
 import { addWisdom } from './wisdom.mjs';
@@ -196,43 +196,10 @@ function isLiveHandle(h) {
  * @param {number} pid
  * @returns {string|null}
  */
-export function readProcStartId(pid) {
-  if (!Number.isInteger(pid) || pid <= 1) return null;
-  // Platform DISPATCH — never mix schemes. A `lin:` baseline must not be compared
-  // against a `ps:` reading (e.g. if a /proc read transiently fails), which would
-  // be a false mismatch → false "recycled" → a real orphan left unsignaled.
-  if (process.platform === 'linux') {
-    try {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
-      // comm (field 2) is parenthesized and may contain spaces/parens → split
-      // AFTER the last ')'. starttime is field 22 → index 19 (field 3 = index 0).
-      const rp = stat.lastIndexOf(')');
-      if (rp !== -1) {
-        const starttime = stat.slice(rp + 1).trim().split(/\s+/)[19];
-        if (starttime && /^\d+$/.test(starttime)) {
-          // starttime is ticks-since-boot — scope it with boot_id so stale
-          // post-reboot state can't match a new same-pid/same-tick process.
-          let boot = '';
-          try { boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf-8').trim(); } catch { /* keep '' */ }
-          return `lin:${boot}:${starttime}`;
-        }
-      }
-    } catch { /* pid gone or /proc unreadable → null (fail open) */ }
-    return null;
-  }
-  // macOS / BSD: `ps -o lstart=` renders LOCAL time, so force TZ=UTC + LC_ALL=C
-  // to make the timestamp STABLE across ambient timezone/locale changes between
-  // spawn and a (possibly later, different-process) shutdown — otherwise the same
-  // process yields different strings and is falsely classified as recycled.
-  try {
-    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000,
-      env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
-    }).trim();
-    if (out) return `ps:${out}`;
-  } catch { /* pid gone, or ps unavailable → null (fail open) */ }
-  return null;
-}
+// `readProcStartId` is imported at the top from ./proc-identity.mjs (so the
+// detached supervisor can share it without importing all of worker-spawn) and
+// re-exported here for back-compat (callers/tests importing it from worker-spawn).
+export { readProcStartId };
 
 /**
  * Signal one or more detached worker process GROUPS, escalating SIGTERM →
