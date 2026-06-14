@@ -133,23 +133,27 @@ claim of automatic in-process adapter monitoring.
 - Fixture flow gated by `AO_SUPERVISOR_ALLOW_FIXTURE==='1'` (never set in prod).
 
 ## Phasing (Codex-revised; reading side BEFORE the flip; each phase reviewed)
-- **P1**: `supervisor-state.mjs` (paths, run identity, atomic snapshot I/O with
-  4-way read result, heartbeat) + unit tests. SessionEnd cleanup rule.
-- **P2**: `adapter-worker-supervisor.mjs` — signal handling, adapter flows,
+**Status: ALL PHASES COMPLETE (P1–P6).** Each phase implemented → Codex cross-reviewed → hardened → committed. Full suite 2191 tests, 0 failures.
+- **P1 ✅**: `supervisor-state.mjs` (paths, run identity, atomic snapshot I/O with
+  5-way read result, heartbeat) + unit tests. SessionEnd cleanup rule.
+- **P2 ✅**: `adapter-worker-supervisor.mjs` — signal handling, adapter flows,
   `finally` cleanup, watchdog, fixture mode + supervisor tests (happy/fail/
   cancel/timeout/crash) run as REAL detached processes against the fixture.
-- **P3 (DORMANT readers)**: `monitorTeam`/`collectResults`/`shutdownTeam`/
+- **P3 ✅ (DORMANT readers)**: `monitorTeam`/`collectResults`/`shutdownTeam`/
   `reassignToClaude` learn to read snapshots/output + supervisor-first shutdown —
   WITHOUT changing how spawn works yet (no live supervisor workers exist, so
   these are inert for real teams; unit-tested with hand-written snapshots).
-- **P4 (FLIP)**: `spawnTeam` launches supervisors for adapter workers + the
-  two-process regression test (spawn → fresh-read observes running→completed →
-  collect output) using the fixture adapter.
-- **P5**: hardening tests (launch-race shutdown, stale-generation overwrite,
-  parent-exits-immediately, dead-supervisor detection, heartbeat, worktree/
-  absolute-path, SessionEnd-during-active-run, disk-write failure, duplicate
-  shutdown, adapter PID-reuse) + full suite.
-- **P6**: skills docs + integration sweep.
+- **P4 ✅ (FLIP, `846f50b`)**: `spawnTeam` launches supervisors for adapter workers
+  + the two-process E2E (spawn → fresh-read observes running→completed → collect
+  output) using the fixture adapter. Review fixes in `43cc0af` (gemini model →
+  createSession; spawn error/pid guard; pure option builders).
+- **P5 ✅ (`d32ced2`, `8b09829`)**: hardening tests (launch-race shutdown,
+  stale-generation overwrite, parent-exits-immediately/orphan-survival via a
+  deterministic file gate, duplicate shutdown, no-pid launch guard, manifest
+  scrub). Round-2 review fix: pure builders moved to `supervisor-opts.mjs` so
+  `main()` stays unconditional (the path-equality guard was not symlink-safe).
+- **P6 ✅ (`1a9329c`)**: skills docs (atlas/athena supervisor monitoring model)
+  + integration sweep (full suite green, syntax + namespace checks clean).
 
 ## Risks & mitigations
 - Stale/concurrent generations → runId/workerRunId + mismatch rejection.
