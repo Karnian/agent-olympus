@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.2.0] - 2026-06-15
+
+### Feature — Detached per-worker supervisor: adapter team workers now report completion across the fresh-process boundary (F1)
+
+**Root cause.** Atlas/Athena orchestration is fresh-process-per-poll — `monitorTeam` / `collectResults` / `shutdownTeam` each reload the team state from disk in a brand-new Node process. A live in-process adapter handle (`_liveHandle`) cannot survive that boundary (`saveTeamState` strips it), so the five non-tmux adapters (codex-exec, codex-appserver, claude-cli, gemini-exec, gemini-acp), which previously spawned in-process, were observed as `status: 'running'` forever once the orchestrator re-polled in a fresh process. Their completion, failure, and output were simply invisible.
+
+**The FLIP** — `spawnTeam` no longer spawns adapters in-process. For each non-tmux worker it launches a **detached supervisor** (`node scripts/lib/adapter-worker-supervisor.mjs <manifest>`, `detached`+`unref`+`stdio:ignore`) that loads the adapter itself, runs one prompt to terminal completion, and writes **atomic disk snapshots + a durable output file**. A fresh-process orchestrator reads the outcome from disk. tmux workers are unchanged (still `capturePane`-classified).
+
+**Run identity & disk contract** — team state is stamped with a random `runId` + absolute `projectRoot`; each worker gets a `workerRunId`. The persisted `_handle = { supervisorPid, supervisorStartId, runId, workerRunId }` is fully serializable, and the supervisor's snapshot/output/manifest paths are DERIVED from the absolute `projectRoot` + these validated hex IDs (no explicit module/snapshot/output path is read from the manifest), so a stale supervisor from a prior same-name run can't be read as current. Snapshots (`supervisor-state.mjs`, schemaVersion:1) use atomic 0600 writes and a 5-way `readSnapshot` result (`missing` / `corrupt` / `unsupported` / `mismatch` / `ok`) with heartbeat freshness.
+
+**Liveness & shutdown** — `monitorSupervisorWorker` classifies from the snapshot: terminal status wins; `running`+dead-supervisor (PID start-time identity mismatch) → crash; `running`+stale-heartbeat → crash on the 2nd consecutive poll; missing-snapshot-past-grace or future-`startedAt` → crash. `shutdownSupervisorWorker` is supervisor-first (signal the supervisor group → re-read snapshot → reap a surviving adapter group via the start-id-checked kill → scrub the prompt-bearing manifest). `session-end.mjs` sweeps the supervisor tree per-run and protects a run with a fresh heartbeat or a live supervisor PID (identity-checked when a start-id is recorded; otherwise a bare existence probe).
+
+**Security & hygiene** — the manifest is DATA-only and carries the raw prompt; the supervisor truncates+unlinks it on startup, and a launch failure or early shutdown also clears it so the prompt never lingers to the 24h sweep. The built-in `fixture` adapter (test-only) is selectable ONLY under `AO_SUPERVISOR_ALLOW_FIXTURE==='1'`, which `spawnTeam` strips from the child env in production. The detached spawn attaches an `error` listener (async ENOENT/EAGAIN no longer crash the orchestrator) and a synchronous `pid` guard (a no-pid handle fails the worker instead of persisting an unmonitorable `running`).
+
+**Adapter wiring** — the supervisor's dispatch uses pure manifest→option builders in `scripts/lib/supervisor-opts.mjs` (CLI-free, so they unit-test without importing the supervisor, which runs `main()` on import). This caught and fixed a real regression where the gemini `model` was routed to `startServer` (ignored) instead of `createSession` (→ `unstable_setSessionModel`).
+
+**Cross-review** — implemented in phases P1–P6, each Codex-cross-reviewed: the P4 FLIP review caught the gemini-model bug + spawn-failure handling + tautological wiring tests; a round-2 review caught a non-symlink-safe `main()` guard (fixed by moving builders to a CLI-free module + restoring unconditional `main()`); the final round confirmed closure with two P3s (launch-race manifest leak, nondeterministic orphan test) fixed. No P1/P2 findings remained.
+
+**Also in this release (the tmux-reliability work the supervisor builds on):**
+- **tmux send-keys double-escaping fix** — env values were escaped once then the whole command again; after the execSync→execFileSync migration the second layer leaked into the pane verbatim → shell syntax error → a silently-failed worker that `monitorTmuxWorker` mis-reported as `completed`. Single-level escaping + an explicit `__AO_EXIT__[:<nonce>]:<code>` exit sentinel (line-anchored, per-invocation nonce anti-forgery) so a tmux worker's real exit code is authoritative instead of a "shell prompt came back" heuristic.
+- **F3 PID start-time identity** — `readProcStartId` (Linux `/proc/<pid>/stat` field 22 + boot_id; macOS `ps -o lstart=` with `TZ=UTC`) is recorded at spawn and re-checked before any stored-pid signal, so a recycled PID is never killed in the legacy `_handle.pid` shutdown fallback (fails open to the group signal when identity is unreadable).
+- **stop-hook secret-scrubbing** — the Stop-hook WIP auto-commit now excludes `.env`/secrets/`.ao/state`/`.ao/teams` via selective staging with rename-pair handling.
+
+**New files** — `scripts/lib/adapter-worker-supervisor.mjs`, `scripts/lib/supervisor-state.mjs`, `scripts/lib/supervisor-opts.mjs`, `scripts/lib/proc-identity.mjs` (+ test files `adapter-worker-supervisor`, `supervisor-state`, `supervisor-readers`, `tmux-completion`, `tmux-command-composition`). Suite: **2191 tests, 0 failures** (84 files, 57 lib modules). See `docs/plans/adapter-worker-supervisor/PLAN.md`.
+
 ## [1.1.6] - 2026-05-09
 
 ### Fix — Runtime permission_mode capture + `/ask codex` read-only fallback (#67/#68/#69)

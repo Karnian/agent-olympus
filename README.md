@@ -60,7 +60,8 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Gemini Keychain wizard** *(v1.1.3, partition-list fix in v1.1.4)*: `/setup-gemini-auth` creates an AO-owned Keychain item with `/usr/bin/security` pre-listed as trusted, eliminating the macOS password prompt every Gemini worker spawn would otherwise trigger. Scoped to keychain users — OAuth/Vertex/env-var paths are unaffected
 - **Layered Opus-skew reduction** *(v1.1.0+)*: Per-subagent model usage logging (`ao-model-usage.jsonl`, schemaVersion:1) for measurement; escalation-first routing pipeline that defaults to Sonnet/Haiku and only promotes to Opus on demonstrated need. Summarise with `node scripts/usage-report.mjs`
 - **Runtime permission_mode capture + `/ask codex` read-only fallback** *(v1.1.6)*: SessionStart + UserPromptSubmit hooks read `permission_mode` from Claude Code's hook stdin (or `CLAUDE_PERMISSION_MODE` env) and persist to `.ao/state/ao-runtime-permissions.json` (schemaVersion:1, 30-min TTL). Permission detection now merges settings ⇧ runtime as **upgrade-only** through the same deny/ask/disableBypassPermissionsMode/allowManagedPermissionRulesOnly pipeline — `--dangerously-skip-permissions` no longer leaves the mirror at `suggest`. Independently, `/ask codex` on suggest-tier hosts now falls back to codex's `read-only` sandbox (`-s read-only -a never`) with a system-prompt guard + `git status --porcelain` post-check, instead of exiting with code 2. New `node scripts/diagnose-sandbox.mjs --explain-permissions` shows the full per-layer breakdown. Closes #67/#68/#69
-- **2075+ unit tests**: Comprehensive test suite using `node:test` across 79 test files (v1.1.6: 2074/2075 passing)
+- **Detached worker supervisor** *(v1.2.0)*: Adapter team workers (codex-exec/appserver, claude-cli, gemini-exec/acp) no longer run in-process — `spawnTeam` launches a detached supervisor per worker that owns the adapter and writes completion/failure/output to disk, so the fresh-process-per-poll orchestrator (`monitorTeam`/`collectResults`/`shutdownTeam`) finally observes their outcome across the process boundary (they were previously stuck `running` forever). Run-scoped snapshots (schemaVersion:1) with PID start-time identity for crash/reuse detection, supervisor-first shutdown with orphan-group reap, per-run SessionEnd protection, and prompt-bearing-manifest scrubbing. Shipped across P1–P6 phases with 4 Codex cross-review rounds
+- **2191 unit tests**: Comprehensive test suite using `node:test` across 84 test files (v1.2.0: 2191/2191 passing)
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -545,7 +546,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (2075+ tests across 79 files as of v1.1.6) covers the core hook libraries. To run:
+A `node:test` based test suite (2191 tests across 84 files as of v1.2.0) covers the core hook libraries. To run:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'

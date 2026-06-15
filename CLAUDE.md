@@ -16,7 +16,7 @@ Both orchestrators autonomously loop until the task is fully complete (build pas
 agents/     → Agent persona definitions (.md files with model and role)
 skills/     → User-facing skills (SKILL.md with triggers, steps, workflow)
 scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
-scripts/lib → Shared libraries (53 files; stdin, intent-patterns, tmux-session, inbox-outbox,
+scripts/lib → Shared libraries (57 files; stdin, intent-patterns, tmux-session, inbox-outbox,
               checkpoint, wisdom, worker-status, worktree, fs-atomic, provider-detect,
               config-validator, autonomy, cost-estimate, changelog, pr-create, ci-watch,
               notify, model-router, worker-spawn, preflight, input-guard, stuck-recovery,
@@ -26,8 +26,9 @@ scripts/lib → Shared libraries (53 files; stdin, intent-patterns, tmux-session
               artifact-pipe, browser-handoff, design-identity, memory, micro-skill-scope,
               review-router, subagent-context, taste-memory, ui-reference, ui-remediate,
               ui-smell-scan, ask-jobs, architect-scope, light-mode, model-usage,
-              stage-escalation, runtime-permissions)
-scripts/test → node:test based unit tests (2075+ tests, 79 files; v1.1.6: 2074/2075 passing)
+              stage-escalation, runtime-permissions, proc-identity, supervisor-state,
+              adapter-worker-supervisor, supervisor-opts)
+scripts/test → node:test based unit tests (2191 tests, 84 files; v1.2.0: 2191/2191 passing)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -92,6 +93,9 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/state/ao-model-usage.jsonl` — per-subagent model usage log (schemaVersion:1) for Opus-skew analysis; written by `subagent-stop.mjs` via `scripts/lib/model-usage.mjs`; fallback file when no active run (capped at 1000 lines FIFO); per-run variant at `.ao/artifacts/runs/<runId>/model-usage.jsonl` (uncapped); summarise with `node scripts/usage-report.mjs [--run <runId>|--all|--json]`
 - `.ao/state/ao-plan-pending.json` — marker for plan execution routing fallback (created by PlanExecuteGate, consumed by SessionStart)
 - `.ao/state/ao-runtime-permissions.json` — **[v1.1.6+]** captured Claude Code runtime `permission_mode` (schemaVersion:1, 30-min TTL); written by `RuntimePermissionsCapture` hook on every SessionStart + UserPromptSubmit; read by `permission-detect.mjs` as an UPGRADE-ONLY override on top of the settings union. Runtime tier flows through the SAME deny/ask/disableBypassPermissionsMode/allowManagedPermissionRulesOnly pipeline as the settings defaultMode (via `detectClaudePermissions({effectiveDefaultMode})`), so runtime promotion can never bypass managed restrictions. Issues #67/#68/#69 fix.
+- `.ao/state/supervisor/<runId>/<workerRunId>.snapshot.json` — **[v1.2.0+]** detached worker supervisor snapshot (schemaVersion:1): status (running/completed/failed/cancelled), error category, output tail, supervisorPid/adapterPid + their start-time identities, heartbeat `updatedAt`. Atomic 0600 write; read by `monitorTeam`/`collectResults`/`shutdownTeam` via `supervisor-state.mjs`. Swept per-run by SessionEnd (active runs protected)
+- `.ao/artifacts/team/<runId>/<workerRunId>.output` — **[v1.2.0+]** durable full worker output the supervisor wrote; read by `collectResults` across the fresh-process boundary (lives under `artifacts/team`, NOT `state/supervisor`, so it survives for collect)
+- `.ao/state/supervisor/<runId>/<workerRunId>.manifest.json` — **[v1.2.0+]** launch manifest (carries the raw prompt); the supervisor truncates+unlinks it on startup, and a launch failure / early shutdown also scrubs it so the prompt never lingers
 - `.ao/state/browser-handoff.json` — [v1.0.2+] browser pause state (sessionId + sanitized URL + sanitized breadcrumb); 24h TTL; created by US-006 browser-handoff.mjs; read by `/resume-handoff`
 - `.ao/state/ask-jobs/<jobId>.json` — [v1.0.4+] per-job metadata for the async `/ask` path (schemaVersion:1). **Single-writer rule:** only the detached `_run-job` runner process ever writes this file; `status`/`collect`/`cancel`/`list` subcommands are read-only. 24h SessionEnd sweep applies.
 - `.ao/state/ask-jobs/<jobId>.prompt` — [v1.0.4+] raw prompt sidecar for async `/ask` jobs; written by the async launcher and deleted by the runner on adapter spawn (mode 0o600).
@@ -203,6 +207,22 @@ Workers (Codex, Claude, and Gemini) are spawned via a strategy-pattern adapter s
    - `tmux new-session` + `tmux send-keys` + `tmux capture-pane`
    - Always available when tmux is installed
 
+### Detached Worker Supervisor (v1.2.0+)
+
+**Problem.** Atlas/Athena orchestration is **fresh-process-per-poll**: `monitorTeam` / `collectResults` / `shutdownTeam` each `loadTeamState()` from disk in a brand-new Node process. A live in-process adapter handle (`_liveHandle`) does NOT survive that boundary — `saveTeamState` strips it (`NON_SERIALIZABLE_WORKER_KEYS`). Before v1.2.0 the five non-tmux adapters spawned in-process, so once the orchestrator re-polled in a fresh process their completion was invisible and the workers were stuck `status: 'running'` forever (a fresh `monitorTeam` had no handle to read).
+
+**Fix (the "FLIP").** `spawnTeam` no longer spawns adapters in-process. For every non-tmux worker it launches a **detached supervisor** — `node scripts/lib/adapter-worker-supervisor.mjs <manifest>` (`detached: true`, `unref`, `stdio: 'ignore'`) — that loads the adapter ITSELF, runs one prompt to terminal completion, and writes **atomic disk snapshots + a durable output file**. A fresh-process orchestrator then reads the worker's outcome from disk. tmux workers are unchanged (still `capturePane`-classified).
+
+- **Run identity** — `spawnTeam` stamps the team state with a `runId` (random hex) + absolute `projectRoot`. Each worker gets a `workerRunId`; the persisted `_handle = { supervisorPid, supervisorStartId, runId, workerRunId }` is fully serializable. The supervisor's snapshot/output/manifest paths are DERIVED from the absolute `projectRoot` + these validated hex IDs (the manifest is NOT consulted for any explicit module/snapshot/output path), so a STALE supervisor from a prior same-name run can never be read as the current one.
+- **Snapshot lifecycle** (`scripts/lib/supervisor-state.mjs`, schemaVersion:1) — atomic `writeSnapshot` (0600, clamped output tail), `readSnapshot(path, expected)` with a 5-way result (`missing` / `corrupt` / `unsupported` / `mismatch` / `ok`), heartbeat freshness (future-skew bounded), HEARTBEAT_INTERVAL 10s / STALE 90s / STARTUP_GRACE 10s.
+- **Readers** (`worker-spawn.mjs`) — `monitorSupervisorWorker` maps a snapshot → MonitorResult: terminal status wins; `running` + dead supervisor (PID start-time identity mismatch) → crash; `running` + stale heartbeat → crash on the 2nd consecutive poll (`_supStaleSeen` latch); missing snapshot past startup grace (or a future `startedAt`) → crash; `mismatch`/`corrupt` → invalid. `collectResults` reads the durable output file (under `.ao/artifacts/team/`). `shutdownSupervisorWorker` is **supervisor-first**: signal the supervisor group (its SIGTERM handler shuts the adapter down) → re-read the snapshot → reap a surviving adapter group via the F3 start-id-checked kill → scrub the prompt-bearing manifest.
+- **Adapter dispatch** — the supervisor's `run*` functions use pure manifest→option builders in `scripts/lib/supervisor-opts.mjs` (`buildExecOpts` / `buildAppserverThreadOpts` / `buildGeminiAcpSessionOpts`), kept in a CLI-free module so the wiring is unit-testable without importing the supervisor (which runs `main()` on import). gemini `model` rides on `createSession` (→ `unstable_setSessionModel`), NOT `startServer`.
+- **Manifest hygiene** — the manifest carries the raw prompt. It is DATA for behavior (and supplies `projectRoot`/`cwd`), but NO explicit module/snapshot/output path is ever read from it — those are derived from the absolute `projectRoot` + validated IDs. The supervisor truncates+unlinks it on startup; a launch failure or an early shutdown also truncates+unlinks it so the prompt never lingers to the 24h sweep.
+- **SessionEnd** — `session-end.mjs` sweeps the supervisor tree **per-run** (never wholesale) and skips a run with a `running` snapshot that has a fresh heartbeat OR a live supervisor PID (identity-checked when a `supervisorStartId` is recorded and readable; otherwise it fails open to a bare `kill(pid,0)` existence probe).
+- **Security** — the built-in `fixture` adapter (test-only) is selectable ONLY when `AO_SUPERVISOR_ALLOW_FIXTURE==='1'`, which `spawnTeam` STRIPS from the child env in production; tests opt in via `_inject.supervisor.env`.
+
+Key files: `scripts/lib/adapter-worker-supervisor.mjs` (detached CLI), `scripts/lib/supervisor-state.mjs` (paths + atomic snapshot I/O), `scripts/lib/supervisor-opts.mjs` (pure option builders), `scripts/lib/proc-identity.mjs` (`readProcStartId` PID start-time identity for reuse detection). See `docs/plans/adapter-worker-supervisor/PLAN.md`.
+
 ### Permission Mirroring
 
 All worker types (Codex, Claude, Gemini) mirror the host session's permission level via `scripts/lib/permission-detect.mjs`. This shared module eliminates duplication between adapter-specific approval modules.
@@ -288,7 +308,11 @@ Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
 - `scripts/lib/gemini-exec.mjs` — Gemini exec JSON adapter (spawn/monitor/collect/shutdown)
 - `scripts/lib/permission-detect.mjs` — Unified permission detection (shared by all worker adapters)
 - `scripts/lib/gemini-approval.mjs` — Gemini approval mode mapping (delegates to permission-detect)
-- `scripts/lib/worker-spawn.mjs` — Adapter router (`selectAdapter`, `spawnTeam`, `monitorTeam`)
+- `scripts/lib/worker-spawn.mjs` — Adapter router (`selectAdapter`, `spawnTeam`, `monitorTeam`); launches detached supervisors + reads their disk snapshots (`monitorSupervisorWorker`, `shutdownSupervisorWorker`, `isSupervisorWorker`, `probePidLiveness`)
+- `scripts/lib/adapter-worker-supervisor.mjs` — Detached per-worker supervisor CLI (owns the adapter, writes disk snapshot/output, signal/watchdog/finally, fixture mode)
+- `scripts/lib/supervisor-state.mjs` — Run-scoped supervisor paths + atomic snapshot I/O (5-way `readSnapshot`, heartbeat freshness)
+- `scripts/lib/supervisor-opts.mjs` — Pure manifest→adapter-call option builders (CLI-free so they unit-test without importing the supervisor)
+- `scripts/lib/proc-identity.mjs` — `readProcStartId` PID start-time identity for reuse detection (Linux `/proc/<pid>/stat` + boot_id; macOS `ps -o lstart=`)
 - `scripts/lib/resolve-binary.mjs` — Binary resolution with caching + `buildEnhancedPath()`
 - `scripts/lib/preflight.mjs` — `runStateCleanup()` (lightweight, SessionStart) + `runPreflight()` (full, orchestrators) + `detectCapabilities()` (parallel, cached 60min)
 - `scripts/lib/codex-approval.mjs` — Claude permission level → Codex sandbox tier mirroring + host-sandbox intersection (`buildCodexExecArgs`, `buildCodexAppServerParams`, `shouldDemoteCodexWorker`, `effectiveCodexLevel`, `buildHostSandboxWarning`)
@@ -492,7 +516,7 @@ Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), G
 ## Testing
 
 ```bash
-# Run unit tests (2075+ tests, 79 files; v1.1.6: 2074/2075 passing)
+# Run unit tests (2191 tests, 84 files; v1.2.0: 2191/2191 passing)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script

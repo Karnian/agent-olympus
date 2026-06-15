@@ -92,14 +92,18 @@ agent-olympus/
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (2075+ tests, 79 files; v1.1.6: 2074/2075 passing)
+│   ├── test/                     — node:test unit tests (2191 tests, 84 files; v1.2.0: 2191/2191 passing)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
 │       ├── model-router.mjs      — Routing logic with JSONC config merge
 │       ├── tmux-session.mjs      — Tmux session lifecycle + sanitizeForShellArg()
 │       ├── inbox-outbox.mjs      — File-based message queue (legacy, used by tmux fallback)
-│       ├── worker-spawn.mjs      — Team worker lifecycle (spawn/monitor/collect/shutdown)
+│       ├── worker-spawn.mjs      — Team worker lifecycle (spawn/monitor/collect/shutdown); launches detached supervisors + reads their disk snapshots (v1.2.0)
+│       ├── adapter-worker-supervisor.mjs — Detached per-worker supervisor CLI: owns the adapter, writes disk snapshot/output (v1.2.0)
+│       ├── supervisor-state.mjs  — Run-scoped supervisor paths + atomic snapshot I/O (5-way read, heartbeat) (v1.2.0)
+│       ├── supervisor-opts.mjs   — Pure manifest→adapter-call option builders (CLI-free, unit-testable) (v1.2.0)
+│       ├── proc-identity.mjs     — readProcStartId() PID start-time identity for reuse detection (v1.2.0)
 │       ├── checkpoint.mjs        — Session checkpoint save/restore (24h expiry)
 │       ├── wisdom.mjs            — Structured learning store (JSONL, intent-aware query)
 │       ├── worker-status.mjs     — Real-time worker status dashboard (inline markdown)

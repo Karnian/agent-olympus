@@ -60,7 +60,8 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **Gemini Keychain 마법사** *(v1.1.3, v1.1.4 partition-list 보강)*: `/setup-gemini-auth`로 `/usr/bin/security`를 trusted로 사전 등록한 AO 소유 Keychain 항목을 생성, Gemini 워커 spawn마다 떠오르던 macOS 암호 프롬프트 영구 제거. Keychain 사용자 한정 — OAuth/Vertex/환경변수 경로는 영향 없음
 - **레이어드 Opus-skew 감소** *(v1.1.0+)*: 서브에이전트별 모델 사용 로깅(`ao-model-usage.jsonl`, schemaVersion:1) 측정 + 기본 Sonnet/Haiku로 routing하고 입증된 필요시에만 Opus로 escalation하는 routing 파이프라인. `node scripts/usage-report.mjs`로 요약
 - **런타임 permission_mode 캡처 + `/ask codex` read-only 폴백** *(v1.1.6)*: SessionStart + UserPromptSubmit 훅이 Claude Code의 hook stdin(또는 `CLAUDE_PERMISSION_MODE` 환경변수)에서 `permission_mode`를 읽어 `.ao/state/ao-runtime-permissions.json` (schemaVersion:1, 30분 TTL)에 저장. 권한 감지가 settings ⇧ runtime을 **upgrade-only**로 병합하며 동일한 deny/ask/disableBypass/allowManagedOnly 파이프라인을 통과 — `--dangerously-skip-permissions`로 띄워도 mirror가 `suggest`로 남지 않음. 별개로 `/ask codex`가 suggest 티어 호스트에서 codex의 `read-only` 샌드박스(`-s read-only -a never`)로 폴백 + 시스템 프롬프트 가드 + `git status --porcelain` post-check, 더 이상 exit 2로 끊기지 않음. `node scripts/diagnose-sandbox.mjs --explain-permissions`로 layer별 분석 가능. #67/#68/#69 해결
-- **2075개+ 단위 테스트**: `node:test` 기반 79개 파일의 종합 테스트 스위트 (v1.1.6: 2074/2075 통과)
+- **분리형 워커 슈퍼바이저** *(v1.2.0)*: 어댑터 팀 워커(codex-exec/appserver, claude-cli, gemini-exec/acp)가 더 이상 in-process로 실행되지 않음 — `spawnTeam`이 워커마다 분리된(detached) 슈퍼바이저를 띄워 어댑터를 소유하고 완료/실패/출력을 디스크에 기록하므로, fresh-process-per-poll 오케스트레이터(`monitorTeam`/`collectResults`/`shutdownTeam`)가 프로세스 경계 너머로 결과를 관측 가능(이전엔 영원히 `running`에 멈춰 있었음). run 단위 스냅샷(schemaVersion:1) + PID 시작시간 identity 기반 crash/재사용 감지, supervisor-first 셧다운 + 고아 그룹 reap, SessionEnd run 단위 보호, 프롬프트 포함 매니페스트 scrub. P1–P6 단계로 진행, 코덱스 교차리뷰 4라운드
+- **2191개 단위 테스트**: `node:test` 기반 84개 파일의 종합 테스트 스위트 (v1.2.0: 2191/2191 통과)
 - **페일-세이프 아키텍처**: 훅이 Claude Code를 절대 차단하지 않음; 에러 시 우아한 저하
 
 ## 설치
@@ -538,7 +539,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## 테스트
 
-`node:test` 기반 테스트 스위트 (79개 파일, 2075개+ 테스트, v1.1.6 기준)가 핵심 훅 라이브러리를 커버합니다:
+`node:test` 기반 테스트 스위트 (84개 파일, 2191개 테스트, v1.2.0 기준)가 핵심 훅 라이브러리를 커버합니다:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'
