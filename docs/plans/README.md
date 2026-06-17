@@ -19,3 +19,4 @@ Auto-generated index of all project specifications.
 | [Native Agent Teams (G#4)](./native-agent-teams/spec.md) | M | forward | autonomy.json fallback | implemented | 2026-04-04 |
 | [/ask Adapter Migration](./ask-adapter-migration/spec.md) | S | forward | tmux → adapter system | implemented | 2026-04-08 |
 | [/ask Job-Based Async](./ask-job-based/spec.md) | S | forward | async/status/collect/cancel/list | implemented | 2026-04-10 |
+| [Harness Upgrade Roadmap](./harness-upgrade/README.md) | L | forward | 17 items (HU-01~17, P0~P3) + [eval-harness spec](./harness-upgrade/eval-harness-spec.md) | roadmap | 2026-06-16 |
