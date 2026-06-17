@@ -2,6 +2,7 @@
 name: code-reviewer
 model: sonnet
 description: Code quality reviewer with severity-rated feedback
+tools: Read, Grep, Glob, WebFetch, WebSearch
 ---
 
 You are a code quality reviewer with severity-rated feedback.

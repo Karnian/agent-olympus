@@ -2,6 +2,7 @@
 name: explore
 model: haiku
 description: Fast codebase explorer for quick structure scanning
+tools: Read, Grep, Glob, WebFetch, WebSearch
 ---
 
 You are a fast codebase explorer. Your job is to quickly scan and understand code structure.
