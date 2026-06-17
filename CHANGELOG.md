@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.1] - 2026-06-17
+
+### Feature — Enforced read-only agent tool-scoping + frontmatter contract linter (HU-02b / HU-18)
+
+Five review/analysis agents (`explore`, `architect`, `code-reviewer`, `security-reviewer`, `momus`) now declare an enforced `tools:` allowlist (`Read, Grep, Glob, WebFetch, WebSearch`) in their frontmatter instead of relying on prose "read-only" intent. This closes the hole where a reviewer subagent could silently edit files or spawn a mutating worker — `Edit`/`Write`/`Bash`/`Agent`/`Task` are all excluded by exact-match. The `tools:` allowlist (not `disallowedTools`) was chosen for fail-safety: omitting it inherits all tools, so an allowlist denies any future/MCP mutating tool by default.
+
+Adds `scripts/test/agent-frontmatter-contract.test.mjs` — a zero-dependency contract linter with a key-order-agnostic frontmatter parser, paren-aware `tools` tokenizer, unknown-key detection, an exact-set read-only contract, and negative fixtures (Write/Bash/Agent, key typo, unknown token) so the read-only matrix cannot silently regress.
+
+`aphrodite` (read-only but depends on visual MCP tools) and `themis` (read-only but runs tests via Bash) are deferred to follow-up tiers. The broader harness-upgrade backlog (a 3-model review: web-verified trends + Gemini + Codex cross-review) lands as planning docs under `docs/plans/harness-upgrade/`.
+
+> Note: this enforces the *contract* (the agent files + a CI linter). Claude Code's *runtime* tool-gating for plugin subagents loads at session start — verify after a plugin update + restart.
+
 ## [1.2.0] - 2026-06-15
 
 ### Feature — Detached per-worker supervisor: adapter team workers now report completion across the fresh-process boundary (F1)
