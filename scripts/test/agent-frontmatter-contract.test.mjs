@@ -4,10 +4,27 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ALLOWED_KEYS = new Set(['name', 'model', 'description', 'tools', 'disallowedTools']);
+const ALLOWED_KEYS = new Set(['name', 'model', 'description', 'tools', 'disallowedTools', 'memory']);
 const ALLOWED_MODELS = new Set(['haiku', 'sonnet', 'opus']);
-const READONLY_AGENTS = ['explore', 'architect', 'code-reviewer', 'security-reviewer', 'momus'];
-const READONLY_TOOLS = new Set(['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch']);
+const AGENT_TOOL_CONTRACTS = {
+  explore: ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
+  architect: ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
+  'code-reviewer': ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
+  'security-reviewer': ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
+  momus: ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
+  aphrodite: [
+    'Read',
+    'Grep',
+    'Glob',
+    'WebFetch',
+    'WebSearch',
+    'mcp__Claude_Preview__preview_screenshot',
+    'mcp__Claude_Preview__preview_snapshot',
+  ],
+  themis: ['Read', 'Grep', 'Glob', 'Bash'],
+};
+const FORBIDDEN_TOOL_TOKENS = ['Edit', 'Write', 'NotebookEdit', 'Agent', 'Task', 'Skill'];
+const FORBIDDEN_KEYS_FOR_CONTRACTED = ['disallowedTools', 'memory'];
 const BUILTIN_TOOLS = new Set([
   'Read',
   'Write',
@@ -118,16 +135,21 @@ function isRecognizedToolToken(token) {
 }
 
 function assertExactSet(actual, expected, label) {
-  for (const token of expected) {
+  const expectedSet = new Set(expected);
+  for (const token of expectedSet) {
     assert.ok(actual.has(token), `${label}: missing ${token}`);
   }
   for (const token of actual) {
-    assert.ok(expected.has(token), `${label}: unexpected ${token}`);
+    assert.ok(expectedSet.has(token), `${label}: unexpected ${token}`);
   }
-  assert.equal(actual.size, expected.size, `${label}: expected ${expected.size} tools, got ${actual.size}`);
+  assert.equal(actual.size, expectedSet.size, `${label}: expected ${expectedSet.size} tools, got ${actual.size}`);
 }
 
-function validateAgentFrontmatter({ source, fileStem, readonlyAgents = READONLY_AGENTS }) {
+function isForbiddenToolToken(token) {
+  return FORBIDDEN_TOOL_TOKENS.some((forbidden) => token === forbidden || token.startsWith(`${forbidden}(`));
+}
+
+function validateAgentFrontmatter({ source, fileStem, agentToolContracts = AGENT_TOOL_CONTRACTS }) {
   const frontmatter = parseFrontmatter(source);
 
   for (const key of Object.keys(frontmatter)) {
@@ -146,9 +168,16 @@ function validateAgentFrontmatter({ source, fileStem, readonlyAgents = READONLY_
     }
   }
 
-  if (readonlyAgents.includes(fileStem)) {
-    assert.ok('tools' in frontmatter, `${fileStem}: read-only agent must declare tools`);
-    assertExactSet(new Set(toolsTokens), READONLY_TOOLS, `${fileStem}: read-only tools`);
+  const toolContract = agentToolContracts[fileStem];
+  if (toolContract) {
+    assert.ok('tools' in frontmatter, `${fileStem}: contracted agent must declare tools`);
+    assertExactSet(new Set(toolsTokens), toolContract, `${fileStem}: contracted tools`);
+    for (const token of toolsTokens) {
+      assert.ok(!isForbiddenToolToken(token), `${fileStem}: forbidden tools token ${token}`);
+    }
+    for (const key of FORBIDDEN_KEYS_FOR_CONTRACTED) {
+      assert.ok(!(key in frontmatter), `${fileStem}: contracted agent must not declare ${key}`);
+    }
   }
 
   return { frontmatter, toolsTokens };
@@ -197,7 +226,7 @@ Body
 });
 
 describe('agent frontmatter contract', () => {
-  it('validates every agents/*.md schema and read-only allowlist contract', async () => {
+  it('validates every agents/*.md schema and per-agent tool contract', async () => {
     const agents = await readAgentFiles();
     assert.ok(agents.length > 0, 'expected at least one agent file');
 
@@ -218,7 +247,91 @@ tools: Read, Grep, Glob, WebFetch, WebSearch, Write, Bash(git diff:*), Agent(exe
 ---
 `,
       }),
-      /unexpected (Write|Bash\(git diff:\*\)|Agent\(executor\))/,
+      /(unexpected (Write|Bash\(git diff:\*\)|Agent\(executor\))|forbidden tools token (Write|Agent\(executor\)))/,
+    );
+  });
+
+  it('fails aphrodite contract fixtures that include Bash', () => {
+    assert.throws(
+      () => validateAgentFrontmatter({
+        fileStem: 'aphrodite',
+        source: `---
+name: aphrodite
+model: sonnet
+description: Fixture visual review agent
+tools: Read, Grep, Glob, WebFetch, WebSearch, mcp__Claude_Preview__preview_screenshot, mcp__Claude_Preview__preview_snapshot, Bash
+---
+`,
+      }),
+      /unexpected Bash/,
+    );
+  });
+
+  it('fails themis contract fixtures that include delegation tools', () => {
+    for (const token of ['Agent', 'Task', 'Skill']) {
+      assert.throws(
+        () => validateAgentFrontmatter({
+          fileStem: 'themis',
+          source: `---
+name: themis
+model: sonnet
+description: Fixture quality gate
+tools: Read, Grep, Glob, Bash, ${token}
+---
+`,
+        }),
+        new RegExp(`(unexpected ${token}|forbidden tools token ${token})`),
+      );
+    }
+  });
+
+  it('fails contracted agents that declare memory', () => {
+    assert.throws(
+      () => validateAgentFrontmatter({
+        fileStem: 'themis',
+        source: `---
+name: themis
+model: sonnet
+description: Fixture quality gate
+tools: Read, Grep, Glob, Bash
+memory: project
+---
+`,
+      }),
+      /contracted agent must not declare memory/,
+    );
+  });
+
+  it('fails contracted agents that declare disallowedTools', () => {
+    assert.throws(
+      () => validateAgentFrontmatter({
+        fileStem: 'explore',
+        source: `---
+name: explore
+model: haiku
+description: Fixture read-only agent
+tools: Read, Grep, Glob, WebFetch, WebSearch
+disallowedTools: Read
+---
+`,
+      }),
+      /contracted agent must not declare disallowedTools/,
+    );
+  });
+
+  it('fails tier-1 agents with stray MCP tool tokens', () => {
+    assert.throws(
+      () => validateAgentFrontmatter({
+        fileStem: 'explore',
+        source: `---
+name: explore
+model: haiku
+description: Fixture read-only agent
+tools: Read, Grep, Glob, WebFetch, WebSearch, mcp__Foo__bar
+---
+`,
+      }),
+      /unexpected mcp__Foo__bar/,
     );
   });
 
