@@ -32,7 +32,36 @@ Athena = many brains collaborating.
 - Bridge ALL Claude↔Codex↔Gemini communication
 - If integration fails → debug and retry
 - If reviews reject → fix and re-review
-- Only stop when ALL checks pass, or after 15 iterations (then escalate)
+- Only stop when ALL checks pass, or when the **Loop Guard** (below) returns a stop signal.
+
+## Loop_Guard (persistent cooperative guard — MANDATORY)
+
+Identical mechanism to Atlas. The loop bounds — "15 iterations", "same error 3×",
+"10 monitor iterations", "3 review rounds" — are tracked by
+`scripts/lib/loop-guard.mjs` (persisted per-run to
+`.ao/artifacts/runs/<runId>/loop-guard.json`), NOT self-counted. Counts survive
+context compaction / fresh-process polling, and the guard yields a deterministic
+STOP result once consulted. It is cooperative: you MUST consult it. No hook
+enforces the call yet; a Stop/PreToolUse hook backstop is possible future work.
+
+```javascript
+import {
+  registerIteration, recordError, registerReviewRound, registerCounter,
+} from './scripts/lib/loop-guard.mjs';
+// runId = the active run id (same one used by addVerification / checkVerificationGate);
+// resolve via getActiveRunId('athena') from ./scripts/lib/run-artifacts.mjs if needed.
+```
+
+Consult points:
+- **Top of each outer iteration:** `registerIteration(runId)` → `!allowed` ⇒ STOP + escalate "15 iteration limit exceeded".
+- **Phase 3 monitor loop (each pass):** `registerCounter(runId, 'monitor-iterations', { cap: 10 })` → `!allowed` ⇒ stop monitoring, force-collect + escalate stalled workers.
+- **Phase 4 on every integration/build/test failure:** `recordError(runId, <error signature>)` → `shouldEscalate` ⇒ STOP + escalate (same error 3×).
+- **Top of each Phase 5 review round:** `registerReviewRound(runId)` → `!allowed` ⇒ stop review loop + escalate unresolved findings.
+
+**Fail-open:** `degraded: true` means the guard could not persist or read clean
+state — fall back to the prose bounds and keep working; never halt the team on a
+tracking glitch. A `!allowed` / `shouldEscalate` with `degraded:false` is
+authoritative — STOP.
 
 ## Architecture
 
@@ -534,6 +563,8 @@ saveCheckpoint('athena', {
 
 ```
 ┌─→ MONITOR LOOP (adapts to spawn path used)
+│   registerCounter(runId, 'monitor-iterations', { cap: 10 })
+│     → if !allowed: stop monitoring, force-collect results + escalate any stalled workers
 │
 │   IF Path A (native teams):
 │     Check TaskList("athena-<slug>") for Claude worker status [LLM tool call]
@@ -554,7 +585,7 @@ saveCheckpoint('athena', {
 │     ├─ Gemini worker fails (auth/quota/crash/timeout) → reassign to Claude executor
 │     ├─ Worker blocked → unblock or escalate
 │     └─ All done? → proceed to Phase 4
-└── Loop (max 10 monitor iterations)
+└── Loop until all workers done or registerCounter('monitor-iterations') returns !allowed (cap 10)
 ```
 
 **Worker execution & monitoring model (supervisor).** Non-tmux adapter workers (codex-exec, codex-appserver, claude-cli, gemini-exec, gemini-acp) do NOT run in your process — `spawnTeam()` launches a **detached supervisor** per worker that owns the adapter and writes its completion/failure/output to disk. So the canonical monitor loop is:
@@ -750,8 +781,12 @@ Task(subagent_type="agent-olympus:themis", model="sonnet",
 Note: Skip this checkpoint if Themis agent is absent.
 
 ```
-┌─→ ALL PASS → Phase 5
-│   ANY FAIL → spawn debugger (with wisdom learnings: formatWisdomForPrompt(queryWisdom(null,10))), fix, re-verify
+┌─→ registerIteration(runId) → if !allowed: STOP + escalate "15 iteration limit exceeded"
+│   ALL PASS → Phase 5
+│   ANY FAIL →
+│     recordError(runId, <first error line or error code>)
+│       → if shouldEscalate (same error 3×): STOP + escalate, do NOT retry the same fix
+│     else spawn debugger (with wisdom learnings: formatWisdomForPrompt(queryWisdom(null,10))), fix, re-verify
 │   Debug escalation chain:
 │     1. First attempt: spawn debugger agent
 │     2. Debugger fails once: spawn debugger again with additional context from wisdom
@@ -759,7 +794,7 @@ Note: Skip this checkpoint if Themis agent is absent.
 │        for root-cause-first investigation
 │     4. systematic-debug fails: escalate via Skill(skill="agent-olympus:trace")
 │        for evidence-driven hypothesis analysis
-└── Loop (max 5 fix cycles)
+└── Loop until ALL PASS or a Loop Guard stop signal fires (local soft budget: ~5 fix cycles)
 ```
 
 ```
@@ -803,10 +838,11 @@ call `handleEscalation(currentSet, flag)` and spawn the requested reviewer in th
 **same iteration** (not the next loop).
 
 ```
-┌─→ ALL APPROVED → DONE ✓
-│   ANY ESCALATION → spawn additional reviewer same iteration
+┌─→ registerReviewRound(runId) → if !allowed: stop the review loop, escalate unresolved findings
+│   ALL APPROVED → DONE ✓
+│   ANY ESCALATION → spawn additional reviewer same iteration (does NOT consume a round)
 │   ANY REJECTED → fix, re-review
-└── Loop (max 3 rounds)
+└── Loop until ALL APPROVED or registerReviewRound returns !allowed (default cap 3)
 ```
 
 **Rollback**: `.ao/autonomy.json` → `{ "reviewRouter": { "disabled": true } }`.
@@ -1089,16 +1125,20 @@ Phase 5 (Review) → Skill(skill="agent-olympus:slop-cleaner") → Skill(skill="
 
 STOP only when:
 - ✅ All workers complete + integrated + build passes + tests pass + reviews approved
-- ❌ Same error 3 times (escalate)
+- ❌ Same error 3 times — signaled by `recordError(runId, sig).shouldEscalate` once consulted (see Loop_Guard)
   ```
   node scripts/notify-cli.mjs --event escalated --orchestrator athena --body "Same error 3 times: <error summary>"
   ```
-- ❌ 15 iterations exceeded (escalate)
+- ❌ 15 iterations exceeded — signaled by `registerIteration(runId).allowed === false` once consulted (see Loop_Guard)
   ```
   node scripts/notify-cli.mjs --event escalated --orchestrator athena --body "15 iteration limit exceeded"
   ```
 - ❌ Critical security issue (escalate)
 - ❌ Workers in circular deadlock (escalate)
+
+> These limits are tracked by a persistent cooperative guard (`scripts/lib/loop-guard.mjs`), not self-counted.
+> A `degraded:true` result means tracking was unavailable or state was not readable —
+> fall back to the prose numbers above as a backstop and keep the team running.
 
 **NEVER stop because "it seems done" — verify EVERYTHING.**
 

@@ -16,7 +16,7 @@ Both orchestrators autonomously loop until the task is fully complete (build pas
 agents/     → Agent persona definitions (.md files with model and role)
 skills/     → User-facing skills (SKILL.md with triggers, steps, workflow)
 scripts/    → Hook scripts (Node.js ESM, zero npm dependencies)
-scripts/lib → Shared libraries (57 files; stdin, intent-patterns, tmux-session, inbox-outbox,
+scripts/lib → Shared libraries (58 files; stdin, intent-patterns, tmux-session, inbox-outbox,
               checkpoint, wisdom, worker-status, worktree, fs-atomic, provider-detect,
               config-validator, autonomy, cost-estimate, changelog, pr-create, ci-watch,
               notify, model-router, worker-spawn, preflight, input-guard, stuck-recovery,
@@ -27,8 +27,8 @@ scripts/lib → Shared libraries (57 files; stdin, intent-patterns, tmux-session
               review-router, subagent-context, taste-memory, ui-reference, ui-remediate,
               ui-smell-scan, ask-jobs, architect-scope, light-mode, model-usage,
               stage-escalation, runtime-permissions, proc-identity, supervisor-state,
-              adapter-worker-supervisor, supervisor-opts)
-scripts/test → node:test based unit tests (2191 tests, 84 files; v1.2.0: 2191/2191 passing)
+              adapter-worker-supervisor, supervisor-opts, loop-guard)
+scripts/test → node:test based unit tests (2249 tests, 86 files; 2249/2249 passing)
 config/     → Model routing configuration (JSONC)
 hooks/      → Hook event registrations
 docs/plans/ → Finalized specifications (git-tracked, permanent)
@@ -103,6 +103,7 @@ docs/plans/ → Finalized specifications (git-tracked, permanent)
 - `.ao/sessions/<sessionId>.json` — per-session metadata (branch, cwd, status, linked runIds); shared across worktrees; 90-day TTL
 - `.ao/artifacts/runs/<runId>/` — per-run artifacts (events.jsonl, summary.json, verification.jsonl)
   - `.ao/artifacts/runs/<runId>/ui-remediation.json` — [v1.0.2+] sequential remediation chain results (schemaVersion: 1); written by `/ui-remediate`
+  - `.ao/artifacts/runs/<runId>/loop-guard.json` — **[v1.2.3+]** persistent cooperative orchestration termination counters (schemaVersion:1): `{ counters: { iterations, reviewRounds, <named> }, errors: { <sigKey>: { count, sample, firstAt, lastAt } } }`. Atomic 0600 write. Written/read by `scripts/lib/loop-guard.mjs` (`registerIteration`/`registerReviewRound`/`registerCounter`/`recordError` + read-only getters). Gives Atlas/Athena a deterministic STOP result once consulted for "max 15 iterations / same error 3× / max 3 review rounds"; counters survive context compaction / fresh-process polling. The orchestrator must still call it (no hook enforces the call yet; a Stop/PreToolUse hook backstop is possible future work). Fails OPEN (`degraded:true`) on missing runId / corrupt state / FS error so a tracking glitch never halts a run; a genuine cap/threshold hit on healthy storage is authoritative. Separate concern from `escalation-log.json` (which gates Sonnet→Opus re-runs). Swept by SessionEnd with other run artifacts.
 - `.ao/artifacts/ask/<jobId>.jsonl` — [v1.0.4+] raw JSONL event stream (adapter stdout tee) for async `/ask` jobs. Also carries the runner-written `{"type":"runner_done","schemaVersion":1,"status":"completed|failed|cancelled","text":...}` sentinel — the adapter-agnostic completion oracle used by `status`/`collect` reconciliation when the runner crashed before flipping metadata.
 - `.ao/artifacts/ask/<jobId>.md` — [v1.0.4+] rendered markdown body for async `/ask` jobs, synthesized by the runner from `handle._output` on the completed path. JobId-addressable (vs sync path's `<model>-<ts>.md`) to tolerate parallel launches.
 - `.ao/artifacts/pipe/` — **[v1.0.2+] cascade artifact ARCHIVAL pipe (NOT prompt-history isolation); swept by SessionEnd after 24h**

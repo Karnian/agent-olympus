@@ -29,7 +29,59 @@ You say it. Atlas finishes it. No exceptions.
 - Does the build pass? If NO → debug and fix
 - Do all tests pass? If NO → debug and fix
 - Is the code review clean? If NO → fix issues and re-review
-- Only stop when ALL checks pass, or after 15 total iterations (then escalate to user)
+- Only stop when ALL checks pass, or when the **Loop Guard** (below) returns a stop signal.
+
+## Loop_Guard (persistent cooperative guard — MANDATORY)
+
+The loop bounds are NOT self-counted by you. They are tracked by
+`scripts/lib/loop-guard.mjs`, which persists per-run counters to
+`.ao/artifacts/runs/<runId>/loop-guard.json` so counts survive context
+compaction / fresh-process polling. The guard yields a deterministic STOP result
+once consulted, but it is cooperative: you MUST consult it — do not rely on
+counting in your head. No hook enforces the call yet; a Stop/PreToolUse hook
+backstop is possible future work.
+
+```javascript
+import {
+  registerIteration, recordError, registerReviewRound,
+} from './scripts/lib/loop-guard.mjs';
+// runId is the active run id — the SAME one passed to addVerification() /
+// checkVerificationGate(). If it is not already in scope, resolve it with
+// getActiveRunId('atlas') from ./scripts/lib/run-artifacts.mjs.
+```
+
+Three mandatory consult points:
+
+1. **Top of every outer iteration** (the NEVER-STOP loop — each Phase 3→4→5 pass):
+   ```javascript
+   const it = registerIteration(runId);          // default cap 15
+   if (!it.allowed) {
+     // hard cap reached — STOP and escalate, do NOT loop again
+     // node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "15 iteration limit exceeded"
+   }
+   ```
+2. **On every verify/build/test failure** (Phase 4), before retrying:
+   ```javascript
+   const err = recordError(runId, <first error line OR error code>);  // threshold 3
+   if (err.shouldEscalate) {
+     // same error 3× — STOP and escalate, do NOT retry the same fix
+     // node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "Same error 3 times: <summary>"
+   }
+   ```
+   Pass a focused signature (the first error line, or an error code) — the guard
+   normalizes away volatile line numbers / hex addresses / ANSI so shifting line
+   numbers across attempts still count as "the same error".
+3. **Top of every Phase 5 review round**:
+   ```javascript
+   const rr = registerReviewRound(runId);        // default cap 3
+   if (!rr.allowed) { /* stop the review loop, escalate unresolved findings */ }
+   ```
+
+**Fail-open:** if a call returns `degraded: true`, the guard could not persist or
+read clean state (missing runId / corrupt state / FS error) — fall back to the
+prose bounds as a backstop and proceed; a tracking glitch must never halt legitimate work. A genuine
+`allowed:false` / `shouldEscalate:true` with `degraded:false` is authoritative —
+STOP.
 
 ## Architecture
 
@@ -789,10 +841,17 @@ saveCheckpoint('atlas', { phase: 4, prdSnapshot: <prd.json>, completedStories, a
 
 Run **simultaneously**: build, tests, linter, type checker.
 
+**Consult the Loop Guard** (see Loop_Guard section): call `registerIteration(runId)`
+once on entry to this verify/fix loop; on each failure call `recordError(runId, <error signature>)`.
+
 ```
-┌─→ Run all checks
+┌─→ registerIteration(runId) → if !allowed: STOP + escalate "15 iteration limit exceeded"
+│   Run all checks
 │   ├─ ALL PASS → proceed to Phase 5
-│   └─ ANY FAIL → spawn debugger:
+│   └─ ANY FAIL →
+│       recordError(runId, <first error line or error code>)
+│         → if shouldEscalate (same error 3×): STOP + escalate, do NOT retry the same fix
+│       else spawn debugger:
 │       Task(subagent_type="agent-olympus:debugger", model="sonnet",
 │         prompt="Fix: <error_output>. Previous learnings: <formatWisdomForPrompt(queryWisdom(null,10))>")
 │       Debug escalation chain:
@@ -803,7 +862,9 @@ Run **simultaneously**: build, tests, linter, type checker.
 │         4. systematic-debug fails: escalate via Skill(skill="agent-olympus:trace")
 │            for evidence-driven hypothesis analysis
 │       Re-run checks
-└── Loop (max 5 fix cycles, same error 3x = escalate)
+└── Loop until ALL PASS or a Loop Guard stop signal fires
+    (registerIteration !allowed = global cap; recordError shouldEscalate = same error 3×;
+     local soft budget: ~5 fix cycles)
 ```
 
 ```
@@ -921,11 +982,12 @@ the case where code-reviewer notices security-relevant code that the path-based
 router missed.
 
 ```
-┌─→ Collect verdicts
+┌─→ registerReviewRound(runId) → if !allowed: stop the review loop, escalate unresolved findings to user
+│   Collect verdicts
 │   ├─ ALL APPROVED → DONE ✓
-│   ├─ ANY ESCALATION → spawn additional reviewer same iteration
+│   ├─ ANY ESCALATION → spawn additional reviewer same iteration (does NOT consume a round)
 │   └─ ANY REJECTED → fix issues, re-review
-└── Loop (max 3 review rounds)
+└── Loop until ALL APPROVED or registerReviewRound returns !allowed (default cap 3)
 ```
 
 **Rollback**: set `.ao/autonomy.json` → `{ "reviewRouter": { "disabled": true } }`
@@ -1154,15 +1216,20 @@ For example, use `anthropic-skills:xlsx` for spreadsheets instead of writing xls
 
 STOP only when:
 - ✅ All acceptance criteria met AND build passes AND tests pass AND reviews approved
-- ❌ Same error 3 times (escalate to user)
+- ❌ Same error 3 times — signaled by `recordError(runId, sig).shouldEscalate` once consulted (see Loop_Guard), not eyeballed
   ```
   node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "Same error 3 times: <error summary>"
   ```
-- ❌ 15 total iterations exceeded (escalate to user)
+- ❌ 15 total iterations exceeded — signaled by `registerIteration(runId).allowed === false` once consulted (see Loop_Guard)
   ```
   node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "15 iteration limit exceeded"
   ```
+- ❌ Max review rounds exceeded — signaled by `registerReviewRound(runId).allowed === false` once consulted (default cap 3)
 - ❌ Critical security vulnerability found (escalate to user)
+
+> These limits are tracked by a persistent cooperative guard (`scripts/lib/loop-guard.mjs`), not self-counted.
+> Consult the guard at each loop point; a `degraded:true` result means tracking was
+> unavailable or state was not readable — fall back to the prose numbers above as a backstop.
 
 **NEVER stop because "it seems done" — verify EVERYTHING.**
 

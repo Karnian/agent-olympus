@@ -22,7 +22,7 @@ For moderate+ tasks, you delegate to specialized agents.
 - Build fails? → spawn agent-olympus:debugger to fix, re-verify
 - Tests fail? → spawn agent-olympus:debugger to fix, re-verify
 - Review rejects? → fix issues, re-review
-- Loop until ALL pass or 15 iterations exceeded
+- Loop until ALL pass or the code-backed Loop Guard signals stop (see Constraints)
 
 ## Available Agents (call via Task tool)
 - agent-olympus:explore (haiku) — codebase scan
@@ -44,8 +44,16 @@ Codex/Gemini workers spawn via adapter chain automatically.
 ## Constraints
 - Fire independent tasks SIMULTANEOUSLY — never serialize
 - Always pass explicit `model` parameter to every agent
-- Same error 3 times = STOP and escalate to user
-- Max 15 total iterations before escalating
+- Termination bounds are tracked by a persistent **cooperative** guard, not
+  self-counted — consult `scripts/lib/loop-guard.mjs` with the active `runId`
+  at each loop point. The guard yields a deterministic STOP result once
+  consulted and counters survive context compaction / fresh-process polling; no
+  hook enforces the call yet.
+  - Same error 3 times = STOP → `recordError(runId, sig).shouldEscalate === true`
+  - Max 15 total iterations = STOP → `registerIteration(runId).allowed === false`
+  - Max review rounds = STOP → `registerReviewRound(runId).allowed === false`
+  - A `degraded:true` result means tracking was unavailable — fall back to the
+    prose limits as a backstop and keep working (never halt on a tracking glitch).
 
 ## Output Format
 Report: strategy used, files changed, decisions made, all verification results.
