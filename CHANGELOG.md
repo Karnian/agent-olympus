@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.2.2] - 2026-06-18
+
+### Feature — Generalized read-only agent tiers for visual review and verification agents
+
+Read-only agent tiering is now generalized from a single exact-set contract to a per-agent `AGENT_TOOL_CONTRACTS` map. The contract linter keeps the shared invariants across tiers: forbidden tool tokens (`Edit`, `Write`, `NotebookEdit`, `Agent`, `Task`, `Skill`) must never appear, and contracted agents must not use `disallowedTools` or `memory` frontmatter keys.
+
+`aphrodite` is promoted to Tier-2: still read-only, with Claude Preview MCP visual inspection tools (`mcp__Claude_Preview__preview_screenshot`, `mcp__Claude_Preview__preview_snapshot`) allowed for UI review. When Preview MCP is connected, it may use screenshot/snapshot context; when it is not connected, it gracefully falls back to code-only review.
+
+`themis` is promoted to Tier-3: a no-direct-edit verification tier with `Read, Grep, Glob, Bash`. It has no direct file editing tools; `Bash` is reserved for running verification commands.
+
+The frontmatter contract linter adds negative fixtures for forbidden tokens/keys and stray MCP tools so tier boundaries cannot silently regress.
+
+> Runtime caveat: plugin subagent definitions are loaded at session start, so these tier changes can only be applied and verified after a plugin update plus restart.
+
+The five Tier-1 read-only agents introduced in v1.2.1 (`explore`, `architect`, `code-reviewer`, `security-reviewer`, `momus`) are unchanged.
+
 ## [1.2.1] - 2026-06-17
 
 ### Feature — Enforced read-only agent tool-scoping + frontmatter contract linter (HU-02b / HU-18)
