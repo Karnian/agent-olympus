@@ -4,6 +4,30 @@
 > harness-engineering review on **2026-06-16** (baseline: `main` @ v1.1.6 +
 > `feat/adapter-worker-supervisor` @ v1.2.0).
 
+## Status & handoff — START HERE (updated 2026-06-18)
+
+**Shipped on `main` (pushed, tagged):**
+- **v1.2.0** — detached worker supervisor.
+- **v1.2.1** — HU-02b Tier-1 read-only tool-scoping (`explore`, `architect`, `code-reviewer`, `security-reviewer`, `momus`) + **HU-18** contract linter.
+- **v1.2.2** — read-only tiers generalized: **Tier-2** `aphrodite` (read-only + Claude Preview MCP), **Tier-3** `themis` (no-direct-edit verify, `Bash` allowed). All 7 read-only-family agents are contract- AND runtime-verified (fresh `claude -p` probe).
+
+**Not started:** everything else in the backlog below (HU-01, HU-02a, HU-03–21) + the **4 deferred agents** (`metis`, `prometheus`, `hermes`, `ask` — decide read-only/Bash/unrestricted per their bodies).
+
+**Recommended next:**
+- **A — small / direct continuation:** tier the 4 deferred agents → ship as v1.2.3.
+- **B — highest value / larger:** `HU-06` (deterministic pipeline + idempotent durable execution) → unblocks `HU-01` (eval + CI regression harness; see [eval-harness-spec.md](eval-harness-spec.md)).
+
+**Workflow conventions (author's preferred flow):**
+1. Claude writes a plan (doc in this dir). 2. **Codex cross-reviews** the plan (`codex -a never -s read-only -c model_reasoning_effort=high exec`) → GO / GO-WITH-CHANGES / NO-GO → fold into a rev-2 plan. 3. **Codex implements** (`-s workspace-write`), does NOT commit. 4. **Claude reviews** the diff + runs tests (+ a real-file mutation test for linter changes). 5. Parallelize (Athena / parallel Codex) only when sub-tasks don't share a file; a single shared artifact → one cohesive flow.
+
+**Release procedure:** branch off `main`, FF-merge back. Bump version in **4 strings** (`package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` ×2) + prepend a CHANGELOG entry. Gate order: 4-count recheck → `claude plugin validate .` → full suite → `git fetch` + verify `main == origin/main` → FF-merge → annotated tag `vX.Y.Z` → push `main` THEN the tag. User then runs `claude plugin marketplace update` + `claude plugin update` + restart.
+
+**Gotchas:**
+- **Subagent defs load at session START** — a plugin update mid-session does NOT reload them; runtime tool restrictions only apply in a session started *after* the update. Verify with a **fresh `claude -p`** (the running session is stale).
+- A Stop hook **auto-commits uncommitted work as `ao-wip`** — after Codex implements, `git reset --mixed <last-clean>` and re-commit cleanly.
+- `tools:` allowlist is the enforced mechanism (NOT `disallowedTools`); MCP tokens (`mcp__server__tool`) are accepted but only inject when the MCP server is connected (graceful code-only fallback otherwise).
+- Restore files via a **backup copy**, not `git checkout` (Codex's edits are uncommitted; checkout would revert them).
+
 ## Provenance (how this was produced)
 
 | Axis | Method | Output |
