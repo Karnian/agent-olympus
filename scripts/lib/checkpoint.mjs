@@ -65,6 +65,7 @@ async function tryLoadCheckpointFile(filePath) {
  *
  * @param {'atlas'|'athena'} orchestrator
  * @param {{ phase: number, sessionId?: string, prdSnapshot?: object, completedStories?: string[], activeWorkers?: string[], worktrees?: Object.<string, {path: string, branch: string}>, startedAt?: string, taskDescription?: string }} data
+ * @returns {Promise<{ ok: boolean, degraded: boolean }>}
  */
 export async function saveCheckpoint(orchestrator, data) {
   try {
@@ -115,8 +116,10 @@ export async function saveCheckpoint(orchestrator, data) {
     }
 
     await atomicWriteFile(filePath, JSON.stringify(checkpoint, null, 2));
+    return { ok: true, degraded: false };
   } catch {
     // fail-safe: never throw
+    return { ok: false, degraded: true };
   }
 }
 
