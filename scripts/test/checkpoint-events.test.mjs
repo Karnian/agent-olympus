@@ -119,7 +119,8 @@ test('saveCheckpoint: emits checkpoint_saved event when active run exists', asyn
     await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true });
 
     const { runId } = createRun('atlas', 'test task');
-    await saveCheckpoint('atlas', { phase: 0, taskDescription: 'test' });
+    const result = await saveCheckpoint('atlas', { phase: 0, taskDescription: 'test' });
+    assert.deepEqual(result, { ok: true, degraded: false });
 
     const run = getRun(runId);
     const cpEvents = run.events.filter(e => e.type === 'checkpoint_saved');
@@ -280,6 +281,21 @@ test('saveCheckpoint + loadCheckpoint: backward compat — signatures unchanged'
     const formatted = formatCheckpoint(cp);
     assert.ok(formatted.includes('Phase 2'));
     assert.ok(formatted.includes('PLAN'));
+  } finally {
+    process.chdir(origCwd);
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('saveCheckpoint: returns degraded status instead of throwing on write failure', async () => {
+  const { tmpDir } = await setupTestEnv();
+  const origCwd = process.cwd();
+  process.chdir(tmpDir);
+  try {
+    // Make ".ao" a file so checkpoint.mjs cannot create ".ao/state".
+    await fsp.writeFile(path.join(tmpDir, '.ao'), 'not a directory');
+    const result = await saveCheckpoint('atlas', { phase: 0, taskDescription: 'cannot write' });
+    assert.deepEqual(result, { ok: false, degraded: true });
   } finally {
     process.chdir(origCwd);
     await removeTmpDir(tmpDir);
