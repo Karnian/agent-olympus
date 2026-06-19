@@ -4,21 +4,23 @@
 > harness-engineering review on **2026-06-16** (baseline: `main` @ v1.1.6 +
 > `feat/adapter-worker-supervisor` @ v1.2.0).
 
-## Status & handoff — START HERE (updated 2026-06-18)
+## Status & handoff — START HERE (updated 2026-06-19)
 
 **Shipped on `main` (pushed, tagged):**
 - **v1.2.0** — detached worker supervisor.
 - **v1.2.1** — HU-02b Tier-1 read-only tool-scoping (`explore`, `architect`, `code-reviewer`, `security-reviewer`, `momus`) + **HU-18** contract linter.
 - **v1.2.2** — read-only tiers generalized: **Tier-2** `aphrodite` (read-only + Claude Preview MCP), **Tier-3** `themis` (no-direct-edit verify, `Bash` allowed). All 7 read-only-family agents are contract- AND runtime-verified (fresh `claude -p` probe).
+- **v1.2.3** — **HU-06.1** deterministic phase runner (`scripts/lib/phase-runner.mjs` + the `pipeline.json` per-run ledger; absorbs `loop-guard` as its sole caller) + **HU-06.2** Atlas `SKILL.md` rewritten onto the runner + `phase-contract.test.mjs` (15-assertion contract linter). Plan converged through 3 Codex rounds; library Codex-implemented/Claude-reviewed; Atlas rewrite Claude-implemented/Codex-reviewed ×2. Suite 2289/2289. ⚠️ runtime `claude -p` smoke deferred (Atlas would run unsupervised). **Remaining HU-06:** `.3` (Athena rewrite, incl. the `recover` branches).
 
-**Not started:** everything else in the backlog below (HU-01, HU-02a, HU-03–20) + the **4 deferred agents** (`metis`, `prometheus`, `hermes`, `ask` — decide read-only/Bash/unrestricted per their bodies).
+**Not started:** the rest of the backlog (HU-01, HU-02a, HU-03–05, HU-07–20) + the **4 deferred agents** (`metis`, `prometheus`, `hermes`, `ask` — decide read-only/Bash/unrestricted per their bodies). **HU-06 in progress:** `.1`/`.2` shipped in v1.2.3; `.3` (Athena rewrite — has the `recover` spawn/monitor/integrate branches) is next; `.4` (docs) done in v1.2.3.
 
-**Partial / unmerged (NOT in any release):**
-- **`loop-guard`** (branch `feat/loop-guard`; `scripts/lib/loop-guard.mjs`, 47 tests, suite 2249/2249) — code-backs the orchestration loop counters that HU-06 + HU-21 flag as *"advisory prose"*: the **iteration**, **same-error-3×**, and **review-round** caps now persist per-run to `.ao/artifacts/runs/<runId>/loop-guard.json` and survive context compaction / fresh-process polling; wired into atlas/athena `SKILL.md` Phase 4/5 + `Stop_Conditions`. ⚠️ **COOPERATIVE partial down-payment on HU-21, NOT its closure**: the Atlas/Athena LLM *must call* the guard (no hook enforces the call), **time / token / spend caps + a user-visible kill-switch are NOT implemented**, and it **fails open** — corrupt/unreadable state or a missing `runId` reports `degraded:true`, while an *absent* log file starts fresh (`degraded:false`) — a guardrail, not a hard safety boundary. Produced via the workflow convention below (Claude → Codex cross-review → Codex implement → Claude review; Codex caught a silent state-loss bug in the degraded-signaling path). **Disposition (2026-06-18 Codex decision review): reuse it as the loop-limit primitive *inside* HU-06's phase runner rather than extending it standalone — see the HU-06 / HU-21 rows.**
+**Absorbed into v1.2.3 (was "partial / unmerged"):**
+- **`loop-guard`** (`scripts/lib/loop-guard.mjs`) — the iteration / same-error-3× / review-round caps. As of v1.2.3 (HU-06) the **phase runner is its sole caller** — the structural chokepoint that *guarantees* the consult — so it is no longer standalone-cooperative: Atlas reaches every cap through `beginAttempt`/`reattempt`/`loopTick`/`recordPhaseError`. ⚠️ Still a guardrail, not a hard safety boundary: **time / token / spend caps + a user-visible kill-switch remain unimplemented (HU-21)**, and it fails open (`degraded:true` on corrupt/missing state). (Athena still calls `loop-guard` directly until HU-06.3 migrates it.)
 
 **Recommended next:**
-- **A — small / direct continuation:** tier the 4 deferred agents → ship as v1.2.3.
-- **B — highest value / larger:** `HU-06` (deterministic pipeline + idempotent durable execution) → unblocks `HU-01` (eval + CI regression harness; see [eval-harness-spec.md](eval-harness-spec.md)).
+- **A — finish HU-06:** `HU-06.3` Athena `SKILL.md` rewrite onto the runner — the `recover` branches for spawn/monitor/integrate are the hard part (see [HU-06-pipeline-runner.md](HU-06-pipeline-runner.md) for the resume contract + [HU-06.2-atlas-rewrite.md](HU-06.2-atlas-rewrite.md) for the established flow + the contract-linter pattern to extend with an athena block).
+- **B — unblocked now:** `HU-01` (eval + CI regression harness; see [eval-harness-spec.md](eval-harness-spec.md)) — the phase runner + Atlas adoption let a `claude -p "/atlas …"` run reproduce *real* orchestration (it reads `pipeline.json`), the precondition HU-06 existed to provide.
+- **C — small:** tier the 4 deferred agents (`metis`, `prometheus`, `hermes`, `ask`).
 
 **Workflow conventions (author's preferred flow):**
 1. Claude writes a plan (doc in this dir). 2. **Codex cross-reviews** the plan (`codex -a never -s read-only -c model_reasoning_effort=high exec`) → GO / GO-WITH-CHANGES / NO-GO → fold into a rev-2 plan. 3. **Codex implements** (`-s workspace-write`), does NOT commit. 4. **Claude reviews** the diff + runs tests (+ a real-file mutation test for linter changes). 5. Parallelize (Athena / parallel Codex) only when sub-tasks don't share a file; a single shared artifact → one cohesive flow.
