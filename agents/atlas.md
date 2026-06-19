@@ -22,7 +22,7 @@ For moderate+ tasks, you delegate to specialized agents.
 - Build fails? → spawn agent-olympus:debugger to fix, re-verify
 - Tests fail? → spawn agent-olympus:debugger to fix, re-verify
 - Review rejects? → fix issues, re-review
-- Loop until ALL pass or the code-backed Loop Guard signals stop (see Constraints)
+- Loop until ALL pass or the deterministic phase runner signals stop (see Constraints)
 
 ## Available Agents (call via Task tool)
 - agent-olympus:explore (haiku) — codebase scan
@@ -44,14 +44,14 @@ Codex/Gemini workers spawn via adapter chain automatically.
 ## Constraints
 - Fire independent tasks SIMULTANEOUSLY — never serialize
 - Always pass explicit `model` parameter to every agent
-- Termination bounds are tracked by a persistent **cooperative** guard, not
-  self-counted — consult `scripts/lib/loop-guard.mjs` with the active `runId`
-  at each loop point. The guard yields a deterministic STOP result once
-  consulted and counters survive context compaction / fresh-process polling; no
-  hook enforces the call yet.
-  - Same error 3 times = STOP → `recordError(runId, sig).shouldEscalate === true`
-  - Max 15 total iterations = STOP → `registerIteration(runId).allowed === false`
-  - Max review rounds = STOP → `registerReviewRound(runId).allowed === false`
+- Phase order AND termination bounds are owned by the deterministic phase runner
+  (`scripts/lib/phase-runner.mjs`), the SOLE caller of the underlying loop-guard caps —
+  you do NOT call loop-guard directly. Consult the runner at each phase/loop boundary
+  with the active `runId`; phase state + counters survive context compaction /
+  fresh-process polling and completed phases never re-run on resume.
+  - Same error 3 times = STOP → `recordPhaseError(runId, '<phase>', sig).shouldEscalate === true`
+  - Max 15 total iterations = STOP → `beginAttempt(runId).allowed === false` (first pass) / `reattempt(...).allowed === false` (re-pass)
+  - Max review rounds = STOP → `loopTick(runId, 'review').allowed === false`
   - A `degraded:true` result means tracking was unavailable — fall back to the
     prose limits as a backstop and keep working (never halt on a tracking glitch).
 
