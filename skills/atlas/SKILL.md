@@ -29,59 +29,53 @@ You say it. Atlas finishes it. No exceptions.
 - Does the build pass? If NO → debug and fix
 - Do all tests pass? If NO → debug and fix
 - Is the code review clean? If NO → fix issues and re-review
-- Only stop when ALL checks pass, or when the **Loop Guard** (below) returns a stop signal.
+- Only stop when ALL checks pass, or when the **Phase Runner** (below) returns a stop signal.
 
-## Loop_Guard (persistent cooperative guard — MANDATORY)
+## Phase_Runner (deterministic phase ledger + loop-guard chokepoint — MANDATORY)
 
-The loop bounds are NOT self-counted by you. They are tracked by
-`scripts/lib/loop-guard.mjs`, which persists per-run counters to
-`.ao/artifacts/runs/<runId>/loop-guard.json` so counts survive context
-compaction / fresh-process polling. The guard yields a deterministic STOP result
-once consulted, but it is cooperative: you MUST consult it — do not rely on
-counting in your head. No hook enforces the call yet; a Stop/PreToolUse hook
-backstop is possible future work.
+The phase order AND the loop bounds are NOT self-counted by you. They are owned by
+`scripts/lib/phase-runner.mjs`, which persists a per-run phase ledger to
+`.ao/artifacts/runs/<runId>/pipeline.json` and is the **sole** caller of the
+loop-guard caps (15 iterations / 3 review rounds / same-error-3×). The runner is the
+chokepoint: you reach every cap consult THROUGH a runner method and you do NOT import
+`loop-guard` directly. Phase state + counts survive context compaction / fresh-process
+polling, and completed phases are never re-run on resume (exactly-once).
 
 ```javascript
+// AO-CONTRACT:runner-init
 import {
-  registerIteration, recordError, registerReviewRound,
-} from './scripts/lib/loop-guard.mjs';
+  initPipeline, enterPhase, beginAttempt, reattempt, loopTick,
+  recordPhaseError, completePhase, skipPhase, reopenPhase, getPipelineState,
+} from './scripts/lib/phase-runner.mjs';
 // runId is the active run id — the SAME one passed to addVerification() /
-// checkVerificationGate(). If it is not already in scope, resolve it with
-// getActiveRunId('atlas') from ./scripts/lib/run-artifacts.mjs.
+// checkVerificationGate(). Resolve via createRun('atlas', <task>) /
+// getActiveRunId('atlas') from ./scripts/lib/run-artifacts.mjs if not in scope.
+const { resumePhase, resumePolicy } = initPipeline(runId, 'atlas');
+// On resume, jump to resumePhase; every earlier enterPhase below returns { skip:true }.
 ```
 
-Three mandatory consult points:
+The runner methods replace the old direct loop-guard calls one-for-one:
 
-1. **Top of every outer iteration** (the NEVER-STOP loop — each Phase 3→4→5 pass):
-   ```javascript
-   const it = registerIteration(runId);          // default cap 15
-   if (!it.allowed) {
-     // hard cap reached — STOP and escalate, do NOT loop again
-     // node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "15 iteration limit exceeded"
-   }
-   ```
-2. **On every verify/build/test failure** (Phase 4), before retrying:
-   ```javascript
-   const err = recordError(runId, <first error line OR error code>);  // threshold 3
-   if (err.shouldEscalate) {
-     // same error 3× — STOP and escalate, do NOT retry the same fix
-     // node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "Same error 3 times: <summary>"
-   }
-   ```
-   Pass a focused signature (the first error line, or an error code) — the guard
-   normalizes away volatile line numbers / hex addresses / ANSI so shifting line
-   numbers across attempts still count as "the same error".
-3. **Top of every Phase 5 review round**:
-   ```javascript
-   const rr = registerReviewRound(runId);        // default cap 3
-   if (!rr.allowed) { /* stop the review loop, escalate unresolved findings */ }
-   ```
+- **Each phase boundary:** `const g = enterPhase(runId, '<id>'); if (!g.skip) { …phase
+  work verbatim… await completePhase(runId, '<id>'); }`. `completePhase` writes the
+  ledger first, then the checkpoint payload — you no longer call `saveCheckpoint` with
+  a phase number.
+- **Outer NEVER-STOP loop** (each execute→verify→review pass): `beginAttempt(runId)`
+  once at the head (cap 15); a review reject re-enters via `reattempt(runId,
+  {reopen:['verify'], reason:'review_reject'})`, which ticks the cap atomically.
+  `!allowed` ⇒ STOP + escalate "15 iteration limit exceeded".
+- **On every verify/build/test failure** (Phase 4), before retrying: `const e =
+  recordPhaseError(runId, 'verify', <first error line OR error code>)`;
+  `e.shouldEscalate` (same error 3×) ⇒ STOP + escalate, do NOT retry the same fix. The
+  runner normalizes volatile line numbers / hex / ANSI so shifting positions across
+  attempts still count as "the same error".
+- **Top of every Phase 5 review round:** `loopTick(runId, 'review')` (cap 3);
+  `!allowed` ⇒ stop the review loop, escalate unresolved findings.
 
-**Fail-open:** if a call returns `degraded: true`, the guard could not persist or
-read clean state (missing runId / corrupt state / FS error) — fall back to the
-prose bounds as a backstop and proceed; a tracking glitch must never halt legitimate work. A genuine
-`allowed:false` / `shouldEscalate:true` with `degraded:false` is authoritative —
-STOP.
+**Fail-open:** if a runner call returns `degraded: true`, it could not persist or read
+clean state (missing runId / corrupt state / FS error) — fall back to the prose bounds
+as a backstop and proceed; a tracking glitch must never halt legitimate work. A genuine
+`allowed:false` / `shouldEscalate:true` with `degraded:false` is authoritative — STOP.
 
 ## Architecture
 
@@ -123,7 +117,7 @@ Phase 5: REVIEW ←── Fix & Retry (debugger agent)
 
 ### Phase 0 — TRIAGE
 
-#### Light-Mode Resolution (Phase 4, 2026-04-22)
+#### Light-Mode Resolution (Phase 4, 2026-04-22) <!-- AO-CONTRACT:light-mode-resolution -->
 
 Before any sub-agent is spawned, resolve the orchestrator mode. Light mode
 skips momus + architect review stages. Source precedence (highest first):
@@ -183,28 +177,45 @@ const _stageFilter = stageFilter(orchMode);
 ```
 
 After each review stage (Phase 2b momus, architect), if `orchMode === 'light'`
-and the reviewer REJECTs, import `autoEscalateOnReject`, flip `orchMode = 'full'`,
+and the reviewer REJECTs, import `autoEscalateOnReject` (and `registerEscalation` from
+`scripts/lib/stage-escalation.mjs`), flip `orchMode = 'full'`,
 update `_stageFilter = stageFilter(orchMode)`, call `logLightModeEvent({ event: 'escalated', rejectingStage, rejectReason })`,
-then **jump back to Phase 2b**: re-run momus on the current plan, then
-architect review, before returning to Phase 3.
+then **rewind to Phase 2b** through the runner's policy door:
+```javascript
+// AO-CONTRACT:light-mode-rewind — a POLICY rewind, NOT an outer attempt: it does NOT tick the 15-cap.
+const esc = registerEscalation(runId, 'light-mode-rewind', { cap: 2 });  // its OWN cap (stage-escalation.mjs, NOT loop-guard)
+if (!esc.allowed) {
+  // 2-rewind cap reached — STOP + escalate to user, do NOT rewind again
+} else {
+  reopenPhase(runId, 'plan', { reason: 'light_mode_rewind' });           // reopens the plan phase for re-validation
+}
+```
+re-run momus on the current plan, then architect review, before returning to Phase 3.
 
 **Phase 2 re-entry regimen (Codex Phase 4 #3)** — when auto-escalation
 fires AFTER Phase 3 execution has started (e.g. code-reviewer rejects in
-Phase 5), the orchestrator saves the current iteration's work, rewinds
-to Phase 2b to insert the skipped momus validation on the *actual* plan
-that was executed, then continues Phase 5 re-review with architect. If
-momus rejects retroactively, feed back to prometheus (same retry flow as
-full mode) and re-execute the affected stories. Cap at 2 rewinds per run
-(use `registerEscalation(runId, 'light-mode-rewind', { cap: 2 })`) to
-prevent runaway loops.
+Phase 5), the orchestrator saves the current iteration's work, then runs **the same
+cap-checked rewind block above** (`registerEscalation` → if `!esc.allowed` STOP, else
+`reopenPhase('plan', {reason:'light_mode_rewind'})`) to insert the skipped momus
+validation on the *actual* plan that was executed, then continues Phase 5 re-review with
+architect. If
+momus rejects retroactively, feed back to prometheus (same retry flow as full mode) and
+re-execute the affected stories via `reattempt(runId, { reopen: ['execute', 'verify'],
+reason: 'light_mode_reexec' })` — `reopenPhase('plan')` alone leaves execute/verify
+`completed` (they would skip in `enterPhase`), so re-execution must reopen them, and that
+re-execution legitimately consumes an outer iteration. The 2-rewind cap
+(`registerEscalation(runId, 'light-mode-rewind', { cap: 2 })`, checked for `allowed`
+above) prevents runaway loops — a SEPARATE budget from the 15-iteration cap.
 
-#### Checkpoint Recovery
+#### Checkpoint Recovery + Phase-Ledger Init
 
-Before starting any work:
-1. Check for an interrupted session: `loadCheckpoint('atlas')`
-2. If found, present to user: "[formatCheckpoint output]. Resume or restart?"
-   - **Resume** → skip to saved phase, restore `completedStories` from checkpoint
-   - **Restart** → `clearCheckpoint('atlas')`, proceed normally
+Before starting any work, establish the run id and the phase ledger:
+1. `runId = getActiveRunId('atlas') || createRun('atlas', <user_request>).runId` (from `run-artifacts.mjs`).
+2. `const { resumePhase, resumePolicy } = initPipeline(runId, 'atlas')` — the runner's resume point (see Phase_Runner section).
+3. Check for an interrupted session: `loadCheckpoint('atlas')` (carries the rich payload).
+4. If `resumePhase` is past `triage` OR a checkpoint is found, present to user: "[formatCheckpoint output]. Resume or restart?"
+   - **Resume** → jump to `resumePhase`; every earlier `enterPhase` returns `{ skip:true }` (completed phases are never re-run). Restore the rich payload (`prdSnapshot`) from the checkpoint, but read **story-level truth** (which stories passed) from `.ao/prd.json` + the verification ledger, NOT from a possibly-stale `completedStories`.
+   - **Restart** → `clearCheckpoint('atlas')`, start a fresh run id, proceed normally.
 
 #### Load Prior Wisdom
 1. Run `migrateProgressTxt()` if `.ao/progress.txt` exists (one-time migration to wisdom.jsonl)
@@ -238,9 +249,13 @@ test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSI
 **Phase Guard — early checkpoint + preflight:**
 
 ```javascript
-// Step 1: Early checkpoint BEFORE any sub-agent call
-saveCheckpoint('atlas', { phase: 0, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
-Output: "[Atlas] Phase 0: TRIAGE started (checkpoint saved)"
+// Step 1: Enter the triage phase (resume-aware ledger entry; replaces the early checkpoint)
+// The earlier Phase 0 steps (light-mode resolution, checkpoint recovery, wisdom load,
+// onboarding, harness check) are IDEMPOTENT pre-phase setup that runs every pass — they
+// establish orchMode / runId / context, are cheap to re-run, and are NOT ledger phases.
+// On resume past 'triage', the Checkpoint Recovery jump skips ahead after this setup.
+const _triage = enterPhase(runId, 'triage');   // runId + initPipeline established in Checkpoint Recovery above
+Output: "[Atlas] Phase 0: TRIAGE started (phase ledger entered)"
 
 // Step 2: Clean stale .ao/ state + detect capabilities
 import { runPreflight, formatCapabilityReport } from './scripts/lib/preflight.mjs';
@@ -264,6 +279,7 @@ if (!inputCheck.safe) {
 }
 ```
 
+<!-- AO-CONTRACT:explore-before-metis -->
 Pick strategy. **Run Explore FIRST (fast, haiku), then Metis** — metis
 requires explore_results as input, so the previous "simultaneous" pattern
 was unsafe (metis started with an empty `<explore_results>` placeholder).
@@ -365,7 +381,7 @@ the previous two-call pattern (Phase 0 classify + Phase 1 analyze). Output
 reused by Phase 2/3/4/5 via `metis_output`. No second metis call — see
 Phase 1 below.
 
-**Sub-agent output validation — MANDATORY:**
+**Sub-agent output validation — MANDATORY:** <!-- AO-CONTRACT:subagent-validation -->
 
 After Metis and Explore return, validate before proceeding:
 ```
@@ -388,7 +404,7 @@ If metis_output is empty OR does not contain COMPLEXITY classification:
     await addWisdom({ category: 'debug', lesson: 'Atlas Phase 0 failed: Metis empty output on L-scale input.', confidence: 'high' });
     STOP — do not proceed.
 
-# False-trivial guard: a "trivial" classification is only acceptable when
+# False-trivial guard (AO-CONTRACT:false-trivial-guard): a "trivial" classification is only acceptable when
 # PART B analysis fields are honestly 'none'. If PART A says trivial but
 # PART B has concrete bullets, that's a lazy classification — escalate
 # complexity to 'moderate' (conservative) without re-calling metis.
@@ -416,14 +432,28 @@ Output: "[Atlas] Triage + Analysis complete — complexity: <complexity>, scope:
 ```
 
 **Trivial tasks**: Skip phases 1-2, execute directly (Atlas CAN implement simple things itself).
+On the trivial path, mark the skipped phases in the ledger and synthesize a minimal
+PRD so the downstream finalize/ship contract still holds:
+```javascript
+// AO-CONTRACT:trivial-prd — synthetic one-story PRD (passes:false; execute→verify flips it true)
+skipPhase(runId, 'context', 'trivial');
+skipPhase(runId, 'spec', 'trivial');
+skipPhase(runId, 'plan', 'trivial');
+// Write .ao/prd.json = { projectName:'atlas-<slug>',
+//   userStories:[{ id:'US-001', title:<task>, acceptanceCriteria:[<derived>], passes:false }] }
+// Do NOT self-verify here. The normal execute→verify path sets passes:true and records
+// the US-001 verification, so the changelog (passes:true only) and PR body both include it.
+```
 **Ambiguous tasks** (ambiguity > 60): Invoke `Skill(skill="agent-olympus:deep-interview")` to clarify before proceeding.
 **Moderate+**: Full pipeline.
 
-```
-saveCheckpoint('atlas', { phase: 1, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
+```javascript
+await completePhase(runId, 'triage');   // replaces saveCheckpoint({phase:1}); checkpoints triage (index 0)
 ```
 
 ### Phase 1 — OPTIONAL DEEP-DIVE / EXTERNAL CONTEXT (skip for trivial)
+
+**Phase entry/exit (runner):** `const g = enterPhase(runId, 'context')`. If `g.skip` (trivial path skipped it in Phase 0, or resume), jump straight to Phase 1.5. Otherwise run this phase; when its optional deep-dive / external-context steps are done (or determined unnecessary), call `await completePhase(runId, 'context')` before Phase 1.5.
 
 **Analysis reuse**: `metis_output.AFFECTED_FILES`, `.HIDDEN_REQUIREMENTS`,
 `.RISKS`, `.UNKNOWNS`, `.KNOWLEDGE_GAPS` were already produced in Phase 0.
@@ -472,7 +502,9 @@ Skill(skill="agent-olympus:external-context",
 ```
 Inject the returned markdown brief as `<external_context>` into the Phase 2 prompt for prometheus.
 
-### Phase 1.5 — SPEC GATE (Hermes validation/creation)
+### Phase 1.5 — SPEC GATE (Hermes validation/creation) <!-- AO-CONTRACT:spec-gate -->
+
+**Phase entry/exit (runner):** `const g = enterPhase(runId, 'spec')`. If `g.skip` (trivial/resume), jump to Phase 2. Otherwise run the spec gate below; finish with `await completePhase(runId, 'spec')`.
 
 Output: "[Atlas] Phase 1.5: SPEC GATE — validating/creating specification..."
 
@@ -569,8 +601,11 @@ Proceed to Phase 2 with a guaranteed spec. Prometheus now receives structured re
 
 ### Phase 2 — PLAN + VALIDATE (skip for trivial)
 
+**Phase entry/exit (runner):** `const g = enterPhase(runId, 'plan')`. If `g.skip` (trivial/resume), jump to Phase 3. Otherwise run planning + validation below; finish with `await completePhase(runId, 'plan', null, { checkpointData: { prdSnapshot: <.ao/prd.json> } })` (this replaces the numeric plan-phase `saveCheckpoint` calls).
+
 Output: "[Atlas] Phase 2: PLAN + VALIDATE — creating execution plan..."
 
+<!-- AO-CONTRACT:consensus-plan -->
 **[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
 ```
 Skill(skill="agent-olympus:consensus-plan",
@@ -629,7 +664,7 @@ the event with `logLightModeEvent({ event: 'escalated', rejectingStage: 'momus',
 and re-run any skipped stages before proceeding.
 
 ```
-saveCheckpoint('atlas', { phase: 2, completedStories: [], activeWorkers: [], startedAt, taskDescription })
+// plan-phase checkpoint is performed by completePhase(runId, 'plan') at the phase exit (see Phase 2 entry).
 ```
 
 **Generate PRD** (after plan approved):
@@ -672,10 +707,31 @@ These ARE acceptable:
 - ✅ "Test file tests/auth.test.ts exists and all 5 cases pass"
 
 ```
-saveCheckpoint('atlas', { phase: 3, prdSnapshot: <prd.json contents>, completedStories: [], activeWorkers: [], startedAt, taskDescription })
+// await completePhase(runId, 'plan', null, { checkpointData: { prdSnapshot: <prd.json contents> } })  — see Phase 2 entry; carries the PRD snapshot into the checkpoint.
 ```
 
 ### Phase 3 — EXECUTE (story-by-story)
+
+**Phase entry + OUTER-LOOP head (runner):**
+```javascript
+// AO-CONTRACT:outer-attempt — execute→verify→review is the NEVER-STOP outer loop.
+// Open the outer loop with beginAttempt ONCE per run. The concrete first-pass test is the
+// ledger's outer-attempt counter: `attempt === 0` ⇒ no outer attempt has ticked yet. A
+// later reattempt (review_reject / quality_fail) re-enters BELOW this line with attempt>0,
+// so beginAttempt is correctly skipped here — it never double-counts the 15-cap (Codex HU-06.2).
+if (getPipelineState(runId).attempt === 0) {
+  const a = beginAttempt(runId);   // ticks the 15-iteration cap exactly once, at loop open
+  if (!a.allowed) {
+    // 15 iteration limit reached — STOP + escalate, do NOT loop again
+    // node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "15 iteration limit exceeded"
+  }
+}
+const g = enterPhase(runId, 'execute');  // skipped on resume, or when a review-reject reopened only 'verify'
+// if (!g.skip) { …run the stories below; finish with completePhase(runId, 'execute', …) … }
+```
+A later **review reject** re-enters via `reattempt(runId, {reopen:['verify'], reason:'review_reject'})`
+(back to Phase 4); a **quality-gate fail** re-enters via `reattempt(runId, {reopen:['execute','verify'],
+reason:'quality_fail'})` (back here). Each `reattempt` ticks the 15-cap atomically; `!allowed` ⇒ STOP.
 
 **Progress Briefing** — during execution, output periodic status updates:
 - After each parallel group completes, output a compact summary:
@@ -791,7 +847,7 @@ If story is a pure refactor / docs / config change (no runtime behavior change):
 
 3. After each story completes, verify its acceptance criteria with FRESH evidence
 
-4. **Codex Cross-Validation** (per story) — MANDATORY: spawn a Codex validator before marking passes:
+4. **Codex Cross-Validation** (per story) — MANDATORY: spawn a Codex validator before marking passes: <!-- AO-CONTRACT:cross-validation -->
 ```bash
 # CRITICAL: resolve binary path first — worktree shells may not inherit full PATH
 CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
@@ -820,7 +876,7 @@ tmux send-keys -t "atlas-gemini-xval-<story-id>" "\"$GEMINI_BIN\" <approval-flag
    addWisdom({ category: 'debug',   lesson: '<pitfall to avoid>',              confidence: 'high' })
    addWisdom({ category: 'build',   lesson: '<build/test learning>',           confidence: 'medium' })
    ```
-6. After each story passes: `saveCheckpoint('atlas', { phase: 3, prdSnapshot: <updated prd.json>, completedStories: <all passing story IDs>, activeWorkers: <in-flight agent IDs>, startedAt, taskDescription })`
+6. After each story passes: mark `passes: true` in `.ao/prd.json` — the authoritative story-level state the runner reads on resume (no per-story checkpoint needed; `completePhase('execute')` checkpoints the phase).
 
 **Wisdom tracking** — call `addWisdom()` after each story with appropriate category:
 - `'test'` — test framework quirks, test patterns that work
@@ -834,23 +890,27 @@ tmux send-keys -t "atlas-gemini-xval-<story-id>" "\"$GEMINI_BIN\" <approval-flag
 Wisdom persists across iterations so later stories benefit from earlier learnings.
 
 ```
-saveCheckpoint('atlas', { phase: 4, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
+await completePhase(runId, 'execute', null, { checkpointData: { prdSnapshot: <prd.json>, completedStories } });   // execute complete — replaces saveCheckpoint({phase:4})
 ```
 
 ### Phase 4 — VERIFY (loop until pass)
 
-Run **simultaneously**: build, tests, linter, type checker.
+**Phase entry (runner):** `const g = enterPhase(runId, 'verify')`. On resume / after a
+review-reject reopened it, this re-enters cleanly. The 15-iteration **outer** cap was
+already ticked by `beginAttempt`/`reattempt` at the Phase 3 head — this phase's
+**internal** fix loop is bounded by `recordPhaseError` (same-error-3×) + a ~5-cycle soft
+budget, NOT a fresh iteration tick.
 
-**Consult the Loop Guard** (see Loop_Guard section): call `registerIteration(runId)`
-once on entry to this verify/fix loop; on each failure call `recordError(runId, <error signature>)`.
+Run **simultaneously**: build, tests, linter, type checker. The fix/debug escalation
+chain (debugger → systematic-debug → trace) is recorded through the runner.
+<!-- AO-CONTRACT:debug-escalation -->
 
 ```
-┌─→ registerIteration(runId) → if !allowed: STOP + escalate "15 iteration limit exceeded"
-│   Run all checks
-│   ├─ ALL PASS → proceed to Phase 5
+┌─→ Run all checks
+│   ├─ ALL PASS → proceed to Phase 4.2 / 4.5, then Phase 5
 │   └─ ANY FAIL →
-│       recordError(runId, <first error line or error code>)
-│         → if shouldEscalate (same error 3×): STOP + escalate, do NOT retry the same fix
+│       const e = recordPhaseError(runId, 'verify', <first error line or error code>)
+│         → if e.shouldEscalate (same error 3×): STOP + escalate, do NOT retry the same fix
 │       else spawn debugger:
 │       Task(subagent_type="agent-olympus:debugger", model="sonnet",
 │         prompt="Fix: <error_output>. Previous learnings: <formatWisdomForPrompt(queryWisdom(null,10))>")
@@ -862,14 +922,11 @@ once on entry to this verify/fix loop; on each failure call `recordError(runId, 
 │         4. systematic-debug fails: escalate via Skill(skill="agent-olympus:trace")
 │            for evidence-driven hypothesis analysis
 │       Re-run checks
-└── Loop until ALL PASS or a Loop Guard stop signal fires
-    (registerIteration !allowed = global cap; recordError shouldEscalate = same error 3×;
-     local soft budget: ~5 fix cycles)
+└── Loop until ALL PASS or recordPhaseError signals shouldEscalate (same error 3×; soft budget ~5 cycles)
 ```
 
-```
-saveCheckpoint('atlas', { phase: 5, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
-```
+`completePhase(runId, 'verify')` is called AFTER the optional Phase 4.2 (visual) and
+Phase 4.5 (quality) sub-steps below — verify is not complete until those gates pass.
 
 ### Phase 4.2 — VISUAL VERIFICATION [OPTIONAL]
 
@@ -923,14 +980,34 @@ If `agent-olympus:themis` agent is available:
 Task(subagent_type="agent-olympus:themis", model="sonnet",
   prompt="Run quality gate checks on all changed files.")
 ```
-- If verdict is FAIL → return to Phase 3 with specific failure reasons (max 2 retry cycles before escalating to user)
+- If verdict is FAIL → remediate via the outer loop (NOT a no-op reopen):
+  ```javascript
+  // AO-CONTRACT:quality-fail
+  const q = loopTick(runId, 'quality');     // code-owned 2-cycle budget (QUALITY_CAP=2)
+  if (!q.allowed) {
+    // quality budget exhausted — escalate to user with the specific failure reasons
+  } else {
+    // STEP 1 (REQUIRED): mark the quality-failed stories passes:false in .ao/prd.json.
+    //   Atlas execute only re-runs passes:false stories, so WITHOUT this flip the
+    //   reopen below is a no-op (burns an attempt doing nothing).
+    setStoriesPassesFalse(<quality-failed story ids>);   // mutate .ao/prd.json
+    // STEP 2: re-enter the outer loop. reattempt ALREADY ticks the 15-cap; the re-entry
+    //   resumes at enterPhase('execute') and does NOT re-call beginAttempt (no double-tick).
+    reattempt(runId, { reopen: ['execute', 'verify'], reason: 'quality_fail' });
+  }
+  ```
 - If verdict is CONDITIONAL → log warnings, proceed to Phase 5
 - If verdict is PASS → proceed to Phase 5
 Note: This phase is OPTIONAL. If Themis agent is absent, skip and proceed.
 
+**Phase exit (runner):** once the verify checks + the optional visual (4.2) and quality
+(4.5) gates all pass, call `await completePhase(runId, 'verify')` before Phase 5.
+
 ### Phase 5 — REVIEW (loop until approved)
 
-**Step 5.0 — Consult review router (US-005)**
+**Phase entry (runner):** `enterPhase(runId, 'review')`. Each review round is bounded by `loopTick(runId, 'review')` (cap 3); a reject re-enters the outer loop via `reattempt`; ALL APPROVED → `await completePhase(runId, 'review')`.
+
+**Step 5.0 — Consult review router (US-005)** <!-- AO-CONTRACT:review-router -->
 
 Before fanning out reviewers, call `scripts/lib/review-router.mjs` to compute the
 minimal reviewer set for the actual diff scope. This eliminates 60-80% of wasted
@@ -967,7 +1044,7 @@ For each reviewer in r.reviewers, fire in parallel:
   Task(subagent_type="agent-olympus:<reviewer>", model="sonnet|opus", prompt="...")
 ```
 
-**Step 5.2 — Handle reviewer escalation**
+**Step 5.2 — Handle reviewer escalation** <!-- AO-CONTRACT:review-escalation -->
 
 Reviewers may emit a structured escalation flag mid-run:
 ```json
@@ -982,18 +1059,22 @@ the case where code-reviewer notices security-relevant code that the path-based
 router missed.
 
 ```
-┌─→ registerReviewRound(runId) → if !allowed: stop the review loop, escalate unresolved findings to user
+┌─→ const rr = loopTick(runId, 'review')  → if !rr.allowed: stop the review loop, escalate unresolved findings to user (cap 3)
 │   Collect verdicts
-│   ├─ ALL APPROVED → DONE ✓
+│   ├─ ALL APPROVED → await completePhase(runId, 'review'); DONE ✓
 │   ├─ ANY ESCALATION → spawn additional reviewer same iteration (does NOT consume a round)
-│   └─ ANY REJECTED → fix issues, re-review
-└── Loop until ALL APPROVED or registerReviewRound returns !allowed (default cap 3)
+│   └─ ANY REJECTED → fix issues, then re-enter the outer loop:
+│        reattempt(runId, { reopen: ['verify'], reason: 'review_reject' })   // AO-CONTRACT:review-reject-reattempt
+│          → ticks the 15-cap; if !allowed: STOP + escalate. Else loop back to Phase 4 (verify), then re-review.
+└── Loop until ALL APPROVED (→ completePhase) or loopTick / reattempt returns !allowed
 ```
 
 **Rollback**: set `.ao/autonomy.json` → `{ "reviewRouter": { "disabled": true } }`
 to bypass the router entirely and always run the full reviewer set.
 
 ### Phase 5b — SLOP CLEAN + COMMIT
+
+**Phase entry (runner):** `enterPhase(runId, 'finalize')` — covers 5b (slop+commit), 5c (changelog), 5d (exec-plan). After 5d, `await completePhase(runId, 'finalize')`.
 
 After review approved:
 1. Run `Skill(skill="agent-olympus:slop-cleaner")` on all changed files
@@ -1034,13 +1115,15 @@ Include this file in the commit.
 
 ### Phase 6 — SHIP (PR Creation + Issue Linking)
 
+**Phase entry (runner):** if shipping is not applicable (no `gh` / no remote / on `main` — see Preflight below), call `skipPhase(runId, 'ship', '<reason>')` and proceed to COMPLETION. Otherwise `const g = enterPhase(runId, 'ship')` (`g.skip` is true only when already shipped, on resume); on PR created, `await completePhase(runId, 'ship')`.
+
 Load autonomy config to determine shipping behavior:
 ```javascript
 import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
 const config = loadAutonomyConfig(cwd);
 ```
 
-#### Verification Gate (MANDATORY — blocks PR creation)
+#### Verification Gate (MANDATORY — blocks PR creation) <!-- AO-CONTRACT:verification-gate -->
 Before any shipping activity, check that ALL stories have verification records:
 ```javascript
 import { checkVerificationGate } from './scripts/lib/run-artifacts.mjs';
@@ -1093,7 +1176,9 @@ If `config.ship.autoPush` is true OR user approves:
 
 If `config.ship.autoPush` is false (default) → ask user: "Push and create PR? [y/n]"
 
-### Phase 6b — CI WATCH (Monitor + Auto-Fix)
+### Phase 6b — CI WATCH (Monitor + Auto-Fix) <!-- AO-CONTRACT:ci-watch -->
+
+**Phase entry (runner):** if no PR was created OR `config.ci.watchEnabled` is false, call `skipPhase(runId, 'ci', '<reason>')` and go to COMPLETION. Otherwise `enterPhase(runId, 'ci')`; each poll cycle is bounded by `loopTick(runId, 'ci')` (cap 2 = CI_CAP); on exit, `await completePhase(runId, 'ci')`.
 
 If `config.ci.watchEnabled` is true AND a PR was created:
 
@@ -1124,12 +1209,14 @@ If `config.ci.watchEnabled` is true AND a PR was created:
 │   │
 │   └─ status: 'timeout' | 'skipped' → report to user, proceed
 │
-└── Loop (max config.ci.maxCycles attempts, default 2)
+└── Loop, bounded by loopTick(runId, 'ci') (cap 2 = CI_CAP) — !allowed ⇒ stop polling, report to user
 ```
 
 If CI passes → DONE. If CI fails after max cycles → escalate to user with failure logs.
 
-### COMPLETION
+### COMPLETION <!-- AO-CONTRACT:cleanup -->
+
+**Phase entry (runner):** `enterPhase(runId, 'complete')`. Do the cleanup below, then `await completePhase(runId, 'complete')` (the run is now `isComplete`).
 
 Prune wisdom to prevent unbounded growth:
 - Call `pruneWisdom(200)` to remove entries older than 90 days and cap at 200 most recent
@@ -1216,20 +1303,21 @@ For example, use `anthropic-skills:xlsx` for spreadsheets instead of writing xls
 
 STOP only when:
 - ✅ All acceptance criteria met AND build passes AND tests pass AND reviews approved
-- ❌ Same error 3 times — signaled by `recordError(runId, sig).shouldEscalate` once consulted (see Loop_Guard), not eyeballed
+- ❌ Same error 3 times — signaled by `recordPhaseError(runId, '<phase>', sig).shouldEscalate` once consulted (see Phase_Runner), not eyeballed
   ```
   node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "Same error 3 times: <error summary>"
   ```
-- ❌ 15 total iterations exceeded — signaled by `registerIteration(runId).allowed === false` once consulted (see Loop_Guard)
+- ❌ 15 total iterations exceeded — signaled by `beginAttempt(runId).allowed === false` (first pass) or `reattempt(...).allowed === false` (re-pass) once consulted (see Phase_Runner)
   ```
   node scripts/notify-cli.mjs --event escalated --orchestrator atlas --body "15 iteration limit exceeded"
   ```
-- ❌ Max review rounds exceeded — signaled by `registerReviewRound(runId).allowed === false` once consulted (default cap 3)
+- ❌ Max review rounds exceeded — signaled by `loopTick(runId, 'review').allowed === false` once consulted (default cap 3)
 - ❌ Critical security vulnerability found (escalate to user)
 
-> These limits are tracked by a persistent cooperative guard (`scripts/lib/loop-guard.mjs`), not self-counted.
-> Consult the guard at each loop point; a `degraded:true` result means tracking was
-> unavailable or state was not readable — fall back to the prose numbers above as a backstop.
+> These limits are owned by the deterministic phase runner (`scripts/lib/phase-runner.mjs`),
+> the sole caller of the underlying loop-guard caps — not self-counted. Consult the runner
+> at each loop point; a `degraded:true` result means tracking was unavailable or state was
+> not readable — fall back to the prose numbers above as a backstop.
 
 **NEVER stop because "it seems done" — verify EVERYTHING.**
 
