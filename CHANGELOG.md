@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.2.3] - 2026-06-19
+
+### Feature — Deterministic phase runner + Atlas adoption (HU-06.1 / HU-06.2)
+
+Orchestration gains a code-defined phase runner (`scripts/lib/phase-runner.mjs`), the eval (HU-01) prerequisite. It persists a durable per-run phase ledger at `.ao/artifacts/runs/<runId>/pipeline.json` (schemaVersion:1, atomic 0600) that owns the Atlas/Athena phase sequence, supports exactly-once durable resume (completed phases are never re-run), and is the **sole** caller of the loop-guard caps — the structural chokepoint that *guarantees* the "max 15 iterations / max 3 review rounds / same error 3×" consults instead of leaving them as advisory prose.
+
+The runner exposes `initPipeline` / `enterPhase` / `beginAttempt` / `reattempt` / `loopTick` / `recordPhaseError` / `completePhase` / `skipPhase` / `reopenPhase`, with a per-phase `onResume` policy (`reexecute` / `recover` / `skip-if-complete`). `completePhase` is **ledger-first** (writes the authoritative `pipeline.json`, then the checkpoint payload), so a crash leaves the phase authority correct and the checkpoint at most one transition behind. `saveCheckpoint` now returns an additive `{ok,degraded}` so the runner can flag checkpoint divergence; existing callers are unaffected.
+
+**Atlas `SKILL.md` is rewritten onto the runner (HU-06.2).** Every phase is wired through `enterPhase`/`completePhase`; the outer execute→verify→review loop runs via `beginAttempt` (first-pass-guarded by `getPipelineState().attempt === 0`, so a `reattempt` re-entry cannot double-tick the 15-cap) + `reattempt`; review rounds via `loopTick('review')`, CI via `loopTick('ci')`, the quality gate via `loopTick('quality')`; the verify fix loop via `recordPhaseError`. Zero direct loop-guard calls remain in the skill, and the seven numeric `saveCheckpoint({phase:N})` calls are replaced by `completePhase`. New behaviors: a trivial-path synthetic one-story PRD (`passes:false` → the normal `execute→verify` flow flips it true) and a quality-gate failure that flips the failed stories `passes:false` + ticks a code-owned `quality-cycles` cap + `reattempt`s. Light-mode rewind routes through `reopenPhase('plan')` with its own cap-checked `registerEscalation`. All prior Atlas behavior (light mode, false-trivial guard, sub-agent validation, spec gate, consensus plan, cross-validation, review router, verification gate, debug-escalation chain, CI watch, cleanup) is preserved verbatim.
+
+Adds `scripts/test/phase-runner.test.mjs` (the library) and `scripts/test/phase-contract.test.mjs` — a structural+semantic contract linter for the rewrite: 19 `AO-CONTRACT:<key>` markers, per-phase `enterPhase`/`completePhase`, zero direct loop-guard, plus guards for the wiring pitfalls caught in adversarial review (no 15-cap double-tick, cap-checked rewind, explicit `passes:false` flip, `skipPhase` for dynamic skips).
+
+Produced via the workflow convention (Claude plan → Codex cross-review → implement → Claude review): the HU-06 plan converged through 3 Codex rounds; the library was Codex-implemented + Claude-reviewed; the Atlas rewrite was Claude-implemented + Codex-reviewed across 2 rounds. Athena's rewrite (HU-06.3, incl. the `recover` branches for spawn/monitor/integrate) and the eval harness (HU-01) follow.
+
+> Runtime caveat: plugin subagent + skill definitions load at session start, so the Atlas phase-runner adoption applies only after a plugin update + restart.
+
 ## [1.2.2] - 2026-06-18
 
 ### Feature — Generalized read-only agent tiers for visual review and verification agents
