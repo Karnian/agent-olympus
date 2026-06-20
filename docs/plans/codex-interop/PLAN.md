@@ -52,11 +52,31 @@ Reframe vs the original plan: **delegate the goal; don't push the machinery.**
 
 ## Open decisions (resolve during impl)
 
-1. **AGENTS.md ⇄ CLAUDE.md unification.** They are SEPARATE hand-maintained files
-   (CLAUDE.md ~50KB, AGENTS.md ~24KB, different content) — a plain symlink would
-   lose content. Decide: pick a source of truth, merge the Codex-relevant subset
-   into it, then symlink the other (or generate AGENTS.md from CLAUDE.md). Cheapest
-   high-leverage win; do first.
+1. **AGENTS.md ⇄ CLAUDE.md unification — RESOLVED (2026-06-21, joint Claude+Codex review).**
+   Direction **(b)**: `AGENTS.md` = canonical concise shared instruction file;
+   `CLAUDE.md` = `@AGENTS.md` import + a THIN Claude-runtime-only layer. NOT a symlink
+   (the files serve different purposes; a symlink would either bloat Codex past its
+   cap or strip Claude's context) and NOT two independent files (drift = current
+   failure mode).
+   - **Decisive facts:** Claude Code reads `CLAUDE.md` only (NOT `AGENTS.md`) and the
+     official Anthropic guidance IS this `@AGENTS.md`-import pattern; `@path` imports
+     resolve relative to the importing file, 4-hop max, treated as inline ([memory.md](https://code.claude.com/docs/en/memory.md)).
+     Codex loads `AGENTS.md` (global→root→cwd chain, nested merged) but STOPS at
+     `project_doc_max_bytes` = **32 KiB default** (overflow silently truncated); `AGENTS.md`
+     has no `@import` (flat markdown, can only REFERENCE other docs for on-demand reading).
+   - **Operative constraint:** current `AGENTS.md` is already ~24,810 B (~76% of the 32 KiB
+     cap). Migration is curation-UNDER-BUDGET, not a merge: put SUMMARIES + `docs/` links in
+     `AGENTS.md`, move deep internals to `docs/`. Aligns with the repo's own `harness-init`
+     doctrine ("AGENTS.md = TOC, docs/ = knowledge base").
+   - **Target:** `AGENTS.md` (≤32 KiB: identity, architecture, dir map, key conventions
+     [zero-dep/ESM/fail-safe/atomic/schemaVersion], short add-checklists, test/lint commands,
+     state-lifecycle summary, adapter-priority summary, concise catalogs, "read docs/X when
+     touching Y" routing) + `CLAUDE.md` (`@AGENTS.md` + Claude-only deltas) +
+     `docs/internals/{permission-mirroring,credentials,worker-adapters}.md` + `docs/testing.md`
+     (the heavy CLAUDE.md sections — permission-mirroring ~150 lines, Gemini credentials
+     ~120 lines, supervisor deep-dive — move here).
+   - **Biggest risk:** `AGENTS.md` crossing 32 KiB → most-important instructions silently
+     lost to truncation. Check byte size in CI.
 2. **`--ephemeral` removal for resume.** `codex-exec.mjs` hardcodes `--ephemeral`
    (`_buildSpawnArgs`, ~line 117) and the supervisor hardcodes `ephemeral:true`
    (`supervisor-opts.mjs` ~line 38). The "use `codex exec resume` for multi-stage"
