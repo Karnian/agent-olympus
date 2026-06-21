@@ -1,7 +1,7 @@
 # Agent Olympus
 
 Standalone multi-model orchestrator plugin for Claude Code.
-Two self-driving orchestrators (Atlas + Athena) that autonomously complete any task using 19 specialized agents, 35 skills, Claude + Codex + Gemini multi-model execution, and adapter-based worker infrastructure.
+Atlas + Athena orchestrate 19 agents, 35 skills, Claude/Codex/Gemini execution, and adapter-based workers.
 
 ## Architecture
 
@@ -92,7 +92,7 @@ agent-olympus/
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (2191 tests, 84 files; v1.2.0: 2191/2191 passing)
+│   ├── test/                     — node:test unit tests (2289 tests, 88 files; v1.2.3: 2289/2289 passing)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
@@ -156,6 +156,55 @@ agent-olympus/
 └── hooks/
     └── hooks.json                — Hook event registrations
 ```
+
+## Conventions
+
+- Naming follows Greek-myth agents where practical, with the `agent-olympus:` namespace for subagents and skills.
+- Scripts are zero-dependency Node.js ESM (`.mjs`), except `scripts/run.cjs` for cross-platform hook wrapping.
+- Hooks are fail-safe: catch errors, write a safe default (`{}`), and exit 0.
+- State writes use atomic tmp+rename helpers; state files use mode `0600` and state directories use `0700`.
+- Persisted formats use `schemaVersion: 1`; see [docs/development.md](docs/development.md) for loader/writer rules.
+- State lives under `.ao/`: `state/` is transient, `memory/` is durable, and run/team artifacts are swept by lifecycle rules.
+
+## Worker Adapter System
+
+- Workers are selected by adapter priority: Codex `codex-appserver` -> `codex-exec` -> `tmux`; Claude `claude-cli` -> `tmux`; Gemini `gemini-acp` -> `gemini-exec` -> `tmux`.
+- Atlas/Athena run `runPreflight()` before orchestration; trivial work stays Claude-only and cross-validation prefers Codex then Gemini.
+- Autonomy config resolves as `defaults <- global <- project`; project `.ao/autonomy.json` wins, and CI skips the global layer unless explicitly overridden.
+- Session names use stable prefixes such as `atlas-codex-<N>`, `athena-<slug>-gemini-<N>`, and `*-xval-<story-id>`.
+- Key files: `scripts/lib/worker-spawn.mjs`, `codex-appserver.mjs`, `codex-exec.mjs`, `claude-cli.mjs`, `gemini-acp.mjs`, `gemini-exec.mjs`, `permission-detect.mjs`.
+- Detached worker supervisor -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md); permission mirroring -> [docs/internals/permission-mirroring.md](docs/internals/permission-mirroring.md); Gemini credentials -> [docs/internals/credentials.md](docs/internals/credentials.md).
+
+## Deep References
+
+- Hook architecture / per-hook details -> [docs/internals/hooks.md](docs/internals/hooks.md).
+- Autonomy config resolution (layered, CI kill-switch) -> [docs/internals/autonomy-config.md](docs/internals/autonomy-config.md).
+- Adapter priority + session naming -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md).
+- schemaVersion convention -> [docs/development.md](docs/development.md).
+
+## Contributing
+
+- Add an agent: follow [docs/development.md#how-to-add-a-new-agent](docs/development.md#how-to-add-a-new-agent).
+- Add a skill: follow [docs/development.md#how-to-add-a-new-skill](docs/development.md#how-to-add-a-new-skill).
+- Add a hook: follow [docs/development.md#how-to-add-a-new-hook](docs/development.md#how-to-add-a-new-hook).
+
+## Testing
+
+Run the 2289-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+
+## Dependencies
+
+- Runtime: Node.js >= 20.0.0.
+- Optional: tmux for legacy worker fallback and Athena team mode.
+- Optional: Codex CLI (`npm install -g @openai/codex`) for Codex workers.
+- Optional: Gemini CLI (`npm install -g @google/gemini-cli`) for Gemini workers.
+- npm packages: none at runtime.
+
+## Known Limitations
+
+- `--bare` Claude Code mode skips hooks, plugins, and skill directory walks, so Agent Olympus hooks will not fire there.
+- Claude Code sandbox mode should be used when testing hooks; edge cases can appear around `.ao/` filesystem access.
+- Gemini credential auto-resolution supports macOS Keychain and Linux libsecret in v1; Windows users must set `GEMINI_API_KEY`.
 
 ## Agent Roles
 
@@ -298,6 +347,12 @@ agent-olympus/
 | `.ao/state/checkpoint-athena[-sessionId].json` | Athena session recovery checkpoint (session-scoped) | Auto-expires after 24h |
 | `.ao/state/ao-intent.json` | Last classified intent | Updated per prompt |
 | `.ao/state/ao-concurrency.json` | Active task tracking | Updated per task spawn/complete |
+| `.ao/memory/` | Durable design identity and taste memory (`schemaVersion:1`) | Survives SessionEnd and cancel |
+| `.ao/state/supervisor/<runId>/` | Detached worker snapshots/manifests | Swept per inactive run |
+| `.ao/artifacts/runs/<runId>/` | Run events, summaries, verification, pipeline/loop ledgers | Swept by SessionEnd lifecycle |
+| `.ao/artifacts/ask/<jobId>.*` | Async `/ask` raw and rendered outputs | Job-addressable artifacts |
+| `.ao/artifacts/pipe/` | Stage handoff/archive pipe (`plan`, `execute`, `verify`, etc.) | 24h SessionEnd sweep |
+| `.ao/sessions/<sessionId>.json` | Cross-session registry metadata | 90-day TTL |
 | `.ao/teams/<slug>/` | Inbox/outbox for team workers (Claude/Codex/Gemini) | Created by Athena, cleaned on completion |
 | `.ao/worktrees/<slug>/<worker>/` | Isolated git worktrees for Athena workers | Created per worker, merged + cleaned on completion |
 
@@ -313,13 +368,13 @@ agent-olympus/
 
 ## Key Design Decisions
 
-1. **Self-driving loop** — Atlas/Athena never stop early. They loop until all PRD stories pass, build succeeds, tests pass, and reviews approve. Max 15 iterations before escalating.
-2. **PRD quality enforcement** — Generic acceptance criteria ("works correctly") are forbidden. Every criterion must be specific and testable.
-3. **Progress persistence** — `.ao/wisdom.jsonl` accumulates learnings across iterations and survives cancellation, so future sessions start smarter.
-4. **Multi-adapter worker system** — Workers spawn via ADAPTER_REGISTRY strategy table: codex-appserver > codex-exec > tmux for Codex; gemini-acp > gemini-exec > tmux for Gemini; claude-cli > tmux for Claude. Adding a new adapter requires one registry entry.
-5. **External skill awareness** — Atlas/Athena can invoke any installed plugin skill (anthropic-skills, ui-ux-pro-max, etc.) when it fits better than a generic executor.
+1. **Self-driving loop** — Atlas/Athena loop until PRD/build/tests/reviews pass; max 15 iterations.
+2. **PRD quality enforcement** — Acceptance criteria must be specific and testable.
+3. **Progress persistence** — `.ao/wisdom.jsonl` survives cancellation and seeds later sessions.
+4. **Multi-adapter worker system** — `ADAPTER_REGISTRY` selects Codex, Gemini, Claude, or tmux fallback adapters.
+5. **External skill awareness** — Atlas/Athena can invoke installed plugin skills when they fit.
 6. **Zero runtime dependencies** — All scripts use Node.js built-ins only. No npm packages.
-7. **Athena worktree isolation** — Each parallel Athena worker runs in a dedicated git worktree (`.ao/worktrees/<slug>/<worker>/`), preventing silent file overwrites and merge conflicts between concurrent workers.
-8. **Fail-safe hooks** — Every hook catches all errors and outputs `{}` to stdout, so Claude Code is never blocked by a hook failure.
-9. **Atomic state writes** — All state file mutations use tmp+rename via `lib/fs-atomic.mjs`, preventing data corruption from concurrent writes or crashes mid-write.
+7. **Athena worktree isolation** — Parallel workers use `.ao/worktrees/<slug>/<worker>/`.
+8. **Fail-safe hooks** — Hooks catch errors and output `{}` so Claude Code is never blocked.
+9. **Atomic state writes** — State mutations use tmp+rename via `lib/fs-atomic.mjs`.
 10. **tmux injection prevention** — `sanitizeForShellArg()` in `lib/tmux-session.mjs` escapes shell special characters before any `send-keys` call.

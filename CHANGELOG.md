@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.3.0] - 2026-06-21
+
+### Feature — Codex Interop v1: goal delegation to Codex with host-side external verification (`/codex-goal`)
+
+Adds a higher-order way to drive Codex beyond single-shot `/ask codex`: the **`/codex-goal`** skill delegates one bounded implementation goal to Codex and verifies the result externally from the Claude host. The design principle is **"delegate the goal, verify externally"** — Codex (optionally using its native `explorer`/`tester`/`reviewer` subagents) implements inside a disposable git worktree; the Claude host runs the Definition-of-Done commands itself and has `agent-olympus:themis` judge the captured output (never trusting Codex's self-report), looping via `codex exec resume` under loop-guard caps (`maxExecInvocations=5` / `maxResumes=4`, `degraded:true` → hard stop).
+
+New surface:
+- `scripts/codex-goal.mjs` — one-turn spawn/resume/parse helper (structured failure, never silent exit-0); per-run auto-propagation of project trust to the worktree (`-c projects."<cwd>".trust_level="trusted"`, `--no-trust` opt-out).
+- `scripts/lib/codex-exec.mjs` — `opts.persist` (omit `--ephemeral` for resumable sessions), `spawnResume()`, and `opts.configOverrides` (global `-c` injection before `exec`). The single-shot argv is byte-unchanged.
+- `skills/codex-goal/SKILL.md` — the host-side orchestration (trust preflight, worktree write-boundary, goal packet, external Themis verification, bounded resume loop, suggest-tier→workspace-write policy, no auto-merge).
+- `schemas/codex-goal-result.schema.json` — the structured result contract (tracked, not under gitignored `.ao/`).
+- `.codex/agents/{explorer,tester,reviewer}.toml` — native Codex subagent roles (git-committed; Codex's sandbox is read-only on `.codex/`).
+
+Also unifies the project instruction files: **`AGENTS.md` becomes the canonical shared file (≤28 KiB, read by both Claude Code and Codex)** and `CLAUDE.md` is now `@AGENTS.md` + Claude-runtime deltas, with deep reference moved to `docs/internals/{permission-mirroring,credentials,worker-adapters,hooks,autonomy-config}.md` + `docs/development.md` + `docs/testing.md`; `scripts/check-agents-size.mjs` enforces the byte cap.
+
+Verified end-to-end against real Codex 0.140 (basic create + fail→resume→fix loop with session continuity, plus a full `/codex-goal` skill run); full suite green. Produced via the workflow convention (3-round deep-research + Codex cross-review → spec `docs/plans/codex-interop/PLAN.md` rev 3 → Codex-implemented, Claude-cross-reviewed). The broader "Codex calls Olympus" MCP layer (step 3) and live app-server steering (step 4) are intentionally deferred pending the HU-01 eval.
+
+> Runtime caveat: plugin skill + agent definitions load at session start, so `/codex-goal` and the `.codex/agents` roles apply only after a plugin update + restart (and, for Codex, after the repo is available with `.codex/` committed).
+
 ## [1.2.3] - 2026-06-19
 
 ### Feature — Deterministic phase runner + Atlas adoption (HU-06.1 / HU-06.2)
