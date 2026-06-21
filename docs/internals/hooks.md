@@ -1,0 +1,20 @@
+# Hook Architecture
+> Recovered verbatim from CLAUDE.md.
+
+- `run.cjs` is the universal entry point — it resolves the correct script path with version fallback
+- All hooks receive JSON on stdin and output JSON on stdout
+- Hooks must complete within their timeout (3s for most, 5s for SessionStart/SessionEnd, 10s for Stop)
+- Hooks never block Claude Code — they fail open on any error
+- Hooks can set `"async": true` to run in the background without blocking Claude's execution
+- **IntentGate** (`scripts/intent-gate.mjs`) — fires on UserPromptSubmit; classifies intent via pattern matching and saves routing context to `.ao/state/ao-intent.json` for downstream model routing. Categories: `visual-engineering`, `design-review`, `deep`, `quick`, `writing`, `artistry`, `planning`, `external-model`. The `external-model` category detects requests to query Codex/Gemini (e.g. "ask codex", "코덱스한테 물어봐", "cross-review") and injects capability-aware advice to use the `/ask` skill
+- **ModelRouter** (`scripts/model-router.mjs`) — fires on PreToolUse Task/Agent; reads intent state from IntentGate and injects model routing advice as `additionalContext` (advisory only, never blocks)
+- **SessionStart** (`scripts/session-start.mjs`) — fires at session start; injects prior wisdom and any interrupted checkpoint context into the conversation
+- **RuntimePermissionsCapture** (`scripts/runtime-permissions-capture.mjs`) — **[v1.1.6+]** fires on SessionStart + UserPromptSubmit (async, silent observer). Reads `permission_mode` from hook stdin (or `CLAUDE_PERMISSION_MODE` / `CLAUDE_CODE_PERMISSION_MODE` env) and persists to `.ao/state/ao-runtime-permissions.json` (schemaVersion:1, 30-min TTL, atomic write). Bridges the gap between Claude Code's settings-file mirror (`permission-detect.mjs`) and the runtime mode the user actually launched with (`--dangerously-skip-permissions`, `--permission-mode bypassPermissions`, etc.). Closes #67/#68/#69
+- **SubagentStart** (`scripts/subagent-start.mjs`) — fires when a subagent is spawned; injects token efficiency directive (non-haiku agents only) + wisdom context via `additionalContext`, filtered by `subagent_type` relevance
+- **Notification** (`scripts/notification.mjs`) — fires on `idle_prompt` and `permission_prompt` events; logs to `.ao/state/ao-notifications.json` for stall detection (async, non-blocking)
+- **SubagentStop** (`scripts/subagent-stop.mjs`) — fires when a subagent completes; captures results to `.ao/state/ao-subagent-results.json` (async, non-blocking); also triggers concurrency-release as safety net
+- **ConcurrencyGate** (`scripts/concurrency-gate.mjs`) — fires on PreToolUse Task/Agent; enforces parallel limits (global 10, claude 8, codex 5, gemini 5) with 3-min stale pruning. Limits configurable via `config/model-routing.jsonc` or `AO_CONCURRENCY_*` env vars
+- **ConcurrencyRelease** (`scripts/concurrency-release.mjs`) — fires on PostToolUse Task/Agent + SubagentStop; 3-stage release: task_id match → provider match → SubagentStop safety net (force-release oldest). Stale threshold 3 min
+- **PlanExecuteGate** (`scripts/plan-execute-gate.mjs`) — fires on PostToolUse ExitPlanMode; reads `planExecution` from autonomy.json and injects execution routing (solo/ask/atlas/athena); `ask` mode instructs Claude to use `AskUserQuestion` interactive UI with text fallback; writes marker `.ao/state/ao-plan-pending.json` for SessionStart fallback (marker preserved as `handled: true`, cleaned by SessionEnd after 24h)
+- **SessionEnd** (`scripts/session-end.mjs`) — fires on session termination; cleans up stale state files older than 24h (async, non-blocking)
+- **Stop** (`scripts/stop-hook.mjs`) — fires at session end; auto-commits any uncommitted work as a WIP commit so nothing is lost; uses selective staging (excludes `.env`, secrets, `.ao/state/`, `.ao/teams/`)

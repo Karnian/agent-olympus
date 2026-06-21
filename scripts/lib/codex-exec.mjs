@@ -82,19 +82,7 @@ export function mapJsonlErrorToCategory(errorText) {
   return 'unknown';
 }
 
-/**
- * Build the Codex CLI argv for `spawn()`. Exposed for hermetic testing.
- *
- * Permission mirroring: when `opts.level` is set, approval flags are derived
- * via `buildCodexExecArgs(level)` and placed BEFORE the `exec` subcommand.
- * Without `opts.level`, falls back to the legacy bypass flag for backward
- * compatibility with unmigrated callers.
- *
- * @param {Object} [opts]
- * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level]
- * @returns {string[]}
- */
-export function _buildSpawnArgs(opts = {}) {
+function buildApprovalArgs(opts = {}) {
   // Approval-related flags are GLOBAL Codex CLI flags — they go BEFORE `exec`.
   // codex 0.118+: `codex exec -a never` → `error: unexpected argument '-a'`.
   //
@@ -110,8 +98,54 @@ export function _buildSpawnArgs(opts = {}) {
     // Legacy: keep the v1 bypass behavior so unmigrated callers don't regress.
     approvalArgs = ['--dangerously-bypass-approvals-and-sandbox'];
   }
-  return [
+
+  return approvalArgs;
+}
+
+function buildConfigOverrideArgs(opts = {}) {
+  const overrides = Array.isArray(opts.configOverrides) ? opts.configOverrides : [];
+  const args = [];
+
+  for (const entry of overrides) {
+    args.push('-c', entry);
+  }
+
+  return args;
+}
+
+/**
+ * Build the Codex CLI argv for `spawn()`. Exposed for hermetic testing.
+ *
+ * Permission mirroring: when `opts.level` is set, approval flags are derived
+ * via `buildCodexExecArgs(level)` and placed BEFORE the `exec` subcommand.
+ * Without `opts.level`, falls back to the legacy bypass flag for backward
+ * compatibility with unmigrated callers.
+ *
+ * @param {Object} [opts]
+ * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level]
+ * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
+ *   overrides placed before `exec`, after approval flags
+ * @param {boolean} [opts.persist] - When true, omit --ephemeral so Codex can resume the session
+ * @returns {string[]}
+ */
+export function _buildSpawnArgs(opts = {}) {
+  const approvalArgs = buildApprovalArgs(opts);
+  const globalArgs = [
     ...approvalArgs,
+    ...buildConfigOverrideArgs(opts),
+  ];
+
+  if (opts.persist === true) {
+    return [
+      ...globalArgs,
+      'exec',
+      '--json',
+      '-',
+    ];
+  }
+
+  return [
+    ...globalArgs,
     'exec',
     '--json',
     '--ephemeral',
@@ -120,32 +154,38 @@ export function _buildSpawnArgs(opts = {}) {
 }
 
 /**
- * Spawn a Codex exec --json process with the given prompt.
- * The prompt is written to stdin; Codex reads it via `-` (stdin mode).
+ * Build the Codex CLI argv for `spawnResume()`. Exposed for hermetic testing.
  *
- * Permission mirroring: pass `opts.level` to mirror the host Claude session's
- * permission tier into the Codex sandbox via `buildCodexExecArgs(level)`.
- * The resulting `-a never -s <sandbox>` flags are GLOBAL Codex CLI flags and
- * MUST appear BEFORE the `exec` subcommand (Codex 0.118+).
+ * codex 0.140 documents the resume form as:
+ *   codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
+ * so JSONL output is a resume option and `-` is the prompt argument after the
+ * session id. Approval flags remain GLOBAL and precede `exec`.
  *
- * Backward compatibility: when `opts.level` is omitted, the function preserves
- * the legacy behavior of `--dangerously-bypass-approvals-and-sandbox`. New
- * callers should always pass `opts.level`. Once all callers are migrated, the
- * legacy branch will be removed.
- *
- * @param {string} prompt - The prompt to send to Codex
- * @param {Object} [opts] - Options
- * @param {string} [opts.cwd] - Working directory
- * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level] - Host Claude
- *   permission tier; resolved by callers via `resolveCodexApproval`. When set,
- *   replaces the legacy `--dangerously-bypass-approvals-and-sandbox` flag with
- *   the appropriate `-a never -s <sandbox>` global flags.
- * @param {Object} [opts.env] - Additional environment variables merged over process.env
- * @returns {CodexHandle}
+ * @param {string} threadId - Persisted Codex session/thread id or thread name
+ * @param {Object} [opts]
+ * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level]
+ * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
+ *   overrides placed before `exec`, after approval flags
+ * @returns {string[]}
  */
-export function spawn(prompt, opts = {}) {
+export function _buildResumeArgs(threadId, opts = {}) {
+  if (typeof threadId !== 'string' || threadId.trim().length === 0) {
+    throw new TypeError('threadId must be a non-empty string');
+  }
+
+  return [
+    ...buildApprovalArgs(opts),
+    ...buildConfigOverrideArgs(opts),
+    'exec',
+    'resume',
+    '--json',
+    threadId,
+    '-',
+  ];
+}
+
+function spawnCodexProcess(args, prompt, opts = {}) {
   const codexPath = resolveBinary('codex');
-  const args = _buildSpawnArgs(opts);
 
   const child = nodeSpawn(codexPath, args, {
     cwd: opts.cwd || process.cwd(),
@@ -232,6 +272,57 @@ export function spawn(prompt, opts = {}) {
   });
 
   return handle;
+}
+
+/**
+ * Spawn a Codex exec --json process with the given prompt.
+ * The prompt is written to stdin; Codex reads it via `-` (stdin mode).
+ *
+ * Permission mirroring: pass `opts.level` to mirror the host Claude session's
+ * permission tier into the Codex sandbox via `buildCodexExecArgs(level)`.
+ * The resulting `-a never -s <sandbox>` flags are GLOBAL Codex CLI flags and
+ * MUST appear BEFORE the `exec` subcommand (Codex 0.118+).
+ *
+ * Backward compatibility: when `opts.level` is omitted, the function preserves
+ * the legacy behavior of `--dangerously-bypass-approvals-and-sandbox`. New
+ * callers should always pass `opts.level`. Once all callers are migrated, the
+ * legacy branch will be removed.
+ *
+ * @param {string} prompt - The prompt to send to Codex
+ * @param {Object} [opts] - Options
+ * @param {string} [opts.cwd] - Working directory
+ * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level] - Host Claude
+ *   permission tier; resolved by callers via `resolveCodexApproval`. When set,
+ *   replaces the legacy `--dangerously-bypass-approvals-and-sandbox` flag with
+ *   the appropriate `-a never -s <sandbox>` global flags.
+ * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
+ *   overrides placed before `exec`, after approval flags
+ * @param {boolean} [opts.persist] - When true, omit --ephemeral so Codex writes
+ *   a resumable session
+ * @param {Object} [opts.env] - Additional environment variables merged over process.env
+ * @returns {CodexHandle}
+ */
+export function spawn(prompt, opts = {}) {
+  return spawnCodexProcess(_buildSpawnArgs(opts), prompt, opts);
+}
+
+/**
+ * Resume a persisted Codex exec session with the given prompt.
+ * The prompt is written to stdin; Codex reads it via `-` after the session id.
+ *
+ * @param {string} threadId - Persisted Codex session/thread id or thread name
+ * @param {string} prompt - The prompt to send to Codex
+ * @param {Object} [opts] - Options
+ * @param {string} [opts.cwd] - Working directory
+ * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level] - Host Claude
+ *   permission tier; resolved by callers via `resolveCodexApproval`
+ * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
+ *   overrides placed before `exec`, after approval flags
+ * @param {Object} [opts.env] - Additional environment variables merged over process.env
+ * @returns {CodexHandle}
+ */
+export function spawnResume(threadId, prompt, opts = {}) {
+  return spawnCodexProcess(_buildResumeArgs(threadId, opts), prompt, opts);
 }
 
 /**

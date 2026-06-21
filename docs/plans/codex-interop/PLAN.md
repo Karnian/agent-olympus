@@ -130,7 +130,7 @@ a Node script cannot spawn the Themis Task sub-agent). `codex-goal.mjs` is a thi
 ### NEW
 - `scripts/codex-goal.mjs` — spawn+parse helper (goal packet → `codex exec` → parse). Zero-dep ESM, fail-safe. Does NOT run Themis or own the loop.
 - `scripts/test/codex-goal.test.mjs` — node:test (parse happy path, schema-missing fallback, persist argv, suggest-tier→worktree, budget-cap STOP).
-- `.ao/schemas/codex-goal-result.schema.json` — `{ summary, files_changed[], verification{commands[],results[]}, unresolved_risks[], follow_ups[] }`.
+- `schemas/codex-goal-result.schema.json` — `{ summary, files_changed[], verification{commands[],results[]}, unresolved_risks[], follow_ups[] }`. (Tracked location; NOT `.ao/` which is gitignored.)
 - `skills/codex-goal/SKILL.md` — Claude-side trigger + the verify/loop orchestration (worktree, Themis judge, loop-guard, budget caps, trust preflight).
 - `.codex/agents/{explorer,tester,reviewer}.toml` — Codex native subagent roles.
 - `.agents/skills/olympus-{goal,verify,review}/SKILL.md` — 3 Codex-side skills (core format, NO `Task()` bodies).

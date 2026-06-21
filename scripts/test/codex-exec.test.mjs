@@ -19,6 +19,7 @@ import {
   collect,
   shutdown,
   _buildSpawnArgs,
+  _buildResumeArgs,
 } from '../lib/codex-exec.mjs';
 
 // ─── Mock helpers ──────────────────────────────────────────────────────────────
@@ -140,6 +141,28 @@ test('_buildSpawnArgs: level=full-auto → -a never -s danger-full-access before
   ]);
 });
 
+test('_buildSpawnArgs: configOverrides are global -c flags before exec', () => {
+  const override = 'projects."/x".trust_level="trusted"';
+  const args = _buildSpawnArgs({ level: 'full-auto', configOverrides: [override] });
+
+  assert.deepEqual(args, [
+    '-a', 'never', '-s', 'danger-full-access',
+    '-c', override,
+    'exec', '--json', '--ephemeral', '-',
+  ]);
+  assert.ok(args.indexOf('-c') < args.indexOf('exec'), '-c must precede exec');
+});
+
+test('_buildSpawnArgs: omitted configOverrides remains byte-identical with no -c', () => {
+  const args = _buildSpawnArgs({ level: 'full-auto' });
+
+  assert.deepEqual(args, [
+    '-a', 'never', '-s', 'danger-full-access',
+    'exec', '--json', '--ephemeral', '-',
+  ]);
+  assert.equal(args.includes('-c'), false);
+});
+
 test('_buildSpawnArgs: level=auto-edit → -a never -s workspace-write before exec', () => {
   const args = _buildSpawnArgs({ level: 'auto-edit' });
   assert.deepEqual(args, [
@@ -194,6 +217,63 @@ test('_buildSpawnArgs: approval flags always precede exec subcommand (codex 0.11
     const approvalIdx = args.indexOf('-a');
     assert.ok(approvalIdx >= 0, `level=${level} should include -a`);
     assert.ok(approvalIdx < execIdx, `level=${level}: -a (${approvalIdx}) must come before exec (${execIdx})`);
+  }
+});
+
+test('_buildSpawnArgs: persist=true omits --ephemeral but keeps exec JSON stdin form', () => {
+  const args = _buildSpawnArgs({ level: 'full-auto', persist: true });
+  const execIdx = args.indexOf('exec');
+  const approvalIdx = args.indexOf('-a');
+
+  assert.equal(args.includes('--ephemeral'), false);
+  assert.ok(execIdx >= 0, 'argv should include exec subcommand');
+  assert.ok(args.includes('--json'), 'argv should include --json');
+  assert.equal(args.at(-1), '-', 'argv should read prompt from stdin');
+  assert.ok(approvalIdx >= 0, 'argv should include approval flags');
+  assert.ok(approvalIdx < execIdx, `-a (${approvalIdx}) must come before exec (${execIdx})`);
+});
+
+test('_buildSpawnArgs: persist absent keeps --ephemeral regression guard', () => {
+  const args = _buildSpawnArgs({ level: 'full-auto' });
+  assert.ok(args.includes('--ephemeral'), 'non-persist spawn must remain ephemeral');
+});
+
+test('_buildResumeArgs: builds global-approval exec resume JSON stdin argv', () => {
+  const threadId = '0199aabb-ccdd-eeff-8899-aabbccddeeff';
+  const args = _buildResumeArgs(threadId, { level: 'full-auto' });
+  const execIdx = args.indexOf('exec');
+  const approvalIdx = args.indexOf('-a');
+
+  assert.deepEqual(args, [
+    '-a', 'never', '-s', 'danger-full-access',
+    'exec', 'resume', '--json', threadId, '-',
+  ]);
+  assert.ok(approvalIdx >= 0, 'argv should include approval flags');
+  assert.ok(approvalIdx < execIdx, `-a (${approvalIdx}) must come before exec (${execIdx})`);
+});
+
+test('_buildResumeArgs: configOverrides are global -c flags before exec', () => {
+  const threadId = '0199aabb-ccdd-eeff-8899-aabbccddeeff';
+  const override = 'projects."/x".trust_level="trusted"';
+  const args = _buildResumeArgs(threadId, { level: 'full-auto', configOverrides: [override] });
+  const execIdx = args.indexOf('exec');
+  const configIdx = args.indexOf('-c');
+
+  assert.deepEqual(args, [
+    '-a', 'never', '-s', 'danger-full-access',
+    '-c', override,
+    'exec', 'resume', '--json', threadId, '-',
+  ]);
+  assert.ok(configIdx >= 0, 'argv should include -c');
+  assert.ok(configIdx < execIdx, `-c (${configIdx}) must come before exec (${execIdx})`);
+});
+
+test('_buildResumeArgs: rejects empty or invalid threadId', () => {
+  for (const badThreadId of ['', '   ', null, undefined, 123, {}]) {
+    assert.throws(
+      () => _buildResumeArgs(badThreadId, { level: 'full-auto' }),
+      /threadId must be a non-empty string/,
+    );
   }
 });
 
@@ -728,9 +808,11 @@ test('mapJsonlErrorToCategory: all 7 categories exist', () => {
 test('all required exports are present and callable', async () => {
   const mod = await import('../lib/codex-exec.mjs');
   assert.equal(typeof mod.spawn, 'function', 'spawn must be exported');
+  assert.equal(typeof mod.spawnResume, 'function', 'spawnResume must be exported');
   assert.equal(typeof mod.monitor, 'function', 'monitor must be exported');
   assert.equal(typeof mod.collect, 'function', 'collect must be exported');
   assert.equal(typeof mod.shutdown, 'function', 'shutdown must be exported');
+  assert.equal(typeof mod._buildResumeArgs, 'function', '_buildResumeArgs must be exported');
   assert.equal(typeof mod.parseJSONLEvents, 'function', 'parseJSONLEvents must be exported');
   assert.equal(typeof mod.mapJsonlErrorToCategory, 'function', 'mapJsonlErrorToCategory must be exported');
 });
