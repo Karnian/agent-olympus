@@ -416,6 +416,40 @@ function flushPartial(handle) {
   }
 }
 
+// ── Issue #74: process-group reap seam ──────────────────────────────────────
+// Test seam for the process-group signal used to reap lingering codex
+// descendants. Defaults to process.kill; tests override via _setGroupKill so
+// the reap can be asserted without issuing a real OS signal.
+let _groupKill = (pgid, signal) => process.kill(pgid, signal);
+
+/** @internal Override the process-group signal fn (tests only). Returns prev. */
+export function _setGroupKill(fn) {
+  const prev = _groupKill;
+  _groupKill = typeof fn === 'function' ? fn : (pgid, signal) => process.kill(pgid, signal);
+  return prev;
+}
+
+/**
+ * Reap lingering descendants of an exited codex child (issue #74).
+ *
+ * When codex runs tool calls it spawns `bash -c` grandchildren that inherit
+ * its stdout pipe write-end. If they outlive codex they keep that fd open,
+ * which delays the adapter's 'close' event and exposes the *.output ENOENT
+ * race (a late grandchild evals a temp file codex already deleted → non-zero
+ * exit → a spurious "failed" background shell). SIGTERM to the process group
+ * (negative PID) reaps them. `detached:true` made the codex child a group
+ * leader, so handle.pid doubles as the PGID; the group stays valid while any
+ * member is alive, so -pid reaches the grandchildren after the leader exits
+ * (no PID-reuse hazard while they linger). Best-effort — an already-empty
+ * group throws ESRCH, which we swallow.
+ *
+ * @param {CodexHandle} handle
+ */
+function reapDescendants(handle) {
+  if (!handle || typeof handle.pid !== 'number') return;
+  try { _groupKill(-handle.pid, 'SIGTERM'); } catch { /* group already gone */ }
+}
+
 export function collect(handle, timeoutMs = 30000) {
   return new Promise((resolve) => {
     if (handle.status !== 'running') {
@@ -424,8 +458,11 @@ export function collect(handle, timeoutMs = 30000) {
       return;
     }
 
+    let reapTimer = null;
+
     const timeout = setTimeout(() => {
       handle.status = 'failed';
+      if (reapTimer) { clearImmediate(reapTimer); reapTimer = null; }
       resolve({
         ...monitor(handle),
         error: {
@@ -435,6 +472,22 @@ export function collect(handle, timeoutMs = 30000) {
       });
     }, timeoutMs);
 
+    // Issue #74: the direct codex child can exit while a tool-call grandchild
+    // still holds its inherited stdout pipe write-end open, delaying 'close'.
+    // During that gap the codex CLI deletes its internal *.output temp file and
+    // a late grandchild trips over the now-missing path (ENOENT → non-zero exit
+    // → a spurious "failed" background shell) while collect() blocks on 'close'.
+    // Schedule a process-group reap as soon as the direct child exits. We use
+    // setImmediate so a prompt 'close' (the no-descendant case) cancels it
+    // first — we only signal when descendants genuinely linger, and while they
+    // linger the group PID cannot be reused, so the negative-PID signal is safe.
+    handle.process.once('exit', () => {
+      reapTimer = setImmediate(() => {
+        reapTimer = null;
+        reapDescendants(handle);
+      });
+    });
+
     // Bug B fix (issue #64): listen on 'close' instead of 'exit'. The 'exit'
     // event can fire while stdout 'data' events containing turn.completed are
     // still queued in the libuv pipe — resolving on exit captures stale state
@@ -442,10 +495,12 @@ export function collect(handle, timeoutMs = 30000) {
     // has exited AND the stdio streams have closed, guaranteeing all 'data'
     // events have been processed. Caveat: if a descendant inherits stdout fd
     // and keeps it open, 'close' can be delayed; the timeout above protects
-    // that path. spawn()'s own 'exit' handler is intentionally untouched —
-    // it owns _exitCode/PID lifecycle, not the completion contract.
+    // that path, and the 'exit' reap above releases the descendant. spawn()'s
+    // own 'exit' handler is intentionally untouched — it owns _exitCode/PID
+    // lifecycle, not the completion contract.
     handle.process.on('close', () => {
       clearTimeout(timeout);
+      if (reapTimer) { clearImmediate(reapTimer); reapTimer = null; }
       flushPartial(handle);
       resolve(monitor(handle));
     });
@@ -457,8 +512,13 @@ const SHUTDOWN_GRACE_MS = 5000;
 
 /**
  * Shutdown a Codex process gracefully.
- * Sends SIGTERM first; if the process doesn't exit within SHUTDOWN_GRACE_MS,
- * escalates to SIGKILL on the process group (negative PID).
+ * Sends SIGTERM to the process group first; if the process doesn't exit within
+ * SHUTDOWN_GRACE_MS, escalates to SIGKILL on the process group (negative PID).
+ *
+ * NOTE: this body only runs while the DIRECT child is still alive
+ * (handle._exitCode === null) — e.g. a timeout or cancel. The happy-path
+ * "lingering grandchild" case (issue #74) is handled by collect()'s 'exit'
+ * reap, because shutdown() early-returns once _exitCode is set.
  *
  * @param {CodexHandle} handle
  * @param {number} [graceMs=5000] - Grace period before SIGKILL
@@ -470,7 +530,12 @@ export function shutdown(handle, graceMs = SHUTDOWN_GRACE_MS) {
   // If the process already exited, no need to send signals (avoids PID reuse risk)
   if (handle._exitCode !== null) return Promise.resolve();
 
-  // Send SIGTERM
+  // Send SIGTERM to the whole process group first (negative PID) so orphaned
+  // grandchildren that inherited codex's stdout pipe are reaped alongside the
+  // direct child — mirroring the SIGKILL-on-group escalation below — then the
+  // direct child itself. (Issue #74: SIGTERM previously hit only the direct
+  // child, leaving the group for the SIGKILL grace window to clean up.)
+  try { _groupKill(-handle.pid, 'SIGTERM'); } catch { /* group already gone */ }
   handle.kill('SIGTERM');
 
   return new Promise((resolve) => {
@@ -481,7 +546,7 @@ export function shutdown(handle, graceMs = SHUTDOWN_GRACE_MS) {
         return;
       }
       // Escalate: SIGKILL the entire process group
-      try { process.kill(-handle.pid, 'SIGKILL'); } catch {}
+      try { _groupKill(-handle.pid, 'SIGKILL'); } catch {}
       // Fallback: kill just the process if group kill fails
       try { handle.kill('SIGKILL'); } catch {}
       resolve();

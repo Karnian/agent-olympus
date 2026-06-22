@@ -20,7 +20,14 @@ import {
   shutdown,
   _buildSpawnArgs,
   _buildResumeArgs,
+  _setGroupKill,
 } from '../lib/codex-exec.mjs';
+
+// Neutralize the real process-group signal for the whole file so collect()'s
+// issue-#74 reap and shutdown()'s group escalation never issue a real OS signal
+// against the mock pids (which are arbitrary integers). Individual tests that
+// need to assert the reap install their own spy via _setGroupKill and restore.
+_setGroupKill(() => {});
 
 // ─── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -700,6 +707,84 @@ test('issue #64 (Bug B): collect() listener is on close, NOT exit (race fix)', a
   const result = await collectPromise;
   assert.equal(result.status, 'completed', 'data drained before close → completed');
   assert.ok(!('error' in result));
+});
+
+test('issue #74: collect() reaps the process group when close is delayed by a lingering descendant', async () => {
+  // Simulate the happy path where the direct codex child exits but a tool-call
+  // grandchild still holds the stdout pipe open, so 'close' is delayed. collect()
+  // must SIGTERM the process group (negative pid) to release the straggler —
+  // BEFORE 'close', not after (shutdown() would already have early-returned once
+  // _exitCode is set, so its group SIGTERM never runs in this path).
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = new EventEmitter();
+    child.stdin = new Writable({ write(c, e, cb) { cb(); } });
+    child.stdout = new Readable({ read() {} });
+    child.stderr = new Readable({ read() {} });
+    child.pid = 4242;
+    child.killed = false;
+    child.kill = (signal = 'SIGTERM') => { child.killed = true; };
+    // No auto-close — the grandchild keeps the pipe open until we say so.
+    const handle = createHandle(child);
+
+    const p = collect(handle, 2000);
+
+    // Terminal result arrives, then the DIRECT child exits — but 'close' does
+    // not fire yet (grandchild still holds the fd).
+    child.stdout.push(
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n'
+    );
+    await new Promise((r) => setImmediate(r)); // let the data event drain
+    child.emit('exit', 0);
+
+    // The reap is scheduled via setImmediate on 'exit'.
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    assert.deepEqual(
+      calls,
+      [[-4242, 'SIGTERM']],
+      'collect() must SIGTERM the process group (negative pid) to reap the lingering descendant',
+    );
+    assert.equal(child.killed, false, 'reap targets the GROUP, not the already-exited direct child');
+
+    // The straggler now releases the pipe → close → collect resolves cleanly.
+    child.emit('close', 0);
+    const result = await p;
+    assert.equal(result.status, 'completed');
+    assert.ok(!('error' in result));
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+test('issue #74: collect() does NOT reap when close follows exit promptly (no descendants)', async () => {
+  // The common case: no grandchild lingers, so 'close' fires right after 'exit'
+  // (the mock auto-fires it via queueMicrotask, which runs before the
+  // setImmediate reap). The reap must be cancelled — we never signal a group
+  // that is already empty.
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = createMockChildProcess(); // auto-fires 'close' after 'exit'
+    const handle = createHandle(child);
+
+    const p = collect(handle, 2000);
+    child.stdout.push(
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n'
+    );
+    await new Promise((r) => setImmediate(r));
+    child.emit('exit', 0); // mock queues 'close' via microtask → cancels the reap
+
+    const result = await p;
+    await new Promise((r) => setImmediate(r)); // give any stray immediate a chance to fire
+
+    assert.deepEqual(calls, [], 'no reap when close is prompt — the group is already empty');
+    assert.equal(result.status, 'completed');
+  } finally {
+    _setGroupKill(prev);
+  }
 });
 
 // ─── shutdown ─────────────────────────────────────────────────────────────────
