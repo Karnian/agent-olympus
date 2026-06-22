@@ -458,11 +458,67 @@ export function collect(handle, timeoutMs = 30000) {
       return;
     }
 
+    let settled = false;
     let reapTimer = null;
+    let timeout = null;
 
-    const timeout = setTimeout(() => {
-      handle.status = 'failed';
+    const cleanup = () => {
       if (reapTimer) { clearImmediate(reapTimer); reapTimer = null; }
+      if (timeout) { clearTimeout(timeout); timeout = null; }
+      handle.process.removeListener('exit', onExit);
+      handle.process.removeListener('close', onClose);
+    };
+
+    // Issue #74: when the direct codex child exits, a tool-call grandchild may
+    // still hold codex's inherited stdout pipe write-end open. That delays the
+    // ChildProcess 'close' event and exposes the *.output ENOENT race (a late
+    // grandchild evals a temp file codex already deleted → non-zero exit → a
+    // spurious "failed" background shell) while collect() blocks on 'close'.
+    //
+    // On 'exit', re-check ONE tick later whether stdout is still open. A still-
+    // open stdout is the reliable signal that a descendant inherited the pipe
+    // and is keeping it — and the process group — alive: reaping the group then
+    // is both necessary and PID-reuse-safe (a live member means the leader PID
+    // cannot be recycled, and there is no `await` between the check and the
+    // signal, so the group cannot empty out underneath us). If stdout is already
+    // closed there is no straggler, so we skip the signal entirely — no spurious
+    // SIGTERM, no PID-reuse window.
+    //
+    // NOTE: real child_process 'close' is a libuv event, NOT a microtask, so it
+    // is NOT guaranteed to precede a setImmediate queued here (verified on
+    // Node/macOS: exit → setImmediate → close occurs). Correctness therefore
+    // rests on the stdout-still-open re-check, not on event ordering. If 'close'
+    // does win the race, cleanup() clears this immediate before it runs.
+    function onExit() {
+      reapTimer = setImmediate(() => {
+        reapTimer = null;
+        if (settled) return;
+        const out = handle.process.stdout;
+        if (out && out.closed === false) reapDescendants(handle);
+      });
+    }
+
+    // Bug B fix (issue #64): resolve on 'close', NOT 'exit'. The 'exit' event
+    // can fire while stdout 'data' events containing turn.completed are still
+    // queued in the libuv pipe — resolving on exit captures stale state before
+    // the final event drains. 'close' fires only after the process has exited
+    // AND the stdio streams have closed, guaranteeing all 'data' events were
+    // processed. The timeout below and the onExit reap protect the descendant-
+    // lingering path. spawn()'s own 'exit' handler is intentionally untouched —
+    // it owns _exitCode/PID lifecycle, not the completion contract.
+    function onClose() {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      flushPartial(handle);
+      resolve(monitor(handle));
+    }
+
+    timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      handle.status = 'failed';
       resolve({
         ...monitor(handle),
         error: {
@@ -472,38 +528,8 @@ export function collect(handle, timeoutMs = 30000) {
       });
     }, timeoutMs);
 
-    // Issue #74: the direct codex child can exit while a tool-call grandchild
-    // still holds its inherited stdout pipe write-end open, delaying 'close'.
-    // During that gap the codex CLI deletes its internal *.output temp file and
-    // a late grandchild trips over the now-missing path (ENOENT → non-zero exit
-    // → a spurious "failed" background shell) while collect() blocks on 'close'.
-    // Schedule a process-group reap as soon as the direct child exits. We use
-    // setImmediate so a prompt 'close' (the no-descendant case) cancels it
-    // first — we only signal when descendants genuinely linger, and while they
-    // linger the group PID cannot be reused, so the negative-PID signal is safe.
-    handle.process.once('exit', () => {
-      reapTimer = setImmediate(() => {
-        reapTimer = null;
-        reapDescendants(handle);
-      });
-    });
-
-    // Bug B fix (issue #64): listen on 'close' instead of 'exit'. The 'exit'
-    // event can fire while stdout 'data' events containing turn.completed are
-    // still queued in the libuv pipe — resolving on exit captures stale state
-    // before the final event drains. 'close' fires only after both the process
-    // has exited AND the stdio streams have closed, guaranteeing all 'data'
-    // events have been processed. Caveat: if a descendant inherits stdout fd
-    // and keeps it open, 'close' can be delayed; the timeout above protects
-    // that path, and the 'exit' reap above releases the descendant. spawn()'s
-    // own 'exit' handler is intentionally untouched — it owns _exitCode/PID
-    // lifecycle, not the completion contract.
-    handle.process.on('close', () => {
-      clearTimeout(timeout);
-      if (reapTimer) { clearImmediate(reapTimer); reapTimer = null; }
-      flushPartial(handle);
-      resolve(monitor(handle));
-    });
+    handle.process.once('exit', onExit);
+    handle.process.once('close', onClose);
   });
 }
 
