@@ -25,7 +25,8 @@ Key files: `scripts/lib/adapter-worker-supervisor.mjs` (detached CLI), `scripts/
    - Thread/turn lifecycle, live steering via `steerTurn()`, structured errors
    - Requires `hasCodexAppServer` capability (codex ≥ 0.116.0 + app-server subcommand)
 2. **codex-exec** — Single-turn JSONL via `child_process.spawn` (`codex exec --json`)
-   - 5 event types, error classification, SIGTERM→SIGKILL shutdown
+   - 5 event types, error classification, group-targeted SIGTERM→SIGKILL shutdown
+   - `collect()` reaps lingering tool-call descendants that inherited codex's stdout pipe: on the direct child's `'exit'`, if stdout is still open it SIGTERMs the process group, so a held-open pipe can't delay completion or leave a spurious "failed" background shell (#74)
    - Requires `hasCodexExecJson` capability (codex ≥ 0.116.0)
 
 **Claude workers** (`type: 'claude'`):

@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.3.1] - 2026-06-23
+
+### Fix — `/ask codex` spurious "failed" background shell (#74)
+
+A synchronous `/ask codex` call left exactly one Claude Code background bash shell marked "failed" (`(eval):N: no such file or directory: <…>.output`). Cosmetic — the answer was always collected correctly — but misleading and panel-polluting.
+
+**Root cause.** codex is spawned `detached` with `stdio:['pipe','pipe','pipe']`, so its `bash -c` tool-call grandchildren inherit codex's stdout pipe write-end. After codex emits `turn.completed` and exits, the grandchildren keep that fd open, so `collect()` — which resolves on the ChildProcess `'close'` event — blocks until they release it. During that gap the codex CLI deletes its internal `*.output` temp file and a late grandchild evals the now-missing path (ENOENT → non-zero exit).
+
+**Why the obvious fix is wrong.** The issue proposed making `shutdown()`'s SIGTERM target the process group. Cross-review with Codex confirmed that is ineffective for this path: `runOnce()` calls `shutdown()` in `finally`, AFTER `collect()` has already resolved on `'close'`; by then the direct child's `'exit'` has set `_exitCode`, so `shutdown()` early-returns before reaching its SIGTERM — and the grandchildren are already gone (that is what unblocked `'close'`). The fix has to run earlier, inside `collect()`.
+
+**Fix** (`scripts/lib/codex-exec.mjs`):
+- `collect()` now reaps the process group the moment the direct child exits, gated on the reliable discriminator **"is stdout still open at the next tick?"** — open ⇒ a descendant is holding the pipe (group non-empty ⇒ the negative-PID signal is safe) ⇒ SIGTERM the group; already closed ⇒ no straggler ⇒ skip. A `settled` guard + listener cleanup ensure a timeout that resolves before `'exit'` cannot schedule a late reap.
+- `shutdown()` also targets the group on SIGTERM (mirroring its existing SIGKILL-on-group escalation), fixing the asymmetry on the timeout/cancel paths where its body actually runs.
+- New `_setGroupKill` test seam so the group reap is asserted without issuing a real OS signal.
+
+**Tests** — 4 new regression tests in `scripts/test/codex-exec.test.mjs` (reap when a descendant keeps stdout open; no reap when stdout already closed; timeout-before-exit schedules no late reap; shutdown group SIGTERM→SIGKILL order). Full suite **2313/2313 green**.
+
+Produced via the Codex↔Claude diff cross-review convention: diagnosis agreed by both models; first cut REQUEST-CHANGES'd by Codex (the cancellation relied on Node event ordering that does not hold in real `child_process`, and its tests were tautological against the mock); redesigned onto the stdout-open discriminator; final state APPROVE-WITH-NITS, nits addressed. See #74 / PR #75.
+
 ## [1.3.0] - 2026-06-21
 
 ### Feature — Codex Interop v1: goal delegation to Codex with host-side external verification (`/codex-goal`)

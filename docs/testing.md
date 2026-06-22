@@ -6,7 +6,7 @@ Run `node scripts/check-agents-size.mjs` to verify `AGENTS.md` stays under the 2
 ## Testing
 
 ```bash
-# Run unit tests (2289 tests, 88 files; v1.2.3: 2289/2289 passing)
+# Run unit tests (2313 tests, 89 files; v1.3.1: 2313/2313 passing)
 node --test 'scripts/test/**/*.test.mjs'
 
 # Or via npm script
