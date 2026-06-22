@@ -476,13 +476,17 @@ export function collect(handle, timeoutMs = 30000) {
     // spurious "failed" background shell) while collect() blocks on 'close'.
     //
     // On 'exit', re-check ONE tick later whether stdout is still open. A still-
-    // open stdout is the reliable signal that a descendant inherited the pipe
-    // and is keeping it — and the process group — alive: reaping the group then
-    // is both necessary and PID-reuse-safe (a live member means the leader PID
-    // cannot be recycled, and there is no `await` between the check and the
-    // signal, so the group cannot empty out underneath us). If stdout is already
-    // closed there is no straggler, so we skip the signal entirely — no spurious
-    // SIGTERM, no PID-reuse window.
+    // open stdout is a strong indicator that a descendant inherited the pipe and
+    // is keeping it — and the process group — alive, so we reap the group. If
+    // stdout is already closed there is no straggler, so we skip entirely (no
+    // spurious SIGTERM). The discriminator is NOT perfectly race-free: a
+    // descendant could exit (kernel-side) between the check and the kill, or
+    // stdout's 'close' could lag a no-descendant exit past this tick — in either
+    // case the group is empty and _groupKill() simply throws ESRCH, which we
+    // swallow. The only residual risk is PID reuse, which would require the
+    // leader PID to be recycled AND re-made a group leader within one event-loop
+    // turn — not realistically reachable, and the same posture shutdown()'s
+    // negative-PID escalation already accepts.
     //
     // NOTE: real child_process 'close' is a libuv event, NOT a microtask, so it
     // is NOT guaranteed to precede a setImmediate queued here (verified on

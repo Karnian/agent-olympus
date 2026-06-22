@@ -896,6 +896,32 @@ test('shutdown: no-op when process is already killed', async () => {
   assert.ok(true);
 });
 
+test('issue #74: shutdown() signals the process GROUP on SIGTERM then SIGKILL escalation', async () => {
+  // The file-level seam neutralizes _groupKill; install a spy here to assert
+  // shutdown() now targets the process group (negative pid) on SIGTERM — not
+  // just the direct child — mirroring its SIGKILL-on-group escalation.
+  const group = [];
+  const prev = _setGroupKill((pgid, signal) => { group.push([pgid, signal]); });
+  try {
+    const child = createMockChildProcess();
+    child.pid = 7777;
+    const childSignals = [];
+    child.kill = (signal) => { childSignals.push(signal); }; // hung: never emits exit
+    const handle = createHandle(child); // handle.pid ← 7777
+
+    await shutdown(handle, 40); // short grace → escalate to SIGKILL
+
+    assert.deepEqual(
+      group, [[-7777, 'SIGTERM'], [-7777, 'SIGKILL']],
+      'group gets SIGTERM first, then SIGKILL — both via negative pid',
+    );
+    assert.ok(childSignals.includes('SIGTERM'), 'direct child also gets SIGTERM after the group');
+    assert.ok(childSignals.includes('SIGKILL'), 'direct child SIGKILL fallback after the group');
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
 // ─── US-006: Error taxonomy — timeout category ─────────────────────────────
 
 test('mapJsonlErrorToCategory: "timeout" → timeout', () => {
