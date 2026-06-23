@@ -20,7 +20,14 @@ import {
   shutdown,
   _buildSpawnArgs,
   _buildResumeArgs,
+  _setGroupKill,
 } from '../lib/codex-exec.mjs';
+
+// Neutralize the real process-group signal for the whole file so collect()'s
+// issue-#74 reap and shutdown()'s group escalation never issue a real OS signal
+// against the mock pids (which are arbitrary integers). Individual tests that
+// need to assert the reap install their own spy via _setGroupKill and restore.
+_setGroupKill(() => {});
 
 // ─── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -702,6 +709,119 @@ test('issue #64 (Bug B): collect() listener is on close, NOT exit (race fix)', a
   assert.ok(!('error' in result));
 });
 
+// Build a bare child mock whose stdout we control directly, so the issue-#74
+// tests can drive the real discriminator (is stdout still open?) instead of
+// relying on event-ordering quirks of the auto-close mock.
+function createOpenStdoutChild(pid) {
+  const child = new EventEmitter();
+  child.stdin = new Writable({ write(c, e, cb) { cb(); } });
+  child.stdout = new Readable({ read() {} });
+  child.stderr = new Readable({ read() {} });
+  child.pid = pid;
+  child.killed = false;
+  child.kill = () => { child.killed = true; };
+  return child;
+}
+
+test('issue #74: collect() reaps the process group when a descendant keeps stdout open', async () => {
+  // Happy path: the direct codex child exits but a tool-call grandchild still
+  // holds the stdout pipe open (stdout NOT closed). collect() must SIGTERM the
+  // process group (negative pid) to release the straggler — BEFORE 'close', and
+  // before shutdown() (which early-returns once _exitCode is set, so its group
+  // SIGTERM never runs in this path).
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = createOpenStdoutChild(4242); // stdout stays OPEN
+    const handle = createHandle(child);
+
+    const p = collect(handle, 2000);
+    child.stdout.push(
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n'
+    );
+    await new Promise((r) => setImmediate(r)); // drain data → status completed
+    assert.equal(child.stdout.closed, false, 'precondition: stdout still open (descendant holds it)');
+
+    child.emit('exit', 0);                       // direct child exits, stdout STILL open
+    await new Promise((r) => setImmediate(r));   // post-exit reap immediate fires
+    await new Promise((r) => setImmediate(r));
+
+    assert.deepEqual(
+      calls, [[-4242, 'SIGTERM']],
+      'stdout still open ⇒ reap the lingering group via negative pid',
+    );
+    assert.equal(child.killed, false, 'reap targets the GROUP, not the already-exited direct child');
+
+    child.emit('close', 0);                      // descendant gone → ChildProcess close
+    const result = await p;
+    assert.equal(result.status, 'completed');
+    assert.ok(!('error' in result));
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+test('issue #74: collect() does NOT reap when stdout has already closed (no descendant)', async () => {
+  // The real discriminator — NOT mock event timing. If stdout has closed by the
+  // time the post-exit immediate runs, no descendant is holding the pipe, the
+  // group is empty, and we must NOT signal it (avoids a spurious SIGTERM and any
+  // PID-reuse window). This is the case the first design got wrong: it assumed a
+  // prompt 'close' would always cancel the reap, which is false in real Node.
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = createOpenStdoutChild(5252);
+    const handle = createHandle(child);
+
+    const p = collect(handle, 2000);
+    child.stdout.push(
+      JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n'
+    );
+    await new Promise((r) => setImmediate(r));
+
+    // Close stdout BEFORE the direct child's exit → no straggler holds the pipe.
+    child.stdout.push(null);
+    await new Promise((r) => child.stdout.once('close', r));
+    assert.equal(child.stdout.closed, true, 'precondition: stdout closed');
+
+    child.emit('exit', 0);                       // schedules the reap immediate
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    assert.deepEqual(calls, [], 'stdout already closed ⇒ no descendant ⇒ no group signal');
+
+    child.emit('close', 0);
+    const result = await p;
+    assert.equal(result.status, 'completed');
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+test('issue #74: a timeout that resolves before exit schedules no late reap', async () => {
+  // Finding from the implementation cross-review: if the timeout resolves before
+  // 'exit', the exit listener must be removed so a later exit cannot schedule a
+  // reap after collect() has already settled.
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = createOpenStdoutChild(6363);
+    const handle = createHandle(child);
+
+    const result = await collect(handle, 30); // times out (no exit/close emitted)
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error.category, 'timeout');
+
+    // Direct child exits AFTER collect already resolved via timeout.
+    child.emit('exit', 0);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(calls, [], 'no reap after collect resolved via timeout');
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
 // ─── shutdown ─────────────────────────────────────────────────────────────────
 
 test('shutdown: sends SIGTERM and marks process as killed', () => {
@@ -774,6 +894,32 @@ test('shutdown: no-op when process is already killed', async () => {
   const result = await shutdown(handle, 50);
   // Should resolve without error
   assert.ok(true);
+});
+
+test('issue #74: shutdown() signals the process GROUP on SIGTERM then SIGKILL escalation', async () => {
+  // The file-level seam neutralizes _groupKill; install a spy here to assert
+  // shutdown() now targets the process group (negative pid) on SIGTERM — not
+  // just the direct child — mirroring its SIGKILL-on-group escalation.
+  const group = [];
+  const prev = _setGroupKill((pgid, signal) => { group.push([pgid, signal]); });
+  try {
+    const child = createMockChildProcess();
+    child.pid = 7777;
+    const childSignals = [];
+    child.kill = (signal) => { childSignals.push(signal); }; // hung: never emits exit
+    const handle = createHandle(child); // handle.pid ← 7777
+
+    await shutdown(handle, 40); // short grace → escalate to SIGKILL
+
+    assert.deepEqual(
+      group, [[-7777, 'SIGTERM'], [-7777, 'SIGKILL']],
+      'group gets SIGTERM first, then SIGKILL — both via negative pid',
+    );
+    assert.ok(childSignals.includes('SIGTERM'), 'direct child also gets SIGTERM after the group');
+    assert.ok(childSignals.includes('SIGKILL'), 'direct child SIGKILL fallback after the group');
+  } finally {
+    _setGroupKill(prev);
+  }
 });
 
 // ─── US-006: Error taxonomy — timeout category ─────────────────────────────
