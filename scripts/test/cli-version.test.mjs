@@ -10,6 +10,7 @@ import {
   probeCliVersion,
   compareSemver,
   meetsMinimum,
+  codexVersionMeta,
   _clearVersionCache,
 } from '../lib/cli-version.mjs';
 
@@ -123,6 +124,48 @@ test('meetsMinimum: applies advisory thresholds and fails open for null', () => 
 
 test('meetsMinimum: unparseable versions fail open', () => {
   assert.equal(meetsMinimum('garbage', '0.142.5'), true);
+});
+
+test('codexVersionMeta: warns for concrete versions below the advisory minimum', () => {
+  const result = codexVersionMeta('/fake/codex', {
+    versionProbe: () => ({ version: '0.140.0', raw: 'codex-cli 0.140.0\n' }),
+  });
+
+  assert.deepEqual(result, { codexVersion: '0.140.0', versionWarning: true });
+});
+
+test('codexVersionMeta: does not warn for versions at or above the advisory minimum', () => {
+  const atMinimum = codexVersionMeta('/fake/codex', {
+    versionProbe: () => ({ version: '0.142.5', raw: 'codex-cli 0.142.5\n' }),
+  });
+  const aboveMinimum = codexVersionMeta('/fake/codex', {
+    versionProbe: () => ({ version: '0.143.0', raw: 'codex-cli 0.143.0\n' }),
+  });
+
+  assert.deepEqual(atMinimum, { codexVersion: '0.142.5', versionWarning: false });
+  assert.deepEqual(aboveMinimum, { codexVersion: '0.143.0', versionWarning: false });
+});
+
+test('codexVersionMeta: fails open for null and unparseable versions', () => {
+  const nullVersion = codexVersionMeta('/fake/codex', {
+    versionProbe: () => ({ version: null, raw: 'garbage\n' }),
+  });
+  const unparseableVersion = codexVersionMeta('/fake/codex', {
+    versionProbe: () => ({ version: 'garbage', raw: 'garbage\n' }),
+  });
+
+  assert.deepEqual(nullVersion, { codexVersion: null, versionWarning: false });
+  assert.deepEqual(unparseableVersion, { codexVersion: null, versionWarning: false });
+});
+
+test('codexVersionMeta: fails open when the version probe throws', () => {
+  const result = codexVersionMeta('/fake/codex', {
+    versionProbe: () => {
+      throw new Error('probe failed');
+    },
+  });
+
+  assert.deepEqual(result, { codexVersion: null, versionWarning: false });
 });
 
 test('probeCliVersion: caches by binPath until cleared', () => {
