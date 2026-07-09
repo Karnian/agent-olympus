@@ -92,7 +92,7 @@ agent-olympus/
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (2313 tests, 89 files; v1.3.1: 2313/2313 passing)
+│   ├── test/                     — node:test unit tests (2349 tests, 91 files; 2349/2349 passing)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
@@ -124,12 +124,14 @@ agent-olympus/
 │       ├── session-registry.mjs  — Cross-session metadata tracking and crash recovery
 │       ├── codex-approval.mjs    — Claude permission detection → Codex sandbox-axis mirroring + host-sandbox intersection (v1.1.0)
 │       ├── gemini-approval.mjs   — Claude permission detection → Gemini approval mode mirroring
+│       ├── gemini-binary.mjs     — Gemini binary resolution (gemini → agy fallback)
 │       ├── gemini-exec.mjs       — Gemini exec adapter (single-turn JSON spawn)
 │       ├── gemini-acp.mjs        — Gemini ACP adapter (multi-turn JSON-RPC 2.0)
 │       ├── claude-cli.mjs        — Claude CLI adapter (headless stream-json)
 │       ├── codex-exec.mjs        — Codex exec adapter (single-turn JSONL)
 │       ├── codex-appserver.mjs   — Codex app-server adapter (multi-turn JSON-RPC 2.0)
 │       ├── resolve-binary.mjs    — Binary resolution with caching + buildEnhancedPath()
+│       ├── cli-version.mjs       — Fail-open CLI version probe + advisory minimum-version gate
 │       ├── host-sandbox-detect.mjs — Passive host sandbox detection (LSM, container, seccomp)
 │       ├── permission-detect.mjs — Unified permission detection (settings + runtime layers, shared by all adapters)
 │       ├── runtime-permissions.mjs — Runtime permission_mode capture/load helpers (v1.1.6)
@@ -173,6 +175,7 @@ agent-olympus/
 - Autonomy config resolves as `defaults <- global <- project`; project `.ao/autonomy.json` wins, and CI skips the global layer unless explicitly overridden.
 - Session names use stable prefixes such as `atlas-codex-<N>`, `athena-<slug>-gemini-<N>`, and `*-xval-<story-id>`.
 - Key files: `scripts/lib/worker-spawn.mjs`, `codex-appserver.mjs`, `codex-exec.mjs`, `claude-cli.mjs`, `gemini-acp.mjs`, `gemini-exec.mjs`, `permission-detect.mjs`.
+- Gemini binary resolution: `AO_GEMINI_BINARY` → `gemini` → `agy` via `gemini-binary.mjs` (tier split 2026-06-18). Codex adapters probe versions via `cli-version.mjs`; advisory warn below 0.142.5. Adapters expose a `workerMeta` bag persisted in supervisor snapshots. Baselines: codex 0.143.0, gemini 0.50.0 (numeric ACP protocolVersion).
 - Detached worker supervisor -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md); permission mirroring -> [docs/internals/permission-mirroring.md](docs/internals/permission-mirroring.md); Gemini credentials -> [docs/internals/credentials.md](docs/internals/credentials.md).
 
 ## Deep References
@@ -190,14 +193,14 @@ agent-olympus/
 
 ## Testing
 
-Run the 2313-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the 2349-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
 - Runtime: Node.js >= 20.0.0.
 - Optional: tmux for legacy worker fallback and Athena team mode.
 - Optional: Codex CLI (`npm install -g @openai/codex`) for Codex workers.
-- Optional: Gemini CLI (`npm install -g @google/gemini-cli`) for Gemini workers.
+- Optional: Gemini CLI (`npm install -g @google/gemini-cli`) for Gemini workers, or Antigravity `agy` as drop-in fallback.
 - npm packages: none at runtime.
 
 ## Known Limitations
