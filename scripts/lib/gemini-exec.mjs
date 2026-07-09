@@ -41,7 +41,6 @@ import {
 /** Grace period before escalating from SIGTERM to SIGKILL (ms) */
 const SHUTDOWN_GRACE_MS = 5000;
 
-/** Test hook for hermetic spawn-path coverage. */
 // ─── Handle typedef ───────────────────────────────────────────────────────────
 
 /**
