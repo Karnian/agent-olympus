@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { createWorkerWorktree } from './worktree.mjs';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
+import { resolveGeminiBinary } from './gemini-binary.mjs';
 import { resolveCodexApproval, buildCodexExecArgs } from './codex-approval.mjs';
 import { resolveGeminiApproval, geminiApprovalFlag } from './gemini-approval.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
@@ -404,7 +405,9 @@ export function buildWorkerCommand(worker, opts = {}) {
       const gMode = resolveGeminiApproval(gAutonomy, { cwd: opts.cwd });
       const gFlag = geminiApprovalFlag(gMode);
       const gFlagPart = gFlag ? ` ${gFlag}` : '';
-      return withExitMarker(`"${resolveBinary('gemini')}"${gFlagPart} -p "$(cat "${safeFile}")"`, safeFile, exitNonce);
+      // resolveGeminiBinary: honors AO_GEMINI_BINARY and falls back to agy
+      // when the gemini CLI is absent (2026-06-18 tier split).
+      return withExitMarker(`"${resolveGeminiBinary().path}"${gFlagPart} -p "$(cat "${safeFile}")"`, safeFile, exitNonce);
     }
     case 'claude':
     default:
