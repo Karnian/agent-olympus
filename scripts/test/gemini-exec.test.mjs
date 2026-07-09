@@ -19,8 +19,6 @@ import {
   monitor,
   collect,
   shutdown,
-  __setNodeSpawnForTest,
-  __setGeminiBinaryResolverForTest,
 } from '../lib/gemini-exec.mjs';
 import { buildEnhancedPath } from '../lib/resolve-binary.mjs';
 
@@ -417,65 +415,59 @@ test('collect: resolves immediately when handle is already failed', async () => 
 test('spawn: sets workerMeta from Gemini-compatible binary resolver', () => {
   let spawnPath = null;
   let spawnArgs = null;
-  __setGeminiBinaryResolverForTest(() => ({
+  const resolveGeminiBinary = () => ({
     path: '/opt/antigravity/bin/agy',
     flavor: 'agy',
     resolved: true,
     attempted: ['gemini', 'agy'],
-  }));
-  __setNodeSpawnForTest((path, args) => {
+  });
+  const fakeSpawn = (path, args) => {
     spawnPath = path;
     spawnArgs = args;
     return createMockChildProcess();
+  };
+  const handle = spawn('hello', {
+    spawn: fakeSpawn,
+    resolveGeminiBinary,
+    credential: { credentialSource: 'env' },
+    env: { GEMINI_API_KEY: '' },
   });
-  try {
-    const handle = spawn('hello', {
-      credential: { credentialSource: 'env' },
-      env: { GEMINI_API_KEY: '' },
-    });
 
-    assert.equal(spawnPath, '/opt/antigravity/bin/agy');
-    assert.deepEqual(spawnArgs, ['--output-format', 'json', '-p', 'hello']);
-    assert.deepEqual(handle.workerMeta, {
-      binaryFlavor: 'agy',
-      binaryResolved: true,
-    });
-  } finally {
-    __setGeminiBinaryResolverForTest();
-    __setNodeSpawnForTest();
-  }
+  assert.equal(spawnPath, '/opt/antigravity/bin/agy');
+  assert.deepEqual(spawnArgs, ['--output-format', 'json', '-p', 'hello']);
+  assert.deepEqual(handle.workerMeta, {
+    binaryFlavor: 'agy',
+    binaryResolved: true,
+  });
 });
 
 test('spawn ENOENT: unresolved binary message names gemini, agy, tier split, and override without changing category', async () => {
   const child = createMockChildProcess();
-  __setGeminiBinaryResolverForTest(() => ({
+  const resolveGeminiBinary = () => ({
     path: 'gemini',
     flavor: 'gemini',
     resolved: false,
     attempted: ['gemini', 'agy'],
-  }));
-  __setNodeSpawnForTest(() => child);
-  try {
-    const handle = spawn('hello', {
-      credential: { credentialSource: 'env' },
-      env: { GEMINI_API_KEY: '' },
-    });
-    const err = new Error('spawn gemini ENOENT');
-    err.code = 'ENOENT';
-    child.emit('error', err);
+  });
+  const fakeSpawn = () => child;
+  const handle = spawn('hello', {
+    spawn: fakeSpawn,
+    resolveGeminiBinary,
+    credential: { credentialSource: 'env' },
+    env: { GEMINI_API_KEY: '' },
+  });
+  const err = new Error('spawn gemini ENOENT');
+  err.code = 'ENOENT';
+  child.emit('error', err);
 
-    const result = await collect(handle, 5000);
+  const result = await collect(handle, 5000);
 
-    assert.equal(result.status, 'failed');
-    assert.equal(result.error.category, 'not_installed');
-    assert.match(result.error.message, /gemini/);
-    assert.match(result.error.message, /agy/);
-    assert.match(result.error.message, /2026-06-18/);
-    assert.match(result.error.message, /AO_GEMINI_BINARY/);
-  } finally {
-    __setGeminiBinaryResolverForTest();
-    __setNodeSpawnForTest();
-  }
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.category, 'not_installed');
+  assert.match(result.error.message, /gemini/);
+  assert.match(result.error.message, /agy/);
+  assert.match(result.error.message, /2026-06-18/);
+  assert.match(result.error.message, /AO_GEMINI_BINARY/);
 });
 
 test('collect: waits for exit event then resolves with parsed JSON', async () => {
