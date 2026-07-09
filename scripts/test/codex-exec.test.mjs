@@ -15,6 +15,8 @@ import { Readable, Writable } from 'node:stream';
 import {
   parseJSONLEvents,
   mapJsonlErrorToCategory,
+  spawn as spawnCodex,
+  spawnResume,
   monitor,
   collect,
   shutdown,
@@ -281,6 +283,78 @@ test('_buildResumeArgs: rejects empty or invalid threadId', () => {
       () => _buildResumeArgs(badThreadId, { level: 'full-auto' }),
       /threadId must be a non-empty string/,
     );
+  }
+});
+
+// ─── spawn worker metadata ───────────────────────────────────────────────────
+
+test('spawn and spawnResume: record identical workerMeta without real codex', () => {
+  const children = [createMockChildProcess(), createMockChildProcess()];
+  const spawnCalls = [];
+  const fakeSpawn = (binPath, args, opts) => {
+    spawnCalls.push({ binPath, args, opts });
+    return children.shift();
+  };
+  const fakeProbe = () => ({ version: '0.143.0', raw: 'codex-cli 0.143.0\n' });
+
+  const handle = spawnCodex('hello', {
+    spawn: fakeSpawn,
+    versionProbe: fakeProbe,
+    log: () => {},
+  });
+  const resumeHandle = spawnResume('thread-1', 'again', {
+    spawn: fakeSpawn,
+    versionProbe: fakeProbe,
+    log: () => {},
+  });
+
+  assert.deepEqual(handle.workerMeta, { codexVersion: '0.143.0', versionWarning: false });
+  assert.deepEqual(resumeHandle.workerMeta, handle.workerMeta);
+  assert.equal(spawnCalls.length, 2);
+  assert.ok(spawnCalls[0].args.includes('exec'));
+  assert.deepEqual(spawnCalls[1].args.slice(-3), ['--json', 'thread-1', '-']);
+});
+
+test('spawn: emits info note below minimum and writes nothing to stdout', () => {
+  const child = createMockChildProcess();
+  const logs = [];
+  const stdoutWrites = [];
+  const originalStdoutWrite = process.stdout.write;
+  process.stdout.write = (chunk, ...args) => {
+    stdoutWrites.push(String(chunk));
+    if (typeof args.at(-1) === 'function') args.at(-1)();
+    return true;
+  };
+
+  try {
+    const handle = spawnCodex('hello', {
+      spawn: () => child,
+      versionProbe: () => ({ version: '0.140.0', raw: 'codex-cli 0.140.0\n' }),
+      log: (level, message) => logs.push({ level, message }),
+    });
+
+    assert.deepEqual(handle.workerMeta, { codexVersion: '0.140.0', versionWarning: true });
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].level, 'info');
+    assert.match(logs[0].message, /codex 0\.140\.0 predates the 0\.142\.5 security fix/);
+    assert.deepEqual(stdoutWrites, []);
+  } finally {
+    process.stdout.write = originalStdoutWrite;
+  }
+});
+
+test('spawn: no version note at or above minimum or when unknown', () => {
+  for (const version of ['0.142.5', '0.143.0', null]) {
+    const child = createMockChildProcess();
+    const logs = [];
+    const handle = spawnCodex('hello', {
+      spawn: () => child,
+      versionProbe: () => ({ version, raw: version ? `codex-cli ${version}\n` : 'garbage\n' }),
+      log: (level, message) => logs.push({ level, message }),
+    });
+
+    assert.deepEqual(handle.workerMeta, { codexVersion: version, versionWarning: false });
+    assert.deepEqual(logs, []);
   }
 });
 
