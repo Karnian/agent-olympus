@@ -70,8 +70,13 @@ const MAX_STDERR_CHUNKS = 100;
 /** Max queued messages to prevent unbounded memory growth if worker is stuck */
 const MAX_QUEUE_DEPTH = 200;
 
-/** Protocol version used in the initialize handshake */
-const PROTOCOL_VERSION = '2025-07-01';
+/**
+ * Protocol version used in the initialize handshake.
+ * MUST be a number: gemini-cli >= 0.50 validates `protocolVersion` as an
+ * integer per the ACP spec and rejects the legacy date string with a zod
+ * invalid_type error (verified against 0.50.0 on 2026-07-09).
+ */
+const PROTOCOL_VERSION = 1;
 
 /** Client info sent during initialize handshake */
 const CLIENT_INFO = { name: 'agent-olympus', version: '1.0' };
