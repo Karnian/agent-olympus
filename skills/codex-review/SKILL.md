@@ -55,14 +55,20 @@ The envelope is:
 {
   "status": "ok",
   "verdict": "PASS",
+  "truncated": false,
   "findings": [],
   "summary": "string",
   "threadId": "string"
 }
 ```
 
-Blocking rule: FAIL if Codex returns `verdict:"FAIL"` or any finding has
-severity `critical` or `P1`. Findings with only `P2`, `P3`, or `nit` severity
+Pass condition: the gate is satisfied (process exit 0) ONLY when
+`status:"ok"` AND `verdict:"PASS"` AND `truncated:false`. A `truncated:true`
+envelope means the diff was too large to send whole, so a `PASS` on it is not
+authoritative and the process exits non-zero.
+
+Blocking rule: verdict is `FAIL` if Codex returns `verdict:"FAIL"` or any finding
+has severity `critical` or `P1`. Findings with only `P2`, `P3`, or `nit` severity
 do not fail the gate.
 
 If Codex fails to spawn, exits non-zero, or returns output that cannot be parsed
@@ -102,7 +108,10 @@ machine-readable merge or shell gate.
    `--uncommitted` for current working tree review.
 3. Run `scripts/codex-review.mjs` from the target worktree.
 4. Parse the single JSON envelope from stdout.
-5. Treat `status:"ok", verdict:"PASS"` as the only passing gate state.
+5. Treat `status:"ok", verdict:"PASS", truncated:false` (process exit 0) as the
+   only passing gate state. A `truncated:true` envelope is NOT a pass even when
+   `verdict:"PASS"` — the diff was too large to review whole, so re-scope to a
+   smaller target.
 6. Treat `status:"ok", verdict:"FAIL"` as a blocking review failure and report
    the critical/P1 findings first.
 7. Treat `status:"error"` as fail-open infrastructure failure; report the error

@@ -143,11 +143,33 @@ test('main: success path uses read-only Codex exec schema gate', async () => {
   assert.equal(payload.status, 'ok');
   assert.equal(payload.verdict, 'PASS');
   assert.equal(payload.threadId, 'thread-ok');
-  assert.equal(spawnCalls[0].command, 'codex');
+  assert.ok(spawnCalls[0].command.endsWith('codex'), 'spawns the resolved codex binary');
+  assert.equal(typeof spawnCalls[0].options.env?.PATH, 'string', 'passes an enhanced PATH');
   assert.deepEqual(spawnCalls[0].args.slice(0, 4), ['-s', 'read-only', '-a', 'never']);
   assert.ok(spawnCalls[0].args.includes('--output-schema'));
   assert.deepEqual(spawnCalls[0].args.slice(-3), ['-C', '/repo', '-']);
   assert.equal(spawnCalls[0].options.input.includes('Finding bar:'), true);
+});
+
+test('main: fail-open when a finding is missing the required line key', async () => {
+  const { exec } = makeGitExec({ diff: 'diff --git a/a.js b/a.js\n' });
+  const badResult = {
+    verdict: 'FAIL',
+    summary: 'x',
+    findings: [{ severity: 'P1', file: 'a.js', summary: 'no line key' }], // line omitted
+  };
+  const { payload, exitCode } = await main(['--cwd', '/repo'], {
+    exec,
+    spawn: async () => ({
+      exitCode: 0,
+      stdout: jsonlMessage(JSON.stringify(badResult), 'thread-noline'),
+      stderr: '',
+    }),
+  });
+
+  assert.equal(payload.status, 'error', 'validator must reject a finding missing the required line');
+  assert.equal(payload.verdict, null);
+  assert.equal(exitCode, 2);
 });
 
 test('main: a truncated review target cannot certify PASS (gate not satisfied)', async () => {
