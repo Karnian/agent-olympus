@@ -1,7 +1,7 @@
 # Agent Olympus
 
 Standalone multi-model orchestrator plugin for Claude Code.
-Atlas + Athena orchestrate 19 agents, 35 skills, Claude/Codex/Gemini execution, and adapter-based workers.
+Atlas + Athena orchestrate 19 agents, 37 skills, Claude/Codex/Gemini execution, and adapter-based workers.
 
 ## Architecture
 
@@ -47,7 +47,7 @@ agent-olympus/
 │   ├── hephaestus.md             — Codex deep worker (Sonnet)
 │   ├── ask.md                    — Quick Codex/Gemini query agent (Sonnet)
 │   └── themis.md                 — Quality gate: tests/lint/AC verification (Sonnet)
-├── skills/                       — 35 user-facing skills (workflow recipes)
+├── skills/                       — 37 user-facing skills (workflow recipes)
 │   ├── atlas/SKILL.md            — /atlas: autonomous sub-agent pipeline
 │   ├── athena/SKILL.md           — /athena: autonomous team pipeline
 │   ├── plan/SKILL.md             — /plan: forward/reverse product planning
@@ -266,6 +266,8 @@ Run the 2313-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | Skill | Trigger | What It Does |
 |-------|---------|--------------|
 | `/ask` | "물어봐", "codex" | Quick single-shot Codex/Gemini query (sync + async job system) |
+| `/codex-goal` | "코덱스에 위임", "codex goal" | Delegate one bounded goal to Codex with Claude-hosted external verification |
+| `/codex-review` | "코덱스 리뷰", "codex review" | Codex as an independent PASS/FAIL review gate on the diff — inverse of `/codex-goal` |
 | `/brainstorm` | "브레인스톰", "설계" | Design-before-code with diverge-converge-refine methodology |
 | `/research` | "조사해", "리서치" | Parallel web research: decompose → fetch → synthesize |
 | `/trace` | "추적", "원인분석" | 3-lane competing hypothesis investigation with rebuttal round |
