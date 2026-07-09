@@ -33,7 +33,7 @@ import { spawn } from 'child_process';
 import { readProcStartId } from './proc-identity.mjs';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import {
-  snapshotPath, outputPath, writeSnapshot, isValidId,
+  snapshotPath, outputPath, writeSnapshot, isValidId, sanitizeWorkerMeta,
   HEARTBEAT_INTERVAL_MS,
 } from './supervisor-state.mjs';
 import { buildExecOpts, buildAppserverThreadOpts, buildGeminiAcpSessionOpts } from './supervisor-opts.mjs';
@@ -152,6 +152,19 @@ function onAdapterPid(pid) {
   }
 }
 
+// Adapters may expose a serializable `workerMeta` bag on the handle they
+// return (e.g. probed CLI version, resolved binary flavor). Persist the
+// sanitized bag on every snapshot so post-mortems can see which binary/
+// version actually served the worker. sanitizeWorkerMeta enforces the
+// flat-scalars-only contract; anything else is silently dropped.
+function onWorkerMeta(h) {
+  const meta = sanitizeWorkerMeta(h && h.workerMeta);
+  if (meta) {
+    base.workerMeta = meta;
+    writeRunningSnapshot();
+  }
+}
+
 // Pure manifest → adapter-call option builders live in ./supervisor-opts.mjs so
 // they are unit-testable without importing this CLI (which runs main() on
 // import). run* below MUST use them so the tested contract is what production runs.
@@ -160,6 +173,7 @@ async function runExec(mod, m) {
   const h = mod.spawn(m.prompt, buildExecOpts(m));
   liveHandle = h; liveShutdown = mod.shutdown;
   onAdapterPid(h.pid);
+  onWorkerMeta(h);
   return normalize(await mod.collect(h, m.timeoutMs));
 }
 
@@ -167,6 +181,7 @@ async function runCodexAppserver(mod, m) {
   const h = mod.startServer({ cwd: m.cwd });
   liveHandle = h; liveShutdown = mod.shutdownServer;
   onAdapterPid(h.pid);
+  onWorkerMeta(h);
   // Preserve each step's error CATEGORY (auth_failed/rate_limited/…) instead of
   // throwing → generic crash, so P3 retry/reassignment routes correctly.
   const init = await mod.initializeServer(h);
@@ -184,6 +199,7 @@ async function runGeminiAcp(mod, m) {
   const h = mod.startServer({ cwd: m.cwd, credential: m.geminiCredential });
   liveHandle = h; liveShutdown = mod.shutdownServer;
   onAdapterPid(h.pid);
+  onWorkerMeta(h);
   const init = await mod.initializeServer(h);
   if (init && init.error) return normalize({ status: 'failed', error: init.error });
   const sess = await mod.createSession(h, buildGeminiAcpSessionOpts(m));

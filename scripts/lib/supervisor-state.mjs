@@ -52,8 +52,42 @@ const SNAPSHOT_FIELDS = [
   'runId', 'workerRunId', 'teamName', 'workerName', 'adapterName',
   'status', 'startedAt', 'completedAt',
   'supervisorPid', 'supervisorStartId', 'adapterPid', 'adapterStartId',
-  'error', 'outputTail', 'outputBytes',
+  'error', 'outputTail', 'outputBytes', 'workerMeta',
 ];
+
+/** Caps for the adapter-provided `workerMeta` bag (flat scalars only). */
+const WORKER_META_MAX_KEYS = 16;
+const WORKER_META_MAX_KEY_LENGTH = 40;
+const WORKER_META_MAX_STRING = 120;
+
+/**
+ * Sanitize an adapter-provided `workerMeta` object for snapshot persistence.
+ * Keeps the SNAPSHOT_FIELDS whitelist promise: only a FLAT bag of small
+ * scalars survives (no nested objects/arrays, no long strings), so a
+ * misbehaving adapter cannot leak the prompt or path capabilities through
+ * metadata. Returns undefined when the input is not a plain object or when
+ * nothing safe remains.
+ * @param {unknown} meta
+ * @returns {Record<string, string|number|boolean|null>|undefined}
+ */
+export function sanitizeWorkerMeta(meta) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return undefined;
+  const out = {};
+  let kept = 0;
+  for (const [k, v] of Object.entries(meta)) {
+    if (kept >= WORKER_META_MAX_KEYS) break;
+    if (k.length === 0 || k.length > WORKER_META_MAX_KEY_LENGTH) continue;
+    if (typeof v === 'string') {
+      out[k] = v.length > WORKER_META_MAX_STRING ? v.slice(0, WORKER_META_MAX_STRING) : v;
+    } else if ((typeof v === 'number' && Number.isFinite(v)) || typeof v === 'boolean' || v === null) {
+      out[k] = v;
+    } else {
+      continue;
+    }
+    kept += 1;
+  }
+  return kept > 0 ? out : undefined;
+}
 
 export function isTerminalStatus(status) {
   return TERMINAL_STATUSES.has(status);
@@ -125,7 +159,13 @@ export function writeSnapshot(path, snapshot, now = Date.now()) {
   const out = { schemaVersion: SUPERVISOR_SCHEMA_VERSION, updatedAt: now };
   for (const k of SNAPSHOT_FIELDS) {
     if (snapshot[k] === undefined) continue;
-    out[k] = k === 'outputTail' ? clampOutputTail(snapshot[k]) : snapshot[k];
+    if (k === 'outputTail') { out[k] = clampOutputTail(snapshot[k]); continue; }
+    if (k === 'workerMeta') {
+      const meta = sanitizeWorkerMeta(snapshot[k]);
+      if (meta !== undefined) out[k] = meta;
+      continue;
+    }
+    out[k] = snapshot[k];
   }
   atomicWriteFileSync(path, JSON.stringify(out, null, 2));
 }
@@ -140,6 +180,7 @@ function isValidSnapshotShape(o) {
   if (o.supervisorStartId != null && typeof o.supervisorStartId !== 'string') return false;
   if (o.adapterPid != null && !(Number.isSafeInteger(o.adapterPid) && o.adapterPid > 0)) return false;
   if (o.adapterStartId != null && typeof o.adapterStartId !== 'string') return false;
+  if (o.workerMeta != null && (typeof o.workerMeta !== 'object' || Array.isArray(o.workerMeta))) return false;
   // A failure must carry a categorized error.
   if (o.status === 'failed') {
     if (!o.error || typeof o.error !== 'object' || typeof o.error.category !== 'string') return false;

@@ -25,6 +25,7 @@ import {
   writeSnapshot,
   readSnapshot,
   isHeartbeatFresh,
+  sanitizeWorkerMeta,
 } from '../lib/supervisor-state.mjs';
 
 const RUN = 'a1b2c3d4e5f60718';
@@ -137,6 +138,76 @@ test('clampOutputTail: keeps the END (most recent)', () => {
   assert.ok(clamped.endsWith('TAILMARK'));
   assert.ok(Buffer.byteLength(clamped) <= MAX_OUTPUT_TAIL_BYTES);
   assert.equal(clampOutputTail('short'), 'short');
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeWorkerMeta / workerMeta snapshot field
+// ---------------------------------------------------------------------------
+
+test('sanitizeWorkerMeta: keeps flat scalars, drops nested/function/undefined values', () => {
+  const meta = sanitizeWorkerMeta({
+    codexVersion: '0.140.0',
+    versionWarning: true,
+    retries: 2,
+    threadId: null,
+    nested: { leak: '/etc/passwd' },
+    list: [1, 2],
+    fn: () => {},
+    missing: undefined,
+  });
+  assert.deepEqual(meta, { codexVersion: '0.140.0', versionWarning: true, retries: 2, threadId: null });
+});
+
+test('sanitizeWorkerMeta: rejects non-objects and empty results', () => {
+  for (const bad of [null, undefined, 'str', 42, [], [{ a: 1 }]]) {
+    assert.equal(sanitizeWorkerMeta(bad), undefined, `should reject ${JSON.stringify(bad)}`);
+  }
+  assert.equal(sanitizeWorkerMeta({}), undefined, 'empty object → undefined');
+  assert.equal(sanitizeWorkerMeta({ only: { nested: true } }), undefined, 'nothing safe → undefined');
+});
+
+test('sanitizeWorkerMeta: clamps long strings, long keys, and key count', () => {
+  const meta = sanitizeWorkerMeta({ raw: 'x'.repeat(500), ['k'.repeat(41)]: 'dropped' });
+  assert.equal(meta.raw.length, 120, 'string clamped to 120');
+  assert.equal(Object.keys(meta).length, 1, 'over-long key dropped');
+
+  const many = {};
+  for (let i = 0; i < 30; i++) many[`k${i}`] = i;
+  assert.equal(Object.keys(sanitizeWorkerMeta(many)).length, 16, 'capped at 16 keys');
+});
+
+test('writeSnapshot/readSnapshot: round-trips sanitized workerMeta, drops unsafe values', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-supstate-'));
+  try {
+    const p = snapshotPath(dir, RUN, WRK);
+    writeSnapshot(p, { ...VALID, workerMeta: { flavor: 'agy', nested: { leak: 'SECRET' } } }, 1);
+    const res = readSnapshot(p);
+    assert.equal(res.kind, 'ok');
+    assert.deepEqual(res.snapshot.workerMeta, { flavor: 'agy' });
+    assert.ok(!readFileSync(p, 'utf-8').includes('SECRET'), 'nested values must not be persisted');
+
+    // Entirely-unsafe meta → field omitted, snapshot still valid.
+    writeSnapshot(p, { ...VALID, workerMeta: 'not-an-object' }, 2);
+    const res2 = readSnapshot(p);
+    assert.equal(res2.kind, 'ok');
+    assert.equal(res2.snapshot.workerMeta, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('readSnapshot: rejects a snapshot whose workerMeta is not a plain object', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-supstate-'));
+  try {
+    const p = snapshotPath(dir, RUN, WRK);
+    writeSnapshot(p, { ...VALID }, 1);
+    const obj = JSON.parse(readFileSync(p, 'utf-8'));
+    obj.workerMeta = ['tampered'];
+    writeFileSync(p, JSON.stringify(obj));
+    assert.equal(readSnapshot(p).kind, 'corrupt');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
