@@ -34,7 +34,8 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import { EventEmitter } from 'events';
-import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
+import { buildEnhancedPath } from './resolve-binary.mjs';
+import { resolveGeminiBinary } from './gemini-binary.mjs';
 import {
   resolveGeminiApiKey,
   maskKey,
@@ -49,6 +50,10 @@ import {
 
 /** Grace period before escalating from SIGTERM to SIGKILL (ms) */
 const SHUTDOWN_GRACE_MS = 5000;
+
+/** Test hook for hermetic spawn-path coverage. */
+let _nodeSpawn = nodeSpawn;
+let _resolveGeminiBinary = resolveGeminiBinary;
 
 /** Default timeout for generic RPC requests (ms) */
 const RPC_TIMEOUT_MS = 30000;
@@ -256,6 +261,24 @@ function _heuristicCategory(text) {
  * @property {Object[]} _deadLetters - Messages that failed delivery after retry
  */
 
+/**
+ * Replace child_process.spawn for tests. Pass no argument to reset.
+ *
+ * @param {typeof nodeSpawn} [fn]
+ */
+export function __setNodeSpawnForTest(fn) {
+  _nodeSpawn = fn || nodeSpawn;
+}
+
+/**
+ * Replace Gemini-compatible binary resolution for tests. Pass no argument to reset.
+ *
+ * @param {typeof resolveGeminiBinary} [fn]
+ */
+export function __setGeminiBinaryResolverForTest(fn) {
+  _resolveGeminiBinary = fn || resolveGeminiBinary;
+}
+
 // ─── Server lifecycle ─────────────────────────────────────────────────────────
 
 /**
@@ -273,7 +296,7 @@ function _heuristicCategory(text) {
  * @returns {GeminiAcpHandle}
  */
 export function startServer(opts = {}) {
-  const geminiPath = resolveBinary('gemini');
+  const binary = _resolveGeminiBinary();
   const args = ['--acp'];
 
   // Resolve GEMINI_API_KEY from the OS secret store before spawning; see
@@ -295,12 +318,12 @@ export function startServer(opts = {}) {
   if (process.env.AO_DEBUG_GEMINI) {
     try {
       process.stderr.write(
-        `gemini-acp: GEMINI_API_KEY=${maskKey(mergedEnv.GEMINI_API_KEY)}\n`
+        `gemini-acp: binaryFlavor=${binary.flavor} binaryResolved=${binary.resolved} GEMINI_API_KEY=${maskKey(mergedEnv.GEMINI_API_KEY)}\n`
       );
     } catch { /* never throw from logging */ }
   }
 
-  const child = nodeSpawn(geminiPath, args, {
+  const child = _nodeSpawn(binary.path, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
     env: mergedEnv,
@@ -328,6 +351,7 @@ export function startServer(opts = {}) {
     _messageQueue: [],
     _draining: false,
     _deadLetters: [],
+    workerMeta: { binaryFlavor: binary.flavor, binaryResolved: binary.resolved },
     // Account name used to resolve GEMINI_API_KEY for this session — the auth
     // error classifier calls invalidateCache(handle._credentialAccount) on
     // ACP JSON-RPC auth failures so the next spawn re-reads the keychain.
@@ -405,12 +429,27 @@ export function startServer(opts = {}) {
   });
 
   child.on('error', (err) => {
-    handle._stderrChunks.push(err.message);
+    handle._stderrChunks.push(_formatSpawnErrorMessage(err, binary));
     handle.status = 'failed';
     emitter.emit('error', err);
   });
 
   return handle;
+}
+
+/**
+ * Extend missing-binary guidance only when the resolver proved neither
+ * compatible CLI was present. Category/control flow still comes from the
+ * existing stderr classifier.
+ *
+ * @param {Error} err
+ * @param {{resolved: boolean}} binary
+ * @returns {string}
+ */
+function _formatSpawnErrorMessage(err, binary) {
+  const message = err && err.message ? err.message : String(err);
+  if (binary.resolved !== false) return message;
+  return `${message}. Gemini-compatible CLI not found: tried gemini and agy. As of 2026-06-18, Gemini CLI free/Pro/Ultra users are directed to the Antigravity agy CLI, while API-key/enterprise users remain served by gemini CLI. Set AO_GEMINI_BINARY to an explicit compatible binary path to override.`;
 }
 
 /**
