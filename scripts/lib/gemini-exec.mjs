@@ -42,9 +42,6 @@ import {
 const SHUTDOWN_GRACE_MS = 5000;
 
 /** Test hook for hermetic spawn-path coverage. */
-let _nodeSpawn = nodeSpawn;
-let _resolveGeminiBinary = resolveGeminiBinary;
-
 // ─── Handle typedef ───────────────────────────────────────────────────────────
 
 /**
@@ -128,24 +125,6 @@ export function mapGeminiExecError(errorText) {
   return 'unknown';
 }
 
-/**
- * Replace child_process.spawn for tests. Pass no argument to reset.
- *
- * @param {typeof nodeSpawn} [fn]
- */
-export function __setNodeSpawnForTest(fn) {
-  _nodeSpawn = fn || nodeSpawn;
-}
-
-/**
- * Replace Gemini-compatible binary resolution for tests. Pass no argument to reset.
- *
- * @param {typeof resolveGeminiBinary} [fn]
- */
-export function __setGeminiBinaryResolverForTest(fn) {
-  _resolveGeminiBinary = fn || resolveGeminiBinary;
-}
-
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
 /**
@@ -191,7 +170,9 @@ function _flushOutput(handle) {
  * @returns {GeminiHandle}
  */
 export function spawn(prompt, opts = {}) {
-  const binary = _resolveGeminiBinary();
+  const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;
+  const resolveBin = typeof opts.resolveGeminiBinary === 'function' ? opts.resolveGeminiBinary : resolveGeminiBinary;
+  const binary = resolveBin();
 
   const args = ['--output-format', 'json'];
 
@@ -234,7 +215,7 @@ export function spawn(prompt, opts = {}) {
     } catch { /* never throw from logging */ }
   }
 
-  const child = _nodeSpawn(binary.path, args, {
+  const child = spawnImpl(binary.path, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
     env: mergedEnv,
