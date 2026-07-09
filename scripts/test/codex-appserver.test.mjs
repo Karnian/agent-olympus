@@ -248,6 +248,67 @@ test('createRpcRequest: omits params when undefined', () => {
   assert.ok(!('params' in req));
 });
 
+// ─── startServer worker metadata ──────────────────────────────────────────────
+
+test('startServer: records codexVersion and warning metadata below minimum without stdout', () => {
+  const child = createMockChildProcess();
+  const logs = [];
+  const stdoutWrites = [];
+  const originalStdoutWrite = process.stdout.write;
+  process.stdout.write = (chunk, ...args) => {
+    stdoutWrites.push(String(chunk));
+    if (typeof args.at(-1) === 'function') args.at(-1)();
+    return true;
+  };
+
+  try {
+    const handle = startServer({
+      spawn: () => child,
+      versionProbe: () => ({ version: '0.140.0', raw: 'codex-cli 0.140.0\n' }),
+      log: (level, message) => logs.push({ level, message }),
+    });
+
+    assert.deepEqual(handle.workerMeta, { codexVersion: '0.140.0', versionWarning: true });
+    assert.equal(logs.length, 1);
+    assert.equal(logs[0].level, 'warning');
+    assert.equal(
+      logs[0].message,
+      'codex 0.140.0 predates the 0.142.5 security fix (WebSocket payloads written to trace logs); upgrade recommended for app-server use',
+    );
+    assert.deepEqual(stdoutWrites, []);
+  } finally {
+    process.stdout.write = originalStdoutWrite;
+  }
+});
+
+test('startServer: records version metadata without warning at or above minimum', () => {
+  for (const version of ['0.142.5', '0.143.0']) {
+    const child = createMockChildProcess();
+    const logs = [];
+    const handle = startServer({
+      spawn: () => child,
+      versionProbe: () => ({ version, raw: `codex-cli ${version}\n` }),
+      log: (level, message) => logs.push({ level, message }),
+    });
+
+    assert.deepEqual(handle.workerMeta, { codexVersion: version, versionWarning: false });
+    assert.deepEqual(logs, []);
+  }
+});
+
+test('startServer: unknown codex version records null metadata and does not warn', () => {
+  const child = createMockChildProcess();
+  const logs = [];
+  const handle = startServer({
+    spawn: () => child,
+    versionProbe: () => ({ version: null, raw: 'garbage\n' }),
+    log: (level, message) => logs.push({ level, message }),
+  });
+
+  assert.deepEqual(handle.workerMeta, { codexVersion: null, versionWarning: false });
+  assert.deepEqual(logs, []);
+});
+
 // ─── parseRpcMessage ───────────────────────────────────────────────────────────
 
 test('parseRpcMessage: parses valid JSON object', () => {

@@ -1,9 +1,13 @@
 import { spawn as nodeSpawn } from 'child_process';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { buildCodexExecArgs } from './codex-approval.mjs';
+import { meetsMinimum, probeCliVersion } from './cli-version.mjs';
 
 /** Valid resolved permission levels (mirrors codex-approval VALID_LEVELS). */
 const VALID_SPAWN_LEVELS = new Set(['suggest', 'auto-edit', 'full-auto']);
+const CODEX_SECURITY_FIX_VERSION = '0.142.5';
+const CODEX_EXEC_VERSION_NOTE =
+  'codex {version} predates the 0.142.5 security fix (WebSocket payloads written to trace logs); upgrade recommended';
 
 /**
  * @typedef {Object} CodexHandle
@@ -186,8 +190,10 @@ export function _buildResumeArgs(threadId, opts = {}) {
 
 function spawnCodexProcess(args, prompt, opts = {}) {
   const codexPath = resolveBinary('codex');
+  const workerMeta = probeCodexWorkerMeta(codexPath, opts);
 
-  const child = nodeSpawn(codexPath, args, {
+  const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;
+  const child = spawnImpl(codexPath, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, PATH: buildEnhancedPath(), ...opts.env },
@@ -210,6 +216,7 @@ function spawnCodexProcess(args, prompt, opts = {}) {
     _exitCode: null,
     _stderrChunks: [],
     _hadItemFailure: false,
+    workerMeta,
   };
 
   // Write prompt to stdin then close so Codex gets EOF
@@ -272,6 +279,42 @@ function spawnCodexProcess(args, prompt, opts = {}) {
   });
 
   return handle;
+}
+
+function probeCodexWorkerMeta(codexPath, opts = {}) {
+  let result = { version: null, raw: '' };
+  const versionProbe = typeof opts.versionProbe === 'function' ? opts.versionProbe : probeCliVersion;
+
+  try {
+    result = versionProbe(codexPath);
+  } catch {
+    result = { version: null, raw: '' };
+  }
+
+  const codexVersion = typeof result?.version === 'string' ? result.version : null;
+  const versionWarning = codexVersion !== null && !meetsMinimum(codexVersion, CODEX_SECURITY_FIX_VERSION);
+
+  if (versionWarning) {
+    emitVersionLog(
+      opts,
+      'info',
+      CODEX_EXEC_VERSION_NOTE.replace('{version}', codexVersion),
+    );
+  }
+
+  return { codexVersion, versionWarning };
+}
+
+function emitVersionLog(opts, level, message) {
+  try {
+    if (typeof opts.log === 'function') {
+      opts.log(level, message);
+      return;
+    }
+    process.stderr.write(`${message}\n`);
+  } catch {
+    // Advisory logging must never affect worker startup.
+  }
 }
 
 /**
