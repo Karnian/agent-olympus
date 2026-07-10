@@ -81,7 +81,7 @@ function requireValue(argv, index, flag) {
  *
  * @param {{cwd: string, base: string|null, uncommitted: boolean}} args
  * @param {{exec?: Function, readFile?: Function, maxChars?: number}} [opts]
- * @returns {Promise<string>}
+ * @returns {Promise<{text: string, truncated: boolean}>}
  */
 export async function assembleReviewTarget(args = parseArgs([]), opts = {}) {
   const cwd = args.cwd || process.cwd();
@@ -134,12 +134,15 @@ async function readUntrackedFile(readFile, cwd, path) {
   }
 }
 
+// Returns { text, truncated }. Truncation is a STRUCTURAL signal, never
+// inferred by scanning the (user-controlled) target text for a marker — a diff
+// that merely mentions the truncation notice must not read as truncated.
 function capReviewTarget(text, maxChars) {
   const value = String(text ?? '');
-  if (value.length <= maxChars) return value;
+  if (value.length <= maxChars) return { text: value, truncated: false };
   const note = `\n\n${TRUNCATION_NOTICE} ${maxChars} characters]\n`;
-  if (maxChars <= note.length) return note.slice(0, maxChars);
-  return `${value.slice(0, maxChars - note.length)}${note}`;
+  if (maxChars <= note.length) return { text: note.slice(0, maxChars), truncated: true };
+  return { text: `${value.slice(0, maxChars - note.length)}${note}`, truncated: true };
 }
 
 /**
@@ -166,8 +169,7 @@ export function deriveVerdict(result) {
 export async function main(argv = process.argv.slice(2), opts = {}) {
   try {
     const args = parseArgs(argv);
-    const reviewTarget = await assembleReviewTarget(args, opts);
-    const truncated = reviewTarget.includes(TRUNCATION_NOTICE);
+    const { text: reviewTarget, truncated } = await assembleReviewTarget(args, opts);
     const prompt = buildReviewPrompt(reviewTarget);
     const spawnResult = await runCodex(prompt, args.cwd, opts.spawn || nodeSpawn);
 

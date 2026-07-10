@@ -198,7 +198,8 @@ test('assembleReviewTarget: base mode issues git diff --merge-base <ref> HEAD', 
     uncommitted: false,
   }, { exec });
 
-  assert.equal(target, 'diff --git a/a.js b/a.js\n');
+  assert.equal(target.text, 'diff --git a/a.js b/a.js\n');
+  assert.equal(target.truncated, false);
   assert.deepEqual(calls, [{
     command: 'git',
     args: ['-C', '/repo', 'diff', '--merge-base', 'origin/main', 'HEAD'],
@@ -222,9 +223,9 @@ test('assembleReviewTarget: uncommitted mode includes injected untracked files',
     }),
   });
 
-  assert.match(target, /diff --git a\/tracked\.js b\/tracked\.js/);
-  assert.match(target, /--- NEW UNTRACKED FILE: new\.js ---\nconsole\.log\("new"\);/);
-  assert.match(target, /--- NEW UNTRACKED FILE: notes\/readme\.md ---\n# Notes/);
+  assert.match(target.text, /diff --git a\/tracked\.js b\/tracked\.js/);
+  assert.match(target.text, /--- NEW UNTRACKED FILE: new\.js ---\nconsole\.log\("new"\);/);
+  assert.match(target.text, /--- NEW UNTRACKED FILE: notes\/readme\.md ---\n# Notes/);
   assert.deepEqual(calls.map((call) => call.args), [
     ['-C', '/repo', 'diff', 'HEAD'],
     ['-C', '/repo', 'ls-files', '--others', '--exclude-standard'],
@@ -239,8 +240,23 @@ test('assembleReviewTarget: truncates assembled target within maxChars and notes
     uncommitted: false,
   }, { exec, maxChars: 120 });
 
-  assert.ok(target.length <= 120);
-  assert.match(target, /TRUNCATED: review target exceeded 120 characters/);
+  assert.ok(target.text.length <= 120);
+  assert.equal(target.truncated, true);
+  assert.match(target.text, /TRUNCATED: review target exceeded 120 characters/);
+});
+
+test('assembleReviewTarget: a target that merely MENTIONS the truncation notice is not truncated', async () => {
+  // Regression: truncation must be a structural signal, not a text scan — a
+  // diff that contains the notice string (e.g. codex-review.mjs's own source)
+  // must report truncated:false when it fits within maxChars.
+  const diff = `+const TRUNCATION_NOTICE = '[TRUNCATED: review target exceeded';\n`;
+  const { exec } = makeGitExec({ diff });
+  const target = await assembleReviewTarget(
+    { cwd: '/repo', base: 'origin/main', uncommitted: false },
+    { exec, maxChars: 10_000 },
+  );
+  assert.equal(target.truncated, false, 'mentioning the notice must not read as truncated');
+  assert.match(target.text, /TRUNCATED: review target exceeded/);
 });
 
 test('parseArgs: defaults to uncommitted mode', () => {
