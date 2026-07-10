@@ -27,11 +27,10 @@ import { spawn as nodeSpawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { buildCodexAppServerParams } from './codex-approval.mjs';
-import { meetsMinimum, probeCliVersion } from './cli-version.mjs';
+import { codexVersionMeta } from './cli-version.mjs';
 
 /** Valid resolved permission levels (mirrors codex-exec.VALID_SPAWN_LEVELS). */
 const VALID_THREAD_LEVELS = new Set(['suggest', 'auto-edit', 'full-auto']);
-const CODEX_SECURITY_FIX_VERSION = '0.142.5';
 const CODEX_APP_SERVER_VERSION_WARNING =
   'codex {version} predates the 0.142.5 security fix (WebSocket payloads written to trace logs); upgrade recommended for app-server use';
 
@@ -349,27 +348,17 @@ export function startServer(opts = {}) {
 }
 
 function probeCodexWorkerMeta(codexPath, opts = {}) {
-  let result = { version: null, raw: '' };
-  const versionProbe = typeof opts.versionProbe === 'function' ? opts.versionProbe : probeCliVersion;
+  const workerMeta = codexVersionMeta(codexPath, { versionProbe: opts.versionProbe });
 
-  try {
-    result = versionProbe(codexPath);
-  } catch {
-    result = { version: null, raw: '' };
-  }
-
-  const codexVersion = typeof result?.version === 'string' ? result.version : null;
-  const versionWarning = codexVersion !== null && !meetsMinimum(codexVersion, CODEX_SECURITY_FIX_VERSION);
-
-  if (versionWarning) {
+  if (workerMeta.versionWarning) {
     emitVersionLog(
       opts,
       'warning',
-      CODEX_APP_SERVER_VERSION_WARNING.replace('{version}', codexVersion),
+      CODEX_APP_SERVER_VERSION_WARNING.replace('{version}', workerMeta.codexVersion),
     );
   }
 
-  return { codexVersion, versionWarning };
+  return workerMeta;
 }
 
 function emitVersionLog(opts, level, message) {

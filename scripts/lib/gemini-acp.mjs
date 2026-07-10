@@ -51,10 +51,6 @@ import {
 /** Grace period before escalating from SIGTERM to SIGKILL (ms) */
 const SHUTDOWN_GRACE_MS = 5000;
 
-/** Test hook for hermetic spawn-path coverage. */
-let _nodeSpawn = nodeSpawn;
-let _resolveGeminiBinary = resolveGeminiBinary;
-
 /** Default timeout for generic RPC requests (ms) */
 const RPC_TIMEOUT_MS = 30000;
 
@@ -266,24 +262,6 @@ function _heuristicCategory(text) {
  * @property {Object[]} _deadLetters - Messages that failed delivery after retry
  */
 
-/**
- * Replace child_process.spawn for tests. Pass no argument to reset.
- *
- * @param {typeof nodeSpawn} [fn]
- */
-export function __setNodeSpawnForTest(fn) {
-  _nodeSpawn = fn || nodeSpawn;
-}
-
-/**
- * Replace Gemini-compatible binary resolution for tests. Pass no argument to reset.
- *
- * @param {typeof resolveGeminiBinary} [fn]
- */
-export function __setGeminiBinaryResolverForTest(fn) {
-  _resolveGeminiBinary = fn || resolveGeminiBinary;
-}
-
 // ─── Server lifecycle ─────────────────────────────────────────────────────────
 
 /**
@@ -301,7 +279,9 @@ export function __setGeminiBinaryResolverForTest(fn) {
  * @returns {GeminiAcpHandle}
  */
 export function startServer(opts = {}) {
-  const binary = _resolveGeminiBinary();
+  const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;
+  const resolveBin = typeof opts.resolveGeminiBinary === 'function' ? opts.resolveGeminiBinary : resolveGeminiBinary;
+  const binary = resolveBin();
   const args = ['--acp'];
 
   // Resolve GEMINI_API_KEY from the OS secret store before spawning; see
@@ -328,7 +308,7 @@ export function startServer(opts = {}) {
     } catch { /* never throw from logging */ }
   }
 
-  const child = _nodeSpawn(binary.path, args, {
+  const child = spawnImpl(binary.path, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
     env: mergedEnv,

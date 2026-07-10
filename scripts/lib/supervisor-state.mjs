@@ -59,6 +59,38 @@ const SNAPSHOT_FIELDS = [
 const WORKER_META_MAX_KEYS = 16;
 const WORKER_META_MAX_KEY_LENGTH = 40;
 const WORKER_META_MAX_STRING = 120;
+const WORKER_META_RESERVED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isPlainWorkerMetaBag(meta) {
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+  const proto = Object.getPrototypeOf(meta);
+  return proto === Object.prototype || proto === null;
+}
+
+function isValidWorkerMetaKey(key) {
+  return key.length > 0 &&
+    key.length <= WORKER_META_MAX_KEY_LENGTH &&
+    !WORKER_META_RESERVED_KEYS.has(key);
+}
+
+function isWorkerMetaScalar(value) {
+  return typeof value === 'string' ||
+    (typeof value === 'number' && Number.isFinite(value)) ||
+    typeof value === 'boolean' ||
+    value === null;
+}
+
+function isValidWorkerMetaValue(value) {
+  return isWorkerMetaScalar(value) &&
+    (typeof value !== 'string' || value.length <= WORKER_META_MAX_STRING);
+}
+
+function isValidWorkerMetaBag(meta) {
+  if (!isPlainWorkerMetaBag(meta)) return false;
+  const entries = Object.entries(meta);
+  if (entries.length > WORKER_META_MAX_KEYS) return false;
+  return entries.every(([key, value]) => isValidWorkerMetaKey(key) && isValidWorkerMetaValue(value));
+}
 
 /**
  * Sanitize an adapter-provided `workerMeta` object for snapshot persistence.
@@ -71,22 +103,21 @@ const WORKER_META_MAX_STRING = 120;
  * @returns {Record<string, string|number|boolean|null>|undefined}
  */
 export function sanitizeWorkerMeta(meta) {
-  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return undefined;
-  const out = {};
+  if (!isPlainWorkerMetaBag(meta)) return undefined;
+  const out = Object.create(null);
   let kept = 0;
   for (const [k, v] of Object.entries(meta)) {
     if (kept >= WORKER_META_MAX_KEYS) break;
-    if (k.length === 0 || k.length > WORKER_META_MAX_KEY_LENGTH) continue;
+    if (!isValidWorkerMetaKey(k)) continue;
+    if (!isWorkerMetaScalar(v)) continue;
     if (typeof v === 'string') {
       out[k] = v.length > WORKER_META_MAX_STRING ? v.slice(0, WORKER_META_MAX_STRING) : v;
-    } else if ((typeof v === 'number' && Number.isFinite(v)) || typeof v === 'boolean' || v === null) {
-      out[k] = v;
     } else {
-      continue;
+      out[k] = v;
     }
     kept += 1;
   }
-  return kept > 0 ? out : undefined;
+  return kept > 0 && isValidWorkerMetaBag(out) ? out : undefined;
 }
 
 export function isTerminalStatus(status) {
@@ -180,7 +211,7 @@ function isValidSnapshotShape(o) {
   if (o.supervisorStartId != null && typeof o.supervisorStartId !== 'string') return false;
   if (o.adapterPid != null && !(Number.isSafeInteger(o.adapterPid) && o.adapterPid > 0)) return false;
   if (o.adapterStartId != null && typeof o.adapterStartId !== 'string') return false;
-  if (o.workerMeta != null && (typeof o.workerMeta !== 'object' || Array.isArray(o.workerMeta))) return false;
+  if (o.workerMeta !== undefined && !isValidWorkerMetaBag(o.workerMeta)) return false;
   // A failure must carry a categorized error.
   if (o.status === 'failed') {
     if (!o.error || typeof o.error !== 'object' || typeof o.error.category !== 'string') return false;

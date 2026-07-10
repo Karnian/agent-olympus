@@ -87,6 +87,37 @@ export function meetsMinimum(version, minimum) {
   return compareSemver(version, minimum) >= 0;
 }
 
+/**
+ * Compute Codex worker version metadata from a CLI version probe.
+ *
+ * Fail-open: probe failures, missing binaries, and unknown/unparseable versions
+ * return no warning so worker startup is never blocked by advisory metadata.
+ *
+ * @param {string} binPath - Codex binary path or command name.
+ * @param {Object} [opts]
+ * @param {Function} [opts.versionProbe=probeCliVersion] - Injectable probe.
+ * @param {string} [opts.minimum='0.142.5'] - Advisory minimum version.
+ * @returns {{ codexVersion: string|null, versionWarning: boolean }}
+ */
+export function codexVersionMeta(binPath, { versionProbe = probeCliVersion, minimum = '0.142.5' } = {}) {
+  if (!binPath) return { codexVersion: null, versionWarning: false };
+
+  const probe = typeof versionProbe === 'function' ? versionProbe : probeCliVersion;
+  let result;
+
+  try {
+    result = probe(binPath);
+  } catch {
+    return { codexVersion: null, versionWarning: false };
+  }
+
+  const candidate = typeof result?.version === 'string' ? result.version : null;
+  const codexVersion = parseSemverTriplet(candidate) ? candidate : null;
+  const versionWarning = codexVersion !== null && !meetsMinimum(codexVersion, minimum);
+
+  return { codexVersion, versionWarning };
+}
+
 /** Clear the in-process version cache. Intended for tests. */
 export function _clearVersionCache() {
   _cache.clear();
