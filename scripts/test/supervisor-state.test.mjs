@@ -25,6 +25,7 @@ import {
   writeSnapshot,
   readSnapshot,
   isHeartbeatFresh,
+  sanitizeWorkerMeta,
 } from '../lib/supervisor-state.mjs';
 
 const RUN = 'a1b2c3d4e5f60718';
@@ -137,6 +138,122 @@ test('clampOutputTail: keeps the END (most recent)', () => {
   assert.ok(clamped.endsWith('TAILMARK'));
   assert.ok(Buffer.byteLength(clamped) <= MAX_OUTPUT_TAIL_BYTES);
   assert.equal(clampOutputTail('short'), 'short');
+});
+
+// ---------------------------------------------------------------------------
+// sanitizeWorkerMeta / workerMeta snapshot field
+// ---------------------------------------------------------------------------
+
+test('sanitizeWorkerMeta: keeps flat scalars, drops nested/function/undefined values', () => {
+  const meta = sanitizeWorkerMeta({
+    codexVersion: '0.140.0',
+    versionWarning: true,
+    retries: 2,
+    threadId: null,
+    nested: { leak: '/etc/passwd' },
+    list: [1, 2],
+    fn: () => {},
+    missing: undefined,
+  });
+  assert.deepEqual({ ...meta }, { codexVersion: '0.140.0', versionWarning: true, retries: 2, threadId: null });
+});
+
+test('sanitizeWorkerMeta: rejects non-objects and empty results', () => {
+  for (const bad of [null, undefined, 'str', 42, [], [{ a: 1 }]]) {
+    assert.equal(sanitizeWorkerMeta(bad), undefined, `should reject ${JSON.stringify(bad)}`);
+  }
+  assert.equal(sanitizeWorkerMeta({}), undefined, 'empty object → undefined');
+  assert.equal(sanitizeWorkerMeta({ only: { nested: true } }), undefined, 'nothing safe → undefined');
+});
+
+test('sanitizeWorkerMeta: clamps long strings, long keys, and key count', () => {
+  const meta = sanitizeWorkerMeta({ raw: 'x'.repeat(500), ['k'.repeat(41)]: 'dropped' });
+  assert.equal(meta.raw.length, 120, 'string clamped to 120');
+  assert.equal(Object.keys(meta).length, 1, 'over-long key dropped');
+
+  const many = {};
+  for (let i = 0; i < 30; i++) many[`k${i}`] = i;
+  assert.equal(Object.keys(sanitizeWorkerMeta(many)).length, 16, 'capped at 16 keys');
+});
+
+test('sanitizeWorkerMeta: filters reserved keys and returns a null-prototype bag', () => {
+  assert.equal(({}).polluted, undefined, 'baseline has no pollution');
+  const input = Object.fromEntries([
+    ['__proto__', { polluted: true }],
+    ['constructor', 'y'],
+    ['prototype', 'z'],
+    ['flavor', 'agy'],
+  ]);
+  const meta = sanitizeWorkerMeta(input);
+  assert.equal(Object.getPrototypeOf(meta), null);
+  assert.deepEqual({ ...meta }, { flavor: 'agy' });
+  assert.equal(Object.hasOwn(meta, '__proto__'), false);
+  assert.equal(Object.hasOwn(meta, 'constructor'), false);
+  assert.equal(Object.hasOwn(meta, 'prototype'), false);
+  assert.equal(({}).polluted, undefined, 'sanitize must not pollute Object.prototype');
+});
+
+test('writeSnapshot/readSnapshot: round-trips sanitized workerMeta, drops unsafe values', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-supstate-'));
+  try {
+    const p = snapshotPath(dir, RUN, WRK);
+    writeSnapshot(p, { ...VALID, workerMeta: { flavor: 'agy', nested: { leak: 'SECRET' } } }, 1);
+    const res = readSnapshot(p);
+    assert.equal(res.kind, 'ok');
+    assert.deepEqual(res.snapshot.workerMeta, { flavor: 'agy' });
+    assert.ok(!readFileSync(p, 'utf-8').includes('SECRET'), 'nested values must not be persisted');
+
+    // Entirely-unsafe meta → field omitted, snapshot still valid.
+    writeSnapshot(p, { ...VALID, workerMeta: 'not-an-object' }, 2);
+    const res2 = readSnapshot(p);
+    assert.equal(res2.kind, 'ok');
+    assert.equal(res2.snapshot.workerMeta, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('readSnapshot: rejects a snapshot whose workerMeta is not a plain object', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-supstate-'));
+  try {
+    const p = snapshotPath(dir, RUN, WRK);
+    writeSnapshot(p, { ...VALID }, 1);
+    const obj = JSON.parse(readFileSync(p, 'utf-8'));
+    obj.workerMeta = ['tampered'];
+    writeFileSync(p, JSON.stringify(obj));
+    assert.equal(readSnapshot(p).kind, 'corrupt');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('readSnapshot: rejects tampered workerMeta contract violations', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-supstate-'));
+  try {
+    const p = snapshotPath(dir, RUN, WRK);
+    writeSnapshot(p, { ...VALID, workerMeta: { flavor: 'agy', retries: 1, active: true, threadId: null } }, 1);
+    const valid = readSnapshot(p);
+    assert.equal(valid.kind, 'ok', 'valid flat workerMeta round-trips');
+    assert.deepEqual(valid.snapshot.workerMeta, { flavor: 'agy', retries: 1, active: true, threadId: null });
+
+    const base = JSON.parse(readFileSync(p, 'utf-8'));
+    const tooMany = {};
+    for (let i = 0; i < 17; i++) tooMany[`k${i}`] = i;
+    const cases = [
+      ['nested value', { a: { b: 1 } }],
+      ['reserved key', Object.fromEntries([['__proto__', 'x'], ['flavor', 'agy']])],
+      ['too many keys', tooMany],
+      ['over-long key', { ['k'.repeat(41)]: 'x' }],
+      ['over-long string', { a: 'x'.repeat(121) }],
+    ];
+
+    for (const [label, workerMeta] of cases) {
+      writeFileSync(p, JSON.stringify({ ...base, workerMeta }));
+      assert.equal(readSnapshot(p).kind, 'corrupt', label);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

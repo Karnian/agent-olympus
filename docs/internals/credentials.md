@@ -100,6 +100,14 @@ working without migration. New configs should use `credentialSource` directly.
 
 If the prompt is dismissed, `execFileSync` hits `EXEC_TIMEOUT_MS` (10s) and returns `null` — gemini CLI then surfaces its own auth error.
 
+### Gemini CLI tier split (2026-06-18)
+
+As of 2026-06-18, Google no longer serves Gemini CLI free, Pro, or Ultra tiers through the `gemini` CLI path. Those users are directed to the Antigravity `agy` CLI, which Agent Olympus treats as a drop-in Gemini-compatible binary fallback inside the existing Gemini adapters.
+
+API-key and enterprise users are still served by the `gemini` CLI. The `/setup-gemini-auth` flow is unchanged because it only manages the API-key Keychain path used to populate `GEMINI_API_KEY` before spawning the worker.
+
+Binary resolution order is `AO_GEMINI_BINARY` override, then `gemini`, then `agy`. Set `AO_GEMINI_BINARY` to an explicit compatible binary path when neither default name matches the local install.
+
 **Logging & security**:
 - Raw keys are never logged. Diagnostic events emit as single-line JSON on
   stderr with masked keys (`AIza****xx` format).
@@ -125,4 +133,3 @@ Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), G
 - Messages auto-drain as sequential turns when current turn completes
 - Failed messages retry once, then move to dead letters (`handle._deadLetters`)
 - Queue capped at `MAX_QUEUE_DEPTH=200` to prevent memory leaks
-

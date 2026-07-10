@@ -46,6 +46,10 @@ Key files: `scripts/lib/adapter-worker-supervisor.mjs` (detached CLI), `scripts/
    - Single JSON object output, error classification, SIGTERM→SIGKILL shutdown
    - Requires `hasGeminiCli` capability
 
+Both Gemini adapters resolve their executable through `scripts/lib/gemini-binary.mjs` without adding a new adapter or changing `ADAPTER_REGISTRY`: `AO_GEMINI_BINARY` verbatim override first, then a real resolved `gemini` path, then a real resolved `agy` path. If neither binary is found, the adapters still spawn bare `gemini` so the existing ENOENT/not_installed flow remains intact, but the error message also explains the 2026-06-18 Gemini CLI tier split and the override.
+
+Detached supervisor snapshots may include `workerMeta.binaryFlavor` (`gemini`, `agy`, or `custom`) and `workerMeta.binaryResolved` from the live adapter handle. Baseline: validated e2e against gemini-cli 0.50.0 (exec JSON roundtrip + ACP initialize; ACP `protocolVersion` is numeric as of 0.50 — 0.37.x has not been re-validated since that change). agy path unit-tested only (no binary available), e2e pending. Preflight capability detection and the tmux gemini command also route through `resolveGeminiBinary()`, so an agy-only install or `AO_GEMINI_BINARY` override still selects the Gemini adapters.
+
 **All workers**:
 6. **tmux** — Legacy fallback, works for all worker types
    - `tmux new-session` + `tmux send-keys` + `tmux capture-pane`
@@ -55,4 +59,3 @@ Key files: `scripts/lib/adapter-worker-supervisor.mjs` (detached CLI), `scripts/
 ### Session Naming
 - tmux sessions: `atlas-codex-<N>`, `atlas-gemini-<N>`, `athena-<slug>-codex-<N>`, `athena-<slug>-gemini-<N>`
 - Cross-validation: `atlas-codex-xval-<story-id>`, `atlas-gemini-xval-<story-id>`, `athena-<slug>-codex-xval-<story-id>`, `athena-<slug>-gemini-xval-<story-id>`
-

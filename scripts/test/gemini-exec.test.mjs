@@ -15,6 +15,7 @@ import { Readable, Writable } from 'node:stream';
 import {
   parseGeminiJsonOutput,
   mapGeminiExecError,
+  spawn,
   monitor,
   collect,
   shutdown,
@@ -409,6 +410,64 @@ test('collect: resolves immediately when handle is already failed', async () => 
   assert.equal(result.status, 'failed');
   assert.ok('error' in result);
   assert.equal(result.error.category, 'not_installed');
+});
+
+test('spawn: sets workerMeta from Gemini-compatible binary resolver', () => {
+  let spawnPath = null;
+  let spawnArgs = null;
+  const resolveGeminiBinary = () => ({
+    path: '/opt/antigravity/bin/agy',
+    flavor: 'agy',
+    resolved: true,
+    attempted: ['gemini', 'agy'],
+  });
+  const fakeSpawn = (path, args) => {
+    spawnPath = path;
+    spawnArgs = args;
+    return createMockChildProcess();
+  };
+  const handle = spawn('hello', {
+    spawn: fakeSpawn,
+    resolveGeminiBinary,
+    credential: { credentialSource: 'env' },
+    env: { GEMINI_API_KEY: '' },
+  });
+
+  assert.equal(spawnPath, '/opt/antigravity/bin/agy');
+  assert.deepEqual(spawnArgs, ['--output-format', 'json', '-p', 'hello']);
+  assert.deepEqual(handle.workerMeta, {
+    binaryFlavor: 'agy',
+    binaryResolved: true,
+  });
+});
+
+test('spawn ENOENT: unresolved binary message names gemini, agy, tier split, and override without changing category', async () => {
+  const child = createMockChildProcess();
+  const resolveGeminiBinary = () => ({
+    path: 'gemini',
+    flavor: 'gemini',
+    resolved: false,
+    attempted: ['gemini', 'agy'],
+  });
+  const fakeSpawn = () => child;
+  const handle = spawn('hello', {
+    spawn: fakeSpawn,
+    resolveGeminiBinary,
+    credential: { credentialSource: 'env' },
+    env: { GEMINI_API_KEY: '' },
+  });
+  const err = new Error('spawn gemini ENOENT');
+  err.code = 'ENOENT';
+  child.emit('error', err);
+
+  const result = await collect(handle, 5000);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.category, 'not_installed');
+  assert.match(result.error.message, /gemini/);
+  assert.match(result.error.message, /agy/);
+  assert.match(result.error.message, /2026-06-18/);
+  assert.match(result.error.message, /AO_GEMINI_BINARY/);
 });
 
 test('collect: waits for exit event then resolves with parsed JSON', async () => {

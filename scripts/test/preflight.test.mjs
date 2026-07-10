@@ -432,6 +432,27 @@ test('detectCapabilities: returns object with all boolean fields', async () => {
   }
 });
 
+test('detectCapabilities: AO_GEMINI_BINARY override satisfies the Gemini capability', async () => {
+  const { execFileSync } = await import('node:child_process');
+  const tmpDir = await makeTmpDir();
+  try {
+    const preflightUrl = new URL('../../scripts/lib/preflight.mjs', import.meta.url).href;
+    const script = `const mod = await import(${JSON.stringify(preflightUrl)}); const caps = await mod.detectCapabilities(); console.log(JSON.stringify({ hasGeminiCli: caps.hasGeminiCli }));`;
+
+    // A gemini-compatible override (e.g. agy or a custom wrapper) must count
+    // as Gemini capability even when the `gemini` CLI itself is absent —
+    // otherwise adapter selection routes to tmux and the fallback never runs.
+    const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+      env: { ...process.env, AO_GEMINI_BINARY: '/fake/agy-compatible-binary' },
+      encoding: 'utf-8',
+      cwd: tmpDir,
+    });
+    assert.equal(JSON.parse(out.trim()).hasGeminiCli, true);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
 test('detectCapabilities: hasNativeTeamTools follows CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var', async () => {
   const { execFileSync } = await import('node:child_process');
   // Isolate cwd so we don't pick up the project's .ao/autonomy.json (which may have nativeTeams:true)

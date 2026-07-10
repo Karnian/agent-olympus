@@ -24,7 +24,8 @@
  */
 
 import { spawn as nodeSpawn } from 'child_process';
-import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
+import { buildEnhancedPath } from './resolve-binary.mjs';
+import { resolveGeminiBinary } from './gemini-binary.mjs';
 import {
   resolveGeminiApiKey,
   maskKey,
@@ -168,7 +169,9 @@ function _flushOutput(handle) {
  * @returns {GeminiHandle}
  */
 export function spawn(prompt, opts = {}) {
-  const geminiPath = resolveBinary('gemini');
+  const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;
+  const resolveBin = typeof opts.resolveGeminiBinary === 'function' ? opts.resolveGeminiBinary : resolveGeminiBinary;
+  const binary = resolveBin();
 
   const args = ['--output-format', 'json'];
 
@@ -206,12 +209,12 @@ export function spawn(prompt, opts = {}) {
   if (process.env.AO_DEBUG_GEMINI) {
     try {
       process.stderr.write(
-        `gemini-exec: GEMINI_API_KEY=${maskKey(mergedEnv.GEMINI_API_KEY)}\n`
+        `gemini-exec: binaryFlavor=${binary.flavor} binaryResolved=${binary.resolved} GEMINI_API_KEY=${maskKey(mergedEnv.GEMINI_API_KEY)}\n`
       );
     } catch { /* never throw from logging */ }
   }
 
-  const child = nodeSpawn(geminiPath, args, {
+  const child = spawnImpl(binary.path, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
     env: mergedEnv,
@@ -233,6 +236,7 @@ export function spawn(prompt, opts = {}) {
     _usage: null,
     _exitCode: null,
     _stderrChunks: [],
+    workerMeta: { binaryFlavor: binary.flavor, binaryResolved: binary.resolved },
     // Account name used to resolve GEMINI_API_KEY for this spawn — the error
     // classifier reads this to invalidate the right cache entry on auth
     // failure, so the next spawn re-reads the keychain.
@@ -270,7 +274,7 @@ export function spawn(prompt, opts = {}) {
 
   // Spawn errors (e.g. ENOENT when gemini binary is missing)
   child.on('error', (err) => {
-    handle._stderrChunks.push(err.message);
+    handle._stderrChunks.push(_formatSpawnErrorMessage(err, binary));
     handle.status = 'failed';
   });
 
@@ -278,6 +282,21 @@ export function spawn(prompt, opts = {}) {
   try { child.stdin.end(); } catch {}
 
   return handle;
+}
+
+/**
+ * Extend missing-binary guidance only when the resolver proved neither
+ * compatible CLI was present. Category/control flow still comes from the
+ * existing stderr classifier.
+ *
+ * @param {Error} err
+ * @param {{resolved: boolean}} binary
+ * @returns {string}
+ */
+function _formatSpawnErrorMessage(err, binary) {
+  const message = err && err.message ? err.message : String(err);
+  if (binary.resolved !== false) return message;
+  return `${message}. Gemini-compatible CLI not found: tried gemini and agy. As of 2026-06-18, Gemini CLI free/Pro/Ultra users are directed to the Antigravity agy CLI, while API-key/enterprise users remain served by gemini CLI. Set AO_GEMINI_BINARY to an explicit compatible binary path to override.`;
 }
 
 // ─── Monitoring ───────────────────────────────────────────────────────────────

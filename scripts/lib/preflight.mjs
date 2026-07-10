@@ -17,6 +17,7 @@ import path from 'node:path';
 
 const execFileAsync = promisify(execFile);
 import { resolveBinary } from './tmux-session.mjs';
+import { resolveGeminiBinary } from './gemini-binary.mjs';
 import { resolveClaudeBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
 
@@ -285,10 +286,12 @@ export async function detectCapabilities() {
       const bin = resolveBinary('codex');
       return (bin && bin !== 'codex') ? bin : null;
     })(),
-    // gemini
+    // gemini — via resolveGeminiBinary so an agy-only install or an
+    // AO_GEMINI_BINARY override also satisfies the Gemini capability
+    // (`resolved` filters out resolveBinary's bare-name fallback).
     (async () => {
-      const bin = resolveBinary('gemini');
-      return (bin && bin !== 'gemini') ? bin : null;
+      const r = resolveGeminiBinary();
+      return r.resolved ? r.path : null;
     })(),
     // claude
     (async () => {

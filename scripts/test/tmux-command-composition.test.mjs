@@ -145,6 +145,31 @@ for (const type of WORKER_TYPES) {
 }
 
 // ---------------------------------------------------------------------------
+// Gemini binary fallback wiring: the tmux gemini command must honor
+// AO_GEMINI_BINARY (and therefore the gemini→agy fallback), not hardcode
+// resolveBinary('gemini').
+// ---------------------------------------------------------------------------
+
+test('gemini worker command uses resolveGeminiBinary (AO_GEMINI_BINARY honored)', () => {
+  const prev = process.env.AO_GEMINI_BINARY;
+  process.env.AO_GEMINI_BINARY = '/fake/agy-compatible-binary';
+  try {
+    const command = buildWorkerCommand(
+      { type: 'gemini', prompt: 'hello' },
+      { cwd: tmpdir(), autonomyConfig: {} }
+    );
+    reapPromptFiles(command);
+    assert.ok(
+      command.includes('"/fake/agy-compatible-binary"'),
+      `gemini command should spawn the override binary, got:\n${command}`
+    );
+  } finally {
+    if (prev === undefined) delete process.env.AO_GEMINI_BINARY;
+    else process.env.AO_GEMINI_BINARY = prev;
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Discrimination: the OLD double-escaped form MUST fail — proves this test
 // would have caught the regression (and that the single level is meaningful).
 // ---------------------------------------------------------------------------

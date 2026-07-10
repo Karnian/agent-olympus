@@ -34,7 +34,8 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import { EventEmitter } from 'events';
-import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
+import { buildEnhancedPath } from './resolve-binary.mjs';
+import { resolveGeminiBinary } from './gemini-binary.mjs';
 import {
   resolveGeminiApiKey,
   maskKey,
@@ -65,8 +66,13 @@ const MAX_STDERR_CHUNKS = 100;
 /** Max queued messages to prevent unbounded memory growth if worker is stuck */
 const MAX_QUEUE_DEPTH = 200;
 
-/** Protocol version used in the initialize handshake */
-const PROTOCOL_VERSION = '2025-07-01';
+/**
+ * Protocol version used in the initialize handshake.
+ * MUST be a number: gemini-cli >= 0.50 validates `protocolVersion` as an
+ * integer per the ACP spec and rejects the legacy date string with a zod
+ * invalid_type error (verified against 0.50.0 on 2026-07-09).
+ */
+const PROTOCOL_VERSION = 1;
 
 /** Client info sent during initialize handshake */
 const CLIENT_INFO = { name: 'agent-olympus', version: '1.0' };
@@ -273,7 +279,9 @@ function _heuristicCategory(text) {
  * @returns {GeminiAcpHandle}
  */
 export function startServer(opts = {}) {
-  const geminiPath = resolveBinary('gemini');
+  const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;
+  const resolveBin = typeof opts.resolveGeminiBinary === 'function' ? opts.resolveGeminiBinary : resolveGeminiBinary;
+  const binary = resolveBin();
   const args = ['--acp'];
 
   // Resolve GEMINI_API_KEY from the OS secret store before spawning; see
@@ -295,12 +303,12 @@ export function startServer(opts = {}) {
   if (process.env.AO_DEBUG_GEMINI) {
     try {
       process.stderr.write(
-        `gemini-acp: GEMINI_API_KEY=${maskKey(mergedEnv.GEMINI_API_KEY)}\n`
+        `gemini-acp: binaryFlavor=${binary.flavor} binaryResolved=${binary.resolved} GEMINI_API_KEY=${maskKey(mergedEnv.GEMINI_API_KEY)}\n`
       );
     } catch { /* never throw from logging */ }
   }
 
-  const child = nodeSpawn(geminiPath, args, {
+  const child = spawnImpl(binary.path, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
     env: mergedEnv,
@@ -328,6 +336,7 @@ export function startServer(opts = {}) {
     _messageQueue: [],
     _draining: false,
     _deadLetters: [],
+    workerMeta: { binaryFlavor: binary.flavor, binaryResolved: binary.resolved },
     // Account name used to resolve GEMINI_API_KEY for this session — the auth
     // error classifier calls invalidateCache(handle._credentialAccount) on
     // ACP JSON-RPC auth failures so the next spawn re-reads the keychain.
@@ -405,12 +414,27 @@ export function startServer(opts = {}) {
   });
 
   child.on('error', (err) => {
-    handle._stderrChunks.push(err.message);
+    handle._stderrChunks.push(_formatSpawnErrorMessage(err, binary));
     handle.status = 'failed';
     emitter.emit('error', err);
   });
 
   return handle;
+}
+
+/**
+ * Extend missing-binary guidance only when the resolver proved neither
+ * compatible CLI was present. Category/control flow still comes from the
+ * existing stderr classifier.
+ *
+ * @param {Error} err
+ * @param {{resolved: boolean}} binary
+ * @returns {string}
+ */
+function _formatSpawnErrorMessage(err, binary) {
+  const message = err && err.message ? err.message : String(err);
+  if (binary.resolved !== false) return message;
+  return `${message}. Gemini-compatible CLI not found: tried gemini and agy. As of 2026-06-18, Gemini CLI free/Pro/Ultra users are directed to the Antigravity agy CLI, while API-key/enterprise users remain served by gemini CLI. Set AO_GEMINI_BINARY to an explicit compatible binary path to override.`;
 }
 
 /**

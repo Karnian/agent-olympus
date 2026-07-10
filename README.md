@@ -6,7 +6,7 @@
 
 Agent Olympus is a standalone Claude Code plugin that transforms how you build software. Give it a task, and it orchestrates specialized AI agents to complete it autonomously — analyzing requirements, planning execution, implementing changes, verifying results, and fixing issues until everything passes.
 
-Two orchestrators, 19 specialized agents, 35 workflow skills. Zero npm dependencies.
+Two orchestrators, 19 specialized agents, 37 workflow skills. Zero npm dependencies.
 
 ## What It Does
 
@@ -23,7 +23,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 
 - **Two orchestrators**: Atlas (hub-and-spoke) and Athena (peer-to-peer team)
 - **19 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Hermes (spec), Executor, Designer (UI/UX), **Aphrodite (design review)**, Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Themis (quality gate), Ask, Atlas, Athena
-- **35 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, tdd, systematic-debug, brainstorm, finish-branch, design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review, harness-init, sessions, setup-gemini-auth, **teach-design, normalize, polish, typeset, arrange, taste, ui-remediate, resume-handoff**
+- **37 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, tdd, systematic-debug, brainstorm, finish-branch, design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review, harness-init, sessions, setup-gemini-auth, **teach-design, normalize, polish, typeset, arrange, taste, ui-remediate, resume-handoff**, codex-goal, codex-review
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
 - **Structured wisdom**: Cross-session learnings in JSONL format; persists across runs; intent-aware query expansion
 - **Zero npm dependencies**: Node.js built-ins only
@@ -61,7 +61,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Layered Opus-skew reduction** *(v1.1.0+)*: Per-subagent model usage logging (`ao-model-usage.jsonl`, schemaVersion:1) for measurement; escalation-first routing pipeline that defaults to Sonnet/Haiku and only promotes to Opus on demonstrated need. Summarise with `node scripts/usage-report.mjs`
 - **Runtime permission_mode capture + `/ask codex` read-only fallback** *(v1.1.6)*: SessionStart + UserPromptSubmit hooks read `permission_mode` from Claude Code's hook stdin (or `CLAUDE_PERMISSION_MODE` env) and persist to `.ao/state/ao-runtime-permissions.json` (schemaVersion:1, 30-min TTL). Permission detection now merges settings ⇧ runtime as **upgrade-only** through the same deny/ask/disableBypassPermissionsMode/allowManagedPermissionRulesOnly pipeline — `--dangerously-skip-permissions` no longer leaves the mirror at `suggest`. Independently, `/ask codex` on suggest-tier hosts now falls back to codex's `read-only` sandbox (`-s read-only -a never`) with a system-prompt guard + `git status --porcelain` post-check, instead of exiting with code 2. New `node scripts/diagnose-sandbox.mjs --explain-permissions` shows the full per-layer breakdown. Closes #67/#68/#69
 - **Detached worker supervisor** *(v1.2.0)*: Adapter team workers (codex-exec/appserver, claude-cli, gemini-exec/acp) no longer run in-process — `spawnTeam` launches a detached supervisor per worker that owns the adapter and writes completion/failure/output to disk, so the fresh-process-per-poll orchestrator (`monitorTeam`/`collectResults`/`shutdownTeam`) finally observes their outcome across the process boundary (they were previously stuck `running` forever). Run-scoped snapshots (schemaVersion:1) with PID start-time identity for crash/reuse detection, supervisor-first shutdown with orphan-group reap, per-run SessionEnd protection, and prompt-bearing-manifest scrubbing. Shipped across P1–P6 phases with 4 Codex cross-review rounds
-- **2313 unit tests**: Comprehensive test suite using `node:test` across 89 test files (v1.3.1: 2313/2313 passing)
+- **2376 unit tests**: Comprehensive test suite using `node:test` across 92 test files (v1.4.0: 2376/2376 passing)
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -308,7 +308,7 @@ User Request
 | **writer** | Haiku | Documentation specialist — clear, accurate technical docs and code comments |
 | **ask** | Sonnet | Quick single-shot dispatcher — routes questions to Codex/Gemini workers |
 
-## Skills (35 Total)
+## Skills (37 Total)
 
 | Skill | Level | Aliases | Use Case |
 |-------|-------|---------|----------|
@@ -546,7 +546,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (2313 tests across 89 files as of v1.3.1) covers the core hook libraries. To run:
+A `node:test` based test suite (2376 tests across 92 files as of v1.4.0) covers the core hook libraries. To run:
 
 ```bash
 node --test 'scripts/test/**/*.test.mjs'

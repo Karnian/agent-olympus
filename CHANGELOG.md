@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.4.0] - 2026-07-10
+
+Reference-refresh release — Antigravity `agy` fallback, a Codex CLI version gate, and the `/codex-review` skill, plus adapter cleanups. Validated against codex-cli 0.143.0 and gemini-cli 0.50.0. Full suite 2376/2376.
+
+### Added
+- **`agy` (Antigravity CLI) fallback for Gemini workers** (#76) — `scripts/lib/gemini-binary.mjs` resolves `AO_GEMINI_BINARY` → `gemini` → `agy`, so users cut from Gemini CLI's free/Pro/Ultra tiers (2026-06-18) can still run Gemini workers via `agy`. Preflight and the tmux command route through the same resolver; API-key/enterprise users keep the `gemini` CLI path. The `agy` path is unit-tested only (no binary available), e2e pending.
+- **Codex CLI advisory version gate** (#76) — `scripts/lib/cli-version.mjs` probes the codex version and warns (never blocks) when it predates the 0.142.5 security fix (WebSocket payloads written to trace logs). The probed version is recorded in worker snapshots.
+- **`/codex-review` skill** (#78) — Codex as an independent, machine-parseable PASS/FAIL review gate on the current diff (the inverse of `/codex-goal`), in three modes: review gate, adversarial challenge, and open consult.
+
+### Changed
+- **Gemini ACP `protocolVersion` is now numeric `1`** (#76) — gemini-cli ≥ 0.50 validates it as an integer per the ACP spec and rejects the legacy date string.
+- **Adapter test seams unified** (#77) — the Gemini adapters use per-call `opts.spawn` / `opts.resolveGeminiBinary` injection (matching the Codex adapters) instead of module-level setters.
+- **Shared Codex version metadata** (#77) — the duplicated version probe/compute is centralized in `cli-version.codexVersionMeta()`.
+- **`workerMeta` snapshot hardening** (#77) — the detached supervisor sanitizes adapter metadata with a null-prototype bag and enforces the flat-scalar contract on both write and read.
+- Registered `/codex-review` and the previously-unlisted `/codex-goal` in the skills registry (37 skills).
+
 ## [1.3.1] - 2026-06-23
 
 ### Fix — `/ask codex` spurious "failed" background shell (#74)

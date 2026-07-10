@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-olympus.local/schemas/codex-review-result.schema.json",
+  "title": "Codex Review Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "findings", "summary"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["PASS", "FAIL"]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "file", "line", "summary"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "P1", "P2", "P3", "nit"]
+          },
+          "file": {
+            "type": "string"
+          },
+          "line": {
+            "type": ["integer", "null"]
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "string"
+    }
+  }
+}

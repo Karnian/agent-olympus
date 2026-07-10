@@ -27,9 +27,12 @@ import { spawn as nodeSpawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { buildCodexAppServerParams } from './codex-approval.mjs';
+import { codexVersionMeta } from './cli-version.mjs';
 
 /** Valid resolved permission levels (mirrors codex-exec.VALID_SPAWN_LEVELS). */
 const VALID_THREAD_LEVELS = new Set(['suggest', 'auto-edit', 'full-auto']);
+const CODEX_APP_SERVER_VERSION_WARNING =
+  'codex {version} predates the 0.142.5 security fix (WebSocket payloads written to trace logs); upgrade recommended for app-server use';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -219,12 +222,14 @@ const NOTIFY = {
  */
 export function startServer(opts = {}) {
   const codexPath = resolveBinary('codex');
+  const workerMeta = probeCodexWorkerMeta(codexPath, opts);
   const args = [
     'app-server',
     '--listen', 'stdio://',
   ];
 
-  const child = nodeSpawn(codexPath, args, {
+  const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;
+  const child = spawnImpl(codexPath, args, {
     cwd: opts.cwd || process.cwd(),
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, PATH: buildEnhancedPath(), ...opts.env },
@@ -250,6 +255,7 @@ export function startServer(opts = {}) {
     _stderrChunks: [],
     _initialized: false,
     _adapterName: 'codex-appserver',
+    workerMeta,
   };
 
   // Parse stdout as JSONL — each line is a JSON-RPC response or notification
@@ -339,6 +345,32 @@ export function startServer(opts = {}) {
   });
 
   return handle;
+}
+
+function probeCodexWorkerMeta(codexPath, opts = {}) {
+  const workerMeta = codexVersionMeta(codexPath, { versionProbe: opts.versionProbe });
+
+  if (workerMeta.versionWarning) {
+    emitVersionLog(
+      opts,
+      'warning',
+      CODEX_APP_SERVER_VERSION_WARNING.replace('{version}', workerMeta.codexVersion),
+    );
+  }
+
+  return workerMeta;
+}
+
+function emitVersionLog(opts, level, message) {
+  try {
+    if (typeof opts.log === 'function') {
+      opts.log(level, message);
+      return;
+    }
+    process.stderr.write(`${message}\n`);
+  } catch {
+    // Advisory logging must never affect worker startup.
+  }
 }
 
 /**

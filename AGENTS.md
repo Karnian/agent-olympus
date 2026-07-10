@@ -1,7 +1,7 @@
 # Agent Olympus
 
 Standalone multi-model orchestrator plugin for Claude Code.
-Atlas + Athena orchestrate 19 agents, 35 skills, Claude/Codex/Gemini execution, and adapter-based workers.
+Atlas + Athena orchestrate 19 agents, 37 skills, Claude/Codex/Gemini execution, and adapter-based workers.
 
 ## Architecture
 
@@ -47,7 +47,7 @@ agent-olympus/
 │   ├── hephaestus.md             — Codex deep worker (Sonnet)
 │   ├── ask.md                    — Quick Codex/Gemini query agent (Sonnet)
 │   └── themis.md                 — Quality gate: tests/lint/AC verification (Sonnet)
-├── skills/                       — 35 user-facing skills (workflow recipes)
+├── skills/                       — 37 user-facing skills (workflow recipes)
 │   ├── atlas/SKILL.md            — /atlas: autonomous sub-agent pipeline
 │   ├── athena/SKILL.md           — /athena: autonomous team pipeline
 │   ├── plan/SKILL.md             — /plan: forward/reverse product planning
@@ -92,7 +92,7 @@ agent-olympus/
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (2313 tests, 89 files; v1.3.1: 2313/2313 passing)
+│   ├── test/                     — node:test unit tests (2376 tests, 92 files; v1.4.0: 2376/2376 passing)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
@@ -124,12 +124,14 @@ agent-olympus/
 │       ├── session-registry.mjs  — Cross-session metadata tracking and crash recovery
 │       ├── codex-approval.mjs    — Claude permission detection → Codex sandbox-axis mirroring + host-sandbox intersection (v1.1.0)
 │       ├── gemini-approval.mjs   — Claude permission detection → Gemini approval mode mirroring
+│       ├── gemini-binary.mjs     — Gemini binary resolution (gemini → agy fallback)
 │       ├── gemini-exec.mjs       — Gemini exec adapter (single-turn JSON spawn)
 │       ├── gemini-acp.mjs        — Gemini ACP adapter (multi-turn JSON-RPC 2.0)
 │       ├── claude-cli.mjs        — Claude CLI adapter (headless stream-json)
 │       ├── codex-exec.mjs        — Codex exec adapter (single-turn JSONL)
 │       ├── codex-appserver.mjs   — Codex app-server adapter (multi-turn JSON-RPC 2.0)
 │       ├── resolve-binary.mjs    — Binary resolution with caching + buildEnhancedPath()
+│       ├── cli-version.mjs       — Fail-open CLI version probe + advisory minimum-version gate
 │       ├── host-sandbox-detect.mjs — Passive host sandbox detection (LSM, container, seccomp)
 │       ├── permission-detect.mjs — Unified permission detection (settings + runtime layers, shared by all adapters)
 │       ├── runtime-permissions.mjs — Runtime permission_mode capture/load helpers (v1.1.6)
@@ -190,14 +192,14 @@ agent-olympus/
 
 ## Testing
 
-Run the 2313-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the 2376-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
 - Runtime: Node.js >= 20.0.0.
 - Optional: tmux for legacy worker fallback and Athena team mode.
 - Optional: Codex CLI (`npm install -g @openai/codex`) for Codex workers.
-- Optional: Gemini CLI (`npm install -g @google/gemini-cli`) for Gemini workers.
+- Optional: Gemini CLI (`npm install -g @google/gemini-cli`) for Gemini workers, or Antigravity `agy` as drop-in fallback.
 - npm packages: none at runtime.
 
 ## Known Limitations
@@ -266,6 +268,8 @@ Run the 2313-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | Skill | Trigger | What It Does |
 |-------|---------|--------------|
 | `/ask` | "물어봐", "codex" | Quick single-shot Codex/Gemini query (sync + async job system) |
+| `/codex-goal` | "코덱스에 위임", "codex goal" | Delegate one bounded goal to Codex with Claude-hosted external verification |
+| `/codex-review` | "코덱스 리뷰", "codex review" | Codex as an independent PASS/FAIL review gate on the diff — inverse of `/codex-goal` |
 | `/brainstorm` | "브레인스톰", "설계" | Design-before-code with diverge-converge-refine methodology |
 | `/research` | "조사해", "리서치" | Parallel web research: decompose → fetch → synthesize |
 | `/trace` | "추적", "원인분석" | 3-lane competing hypothesis investigation with rebuttal round |

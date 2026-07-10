@@ -459,6 +459,65 @@ test('startServer: returns handle with correct structure', async () => {
   try { handle.process.kill('SIGKILL'); } catch {}
 });
 
+test('startServer: sets workerMeta from Gemini-compatible binary resolver', () => {
+  let spawnPath = null;
+  let spawnArgs = null;
+  const resolveGeminiBinary = () => ({
+    path: '/opt/antigravity/bin/agy',
+    flavor: 'agy',
+    resolved: true,
+    attempted: ['gemini', 'agy'],
+  });
+  const fakeSpawn = (path, args) => {
+    spawnPath = path;
+    spawnArgs = args;
+    return createMockChildProcess();
+  };
+  const handle = startServer({
+    spawn: fakeSpawn,
+    resolveGeminiBinary,
+    credential: { credentialSource: 'env' },
+    env: { GEMINI_API_KEY: '' },
+  });
+
+  assert.equal(spawnPath, '/opt/antigravity/bin/agy');
+  assert.deepEqual(spawnArgs, ['--acp']);
+  assert.deepEqual(handle.workerMeta, {
+    binaryFlavor: 'agy',
+    binaryResolved: true,
+  });
+});
+
+test('startServer ENOENT: unresolved binary message names gemini, agy, tier split, and override without changing category', () => {
+  const child = createMockChildProcess();
+  const resolveGeminiBinary = () => ({
+    path: 'gemini',
+    flavor: 'gemini',
+    resolved: false,
+    attempted: ['gemini', 'agy'],
+  });
+  const fakeSpawn = () => child;
+  const handle = startServer({
+    spawn: fakeSpawn,
+    resolveGeminiBinary,
+    credential: { credentialSource: 'env' },
+    env: { GEMINI_API_KEY: '' },
+  });
+  handle.events.on('error', () => {});
+  const err = new Error('spawn gemini ENOENT');
+  err.code = 'ENOENT';
+  child.emit('error', err);
+
+  const result = monitor(handle);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.category, 'not_installed');
+  assert.match(result.error.message, /gemini/);
+  assert.match(result.error.message, /agy/);
+  assert.match(result.error.message, /2026-06-18/);
+  assert.match(result.error.message, /AO_GEMINI_BINARY/);
+});
+
 // ─── JSONL stdout parsing ─────────────────────────────────────────────────────
 
 test('stdout JSONL: parses response and resolves pending promise', async () => {
