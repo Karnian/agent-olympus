@@ -175,7 +175,6 @@ agent-olympus/
 - Autonomy config resolves as `defaults <- global <- project`; project `.ao/autonomy.json` wins, and CI skips the global layer unless explicitly overridden.
 - Session names use stable prefixes such as `atlas-codex-<N>`, `athena-<slug>-gemini-<N>`, and `*-xval-<story-id>`.
 - Key files: `scripts/lib/worker-spawn.mjs`, `codex-appserver.mjs`, `codex-exec.mjs`, `claude-cli.mjs`, `gemini-acp.mjs`, `gemini-exec.mjs`, `permission-detect.mjs`.
-- Gemini binary resolution: `AO_GEMINI_BINARY` → `gemini` → `agy` via `gemini-binary.mjs` (tier split 2026-06-18). Codex adapters probe versions via `cli-version.mjs`; advisory warn below 0.142.5. Adapters expose a `workerMeta` bag persisted in supervisor snapshots. Baselines: codex 0.143.0, gemini 0.50.0 (numeric ACP protocolVersion).
 - Detached worker supervisor -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md); permission mirroring -> [docs/internals/permission-mirroring.md](docs/internals/permission-mirroring.md); Gemini credentials -> [docs/internals/credentials.md](docs/internals/credentials.md).
 
 ## Deep References
