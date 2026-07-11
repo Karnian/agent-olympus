@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "fix-off-by-one",
+  "track": "regression",
+  "difficulty": "S",
+  "orchestrator": "atlas",
+  "prompt": "lastN returns the wrong slice. Fix the boundary; all tests must pass.",
+  "timeoutMs": 120000,
+  "modelTier": "sonnet",
+  "k": 1
+}
