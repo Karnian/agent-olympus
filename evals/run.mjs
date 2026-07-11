@@ -203,6 +203,37 @@ async function writeRunOutputs({ runDir, trialResults, summary }) {
 }
 
 /**
+ * Resolve the `--fixture` option into an orchestrate fixture descriptor.
+ *
+ * The `solution` fixture applies the task's reference `solution/` (a known-good
+ * fix) into the trial workdir, so the full run → grade → score pipeline can be
+ * demonstrated GREEN on a real golden task without a live, unsupervised
+ * orchestrator run (and it seeds the future P2 baseline). Any other value — a
+ * name like `pass`/`fail`, a descriptor object, or a function — passes through
+ * unchanged to `runOrchestrator`.
+ *
+ * @param {Function|object|string|undefined} fixture
+ * @param {string} taskDir
+ * @returns {Function|object|string|undefined}
+ */
+function resolveFixture(fixture, taskDir) {
+  // `none` — a hermetic no-op orchestrator: runs the fixture path (never spawns
+  // a real claude) and leaves the seed untouched, so the grader REDs. Used for
+  // the broken-outcome side of the green/red demonstration and tests.
+  if (fixture === 'none') return { status: 'completed' };
+  if (fixture !== 'solution') return fixture;
+  const solutionDir = path.join(taskDir, 'solution');
+  return {
+    status: 'completed',
+    mutate: (cwd) => {
+      if (existsSync(solutionDir)) {
+        cpSync(solutionDir, cwd, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
+/**
  * Run one eval task over k isolated trials.
  *
  * @param {string} taskPath Path to an eval task directory.
@@ -216,6 +247,17 @@ async function writeRunOutputs({ runDir, trialResults, summary }) {
  * @returns {Promise<{runId:string, runDir:string, summary:object, results:object[], exitCode:number}>}
  */
 export async function runEval(taskPath, opts = {}) {
+  // Safety: spawning the REAL orchestrator (`claude -p /atlas …`) is expensive,
+  // token-burning, and runs UNSUPERVISED (the HU-06 / Codex-flagged risk). Never
+  // do it implicitly — a live run requires an explicit `--live` (opts.live). With
+  // neither a fixture nor --live, refuse with guidance instead of silently
+  // firing a real Atlas run.
+  if (!opts.live && opts.fixture === undefined) {
+    throw new Error(
+      'Refusing to run the real orchestrator implicitly. Pass --fixture solution|none for a hermetic run, ' +
+      'or --live to spawn the real orchestrator (burns tokens, runs unsupervised).',
+    );
+  }
   const { task, taskDir, graderPath, seedDir } = loadTask(taskPath);
   const k = resolveK(task, opts);
   const runId = makeRunId(opts);
@@ -243,7 +285,7 @@ export async function runEval(taskPath, opts = {}) {
         timeoutMs: task.timeoutMs,
         modelTier: task.modelTier ?? 'sonnet',
         pluginDir,
-        fixture: opts.fixture,
+        fixture: resolveFixture(opts.fixture, taskDir),
       });
       const grade = await gradeWorkdir(graderModule.grade, workdir);
 
@@ -308,6 +350,8 @@ function parseCliArgs(argv) {
       opts.task = argv[++index];
     } else if (arg === '--fixture') {
       opts.fixture = argv[++index];
+    } else if (arg === '--live') {
+      opts.live = true;
     } else if (arg === '--k') {
       opts.k = argv[++index];
     } else if (arg === '--run-id') {

@@ -74,3 +74,37 @@ for (const task of tasks) {
     }
   });
 }
+
+// Full-pipeline proof: run.mjs + the `solution` fixture (which applies each
+// task's reference solution/) must produce a GREEN summary on the real tasks,
+// while no fixture leaves the seed broken → RED. This exercises
+// run → orchestrate(fixture) → grade → score end-to-end on the golden tasks
+// without a live orchestrator.
+for (const task of tasks) {
+  test(`${task.id} runs GREEN via --fixture solution and RED without it`, async () => {
+    const { runEval } = await import(new URL('../../evals/run.mjs', import.meta.url));
+    const taskDir = path.join(repoRoot, 'evals', 'tasks', task.id);
+    const resultsRoot = mkdtempSync(path.join(tmpdir(), `ao-run-${task.id}-`));
+    try {
+      const green = await runEval(taskDir, { fixture: 'solution', resultsDir: resultsRoot, runId: `green-${task.id}` });
+      assert.equal(green.summary.passHatK, true, `${task.id} should be GREEN with the reference solution`);
+      assert.equal(green.exitCode, 0);
+
+      const red = await runEval(taskDir, { fixture: 'none', resultsDir: resultsRoot, runId: `red-${task.id}` });
+      assert.equal(red.summary.passHatK, false, `${task.id} should be RED with no fix applied`);
+      assert.notEqual(red.exitCode, 0);
+    } finally {
+      rmSync(resultsRoot, { recursive: true, force: true });
+    }
+  });
+}
+
+test('runEval refuses an implicit live run (no fixture, no --live)', async () => {
+  const { runEval } = await import(new URL('../../evals/run.mjs', import.meta.url));
+  const taskDir = path.join(repoRoot, 'evals', 'tasks', 'fix-failing-test');
+  await assert.rejects(
+    () => runEval(taskDir, { runId: 'guard' }),
+    /Refusing to run the real orchestrator implicitly/,
+    'a bare run must not silently spawn a real unsupervised orchestrator',
+  );
+});

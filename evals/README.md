@@ -6,28 +6,34 @@ an independent deterministic grader, and writes JSONL plus summary output.
 
 ## Run
 
-```sh
-node evals/run.mjs --task evals/tasks/<id>
-```
-
-For hermetic engine smoke tests, use the sample fixture task:
+A bare `node evals/run.mjs --task <dir>` is **refused** — it will not silently
+spawn a real, unsupervised orchestrator run. Choose a mode:
 
 ```sh
-node evals/run.mjs --task evals/tasks/_sample --fixture pass
-node evals/run.mjs --task evals/tasks/_sample --fixture fail
+# Hermetic (no Claude): apply the task's reference solution/ → GREEN
+node evals/run.mjs --task evals/tasks/fix-failing-test --fixture solution
+# Hermetic: no-op orchestrator, seed stays broken → RED
+node evals/run.mjs --task evals/tasks/fix-failing-test --fixture none
+# LIVE: spawn the real orchestrator (see caveat below)
+node evals/run.mjs --task evals/tasks/fix-failing-test --live
 ```
 
-Results are written to `evals/results/<runId>/results.jsonl` and
-`evals/results/<runId>/summary.json`.
+The engine self-test also uses the sample fixture task
+(`--task evals/tasks/_sample --fixture pass|fail`). Results are written to
+`evals/results/<runId>/results.jsonl` and `.../summary.json`.
 
 ## MVP Scope
 
 P0b is engine-only and manual:
 
-- Three real regression tasks are expected later, outside this worktree.
+- Three real regression tasks ship here: `fix-failing-test`, `fix-null-deref`,
+  `fix-off-by-one` (each: broken seed + deterministic grader + reference
+  `solution/`).
 - MVP defaults to `k=1`.
-- Deterministic graders decide green/red outcomes.
-- The fixture orchestrator is the test path; it does not call Claude.
+- Deterministic graders decide green/red outcomes (never the agent's own
+  self-verification).
+- The fixture orchestrator (`--fixture solution|none|pass|fail`) is the test
+  path; it does not call Claude. `--live` is the only way to spawn a real run.
 - `passHatK` reports all-trials reliability and `passAtK` reports any-trial success.
 
 ## Task Contract
