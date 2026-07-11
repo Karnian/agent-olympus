@@ -7,5 +7,5 @@
   "prompt": "lastN returns the wrong slice. Fix the boundary; all tests must pass.",
   "timeoutMs": 120000,
   "modelTier": "sonnet",
-  "k": 3
+  "k": 1
 }

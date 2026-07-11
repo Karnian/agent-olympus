@@ -7,5 +7,5 @@
   "prompt": "greet(null) throws. Make it handle a null/nameless user safely; all tests must pass.",
   "timeoutMs": 120000,
   "modelTier": "sonnet",
-  "k": 3
+  "k": 1
 }

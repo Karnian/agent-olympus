@@ -127,10 +127,17 @@ function initGitIfAvailable(workdir) {
 
 function createTrialWorkdir(seedDir, trialIndex) {
   const tmpRoot = mkdtempSync(path.join(tmpdir(), 'ao-eval-'));
-  const workdir = path.join(tmpRoot, `trial-${trialIndex}`);
-  cpSync(seedDir, workdir, { recursive: true, force: true });
-  initGitIfAvailable(workdir);
-  return { tmpRoot, workdir };
+  try {
+    const workdir = path.join(tmpRoot, `trial-${trialIndex}`);
+    cpSync(seedDir, workdir, { recursive: true, force: true });
+    initGitIfAvailable(workdir);
+    return { tmpRoot, workdir };
+  } catch (error) {
+    // Clean up the just-created temp root if seed copy/init fails, so a throw
+    // here never leaks a directory the caller hasn't registered for cleanup.
+    rmSync(tmpRoot, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function normalizeChecks(checks) {
