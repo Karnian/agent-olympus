@@ -1,0 +1,28 @@
+name: Hermetic eval harness
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  regression-fixtures:
+    if: github.event_name != 'pull_request' || github.event.label.name == 'run-evals'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Full test suite
+        run: npm test
+      - name: Baseline schema and task integrity
+        run: node evals/verify-baseline.mjs
+      - name: Regression fixture green and red proof
+        run: node evals/verify-fixtures.mjs

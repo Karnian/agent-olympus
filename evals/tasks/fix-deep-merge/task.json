@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "fix-deep-merge",
+  "track": "capability",
+  "difficulty": "M",
+  "orchestrator": "atlas",
+  "prompt": "mergeConfig loses nested defaults and aliases input data. Implement an immutable deep configuration merge; arrays replace rather than concatenate, and all tests must pass.",
+  "timeoutMs": 180000,
+  "modelTier": "sonnet",
+  "k": 3
+}

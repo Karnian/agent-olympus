@@ -581,8 +581,8 @@ saveCheckpoint('athena', {
 │     ├─ Codex/Gemini completes something Claude needs →
 │     │     Path A: SendMessage to Claude worker
 │     │     Path B: include in next agent prompt (no SendMessage available)
-│     ├─ Codex worker fails (auth/rate-limit/crash/timeout) → reassign to Claude executor
-│     ├─ Gemini worker fails (auth/quota/crash/timeout) → reassign to Claude executor
+│     ├─ Codex worker exhausted → retry once if unavailable, then Gemini, then Claude
+│     ├─ Gemini worker exhausted → retry once if unavailable, then Claude executor
 │     ├─ Worker blocked → unblock or escalate
 │     └─ All done? → proceed to Phase 4
 └── Loop until all workers done or registerCounter('monitor-iterations') returns !allowed (cap 10)
@@ -591,25 +591,57 @@ saveCheckpoint('athena', {
 **Worker execution & monitoring model (supervisor).** Non-tmux adapter workers (codex-exec, codex-appserver, claude-cli, gemini-exec, gemini-acp) do NOT run in your process — `spawnTeam()` launches a **detached supervisor** per worker that owns the adapter and writes its completion/failure/output to disk. So the canonical monitor loop is:
 
 ```javascript
-import { monitorTeam, collectResults, shutdownTeam } from './scripts/lib/worker-spawn.mjs';
+import {
+  collectResults,
+  completeClaudeFallback,
+  dispatchProviderFallback,
+  monitorTeam,
+  pollProviderFallback,
+  reassignProvider,
+  shutdownTeam,
+} from './scripts/lib/worker-spawn.mjs';
 
+const providerTeamsToShutdown = new Set(); // initialize once before the monitor loop
 const status = monitorTeam(teamSlug);   // re-reads disk every call — safe across the fresh-process polling model
 for (const w of status.workers) {
-  // w.status: 'running' | 'completed' | 'failed' | 'retry'
+  // w.status: 'running' | 'completed' | 'failed'
   // w.errorReason / w.errorMessage: set for failures (auth_failed/rate_limited/crash/timeout/…)
   // w.lastOutput: latest snapshot output tail
 }
 const results = collectResults(teamSlug);  // durable per-worker output (supervisor-written file or outbox)
+for (const w of status.workers.filter((worker) => worker.status === 'failed')) {
+  const fallback = await reassignProvider(
+    teamSlug,
+    w.name,
+    w.originalPrompt,
+    { category: w.errorReason, message: w.errorMessage },
+  );
+  const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
+  const progress = await pollProviderFallback(dispatched, cwd, capabilities);
+  for (const childTeam of progress.teamNames || []) providerTeamsToShutdown.add(childTeam);
+  if (progress.status === 'running') continue;
+  if (progress.status === 'completed') {
+    results[w.name] = progress.output;
+  }
+  if (progress.status === 'claude-task') {
+    const claudeOutput = Task(subagent_type="agent-olympus:executor", model="sonnet",
+      prompt=`${progress.dispatched.replacementWorker.prompt}`)
+    await completeClaudeFallback(progress.dispatched, claudeOutput);
+    results[w.name] = claudeOutput;
+  }
+}
+// After all provider outputs are integrated and the monitor loop is terminal:
+for (const childTeam of providerTeamsToShutdown) await shutdownTeam(childTeam, cwd);
 ```
 
-`monitorTeam` already classifies supervisor workers from their disk snapshot (including the error category) and applies one crash-retry — you react to the returned `w.status`/`w.errorReason`, you do NOT need to `capturePane` them. The per-worker `capturePane` + `detectCodexError` snippets below are the **tmux-fallback path** (only for workers running under the legacy tmux adapter).
+`monitorTeam` classifies supervisor workers from their disk snapshot. Actual retry/failover is owned by `reassignProvider()` + `dispatchProviderFallback()` + `pollProviderFallback()` so every retry is a new execution. You do NOT need to `capturePane` supervisor workers. The per-worker `capturePane` + `detectCodexError` snippets below are the **tmux-fallback path** only.
 
-**Codex failure detection and Claude fallback (tmux fallback path):**
+**Codex failure detection and provider fallback (tmux fallback path):**
 
 During each monitoring iteration, for every active **tmux** Codex worker, pass its pane output to `detectCodexError()` (from `scripts/lib/worker-spawn.mjs`):
 
 ```javascript
-import { detectCodexError, reassignToClaude } from './scripts/lib/worker-spawn.mjs';
+import { detectCodexError } from './scripts/lib/worker-spawn.mjs';
 import { reportWorkerStatus } from './scripts/lib/worker-status.mjs';
 
 // Inside the monitoring loop, for each Codex worker:
@@ -623,23 +655,41 @@ if (errorCheck.failed) {
   // Kill tmux session and record wisdom.
   // Pass the session name explicitly to avoid the default sessionName() mismatch
   // (athena uses 'athena-<slug>-codex-N' directly, not 'omc-team-athena-...-codex-N').
-  const fallback = await reassignToClaude(teamName, workerName, originalPrompt, errorCheck.reason, codexSession);
+  const fallback = await reassignProvider(
+    teamName,
+    workerName,
+    originalPrompt,
+    { category: errorCheck.reason, message: errorCheck.message },
+    codexSession,
+    { worker: failedWorker, capabilities },
+  );
+  const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
+  const progress = await pollProviderFallback(dispatched, cwd, capabilities);
+  for (const childTeam of progress.teamNames || []) providerTeamsToShutdown.add(childTeam);
 
   // Report the reassignment so the status table shows the transition
-  reportWorkerStatus(teamName, workerName, 'implementing', `Codex → Claude: ${errorCheck.reason}`);
+  reportWorkerStatus(teamName, workerName, 'implementing', `Codex → ${fallback.targetProvider}: ${errorCheck.reason}`);
 
-  // Spawn Claude replacement with the same prompt
-  Task(subagent_type="agent-olympus:executor", model="sonnet",
-    prompt=`${fallback.prompt}`)
+  if (progress.status === 'running') continue;
+  if (progress.status === 'completed') {
+    results[workerName] = progress.output;
+  }
+  if (progress.status === 'claude-task') {
+    const claudeOutput = Task(subagent_type="agent-olympus:executor", model="sonnet",
+      prompt=`${progress.dispatched.replacementWorker.prompt}`)
+    await completeClaudeFallback(progress.dispatched, claudeOutput);
+    results[workerName] = claudeOutput;
+  }
 }
 ```
 
 Rules:
 - If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again for any worker in this session.
 - If `errorCheck.reason` is `'crash'`, retry Codex once; if it crashes again, fall back to Claude.
-- Always call `await reassignToClaude()` before spawning the replacement — it handles tmux cleanup and wisdom recording in one step.
+- Always call `await reassignProvider()` before dispatching the replacement — it handles cleanup and wisdom recording in one step.
+- Never reuse the parent `teamName` for a provider replacement; `dispatchProviderFallback()` creates a distinct child team so parent state is not overwritten.
 
-**Gemini failure detection and Claude fallback:**
+**Gemini failure detection and provider fallback:**
 
 Apply the same pattern for Gemini workers. During each monitoring iteration, for every active Gemini worker, check adapter output for errors:
 
@@ -651,9 +701,28 @@ Apply the same pattern for Gemini workers. During each monitoring iteration, for
 
 if (geminiWorkerFailed) {
   reportWorkerStatus(teamName, workerName, 'failed', `Gemini error: ${reason}`);
-  const fallback = await reassignToClaude(teamName, workerName, originalPrompt, reason, geminiSession);
-  reportWorkerStatus(teamName, workerName, 'implementing', `Gemini → Claude: ${reason}`);
-  Task(subagent_type="agent-olympus:executor", model="sonnet", prompt=`${fallback.prompt}`)
+  const fallback = await reassignProvider(
+    teamName,
+    workerName,
+    originalPrompt,
+    { category: reason, message: errorMessage },
+    geminiSession,
+    { worker: failedWorker, capabilities },
+  );
+  const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
+  const progress = await pollProviderFallback(dispatched, cwd, capabilities);
+  for (const childTeam of progress.teamNames || []) providerTeamsToShutdown.add(childTeam);
+  reportWorkerStatus(teamName, workerName, 'implementing', `Gemini → ${fallback.targetProvider}: ${reason}`);
+  if (progress.status === 'running') continue;
+  if (progress.status === 'completed') {
+    results[workerName] = progress.output;
+  }
+  if (progress.status === 'claude-task') {
+    const claudeOutput = Task(subagent_type="agent-olympus:executor", model="sonnet",
+      prompt=`${progress.dispatched.replacementWorker.prompt}`)
+    await completeClaudeFallback(progress.dispatched, claudeOutput);
+    results[workerName] = claudeOutput;
+  }
 }
 ```
 

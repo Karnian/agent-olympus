@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,7 +15,7 @@ import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { runOrchestrator } from '../../evals/lib/orchestrate.mjs';
 import { passAtK, passHatK, rollupByTrack } from '../../evals/lib/score.mjs';
-import { runEval } from '../../evals/run.mjs';
+import { aggregateTokenUsage, runEval } from '../../evals/run.mjs';
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const SAMPLE_TASK = path.join(REPO_ROOT, 'evals/tasks/_sample');
@@ -138,16 +139,73 @@ test('runOrchestrator fixture mode mutates cwd without spawning', async () => {
       cwd,
       fixture: {
         status: 'completed',
-        usage: { fixture_tokens: 0 },
+        usage: { input_tokens: 999 },
         mutate: (workdir) => writeFileSync(path.join(workdir, 'marker.txt'), 'fixed\n'),
       },
     });
 
     assert.equal(result.status, 'completed');
-    assert.deepEqual(result.usage, { fixture_tokens: 0 });
+    assert.equal(result.usage, null);
     assert.equal(readFileSync(markerPath, 'utf-8').trim(), 'fixed');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('aggregateTokenUsage sums real result-event token fields and ignores missing usage', () => {
+  assert.deepEqual(aggregateTokenUsage([
+    {
+      input_tokens: 10,
+      output_tokens: 4,
+      cache_creation_input_tokens: 3,
+      cache_read_input_tokens: 2,
+    },
+    null,
+    { input_tokens: 5, output_tokens: 1 },
+  ]), {
+    inputTokens: 15,
+    outputTokens: 5,
+    cacheCreationInputTokens: 3,
+    cacheReadInputTokens: 2,
+    totalTokens: 25,
+    reportedTrials: 2,
+  });
+});
+
+test('runEval isolates k trials and reports pass@k, pass^k, tokens, and track rollup', async () => {
+  const tmpRoot = makeTmpDir();
+  const workdirs = [];
+  let call = 0;
+
+  try {
+    const result = await runEval(SAMPLE_TASK, {
+      k: 3,
+      fixture: (cwd) => {
+        workdirs.push(cwd);
+        call += 1;
+        return call === 2 ? 'pass' : 'fail';
+      },
+      runId: 'sample-k3',
+      resultsDir: path.join(tmpRoot, 'results'),
+    });
+
+    assert.equal(new Set(workdirs).size, 3, 'each trial must use a distinct workdir');
+    assert.deepEqual(result.results.map((trial) => trial.pass), [false, true, false]);
+    assert.equal(result.summary.passAtK, true);
+    assert.equal(result.summary.passHatK, false);
+    assert.deepEqual(result.summary.tokenUsage, {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheCreationInputTokens: 0,
+      cacheReadInputTokens: 0,
+      totalTokens: 0,
+      reportedTrials: 0,
+    });
+    assert.deepEqual(result.summary.tracks, [
+      { track: 'regression', total: 1, passed: 0 },
+    ]);
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
   }
 });
 
@@ -174,6 +232,9 @@ test('runEval writes green summary/results for the sample pass fixture', async (
     const summary = readJson(path.join(runDir, 'summary.json'));
     assert.equal(summary.schemaVersion, 1);
     assert.equal(summary.passHatK, true);
+    assert.equal(statSync(runDir).mode & 0o777, 0o700);
+    assert.equal(statSync(path.join(runDir, 'summary.json')).mode & 0o777, 0o600);
+    assert.equal(statSync(path.join(runDir, 'results.jsonl')).mode & 0o777, 0o600);
 
     const lines = readFileSync(path.join(runDir, 'results.jsonl'), 'utf-8')
       .trim()

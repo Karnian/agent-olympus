@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-olympus.local/evals/baseline.schema.json",
+  "title": "Agent Olympus Regression Eval Baseline",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "track",
+    "k",
+    "tasks"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "track": {
+      "const": "regression"
+    },
+    "k": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "tasks": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "k",
+          "passHatK"
+        ],
+        "properties": {
+          "k": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "passHatK": {
+            "const": true
+          }
+        }
+      }
+    }
+  }
+}

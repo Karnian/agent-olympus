@@ -6,7 +6,19 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectCodexError, selectAdapter, demoteCodexWorkersIfNeeded } from '../lib/worker-spawn.mjs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  completeClaudeFallback,
+  demoteCodexWorkersIfNeeded,
+  detectCodexError,
+  detectProviderExhaustion,
+  dispatchProviderFallback,
+  pollProviderFallback,
+  planProviderFailover,
+  selectAdapter,
+} from '../lib/worker-spawn.mjs';
 
 // ---------------------------------------------------------------------------
 // detectCodexError — no failure
@@ -147,6 +159,344 @@ test('detectCodexError: message is truncated to 200 chars', () => {
   assert.equal(result.failed, true);
   assert.equal(result.reason, 'auth_failed');
   assert.ok(result.message.length <= 200, `message length ${result.message.length} exceeds 200`);
+});
+
+// ---------------------------------------------------------------------------
+// provider exhaustion and failover planning
+// ---------------------------------------------------------------------------
+
+test('detectProviderExhaustion distinguishes quota from generic failure', () => {
+  assert.deepEqual(
+    detectProviderExhaustion({ category: 'rate_limited', message: 'HTTP 429' }),
+    { exhausted: true, reason: 'rate_limited' },
+  );
+  assert.deepEqual(
+    detectProviderExhaustion({ category: 'crash', message: 'process exited' }),
+    { exhausted: false, reason: null },
+  );
+});
+
+test('detectProviderExhaustion requires repeated network unavailability', () => {
+  const error = { category: 'network', message: 'provider unavailable' };
+  assert.equal(detectProviderExhaustion(error, 1).exhausted, false);
+  assert.deepEqual(detectProviderExhaustion(error, 2), {
+    exhausted: true,
+    reason: 'repeated_unavailability',
+  });
+});
+
+test('planProviderFailover sends exhausted Codex to available Gemini without losing task', () => {
+  const plan = planProviderFailover({
+    type: 'codex',
+    name: 'deep-worker',
+    prompt: 'implement the bounded goal',
+    model: 'gpt-5',
+    custom: 42,
+    _adapterName: 'codex-appserver',
+    _handle: { pid: 123 },
+  }, { category: 'rate_limited', message: 'quota exceeded' }, {
+    hasGeminiAcp: true,
+    hasGeminiCli: true,
+    hasClaudeCli: true,
+  });
+
+  assert.equal(plan.fallbackNeeded, true);
+  assert.equal(plan.sourceProvider, 'codex');
+  assert.equal(plan.targetProvider, 'gemini');
+  assert.equal(plan.replacementWorker.type, 'gemini');
+  assert.equal(plan.replacementWorker.name, 'deep-worker');
+  assert.equal(plan.replacementWorker.prompt, 'implement the bounded goal');
+  assert.equal(plan.replacementWorker.custom, 42);
+  assert.equal(plan.replacementWorker.model, undefined);
+  assert.equal(plan.replacementWorker._demotedModel, 'gpt-5');
+  assert.equal(plan.replacementWorker._handle, undefined);
+  assert.match(plan.replacementWorker._demotionReason, /provider exhaustion.*codex -> gemini/);
+});
+
+test('planProviderFailover completes Codex to Gemini to Claude priority chain', () => {
+  const noGemini = planProviderFailover(
+    { type: 'codex', name: 'worker', prompt: 'same task' },
+    'rate_limited',
+    { hasGeminiAcp: false, hasGeminiCli: false, hasClaudeCli: true },
+  );
+  assert.equal(noGemini.targetProvider, 'claude');
+
+  const geminiExhausted = planProviderFailover(
+    { type: 'gemini', name: 'worker', prompt: 'same task', model: 'gemini-2.5-pro' },
+    { category: 'provider_exhausted', message: 'repeated unavailability' },
+    { hasClaudeCli: true },
+  );
+  assert.equal(geminiExhausted.targetProvider, 'claude');
+  assert.equal(geminiExhausted.replacementWorker.prompt, 'same task');
+  assert.equal(geminiExhausted.replacementWorker.model, undefined);
+  assert.equal(geminiExhausted.replacementWorker._demotedModel, 'gemini-2.5-pro');
+});
+
+test('provider unavailability retries once with attempt state before failover', () => {
+  const legacyFirst = planProviderFailover(
+    { type: 'codex', name: 'legacy', prompt: 'same task' },
+    { category: 'timeout', message: 'timed out' },
+    { hasGeminiCli: true },
+  );
+  assert.equal(legacyFirst.retry, true);
+  assert.equal(legacyFirst.replacementWorker._providerUnavailableAttempts, 1);
+
+  const first = planProviderFailover(
+    { type: 'codex', name: 'worker', prompt: 'same task', _providerUnavailableAttempts: 1 },
+    { category: 'network', message: 'temporarily unavailable' },
+    { hasGeminiCli: true },
+  );
+  assert.equal(first.retry, true);
+  assert.equal(first.targetProvider, 'codex');
+  assert.equal(first.replacementWorker._providerUnavailableAttempts, 1);
+  assert.match(first.replacementWorker._providerRetryReason, /attempt 2/);
+
+  const second = planProviderFailover(
+    { type: 'codex', name: 'worker', prompt: 'same task', _providerUnavailableAttempts: 2 },
+    { category: 'network', message: 'still unavailable' },
+    { hasGeminiCli: true },
+  );
+  assert.equal(second.retry, false);
+  assert.equal(second.targetProvider, 'gemini');
+  assert.equal(second.exhaustion.reason, 'repeated_unavailability');
+});
+
+test('provider crashes create one real same-provider retry before demotion', () => {
+  const first = planProviderFailover(
+    { type: 'codex', name: 'worker', prompt: 'same task' },
+    { category: 'crash', message: 'process crashed' },
+    { hasGeminiCli: true },
+  );
+  assert.equal(first.retry, true);
+  assert.equal(first.targetProvider, 'codex');
+  assert.equal(first.replacementWorker._providerCrashAttempts, 1);
+
+  const second = planProviderFailover(
+    { type: 'codex', name: 'worker', prompt: 'same task', _providerCrashAttempts: 1 },
+    { category: 'crash', message: 'process crashed again' },
+    { hasGeminiCli: true },
+  );
+  assert.equal(second.retry, false);
+  assert.equal(second.targetProvider, 'claude');
+});
+
+test('dispatchProviderFallback spawns provider replacements and preserves Claude native handoff', async (t) => {
+  const calls = [];
+  let storedState = null;
+  const geminiFallback = planProviderFailover(
+    { type: 'codex', name: 'worker', prompt: 'same task', model: 'gpt-5' },
+    'rate_limited',
+    { hasGeminiCli: true },
+  );
+  const dispatched = await dispatchProviderFallback(
+    { ...geminiFallback, workerName: 'worker' },
+    '/workspace',
+    { hasGeminiCli: true },
+    {
+      teamName: 'failover-gemini-test',
+      loadTeamState: () => storedState,
+      spawnTeam: async (...args) => {
+        calls.push(args);
+        storedState = { teamName: args[0], workers: args[1] };
+        return storedState;
+      },
+    },
+  );
+  assert.equal(dispatched.dispatch, 'provider-team');
+  assert.equal(dispatched.teamName, 'failover-gemini-test');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][1][0].type, 'gemini');
+  assert.equal(calls[0][1][0].prompt, 'same task');
+  assert.equal(calls[0][1][0].model, undefined);
+  const reused = await dispatchProviderFallback(
+    { ...geminiFallback, workerName: 'worker' },
+    '/workspace',
+    { hasGeminiCli: true },
+    {
+      teamName: 'failover-gemini-test',
+      loadTeamState: () => storedState,
+      spawnTeam: async (...args) => { calls.push(args); return storedState; },
+    },
+  );
+  assert.equal(reused.reused, true);
+  assert.equal(calls.length, 1, 're-polling a failed parent must not spawn a duplicate child');
+
+  const claudeStates = new Map();
+  const claudeOutputs = new Map();
+  const lockDir = mkdtempSync(join(tmpdir(), 'ao-claude-fallback-'));
+  t.after(() => rmSync(lockDir, { recursive: true, force: true }));
+  const claudeFallback = {
+    fallbackNeeded: true,
+    targetProvider: 'claude',
+    workerName: 'worker',
+    replacementWorker: { type: 'claude', name: 'worker', prompt: 'same task' },
+  };
+  const claudeOpts = {
+    readState: async (id) => claudeStates.get(id) ?? null,
+    readOutput: async (id) => claudeOutputs.get(id) ?? null,
+    writeState: async (id, value) => claudeStates.set(id, {
+      schemaVersion: 1,
+      handoffId: id,
+      ...value,
+    }),
+    lockDir,
+    now: 100,
+  };
+  const claude = await dispatchProviderFallback(claudeFallback, '/workspace', {}, claudeOpts);
+  assert.equal(claude.dispatch, 'claude-task');
+  assert.equal(claude.prompt, 'same task');
+
+  const pending = await dispatchProviderFallback(claudeFallback, '/workspace', {}, {
+    ...claudeOpts,
+    now: 101,
+  });
+  assert.equal(pending.dispatch, 'claude-pending');
+  assert.equal(pending.handoffId, claude.handoffId);
+
+  await completeClaudeFallback(claude, 'claude output', {
+    readState: claudeOpts.readState,
+    writeOutput: async (id, output, claimToken) => claudeOutputs.set(id, {
+      output: String(output),
+      claimToken,
+    }),
+    writeState: claudeOpts.writeState,
+    lockDir,
+    now: 200,
+  });
+  const completed = await dispatchProviderFallback(claudeFallback, '/workspace', {}, {
+    ...claudeOpts,
+    now: 201,
+  });
+  assert.equal(completed.dispatch, 'claude-completed');
+  assert.equal(completed.output, 'claude output');
+});
+
+test('Claude fallback atomically claims one executor and fences expired owners', async (t) => {
+  const states = new Map();
+  const outputs = new Map();
+  const lockDir = mkdtempSync(join(tmpdir(), 'ao-claude-fence-'));
+  t.after(() => rmSync(lockDir, { recursive: true, force: true }));
+  const fallback = {
+    fallbackNeeded: true,
+    targetProvider: 'claude',
+    teamName: 'parent-team',
+    workerName: 'worker',
+    parentRunId: 'parent-run',
+    parentWorkerRunId: 'parent-worker',
+    replacementWorker: { type: 'claude', name: 'worker', prompt: 'same task' },
+  };
+  let tokenIndex = 0;
+  const io = {
+    lockDir,
+    readState: async (id) => states.get(id) ?? null,
+    readOutput: async (id) => outputs.get(id) ?? null,
+    writeState: async (id, value) => states.set(id, { schemaVersion: 1, handoffId: id, ...value }),
+    writeOutput: async (id, output, claimToken) => outputs.set(id, {
+      output: String(output),
+      claimToken,
+    }),
+    createClaimToken: () => `claim-${++tokenIndex}`,
+  };
+
+  const concurrent = await Promise.all([
+    dispatchProviderFallback(fallback, '/workspace', {}, { ...io, now: 100 }),
+    dispatchProviderFallback(fallback, '/workspace', {}, { ...io, now: 100 }),
+  ]);
+  assert.deepEqual(concurrent.map((item) => item.dispatch).sort(), ['claude-pending', 'claude-task']);
+  assert.equal(tokenIndex, 1);
+  const firstOwner = concurrent.find((item) => item.dispatch === 'claude-task');
+
+  const nextOwner = await dispatchProviderFallback(fallback, '/workspace', {}, {
+    ...io,
+    now: 600_101,
+  });
+  assert.equal(nextOwner.dispatch, 'claude-task');
+  assert.notEqual(nextOwner.claimToken, firstOwner.claimToken);
+
+  await assert.rejects(
+    completeClaudeFallback(firstOwner, 'stale output', { ...io, now: 600_102 }),
+    /lease lost/,
+  );
+  await completeClaudeFallback(nextOwner, 'current output', { ...io, now: 600_103 });
+  const completed = await dispatchProviderFallback(fallback, '/workspace', {}, {
+    ...io,
+    now: 600_104,
+  });
+  assert.equal(completed.dispatch, 'claude-completed');
+  assert.equal(completed.output, 'current output');
+});
+
+test('dispatchProviderFallback replaces stale child state with mismatched task identity', async () => {
+  let shutdownCount = 0;
+  let spawnCount = 0;
+  const fallback = {
+    fallbackNeeded: true,
+    targetProvider: 'gemini',
+    workerName: 'worker',
+    parentRunId: 'parent-run',
+    parentWorkerRunId: 'parent-worker',
+    replacementWorker: { type: 'gemini', name: 'worker', prompt: 'new task' },
+  };
+  const dispatched = await dispatchProviderFallback(fallback, '/workspace', { hasGeminiCli: true }, {
+    teamName: 'failover-stale-child',
+    loadTeamState: () => ({
+      teamName: 'failover-stale-child',
+      workers: [{ type: 'gemini', name: 'worker', prompt: 'old task' }],
+    }),
+    shutdownTeam: async () => { shutdownCount += 1; },
+    spawnTeam: async (teamName, workers) => {
+      spawnCount += 1;
+      return { teamName, workers };
+    },
+  });
+  assert.equal(shutdownCount, 1);
+  assert.equal(spawnCount, 1);
+  assert.equal(dispatched.reused, false);
+  assert.equal(dispatched.state.workers[0].prompt, 'new task');
+});
+
+test('pollProviderFallback collects completed output and advances failed children to Claude', async () => {
+  const completedClaude = await pollProviderFallback({
+    dispatch: 'claude-completed',
+    output: 'persisted claude output',
+  }, '/workspace');
+  assert.equal(completedClaude.status, 'completed');
+  assert.equal(completedClaude.output, 'persisted claude output');
+
+  const pendingClaude = await pollProviderFallback({
+    dispatch: 'claude-pending',
+  }, '/workspace');
+  assert.equal(pendingClaude.status, 'running');
+
+  const completed = await pollProviderFallback({
+    dispatch: 'provider-team',
+    teamName: 'child-complete',
+    workerName: 'worker',
+    prompt: 'same task',
+  }, '/workspace', {}, {
+    monitorTeam: () => ({ workers: [{ name: 'worker', status: 'completed' }] }),
+    collectResults: () => ({ worker: 'finished output' }),
+  });
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.output, 'finished output');
+
+  const claudeDispatch = {
+    dispatch: 'claude-task',
+    workerName: 'worker',
+    replacementWorker: { type: 'claude', name: 'worker', prompt: 'same task' },
+  };
+  const failed = await pollProviderFallback({
+    dispatch: 'provider-team',
+    teamName: 'child-failed',
+    workerName: 'worker',
+    prompt: 'same task',
+  }, '/workspace', {}, {
+    monitorTeam: () => ({ workers: [{ name: 'worker', status: 'failed', errorReason: 'rate_limited' }] }),
+    reassignProvider: async () => ({ fallbackNeeded: true, targetProvider: 'claude' }),
+    dispatchProviderFallback: async () => claudeDispatch,
+  });
+  assert.equal(failed.status, 'claude-task');
+  assert.equal(failed.dispatched.replacementWorker.prompt, 'same task');
 });
 
 // ---------------------------------------------------------------------------

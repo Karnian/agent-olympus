@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import {
   cpSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -14,8 +15,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { atomicWriteFile } from '../scripts/lib/fs-atomic.mjs';
+import {
+  baselineValueForTask,
+  readBaseline,
+  updateBaselineTask,
+} from './lib/baseline.mjs';
 import { runOrchestrator } from './lib/orchestrate.mjs';
-import { passAtK, passHatK } from './lib/score.mjs';
+import { passAtK, passHatK, rollupByTrack } from './lib/score.mjs';
 
 const EVALS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(EVALS_DIR, '..');
@@ -168,26 +174,13 @@ async function gradeWorkdir(grade, workdir) {
   }
 }
 
-function readBaseline(baselinePath) {
-  if (!existsSync(baselinePath)) return null;
+function computeDeltaVsBaseline({ baselinePath, taskId, passHat }) {
+  let baseline;
   try {
-    return readJson(baselinePath);
+    baseline = readBaseline(baselinePath);
   } catch {
     return null;
   }
-}
-
-function baselineValueForTask(baseline, taskId) {
-  const candidate = baseline?.tasks?.[taskId] ?? baseline?.[taskId];
-  if (typeof candidate === 'number') return candidate;
-  if (typeof candidate === 'boolean') return candidate ? 1 : 0;
-  if (typeof candidate?.passHatK === 'number') return candidate.passHatK;
-  if (typeof candidate?.passHatK === 'boolean') return candidate.passHatK ? 1 : 0;
-  return null;
-}
-
-function computeDeltaVsBaseline({ baselinePath, taskId, passHat }) {
-  const baseline = readBaseline(baselinePath);
   const baselineValue = baselineValueForTask(baseline, taskId);
   if (baselineValue === null) return null;
   return (passHat ? 1 : 0) - baselineValue;
@@ -202,8 +195,52 @@ function summarizeOrchestration(orchestration) {
   };
 }
 
+function tokenCount(usage, field) {
+  const value = usage?.[field];
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+/**
+ * Aggregate Claude result-event usage without inventing tokens for fixtures or
+ * failed runs whose provider did not report usage.
+ *
+ * @param {Array<object|null>} usages Raw result-event usage objects.
+ * @returns {{inputTokens:number,outputTokens:number,cacheCreationInputTokens:number,cacheReadInputTokens:number,totalTokens:number,reportedTrials:number}}
+ */
+export function aggregateTokenUsage(usages) {
+  const aggregate = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+    totalTokens: 0,
+    reportedTrials: 0,
+  };
+
+  for (const usage of Array.isArray(usages) ? usages : []) {
+    if (!usage || typeof usage !== 'object' || Array.isArray(usage)) continue;
+    const inputTokens = tokenCount(usage, 'input_tokens');
+    const outputTokens = tokenCount(usage, 'output_tokens');
+    const cacheCreationInputTokens = tokenCount(usage, 'cache_creation_input_tokens');
+    const cacheReadInputTokens = tokenCount(usage, 'cache_read_input_tokens');
+
+    aggregate.inputTokens += inputTokens;
+    aggregate.outputTokens += outputTokens;
+    aggregate.cacheCreationInputTokens += cacheCreationInputTokens;
+    aggregate.cacheReadInputTokens += cacheReadInputTokens;
+    aggregate.reportedTrials += 1;
+  }
+
+  aggregate.totalTokens = aggregate.inputTokens
+    + aggregate.outputTokens
+    + aggregate.cacheCreationInputTokens
+    + aggregate.cacheReadInputTokens;
+  return aggregate;
+}
+
 async function writeRunOutputs({ runDir, trialResults, summary }) {
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
+  chmodSync(runDir, 0o700);
   const jsonl = trialResults.map((result) => JSON.stringify(result)).join('\n');
   await atomicWriteFile(path.join(runDir, 'results.jsonl'), jsonl ? `${jsonl}\n` : '');
   await atomicWriteFile(path.join(runDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
@@ -265,7 +302,16 @@ export async function runEval(taskPath, opts = {}) {
       'or --live to spawn the real orchestrator (burns tokens, runs unsupervised).',
     );
   }
+  if (opts.live && opts.fixture !== undefined) {
+    throw new Error('Choose exactly one execution mode: --live or --fixture');
+  }
   const { task, taskDir, graderPath, seedDir } = loadTask(taskPath);
+  if (opts.updateBaseline && (opts.fixture !== undefined || !opts.live)) {
+    throw new Error('Baseline refresh requires an explicit live run without fixtures');
+  }
+  if (opts.updateBaseline && task.track !== 'regression') {
+    throw new Error('Only regression tasks can update baseline.json');
+  }
   const k = resolveK(task, opts);
   const runId = makeRunId(opts);
   const resultsDir = path.resolve(opts.resultsDir ?? path.join(EVALS_DIR, 'results'));
@@ -299,6 +345,7 @@ export async function runEval(taskPath, opts = {}) {
       trialResults.push({
         schemaVersion: 1,
         runId,
+        executionMode: opts.live ? 'live' : 'fixture',
         task: task.id,
         track: task.track,
         taskDir,
@@ -313,13 +360,35 @@ export async function runEval(taskPath, opts = {}) {
 
     const passHat = passHatK(trialResults);
     const passAt = passAtK(trialResults);
+    const tokenUsage = aggregateTokenUsage(trialResults.map((result) => result.usage));
+    const deltaVsBaseline = computeDeltaVsBaseline({
+      baselinePath,
+      taskId: task.id,
+      passHat,
+    });
+    const taskSummary = {
+      task: task.id,
+      track: task.track,
+      executionMode: opts.live ? 'live' : 'fixture',
+      k,
+      passHatK: passHat,
+      passAtK: passAt,
+      tokenUsage,
+      deltaVsBaseline,
+      delta_vs_baseline: deltaVsBaseline,
+    };
     const summary = {
       schemaVersion: 1,
       runId,
+      completedAt: new Date().toISOString(),
+      executionMode: opts.live ? 'live' : 'fixture',
       task: task.id,
       track: task.track,
       passHatK: passHat,
       passAtK: passAt,
+      tokenUsage,
+      tasks: [taskSummary],
+      tracks: rollupByTrack([taskSummary]),
       trials: trialResults.map((result) => ({
         trial: result.trial,
         pass: result.pass,
@@ -327,14 +396,18 @@ export async function runEval(taskPath, opts = {}) {
         status: result.orchestration.status,
         usage: result.usage,
       })),
-      deltaVsBaseline: computeDeltaVsBaseline({
-        baselinePath,
-        taskId: task.id,
-        passHat,
-      }),
+      deltaVsBaseline,
+      delta_vs_baseline: deltaVsBaseline,
     };
 
     await writeRunOutputs({ runDir, trialResults, summary });
+    if (opts.updateBaseline) {
+      await updateBaselineTask(baselinePath, {
+        taskId: task.id,
+        k,
+        passHatK: passHat,
+      });
+    }
     return {
       runId,
       runDir,
@@ -365,6 +438,10 @@ function parseCliArgs(argv) {
       opts.runId = argv[++index];
     } else if (arg === '--results-dir') {
       opts.resultsDir = argv[++index];
+    } else if (arg === '--baseline') {
+      opts.baselinePath = argv[++index];
+    } else if (arg === '--update-baseline') {
+      opts.updateBaseline = true;
     } else if (arg === '--help' || arg === '-h') {
       opts.help = true;
     } else {
@@ -376,7 +453,7 @@ function parseCliArgs(argv) {
 
 function usage() {
   return [
-    'Usage: node evals/run.mjs --task <dir> [--fixture pass|fail] [--k N]',
+    'Usage: node evals/run.mjs --task <dir> [--fixture solution|none|pass|fail] [--k N] [--update-baseline]',
     '',
     'Runs one eval task and writes evals/results/<runId>/results.jsonl and summary.json.',
   ].join('\n');

@@ -7,5 +7,5 @@
   "prompt": "The test suite fails. Fix src/sum.mjs so every test passes.",
   "timeoutMs": 120000,
   "modelTier": "sonnet",
-  "k": 1
+  "k": 3
 }

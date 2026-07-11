@@ -1,0 +1,8 @@
+{
+  "name": "eval-fix-map-limit",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

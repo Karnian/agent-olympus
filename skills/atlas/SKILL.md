@@ -801,12 +801,21 @@ tmux send-keys -t "atlas-gemini-<N>" "\"$GEMINI_BIN\" <approval-flag> -p \"<impl
 
 **Worker execution & monitoring model (supervisor).** Non-tmux adapter workers (codex-exec, codex-appserver, claude-cli, gemini-exec, gemini-acp) run inside a **detached supervisor** that `spawnTeam()` launches per worker — NOT in your process. The supervisor owns the adapter and writes completion/failure/output to disk, so `monitorTeam(teamSlug)` (re-reading disk on every call) is the canonical monitor and survives the fresh-process polling model. The per-adapter failure detection below happens inside that supervisor and surfaces through `monitorTeam`'s returned `w.status` / `w.errorReason`; `collectResults(teamSlug)` returns each worker's durable output, and `shutdownTeam(teamSlug)` reaps the supervisor (and any orphaned adapter group). You do NOT `capturePane` supervisor workers — that is the tmux-fallback path only.
 
-**Codex/Gemini failure detection and Claude fallback:**
+**Codex/Gemini failure detection and provider fallback:**
 
 The monitoring system detects failures via the active adapter (inside the supervisor for non-tmux workers):
 
 ```javascript
-import { detectCodexError, reassignToClaude, selectAdapter } from './scripts/lib/worker-spawn.mjs';
+import {
+  completeClaudeFallback,
+  detectCodexError,
+  dispatchProviderFallback,
+  pollProviderFallback,
+  reassignProvider,
+  selectAdapter,
+  shutdownTeam,
+} from './scripts/lib/worker-spawn.mjs';
+const providerTeamsToShutdown = new Set(); // initialize once before the monitor loop
 
 // monitorTeam() handles adapter dispatch automatically (supervisor snapshot or tmux pane).
 // For codex-appserver: failures detected via structured CodexErrorInfo + mapAppServerErrorCode()
@@ -815,20 +824,45 @@ import { detectCodexError, reassignToClaude, selectAdapter } from './scripts/lib
 // Error categories: auth_failed, rate_limited, not_installed, network, crash, context_exceeded, timeout, unknown
 
 if (errorCheck.failed) {
-  // reassignToClaude() is adapter-aware — shuts down correct adapter type
-  const fallback = await reassignToClaude('atlas', `codex-${N}`, originalPrompt, errorCheck.reason);
+  // Use the real team/worker identity. opts.worker preserves provider identity
+  // for a legacy tmux worker that has no persisted spawnTeam state.
+  const fallback = await reassignProvider(
+    teamSlug,
+    failedWorker.name,
+    originalPrompt,
+    { category: errorCheck.reason, message: errorCheck.message },
+    failedWorker.session,
+    { worker: failedWorker, capabilities },
+  );
+  if (!fallback.targetProvider) continue;
+  const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
+  const progress = await pollProviderFallback(dispatched, cwd, capabilities);
+  for (const childTeam of progress.teamNames || []) providerTeamsToShutdown.add(childTeam);
 
-  // Spawn Claude replacement
-  Task(subagent_type="agent-olympus:executor", model="sonnet",
-    prompt=`${fallback.prompt}`)
+  if (progress.status === 'running') continue;
+  if (progress.status === 'completed') {
+    const providerOutput = progress.output;
+    // Store providerOutput as failedWorker.name's Phase 3 result before verify.
+  } else if (progress.status === 'claude-task') {
+    const claudeOutput = Task(subagent_type="agent-olympus:executor", model="sonnet",
+      prompt=`${progress.dispatched.replacementWorker.prompt}`)
+    await completeClaudeFallback(progress.dispatched, claudeOutput);
+    // Store claudeOutput as failedWorker.name's Phase 3 result before verify.
+  } else {
+    // No provider remained or the bounded chain failed: mark the story blocked.
+  }
 }
+
+// Only after all provider outputs are integrated and no further parent polls run:
+for (const childTeam of providerTeamsToShutdown) await shutdownTeam(childTeam, cwd);
 ```
 
 Rules:
 - If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again in this session.
 - If `errorCheck.reason` is `'crash'`, you may retry Codex once; if it crashes again, fall back to Claude.
 - If `errorCheck.reason` is `'timeout'`, retry once before reassigning.
-- `reassignToClaude()` handles adapter-specific cleanup (app-server shutdown, codex-exec kill, or tmux session kill) and wisdom recording.
+- `reassignProvider()` handles adapter-specific cleanup and records the reason; `dispatchProviderFallback()` retries one unavailable execution, then follows Codex → Gemini → Claude while preserving the worker prompt/task fields.
+- A provider replacement always uses a deterministic distinct child team name. Re-polling reuses it instead of spawning duplicates; reusing `teamSlug` would overwrite the parent team state.
 
 **Task Chaining** (for iterative Codex work):
 With codex-appserver, use `steerTurn()` for live mid-turn input. For exec/tmux adapters, multi-step work uses sequential calls:

@@ -92,7 +92,9 @@ async function runFixture({ fixture, cwd }) {
   return {
     status,
     finalEvent,
-    usage: descriptor?.usage ?? null,
+    // Fixtures prove harness behavior without invoking a provider. Never let a
+    // fixture descriptor masquerade as real provider token usage.
+    usage: null,
     timedOut,
     raw: {
       fixture: name,

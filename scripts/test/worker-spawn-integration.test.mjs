@@ -23,7 +23,15 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { spawnTeam, shutdownTeam, monitorTeam, collectResults, readProcStartId } from '../lib/worker-spawn.mjs';
+import {
+  collectResults,
+  dispatchProviderFallback,
+  monitorTeam,
+  planProviderFailover,
+  readProcStartId,
+  shutdownTeam,
+  spawnTeam,
+} from '../lib/worker-spawn.mjs';
 import { manifestPath as supManifestPath, snapshotPath as supSnapshotPath, outputPath as supOutputPath, writeSnapshot as supWriteSnapshot, readSnapshot as supReadSnapshot } from '../lib/supervisor-state.mjs';
 
 const WORKER_SPAWN_PATH = fileURLToPath(new URL('../lib/worker-spawn.mjs', import.meta.url));
@@ -247,6 +255,38 @@ test('spawnTeam integration: mixed team with codex + claude + gemini', async () 
     assert.equal(calls.geminiExecSpawn.length, 1);
     assert.equal(state.workers.length, 3);
     assert.ok(state.workers.every(w => w.status === 'running'));
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('provider failover integration: exhausted Codex descriptor dispatches Gemini via spawnTeam', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    const { calls, spawnSupervisor } = makeFakeAdapters();
+    const capabilities = { hasGeminiCli: true, hasClaudeCli: true };
+    const plan = planProviderFailover({
+      type: 'codex',
+      name: 'retry-worker',
+      prompt: 'preserve this exact task',
+      model: 'gpt-5',
+    }, { category: 'rate_limited', message: 'HTTP 429' }, capabilities);
+
+    const dispatched = await dispatchProviderFallback(
+      { ...plan, workerName: 'retry-worker' },
+      ws.cwd,
+      capabilities,
+      {
+        teamName: 'failover-gemini-integration',
+        spawnInject: { spawnSupervisor },
+      },
+    );
+
+    assert.equal(dispatched.dispatch, 'provider-team');
+    assert.equal(dispatched.state.workers[0]._adapterName, 'gemini-exec');
+    assert.equal(calls.geminiExecSpawn.length, 1);
+    assert.equal(calls.geminiExecSpawn[0].prompt, 'preserve this exact task');
+    assert.equal(calls.geminiExecSpawn[0].opts.model, null);
   } finally {
     ws.cleanup();
   }

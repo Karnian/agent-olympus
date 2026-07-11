@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "fix-map-limit",
+  "track": "capability",
+  "difficulty": "M",
+  "orchestrator": "atlas",
+  "prompt": "mapLimit starts every async operation at once. Enforce its concurrency limit while preserving result order and rejection behavior; all tests must pass.",
+  "timeoutMs": 180000,
+  "modelTier": "sonnet",
+  "k": 3
+}

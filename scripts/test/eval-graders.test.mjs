@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -8,34 +8,12 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 
 const tasks = [
-  {
-    id: 'fix-failing-test',
-    sourceFile: path.join('src', 'sum.mjs'),
-    fixedSource: `export function sum(a, b) {
-  return a + b;
-}
-`,
-  },
-  {
-    id: 'fix-null-deref',
-    sourceFile: path.join('src', 'greet.mjs'),
-    fixedSource: `export function greet(user) {
-  const name = user?.name ? user.name : 'guest';
-  return \`HELLO, \${name.toUpperCase()}\`;
-}
-`,
-  },
-  {
-    id: 'fix-off-by-one',
-    sourceFile: path.join('src', 'lastN.mjs'),
-    fixedSource: `export function lastN(arr, n) {
-  if (n <= 0) {
-    return [];
-  }
-  return arr.slice(Math.max(arr.length - n, 0));
-}
-`,
-  },
+  { id: 'fix-failing-test', track: 'regression' },
+  { id: 'fix-null-deref', track: 'regression' },
+  { id: 'fix-off-by-one', track: 'regression' },
+  { id: 'fix-deep-merge', track: 'capability' },
+  { id: 'fix-map-limit', track: 'capability' },
+  { id: 'fix-lru-cache', track: 'capability' },
 ];
 
 function copySeed(taskId) {
@@ -66,7 +44,11 @@ for (const task of tasks) {
 
     const fixed = copySeed(task.id);
     try {
-      writeFileSync(path.join(fixed.workdir, task.sourceFile), task.fixedSource);
+      cpSync(
+        path.join(repoRoot, 'evals', 'tasks', task.id, 'solution'),
+        fixed.workdir,
+        { recursive: true, force: true },
+      );
       const result = await grader.grade(fixed.workdir);
       assert.equal(result.pass, true, `${task.id} fixed seed should pass: ${JSON.stringify(result)}`);
     } finally {
@@ -80,7 +62,7 @@ for (const task of tasks) {
 // while no fixture leaves the seed broken → RED. This exercises
 // run → orchestrate(fixture) → grade → score end-to-end on the golden tasks
 // without a live orchestrator.
-for (const task of tasks) {
+for (const task of tasks.filter((candidate) => candidate.track === 'regression')) {
   test(`${task.id} runs GREEN via --fixture solution and RED without it`, async () => {
     const { runEval } = await import(new URL('../../evals/run.mjs', import.meta.url));
     const taskDir = path.join(repoRoot, 'evals', 'tasks', task.id);

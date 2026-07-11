@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "track": "regression",
+  "k": 3,
+  "tasks": {
+    "fix-failing-test": {
+      "k": 3,
+      "passHatK": true
+    },
+    "fix-null-deref": {
+      "k": 3,
+      "passHatK": true
+    },
+    "fix-off-by-one": {
+      "k": 3,
+      "passHatK": true
+    }
+  }
+}

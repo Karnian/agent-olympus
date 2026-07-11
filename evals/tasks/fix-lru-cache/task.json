@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "fix-lru-cache",
+  "track": "capability",
+  "difficulty": "M",
+  "orchestrator": "atlas",
+  "prompt": "LRUCache evicts recently read entries and mishandles updates. Restore true least-recently-used behavior at a fixed capacity; all tests must pass.",
+  "timeoutMs": 180000,
+  "modelTier": "sonnet",
+  "k": 3
+}

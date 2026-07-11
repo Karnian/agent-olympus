@@ -9,7 +9,11 @@
     "id",
     "track",
     "orchestrator",
-    "prompt"
+    "prompt",
+    "difficulty",
+    "timeoutMs",
+    "modelTier",
+    "k"
   ],
   "properties": {
     "schemaVersion": {
