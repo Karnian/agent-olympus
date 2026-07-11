@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-olympus.local/evals/task.schema.json",
+  "title": "Agent Olympus Eval Task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "track",
+    "orchestrator",
+    "prompt"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "track": {
+      "enum": [
+        "regression",
+        "capability"
+      ]
+    },
+    "orchestrator": {
+      "enum": [
+        "atlas",
+        "athena",
+        "solo"
+      ]
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1
+    },
+    "difficulty": {
+      "type": "string"
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "modelTier": {
+      "type": "string",
+      "minLength": 1
+    },
+    "k": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

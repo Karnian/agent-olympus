@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "_sample-marker-fix",
+  "track": "regression",
+  "difficulty": "S",
+  "orchestrator": "atlas",
+  "prompt": "Change marker.txt so it contains fixed.",
+  "timeoutMs": 600000,
+  "modelTier": "sonnet",
+  "k": 1
+}
