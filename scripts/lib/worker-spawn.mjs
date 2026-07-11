@@ -733,11 +733,17 @@ export function planProviderFailover(worker, failureReason, capabilities = {}) {
     ? failureReason
     : failureReason?.category || exhaustion.reason || 'unknown';
   const replacementWorker = { ...worker, type: targetProvider };
+  // Attempt counters are per-provider retry budgets. They are always cleared
+  // here and re-set explicitly on the retry branch below, so a provider SWITCH
+  // (codex→gemini) starts the new provider with a fresh retry budget instead of
+  // inheriting the exhausted provider's counters (which would deny the
+  // documented retry-once-on-unavailable to the replacement provider).
   for (const field of [
     'status', 'startedAt', 'completedAt', 'retryCount', 'lastActivityAt',
     'lastOutputHash', 'stalled', 'stalledMs', 'error', 'errorReason',
     'errorMessage', '_adapterName', '_handle', '_liveHandle', '_exitNonce',
     '_supStaleSeen', '_providerUnavailableAttemptKey',
+    '_providerUnavailableAttempts', '_providerCrashAttempts', '_providerRetryReason',
   ]) {
     delete replacementWorker[field];
   }
@@ -827,6 +833,11 @@ export async function reassignProvider(teamName, workerName, originalPrompt, fai
       try { killSession(session); } catch {}
     }
 
+    // The orchestrator's fresh-process monitor loop re-runs reassignProvider on
+    // every poll while the parent worker stays 'failed' (that re-run is what
+    // makes dispatchProviderFallback idempotent). The resulting repeated,
+    // near-identical lessons are absorbed by addWisdom's built-in similarity
+    // dedup (Jaccard ≥ 0.7), so no occurrence bookkeeping is needed here.
     await addWisdom({
       category: 'tool',
       lesson: `Worker "${workerName}" failed (${plan.reason}) — failover target: ${plan.targetProvider || 'none'}. Avoid worker type "${worker?.type || 'unknown'}" for reason "${plan.reason}" in this session.`,

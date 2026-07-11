@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -261,6 +262,36 @@ test('provider unavailability retries once with attempt state before failover', 
   assert.equal(second.exhaustion.reason, 'repeated_unavailability');
 });
 
+test('planProviderFailover gives a switched provider a fresh retry budget', () => {
+  // An exhausted Codex worker carries its own spent counters. The Gemini
+  // replacement must NOT inherit them, or its documented retry-once-on-
+  // unavailable would be denied on its very first network hiccup.
+  const plan = planProviderFailover(
+    {
+      type: 'codex',
+      name: 'worker',
+      prompt: 'same task',
+      _providerUnavailableAttempts: 2,
+      _providerCrashAttempts: 1,
+      _providerRetryReason: 'network: attempt 2',
+    },
+    { category: 'network', message: 'still unavailable' },
+    { hasGeminiCli: true },
+  );
+  assert.equal(plan.targetProvider, 'gemini');
+  assert.equal(plan.replacementWorker._providerUnavailableAttempts, undefined);
+  assert.equal(plan.replacementWorker._providerCrashAttempts, undefined);
+  assert.equal(plan.replacementWorker._providerRetryReason, undefined);
+
+  const geminiPlan = planProviderFailover(
+    { ...plan.replacementWorker },
+    { category: 'network', message: 'gemini hiccup' },
+    { hasGeminiCli: true },
+  );
+  assert.equal(geminiPlan.retry, true);
+  assert.equal(geminiPlan.targetProvider, 'gemini');
+});
+
 test('provider crashes create one real same-provider retry before demotion', () => {
   const first = planProviderFailover(
     { type: 'codex', name: 'worker', prompt: 'same task' },
@@ -497,6 +528,37 @@ test('pollProviderFallback collects completed output and advances failed childre
   });
   assert.equal(failed.status, 'claude-task');
   assert.equal(failed.dispatched.replacementWorker.prompt, 'same task');
+});
+
+test('repeated reassignProvider polls of one failure do not spam wisdom', () => {
+  // The fresh-process monitor loop re-runs reassignProvider on every poll while
+  // the parent worker stays 'failed' (that re-run makes dispatchProviderFallback
+  // idempotent). addWisdom's built-in similarity dedup must absorb the
+  // resulting near-identical lessons into a single entry.
+  const tempRoot = mkdtempSync(join(tmpdir(), 'ao-wisdom-dedup-'));
+  try {
+    const script = `
+      import { reassignProvider } from ${JSON.stringify(new URL('../lib/worker-spawn.mjs', import.meta.url).href)};
+      import { readFileSync } from 'node:fs';
+      const worker = { name: 'w1', type: 'codex', prompt: 'task', startedAt: 111 };
+      const liveState = { workers: [worker], capabilities: {} };
+      const failure = { category: 'crash', message: 'boom' };
+      await reassignProvider('dedup-team', 'w1', 'task', failure, undefined, { liveState });
+      await reassignProvider('dedup-team', 'w1', 'task', failure, undefined, { liveState });
+      await reassignProvider('dedup-team', 'w1', 'task', failure, undefined, { liveState });
+      const lines = readFileSync('.ao/wisdom.jsonl', 'utf-8').trim().split('\\n');
+      console.log(JSON.stringify({ entries: lines.length }));
+    `;
+    const stdout = execFileSync('node', ['--input-type=module', '-e', script], {
+      cwd: tempRoot,
+      encoding: 'utf-8',
+      timeout: 30_000,
+    });
+    const result = JSON.parse(stdout.trim().split('\n').pop());
+    assert.equal(result.entries, 1, 'repeated polls of one failure must dedupe to one wisdom entry');
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------

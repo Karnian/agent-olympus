@@ -84,6 +84,12 @@ regression task explicitly with `--live`, then inspect `summary.json`:
 result-event usage. The deterministic grader measures task outcome; it is a
 reliability floor, not a trajectory-quality judgment.
 
+The initial committed `baseline.json` is a declared target (regression tasks
+must hold 100% `pass^k` at `k=3`), not a measured live result — no live run has
+produced it yet. Until the first trusted operator live run refreshes it, a live
+`delta_vs_baseline` of `-1` may reflect that unmeasured seed rather than a real
+regression.
+
 After reviewing a trusted live run, refresh that task's committed baseline with
 the same command plus `--update-baseline`. Refresh is rejected for capability
 tasks, failed runs, fixture runs, ambiguous `--live`+`--fixture` invocations,

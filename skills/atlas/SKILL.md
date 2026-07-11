@@ -859,8 +859,7 @@ for (const childTeam of providerTeamsToShutdown) await shutdownTeam(childTeam, c
 
 Rules:
 - If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again in this session.
-- If `errorCheck.reason` is `'crash'`, you may retry Codex once; if it crashes again, fall back to Claude.
-- If `errorCheck.reason` is `'timeout'`, retry once before reassigning.
+- Crash/timeout/network retries are OWNED by the failover chain: `planProviderFailover` already retries the same provider once (crash, or first unavailable attempt) before switching. Do NOT manually respawn the failed provider yourself — that would double the retry.
 - `reassignProvider()` handles adapter-specific cleanup and records the reason; `dispatchProviderFallback()` retries one unavailable execution, then follows Codex → Gemini → Claude while preserving the worker prompt/task fields.
 - A provider replacement always uses a deterministic distinct child team name. Re-polling reuses it instead of spawning duplicates; reusing `teamSlug` would overwrite the parent team state.
 

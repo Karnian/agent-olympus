@@ -685,7 +685,7 @@ if (errorCheck.failed) {
 
 Rules:
 - If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again for any worker in this session.
-- If `errorCheck.reason` is `'crash'`, retry Codex once; if it crashes again, fall back to Claude.
+- Crash/timeout/network retries are OWNED by the failover chain: `planProviderFailover` already retries the same provider once before switching. Do NOT manually respawn the failed provider yourself — that would double the retry.
 - Always call `await reassignProvider()` before dispatching the replacement — it handles cleanup and wisdom recording in one step.
 - Never reuse the parent `teamName` for a provider replacement; `dispatchProviderFallback()` creates a distinct child team so parent state is not overwritten.
 
