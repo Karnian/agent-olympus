@@ -48,18 +48,27 @@ import { randomUUID } from 'node:crypto';
 import { getActiveRunId } from './scripts/lib/run-artifacts.mjs';
 import { createWorkerWorktree } from './scripts/lib/worktree.mjs';
 
+const goalTag =
+  `${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}-${randomUUID().slice(0, 4)}`;
 const runId =
   getActiveRunId('atlas') ||
   getActiveRunId('athena') ||
-  `codex-goal-${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}-${randomUUID().slice(0, 4)}`;
+  `codex-goal-${goalTag}`;
 
-const { worktreePath, branchName, created } =
-  createWorkerWorktree(cwd, runId, 'codex-goal');
+const { worktreePath, branchName, created, error } =
+  createWorkerWorktree(cwd, runId, `codex-goal-${goalTag}`, { onExisting: 'fail' });
+
+if (!created) {
+  // STOP: report the error and never run Codex from the cwd fallback.
+  throw new Error(`Codex goal worktree creation failed: ${error || 'unknown error'}`);
+}
 ```
 
-If `created === false`, the helper returned the cwd fallback. For this skill,
-that is not a disposable write boundary; stop before running Codex and report
-that git worktree isolation is unavailable.
+If `created === false`, worktree isolation is unavailable. A collision returns
+the intended existing worktree path while other failures retain the legacy
+`cwd` fallback; neither is a disposable write boundary for this skill. Report
+`error`, stop before running Codex, and never continue by writing into either
+path.
 
 ### Phase 2 - Goal Packet
 
@@ -212,3 +221,11 @@ On PASS, report:
 - The worktree path and branch name for user review/merge.
 
 Do not auto-merge the worktree, delete it, or commit to the main checkout.
+
+## Constraints
+
+- Parallel and sequential goals in the same Atlas/Athena run each receive a
+  unique worktree and branch while remaining grouped under the parent run id.
+- Worktree creation uses `onExisting: 'fail'`. If allocation fails or collides
+  with an existing artifact, preserve that artifact, report the error, and stop;
+  never fall back to running Codex in `cwd`.
