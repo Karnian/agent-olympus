@@ -65,7 +65,7 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **제한된 provider failover** *(v1.5.0)*: 소진된 Codex 워커를 가능하면 Gemini로, 최종적으로 native Claude로 전환. provider별 새 retry budget, generation-bound identity, 결정론적 child team, 영속 completion output을 사용하며, 인증된 Claude output 유실 시 완료 작업을 조용히 재실행하지 않고 fail-closed
 - **크래시 안전 event-backed run** *(v1.5.0)*: active-run CAS, phase evidence, finalization lock, terminal-failure marker, Athena generation adoption으로 resume/restart를 fail-closed 처리. no-follow 경화 I/O는 torn run-event JSONL 레코드를 건너뛰고 뒤의 정상 이벤트를 보존하며, append tail만 검증하고, ABA fence를 완화하지 않은 채 확실히 죽은 recovery claimant를 안전하게 재선출
 - **정제된 failed-run 피드백 루프** *(v1.5.0)*: SessionEnd가 독립 검증한 session-linked terminal task failure만 metadata/digest로 큐잉. 후보 승인과 task 연결은 사람이 수행하며 prompt, error text, path, diff, evidence payload, provider output은 큐에 기록하지 않음
-- **2719개 단위 테스트**: `node:test` 기반 108개 파일의 종합 테스트 스위트 (v1.5.0: 2719/2719 통과)
+- **2726개 단위 테스트**: `node:test` 기반 108개 파일의 종합 테스트 스위트 (v1.5.0: 2726/2726 통과)
 - **페일-세이프 아키텍처**: 훅이 Claude Code를 절대 차단하지 않음; 에러 시 우아한 저하
 
 ## 설치
@@ -394,10 +394,15 @@ hooks/               훅 이벤트 등록 (hooks.json)
 - Codex/Gemini 통신을 위한 워커별 디렉토리 (어댑터 관리)
 - 팀 완료 후 자동 정리
 
-**Worktrees** (`.ao/worktrees/<slug>/<worker>/`) — Athena 전용:
+**Worktrees** (`.ao/worktrees/<slug>/<worker>/`):
 - 각 병렬 워커를 위한 격리된 git worktree
 - 워커 간 파일 충돌 방지
-- 팀 완료 후 병합 및 정리
+- `/codex-goal`은 goal마다 고유 worktree를 만들고, 예정된 경로나 브랜치가
+  이미 있으면 기존 산출물을 변경하지 않고 중단
+- 기존 교체 정책은 폐기 가능한 stale/cancelled 워커 전용이며, 미병합 커밋은
+  `-orphan-<timestamp>` 브랜치로 보존하지만 미커밋·미추적 파일은 삭제
+- stale metadata 또는 동시 교체 경합처럼 상태가 모호하면 fail-closed로 중단;
+  보고된 worktree/브랜치를 확인하고 stale임을 검증한 뒤 prune 및 재시도
 
 ## 세션 복구
 
@@ -550,7 +555,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## 테스트
 
-`node:test` 기반 테스트 스위트 (108개 파일, 2719개 테스트, v1.5.0 기준)가 핵심 훅 라이브러리를 커버합니다:
+`node:test` 기반 테스트 스위트 (108개 파일, 2726개 테스트, v1.5.0 기준)가 핵심 훅 라이브러리를 커버합니다:
 
 ```bash
 npm test

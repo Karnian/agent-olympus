@@ -196,7 +196,15 @@ function nextPreservedBranchName(cwd, branchName) {
  *   - `onExisting: 'fail'` returns the intended colliding path/ref without
  *     mutating either artifact.
  *   - `onExisting: 'replace'` keeps the legacy replacement behavior, but
- *     preserves branches not reachable from HEAD under an orphan name.
+ *     preserves branches not reachable from HEAD under an orphan name. The
+ *     existing worktree is still removed with `--force`, so uncommitted and
+ *     untracked files in that worktree are discarded; only commits are
+ *     recoverable through the preserved branch.
+ *   - Stale Git worktree metadata or a concurrent orphan-name collision can
+ *     make replacement fail closed with `created: false`. Inspect the existing
+ *     worktree/branch state before pruning metadata or retrying.
+ *   - When `created` is false, treat `created` and `error` as authoritative;
+ *     `preservedBranch` may be only the candidate selected before a failed rename.
  *   - Other operational failures retain the legacy `cwd` fallback path.
  *
  * @param {string} cwd        - Project root (absolute path)
@@ -317,7 +325,9 @@ export function createWorkerWorktree(cwd, teamName, workerName, opts = {}) {
  *     if they need to distinguish a real isolated worktree from the
  *     fallback shared directory — this is a first-class field.
  *   - With the default replacement policy, branches not reachable from HEAD
- *     are renamed with an `-orphan-<timestamp>` suffix instead of deleted.
+ *     are renamed with an `-orphan-<timestamp>` suffix instead of deleted, but
+ *     uncommitted and untracked files in the replaced worktree are discarded.
+ *     Callers must use this helper only for worktrees known to be disposable.
  *   - Errors are never thrown; each worker's entry is self-contained.
  *
  * @param {string} teamName
