@@ -7,6 +7,7 @@
  *   - preserves state files newer than 24 hours
  *   - cleans team directories older than 24 hours
  *   - preserves recent team directories
+ *   - cleans stale provider-fallback artifacts while preserving recent ones
  *   - handles missing .ao/state/ and .ao/teams/ directories gracefully
  *   - outputs {} or suppressOutput JSON
  *   - always outputs valid JSON (fail-safe)
@@ -17,12 +18,15 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execSync } from 'node:child_process';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, utimesSync } from 'node:fs';
+import { execFileSync, execSync } from 'node:child_process';
+import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync, utimesSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRun } from '../lib/run-artifacts.mjs';
+import { finalizeFailedRun } from '../lib/run-failure.mjs';
+import { getPhaseSequence } from '../lib/phase-runner.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = path.resolve(__dirname, '..', 'session-end.mjs');
@@ -45,15 +49,60 @@ async function removeTmpDir(dir) {
  * Run the session-end hook in `cwd`.
  * Returns parsed JSON output from stdout.
  */
-function runHook(cwd) {
-  const raw = execSync(`echo '{}' | node "${SCRIPT}"`, {
+function runHook(cwd, payload = {}) {
+  const raw = execFileSync(process.execPath, [SCRIPT], {
     encoding: 'utf-8',
     cwd,
     env: { ...process.env },
     stdio: ['pipe', 'pipe', 'pipe'],
+    input: JSON.stringify(payload),
     timeout: 10000,
   });
   return JSON.parse(raw.trim());
+}
+
+function createTerminalFailure(cwd, failure = {}) {
+  const runsBase = path.join(cwd, '.ao', 'artifacts', 'runs');
+  const stateDir = path.join(cwd, '.ao', 'state');
+  const orchestrator = failure.orchestrator || 'atlas';
+  const created = createRun(orchestrator, 'session-end candidate test', { base: runsBase, stateDir });
+  const phase = failure.phase || 'verify';
+  const now = new Date().toISOString();
+  const ids = getPhaseSequence(orchestrator).map(item => item.id);
+  const cut = ids.indexOf(phase);
+  const phases = Object.fromEntries(ids.map((id, index) => [id, {
+    status: index < cut ? 'completed' : (index === cut ? 'in_progress' : 'pending'),
+    ...(index <= cut ? { startedAt: now, attempts: 1 } : {}),
+    ...(index < cut ? { completedAt: now } : {}),
+  }]));
+  writeFileSync(path.join(created.runDir, 'pipeline.json'), JSON.stringify({
+    schemaVersion: 1,
+    runId: created.runId,
+    orchestrator,
+    createdAt: now,
+    updatedAt: now,
+    attempt: 1,
+    phases,
+  }), { mode: 0o600 });
+  finalizeFailedRun(created.runId, {
+    orchestrator,
+    failureClass: failure.failureClass || 'task-outcome',
+    code: failure.code || 'verification_exhausted',
+    phase,
+  }, { base: runsBase, stateDir });
+  return created.runId;
+}
+
+function writeSession(cwd, sessionId, runIds) {
+  const dir = path.join(cwd, '.ao', 'sessions');
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(dir, `${sessionId}.json`), JSON.stringify({
+    sessionId,
+    startedAt: new Date().toISOString(),
+    endedAt: null,
+    status: 'active',
+    runIds,
+  }), { mode: 0o600 });
 }
 
 /**
@@ -254,6 +303,93 @@ describe('session-end: mixed files — only stale ones removed', () => {
   });
 });
 
+describe('session-end: provider fallback artifact lifecycle', () => {
+  let tmpDir;
+  let staleArtifact;
+  let freshArtifact;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    const artifactDir = path.join(tmpDir, '.ao', 'artifacts', 'provider-fallback');
+    staleArtifact = createFile(artifactDir, 'stale.json', STALE_MS + 60 * 1000);
+    freshArtifact = createFile(artifactDir, 'fresh.json', 30 * 60 * 1000);
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('removes stale output and preserves resumable recent output', () => {
+    runHook(tmpDir);
+    assert.equal(existsSync(staleArtifact), false);
+    assert.equal(existsSync(freshArtifact), true);
+  });
+});
+
+describe('session-end: HU-17 bounded linked-run candidate collection', () => {
+  let tmpDir;
+  before(async () => { tmpDir = await makeTmpDir(); });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('collects only eligible failures linked to the ending session', () => {
+    const linkedRun = createTerminalFailure(tmpDir);
+    const unlinkedRun = createTerminalFailure(tmpDir);
+    const infrastructureRun = createTerminalFailure(tmpDir, {
+      failureClass: 'infrastructure',
+      code: 'provider_unavailable',
+      phase: 'verify',
+    });
+    const sessionId = 'hu17-linked-session';
+    writeSession(tmpDir, sessionId, [linkedRun, infrastructureRun]);
+
+    const output = runHook(tmpDir, { session_id: sessionId });
+    assert.ok(typeof output === 'object');
+
+    const recordsDir = path.join(tmpDir, '.ao', 'eval-candidates', 'records');
+    const records = readdirSync(recordsDir).filter((name) => name.endsWith('.json'));
+    assert.equal(records.length, 1, 'only the eligible linked run becomes a candidate');
+    const candidate = JSON.parse(readFileSync(path.join(recordsDir, records[0]), 'utf-8'));
+    assert.equal(candidate.run.runId, linkedRun);
+    assert.notEqual(candidate.run.runId, unlinkedRun, 'SessionEnd must not globally scan run artifacts');
+    assert.notEqual(candidate.run.runId, infrastructureRun, 'infrastructure failures are excluded');
+
+    const session = JSON.parse(readFileSync(
+      path.join(tmpDir, '.ao', 'sessions', `${sessionId}.json`),
+      'utf-8',
+    ));
+    assert.equal(session.status, 'ended');
+  });
+
+  it('caps linked-run inspection at the newest 64 ids', () => {
+    const source = readFileSync(SCRIPT, 'utf-8');
+    assert.match(source, /session\.runIds[\s\S]*?slice\(-64\)/,
+      'SessionEnd must have a structural 64-run cap and no global listing fallback');
+    assert.doesNotMatch(source, /listRuns\s*\(/);
+  });
+
+  it('returns within the one-second budget when the candidate queue is live-locked', () => {
+    const runId = createTerminalFailure(tmpDir);
+    const sessionId = 'hu17-live-lock-session';
+    writeSession(tmpDir, sessionId, [runId]);
+    const candidateBase = path.join(tmpDir, '.ao', 'eval-candidates');
+    const lockDir = path.join(candidateBase, '.queue-lock');
+    mkdirSync(path.join(candidateBase, 'records'), { recursive: true, mode: 0o700 });
+    mkdirSync(lockDir, { mode: 0o700 });
+    writeFileSync(path.join(lockDir, 'owner.json'), JSON.stringify({
+      schemaVersion: 1,
+      token: '12345678-1234-4123-8123-123456789abc',
+      pid: process.pid,
+      startId: null,
+      createdAt: new Date().toISOString(),
+    }), { mode: 0o600 });
+
+    const started = Date.now();
+    runHook(tmpDir, { session_id: sessionId });
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 1_000, `SessionEnd exceeded one-second collection budget: ${elapsed}ms`);
+    const session = JSON.parse(readFileSync(
+      path.join(tmpDir, '.ao', 'sessions', `${sessionId}.json`), 'utf8',
+    ));
+    assert.equal(session.status, 'ended');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Output format
 // ---------------------------------------------------------------------------
@@ -384,6 +520,28 @@ describe('session-end: PROTECTED_NAMES allow-list defense', () => {
     assert.ok(existsSync(path.join(stateDir, 'design-identity.json')));
     assert.ok(existsSync(path.join(stateDir, 'taste.jsonl')));
     assert.ok(existsSync(path.join(stateDir, 'wisdom.jsonl')));
+  });
+});
+
+describe('session-end: provider recovery claim lineages survive across sessions', () => {
+  let tmpDir;
+  const claimName = `.provider-fallback-${'a'.repeat(24)}-recovery-${'b'.repeat(64)}.claim`;
+  const successorName = `.provider-fallback-${'a'.repeat(24)}-recovery-${'b'.repeat(64)}-successor-${'c'.repeat(64)}.claim`;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    createFile(stateDir, claimName, STALE_MS + 60 * 1000);
+    createFile(stateDir, successorName, STALE_MS + 60 * 1000);
+    createFile(stateDir, '.provider-fallback-malformed-recovery.claim', STALE_MS + 60 * 1000);
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('preserves exact root and successor claims but still sweeps lookalikes', () => {
+    runHook(tmpDir);
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    assert.ok(existsSync(path.join(stateDir, claimName)));
+    assert.ok(existsSync(path.join(stateDir, successorName)));
+    assert.equal(existsSync(path.join(stateDir, '.provider-fallback-malformed-recovery.claim')), false);
   });
 });
 

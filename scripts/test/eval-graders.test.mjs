@@ -8,34 +8,12 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 
 const tasks = [
-  {
-    id: 'fix-failing-test',
-    sourceFile: path.join('src', 'sum.mjs'),
-    fixedSource: `export function sum(a, b) {
-  return a + b;
-}
-`,
-  },
-  {
-    id: 'fix-null-deref',
-    sourceFile: path.join('src', 'greet.mjs'),
-    fixedSource: `export function greet(user) {
-  const name = user?.name ? user.name : 'guest';
-  return \`HELLO, \${name.toUpperCase()}\`;
-}
-`,
-  },
-  {
-    id: 'fix-off-by-one',
-    sourceFile: path.join('src', 'lastN.mjs'),
-    fixedSource: `export function lastN(arr, n) {
-  if (n <= 0) {
-    return [];
-  }
-  return arr.slice(Math.max(arr.length - n, 0));
-}
-`,
-  },
+  { id: 'fix-failing-test', track: 'regression' },
+  { id: 'fix-null-deref', track: 'regression' },
+  { id: 'fix-off-by-one', track: 'regression' },
+  { id: 'fix-deep-merge', track: 'capability' },
+  { id: 'fix-map-limit', track: 'capability' },
+  { id: 'fix-lru-cache', track: 'capability' },
 ];
 
 function copySeed(taskId) {
@@ -66,7 +44,11 @@ for (const task of tasks) {
 
     const fixed = copySeed(task.id);
     try {
-      writeFileSync(path.join(fixed.workdir, task.sourceFile), task.fixedSource);
+      cpSync(
+        path.join(repoRoot, 'evals', 'tasks', task.id, 'solution'),
+        fixed.workdir,
+        { recursive: true, force: true },
+      );
       const result = await grader.grade(fixed.workdir);
       assert.equal(result.pass, true, `${task.id} fixed seed should pass: ${JSON.stringify(result)}`);
     } finally {
@@ -80,7 +62,7 @@ for (const task of tasks) {
 // while no fixture leaves the seed broken → RED. This exercises
 // run → orchestrate(fixture) → grade → score end-to-end on the golden tasks
 // without a live orchestrator.
-for (const task of tasks) {
+for (const task of tasks.filter((candidate) => candidate.track === 'regression')) {
   test(`${task.id} runs GREEN via --fixture solution and RED without it`, async () => {
     const { runEval } = await import(new URL('../../evals/run.mjs', import.meta.url));
     const taskDir = path.join(repoRoot, 'evals', 'tasks', task.id);
@@ -107,4 +89,60 @@ test('runEval refuses an implicit live run (no fixture, no --live)', async () =>
     /Refusing to run the real orchestrator implicitly/,
     'a bare run must not silently spawn a real unsupervised orchestrator',
   );
+});
+
+test('deep-merge grader rejects implementations that mutate their inputs', async () => {
+  const candidate = copySeed('fix-deep-merge');
+  try {
+    writeFileSync(path.join(candidate.workdir, 'src', 'mergeConfig.mjs'), `
+function apply(base, override) {
+  for (const [key, value] of Object.entries(override)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      base[key] = apply(base[key] || {}, value);
+    } else {
+      base[key] = value;
+    }
+  }
+  return base;
+}
+export function mergeConfig(base, override) {
+  apply(base, override);
+  return structuredClone(base);
+}
+`);
+    const grader = await import(new URL('../../evals/tasks/fix-deep-merge/grader.mjs', import.meta.url));
+    const result = await grader.grade(candidate.workdir);
+    assert.equal(result.checks[0].pass, true, 'control: public tests do not catch input mutation');
+    assert.equal(result.checks[1].pass, false, 'hidden invariants must reject input mutation');
+  } finally {
+    rmSync(candidate.tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('map-limit grader rejects duplicate mapper side effects', async () => {
+  const candidate = copySeed('fix-map-limit');
+  try {
+    writeFileSync(path.join(candidate.workdir, 'src', 'mapLimit.mjs'), `
+export async function mapLimit(items, limit, mapper) {
+  if (!Number.isInteger(limit) || limit < 1) throw new Error('invalid limit');
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  for (let index = 0; index < items.length; index += 1) await mapper(items[index], index);
+  return results;
+}
+`);
+    const grader = await import(new URL('../../evals/tasks/fix-map-limit/grader.mjs', import.meta.url));
+    const result = await grader.grade(candidate.workdir);
+    assert.equal(result.checks[0].pass, true, 'control: public tests do not catch duplicate mapper calls');
+    assert.equal(result.checks[1].pass, false, 'hidden invariants must reject duplicate mapper calls');
+  } finally {
+    rmSync(candidate.tempRoot, { recursive: true, force: true });
+  }
 });

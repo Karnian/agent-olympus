@@ -2,11 +2,22 @@ import { createHash, randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { readProcStartId } from './proc-identity.mjs';
+import { acquireRecoveryClaim, statGeneration } from './recovery-claim.mjs';
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession, WORKER_EXIT_MARKER } from './tmux-session.mjs';
 import { readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
 import { addWisdom } from './wisdom.mjs';
 import { cleanupTeamWorktrees } from './worktree.mjs';
-import { mkdirSync, readFileSync, existsSync, unlinkSync } from 'fs';
+import {
+  closeSync,
+  linkSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  existsSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'fs';
 import { join, resolve } from 'path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import { buildRecoveryStrategy } from './stuck-recovery.mjs';
@@ -36,6 +47,13 @@ const ARTIFACTS_DIR = '.ao/artifacts';
 
 /** Default stall threshold in milliseconds (5 minutes of zero output change) */
 const STALL_THRESHOLD_MS = 5 * 60 * 1000;
+const CLAUDE_FALLBACK_LOCK_TIMEOUT_MS = 5 * 1000;
+const TEAM_RUN_ID = /^[a-f0-9]{16}$/;
+
+/** Allocate the generation before launch so an orchestrator can persist it first. */
+export function allocateTeamRunId() {
+  return randomBytes(8).toString('hex');
+}
 
 /**
  * Grace period (ms) before escalating an orphaned-process-group kill from
@@ -68,6 +86,16 @@ const CODEX_ERROR_PATTERNS = [
   { pattern: /command not found|ENOENT|codex:.*not found|No such file or directory|not found in PATH/i, reason: 'not_installed' },
   { pattern: /ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up|network error/i, reason: 'network' },
   { pattern: /fatal error|unhandled exception|panic:|SIGSEGV|SIGABRT|segmentation fault/i, reason: 'crash' },
+];
+
+const PROVIDER_EXHAUSTION_PATTERN = /rate.?limit|\b429\b|quota.*exceeded|resource[_ ]exhausted|too many requests/i;
+const PROVIDER_UNAVAILABLE_CATEGORIES = new Set(['network', 'timeout']);
+const CAPABILITY_KEYS = [
+  'hasCodexAppServer',
+  'hasCodexExecJson',
+  'hasClaudeCli',
+  'hasGeminiAcp',
+  'hasGeminiCli',
 ];
 
 // ─── Adapter registry (strategy table) ─────────────────────────────────────
@@ -628,8 +656,165 @@ export function detectCodexError(output) {
 }
 
 /**
- * Kill a failed worker, record the failure in wisdom, and return a
- * descriptor for the orchestrator to spawn a Claude fallback.
+ * Distinguish provider exhaustion from a generic worker failure. Structured
+ * adapter categories win; textual matching is a fallback for tmux/legacy
+ * results. Network/timeouts require two distinct failed attempts so a single
+ * transient disconnect does not trigger a provider switch.
+ */
+export function detectProviderExhaustion(error, unavailableAttempts = 0) {
+  const category = typeof error === 'string' ? error : error?.category;
+  const message = typeof error === 'string' ? error : error?.message;
+  if (category === 'rate_limited' || category === 'provider_exhausted') {
+    return { exhausted: true, reason: category };
+  }
+  if (PROVIDER_EXHAUSTION_PATTERN.test(String(message || ''))) {
+    return { exhausted: true, reason: 'rate_limited' };
+  }
+  if (PROVIDER_UNAVAILABLE_CATEGORIES.has(category) && unavailableAttempts >= 2) {
+    return { exhausted: true, reason: 'repeated_unavailability' };
+  }
+  return { exhausted: false, reason: null };
+}
+
+function providerForWorker(worker) {
+  if (worker?.type === 'codex' || String(worker?._adapterName || '').startsWith('codex-')) return 'codex';
+  if (worker?.type === 'gemini' || String(worker?._adapterName || '').startsWith('gemini-')) return 'gemini';
+  if (worker?.type === 'claude' || worker?._adapterName === 'claude-cli') return 'claude';
+  return 'unknown';
+}
+
+function normalizeCapabilities(capabilities) {
+  const out = {};
+  for (const key of CAPABILITY_KEYS) out[key] = Boolean(capabilities?.[key]);
+  return out;
+}
+
+function stripProviderFields(worker, fields) {
+  for (const field of fields) {
+    if (field in worker) {
+      worker[`_demoted${field[0].toUpperCase()}${field.slice(1)}`] = worker[field];
+      delete worker[field];
+    }
+  }
+}
+
+/**
+ * Build the replacement descriptor consumed by the orchestrator. Exhausted
+ * Codex prefers Gemini when a Gemini adapter is available; exhausted Gemini
+ * (or Codex without Gemini) falls through to Claude. The prompt and ordinary
+ * task fields are retained, while stale runtime handles and source-provider
+ * model fields are removed.
+ */
+export function planProviderFailover(worker, failureReason, capabilities = {}) {
+  const sourceProvider = providerForWorker(worker);
+  const failureCategory = typeof failureReason === 'string' ? failureReason : failureReason?.category;
+  const recordedUnavailableAttempts = Number(worker?._providerUnavailableAttempts) || 0;
+  const crashAttempts = Number(worker?._providerCrashAttempts) || 0;
+  // A structured network/timeout failure is itself attempt one even when it
+  // came from a legacy tmux caller that has no persisted monitor counter.
+  const unavailableAttempts = PROVIDER_UNAVAILABLE_CATEGORIES.has(failureCategory)
+    ? Math.max(1, recordedUnavailableAttempts)
+    : recordedUnavailableAttempts;
+  const exhaustion = detectProviderExhaustion(
+    failureReason,
+    unavailableAttempts,
+  );
+  const retryUnavailable = PROVIDER_UNAVAILABLE_CATEGORIES.has(failureCategory)
+    && unavailableAttempts < 2
+    && sourceProvider !== 'unknown';
+  const retryCrash = failureCategory === 'crash'
+    && crashAttempts < 1
+    && (sourceProvider === 'codex' || sourceProvider === 'gemini');
+  const retryProvider = retryUnavailable || retryCrash;
+  const hasGemini = Boolean(capabilities?.hasGeminiAcp || capabilities?.hasGeminiCli);
+  const targetProvider = retryProvider
+    ? sourceProvider
+    : exhaustion.exhausted && sourceProvider === 'codex' && hasGemini
+      ? 'gemini'
+      : sourceProvider === 'claude' ? null : 'claude';
+
+  if (!targetProvider) {
+    return {
+      fallbackNeeded: false,
+      sourceProvider,
+      targetProvider: null,
+      retry: false,
+      exhaustion,
+      reason: typeof failureReason === 'string' ? failureReason : failureReason?.category || 'unknown',
+      replacementWorker: null,
+    };
+  }
+
+  const reason = typeof failureReason === 'string'
+    ? failureReason
+    : failureReason?.category || exhaustion.reason || 'unknown';
+  const replacementWorker = { ...worker, type: targetProvider };
+  // Attempt counters are per-provider retry budgets. They are always cleared
+  // here and re-set explicitly on the retry branch below, so a provider SWITCH
+  // (codex→gemini) starts the new provider with a fresh retry budget instead of
+  // inheriting the exhausted provider's counters (which would deny the
+  // documented retry-once-on-unavailable to the replacement provider).
+  for (const field of [
+    'status', 'startedAt', 'completedAt', 'retryCount', 'lastActivityAt',
+    'lastOutputHash', 'stalled', 'stalledMs', 'error', 'errorReason',
+    'errorMessage', '_adapterName', '_handle', '_liveHandle', '_exitNonce',
+    'session',
+    '_supStaleSeen', '_providerUnavailableAttemptKey',
+    '_providerUnavailableAttempts', '_providerCrashAttempts', '_providerRetryReason',
+  ]) {
+    delete replacementWorker[field];
+  }
+  // A replacement continues the SAME bounded task. When the source worker was
+  // already operating inside an Athena worktree, keep that exact filesystem
+  // affinity instead of silently falling back to the project root (or creating
+  // a throwaway child-team branch whose successful edits are later deleted).
+  const executionCwd = worker?.worktreePath || worker?.cwd;
+  if (executionCwd) {
+    replacementWorker.cwd = executionCwd;
+    if (worker?.worktreePath) {
+      replacementWorker.worktreePath = worker.worktreePath;
+      replacementWorker.worktreeCreated = false;
+      replacementWorker._inheritedWorktree = true;
+    }
+  }
+  if (retryProvider) {
+    // Same-provider retries share one bounded history even when the failure
+    // category alternates (for example crash -> network -> crash). Preserve
+    // both counters; only a provider SWITCH receives a fresh budget.
+    if (recordedUnavailableAttempts > 0) {
+      replacementWorker._providerUnavailableAttempts = recordedUnavailableAttempts;
+    }
+    if (crashAttempts > 0) replacementWorker._providerCrashAttempts = crashAttempts;
+    if (retryUnavailable) replacementWorker._providerUnavailableAttempts = unavailableAttempts;
+    if (retryCrash) replacementWorker._providerCrashAttempts = crashAttempts + 1;
+    replacementWorker._providerRetryReason = retryUnavailable
+      ? `${failureCategory}: attempt ${unavailableAttempts + 1}`
+      : `crash: attempt ${crashAttempts + 2}`;
+  } else {
+    replacementWorker._providerFailoverOrigin = worker?._providerFailoverOrigin || sourceProvider;
+    replacementWorker._demotedFrom = sourceProvider;
+    replacementWorker._demotionReason = exhaustion.exhausted
+      ? `provider exhaustion (${exhaustion.reason}): ${sourceProvider} -> ${targetProvider}`
+      : `worker failure (${reason}): ${sourceProvider} -> ${targetProvider}`;
+    if (sourceProvider === 'codex') stripProviderFields(replacementWorker, CODEX_PROVIDER_FIELDS);
+    if (sourceProvider === 'gemini') stripProviderFields(replacementWorker, ['model']);
+  }
+
+  return {
+    fallbackNeeded: true,
+    sourceProvider,
+    targetProvider,
+    retry: retryProvider,
+    exhaustion,
+    reason,
+    replacementWorker,
+  };
+}
+
+/**
+ * Kill a failed worker, record the failure in wisdom, and return a descriptor
+ * for the orchestrator to spawn the next provider. A legacy alias is retained
+ * for callers; provider exhaustion prefers Codex → Gemini → Claude.
  * Adapter-aware: calls the correct shutdown method based on _adapterName.
  *
  * IMPORTANT: `_liveHandle` is an in-memory adapter handle that is STRIPPED by
@@ -643,18 +828,25 @@ export function detectCodexError(output) {
  * @param {string} teamName
  * @param {string} workerName
  * @param {string} originalPrompt
- * @param {string} failureReason
+ * @param {string|{category?:string,message?:string}} failureReason
  * @param {string} [sessionOverride] - tmux session name override
- * @param {{ liveState?: object }} [opts] - Optional in-memory state with live handles
- * @returns {Promise<{ fallbackNeeded: boolean, teamName: string, workerName: string, prompt: string, reason: string }>}
+ * @param {{ liveState?: object, worker?: object, capabilities?: object }} [opts]
+ * @returns {Promise<{ fallbackNeeded: boolean, teamName: string, workerName: string, prompt: string, reason: string, targetProvider: string|null, replacementWorker: object|null }>}
  */
-export async function reassignToClaude(teamName, workerName, originalPrompt, failureReason, sessionOverride, opts = {}) {
+export async function reassignProvider(teamName, workerName, originalPrompt, failureReason, sessionOverride, opts = {}) {
+  let plan = null;
   try {
     // Prefer in-memory live state (has _liveHandle), fall back to disk-loaded state
     const state = opts.liveState || loadTeamState(teamName);
-    const worker = state?.workers?.find(w => w.name === workerName);
+    const worker = state?.workers?.find(w => w.name === workerName) || opts.worker;
     const adapterName = worker?._adapterName || 'tmux';
     const registryEntry = ADAPTER_REGISTRY[adapterName];
+    plan = planProviderFailover(
+      worker || { name: workerName, prompt: originalPrompt, type: 'unknown' },
+      failureReason,
+      opts.capabilities || state?.capabilities || {},
+    );
+    if (plan.replacementWorker) plan.replacementWorker.prompt = originalPrompt;
 
     if (isSupervisorWorker(state, worker)) {
       // Supervisor worker: supervisor-first graceful shutdown + adapter reap (F3).
@@ -678,16 +870,756 @@ export async function reassignToClaude(teamName, workerName, originalPrompt, fai
       try { killSession(session); } catch {}
     }
 
+    // The orchestrator's fresh-process monitor loop re-runs reassignProvider on
+    // every poll while the parent worker stays 'failed' (that re-run is what
+    // makes dispatchProviderFallback idempotent). The resulting repeated,
+    // near-identical lessons are absorbed by addWisdom's built-in similarity
+    // dedup (Jaccard ≥ 0.7), so no occurrence bookkeeping is needed here.
     await addWisdom({
       category: 'tool',
-      lesson: `Worker "${workerName}" failed (${failureReason}) — automatically reassigned to agent-olympus:executor. Avoid worker type "${worker?.type || 'unknown'}" for reason "${failureReason}" in this session.`,
+      lesson: `Worker "${workerName}" failed (${plan.reason}) — failover target: ${plan.targetProvider || 'none'}. Avoid worker type "${worker?.type || 'unknown'}" for reason "${plan.reason}" in this session.`,
       confidence: 'high',
     });
 
-    return { fallbackNeeded: true, teamName, workerName, prompt: originalPrompt, reason: failureReason };
+    return {
+      ...plan,
+      teamName,
+      workerName,
+      prompt: originalPrompt,
+      parentRunId: state?.runId || opts.parentRunId || null,
+      parentWorkerRunId: workerRunIdentity(worker) || opts.parentWorkerRunId || null,
+      rootTeamName: opts.rootTeamName || teamName,
+      rootWorkerName: opts.rootWorkerName || workerName,
+      rootRunId: opts.rootRunId || state?.runId || opts.parentRunId || null,
+      rootWorkerRunId: opts.rootWorkerRunId || workerRunIdentity(worker) || opts.parentWorkerRunId || null,
+      rootPrompt: opts.rootPrompt || originalPrompt,
+    };
   } catch {
-    return { fallbackNeeded: true, teamName, workerName, prompt: originalPrompt, reason: failureReason };
+    const fallbackPlan = plan || planProviderFailover(
+      { name: workerName, prompt: originalPrompt, type: 'unknown' },
+      failureReason,
+      opts.capabilities || {},
+    );
+    if (fallbackPlan.replacementWorker) fallbackPlan.replacementWorker.prompt = originalPrompt;
+    return {
+      ...fallbackPlan,
+      teamName,
+      workerName,
+      prompt: originalPrompt,
+      parentRunId: opts.parentRunId || null,
+      parentWorkerRunId: opts.parentWorkerRunId || null,
+      rootTeamName: opts.rootTeamName || teamName,
+      rootWorkerName: opts.rootWorkerName || workerName,
+      rootRunId: opts.rootRunId || opts.parentRunId || null,
+      rootWorkerRunId: opts.rootWorkerRunId || opts.parentWorkerRunId || null,
+      rootPrompt: opts.rootPrompt || originalPrompt,
+    };
   }
+}
+
+/** Backward-compatible alias for callers that still use the old Claude-only name. */
+export async function reassignToClaude(...args) {
+  return reassignProvider(...args);
+}
+
+function workerRunIdentity(worker) {
+  return worker?._attemptId
+    || worker?._handle?.workerRunId
+    || worker?._exitNonce
+    || worker?.startedAt
+    || null;
+}
+
+function fallbackRootIdentity(fallback) {
+  return {
+    teamName: fallback?.rootTeamName || fallback?.teamName || null,
+    workerName: fallback?.rootWorkerName || fallback?.workerName || null,
+    runId: fallback?.rootRunId || fallback?.parentRunId || null,
+    workerRunId: fallback?.rootWorkerRunId || fallback?.parentWorkerRunId || null,
+    prompt: fallback?.rootPrompt || fallback?.prompt || fallback?.replacementWorker?.prompt || '',
+  };
+}
+
+function hasCompleteFallbackRoot(identity) {
+  return Boolean(
+    identity?.teamName
+    && identity?.workerName
+    && identity?.runId
+    && identity?.workerRunId,
+  );
+}
+
+function fallbackRootId(fallback) {
+  const root = fallbackRootIdentity(fallback);
+  return createHash('sha256').update(JSON.stringify([
+    root.teamName,
+    root.workerName,
+    root.runId,
+    root.workerRunId,
+    root.prompt,
+  ])).digest('hex').slice(0, 24);
+}
+
+function claudeFallbackStatePath(handoffId) {
+  return join(STATE_DIR, `provider-fallback-${handoffId}.json`);
+}
+
+function claudeFallbackOutputPath(handoffId) {
+  return join(ARTIFACTS_DIR, 'provider-fallback', `${handoffId}.json`);
+}
+
+function fallbackLockPath(handoffId, lockDir = STATE_DIR) {
+  return join(lockDir, `provider-fallback-${handoffId}.lock`);
+}
+
+function processIsAlive(pid) {
+  // PID 1 is a valid long-running Node owner in containers. The >1 guard used
+  // for process-group signalling must not leak into non-signalling liveness
+  // checks or a second caller can steal a live lock from the orchestrator.
+  if (!Number.isInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+function fallbackLockIsStale(lockPath, opts = {}) {
+  try {
+    const owner = JSON.parse(readFileSync(lockPath, 'utf-8'));
+    if (owner?.schemaVersion !== 1 || !Number.isInteger(owner.pid) || !owner.token) {
+      // Older builds published the path before owner metadata was complete.
+      // An empty/malformed file may therefore still belong to a paused live
+      // creator; elapsed time alone cannot prove otherwise. Fail closed.
+      return false;
+    }
+    if (!processIsAlive(owner.pid)) return true;
+    if (typeof owner.startId === 'string' && owner.startId.length > 0) {
+      const currentStartId = readProcStartId(owner.pid);
+      if (currentStartId !== null && currentStartId !== owner.startId) return true;
+    }
+    return false;
+  } catch { return false; }
+}
+
+async function withFallbackLock(handoffId, fn, opts = {}) {
+  if (opts.withLock) return opts.withLock(handoffId, fn);
+  const lockDir = opts.lockDir || STATE_DIR;
+  mkdirSync(lockDir, { recursive: true, mode: 0o700 });
+  const lockPath = fallbackLockPath(handoffId, lockDir);
+  const startedAt = Date.now();
+  const lockTimeoutMs = Number.isFinite(opts.lockTimeoutMs)
+    ? Math.max(0, opts.lockTimeoutMs)
+    : CLAUDE_FALLBACK_LOCK_TIMEOUT_MS;
+  const owner = {
+    schemaVersion: 1,
+    pid: process.pid,
+    startId: readProcStartId(process.pid),
+    createdAt: startedAt,
+    token: randomBytes(16).toString('hex'),
+  };
+  const createOwnedLock = () => {
+    // Publish only a fully initialized owner record. Writing directly through
+    // open('wx') exposes an empty pathname before writeFileSync; a paused
+    // creator could then be misclassified as stale and enter the critical
+    // section alongside its replacement. A same-directory hard link is an
+    // atomic no-replace publication of the already closed intent file.
+    const intentPath = join(lockDir, `.provider-fallback-${handoffId}-${owner.token}.intent`);
+    const fd = openSync(intentPath, 'wx', 0o600);
+    try { writeFileSync(fd, JSON.stringify(owner)); }
+    finally { closeSync(fd); }
+    try {
+      linkSync(intentPath, lockPath);
+    } finally {
+      try { unlinkSync(intentPath); } catch {}
+    }
+  };
+  while (true) {
+    try {
+      createOwnedLock();
+      break;
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      if (fallbackLockIsStale(lockPath, opts)) {
+        const observedStat = statSync(lockPath);
+        let observedOwner = null;
+        try { observedOwner = JSON.parse(readFileSync(lockPath, 'utf8')); } catch {}
+        const generation = observedOwner?.token || statGeneration(observedStat);
+        const observedGenerationIsCurrent = () => {
+          try {
+            const currentStat = statSync(lockPath);
+            let currentOwner = null;
+            try { currentOwner = JSON.parse(readFileSync(lockPath, 'utf8')); } catch {}
+            const sameGeneration = observedOwner?.token
+              ? currentOwner?.token === observedOwner.token
+              : statGeneration(currentStat) === statGeneration(observedStat);
+            return sameGeneration && fallbackLockIsStale(lockPath, opts);
+          } catch {
+            return false;
+          }
+        };
+        const claim = acquireRecoveryClaim(
+          lockDir,
+          `provider-fallback-${handoffId}`,
+          generation,
+          { isGenerationCurrent: observedGenerationIsCurrent },
+        );
+        if (!claim.won) throw new Error(`Provider fallback recovery already claimed for ${handoffId}`);
+        const currentStat = statSync(lockPath);
+        let currentOwner = null;
+        try { currentOwner = JSON.parse(readFileSync(lockPath, 'utf8')); } catch {}
+        const sameGeneration = observedOwner?.token
+          ? currentOwner?.token === observedOwner.token
+          : statGeneration(currentStat) === statGeneration(observedStat);
+        if (!sameGeneration || !fallbackLockIsStale(lockPath, opts)) {
+          throw new Error(`Provider fallback owner changed during recovery for ${handoffId}`);
+        }
+        unlinkSync(lockPath);
+        try {
+          createOwnedLock();
+          break;
+        } catch (createError) {
+          if (createError?.code !== 'EEXIST') throw createError;
+        }
+        continue;
+      }
+      if (Date.now() - startedAt >= lockTimeoutMs) {
+        throw new Error(`Timed out acquiring provider fallback lock for ${handoffId}`);
+      }
+      await sleep(25);
+    }
+  }
+  try {
+    const published = JSON.parse(readFileSync(lockPath, 'utf-8'));
+    if (published?.token !== owner.token) {
+      throw new Error(`Provider fallback lock ownership changed for ${handoffId}`);
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith('Provider fallback lock ownership changed')) {
+      throw error;
+    }
+    throw new Error(`Provider fallback lock ownership could not be verified for ${handoffId}`);
+  }
+  try {
+    return await fn();
+  } finally {
+    try {
+      const current = JSON.parse(readFileSync(lockPath, 'utf-8'));
+      if (current?.token === owner.token) unlinkSync(lockPath);
+    } catch {}
+  }
+}
+
+function readClaudeFallback(handoffId) {
+  try {
+    const value = JSON.parse(readFileSync(claudeFallbackStatePath(handoffId), 'utf-8'));
+    return value?.schemaVersion === 1 && value.handoffId === handoffId ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function readClaudeFallbackOutput(handoffId) {
+  try {
+    const value = JSON.parse(readFileSync(claudeFallbackOutputPath(handoffId), 'utf-8'));
+    return value?.schemaVersion === 1 && value.handoffId === handoffId
+      ? { output: String(value.output ?? ''), claimToken: value.claimToken || null }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeClaudeFallback(handoffId, value) {
+  atomicWriteFileSync(claudeFallbackStatePath(handoffId), JSON.stringify({
+    schemaVersion: 1,
+    handoffId,
+    ...value,
+  }, null, 2));
+}
+
+function writeClaudeFallbackOutput(handoffId, output, claimToken, root = null) {
+  atomicWriteFileSync(claudeFallbackOutputPath(handoffId), JSON.stringify({
+    schemaVersion: 1,
+    handoffId,
+    claimToken,
+    ...(root ? { root } : {}),
+    output: String(output ?? ''),
+  }));
+}
+
+function fallbackIdentityFields(fallback) {
+  const root = fallbackRootIdentity(fallback);
+  return {
+    rootTeamName: root.teamName,
+    rootWorkerName: root.workerName,
+    rootRunId: root.runId,
+    rootWorkerRunId: root.workerRunId,
+    rootPrompt: root.prompt,
+    handoffId: fallbackRootId(fallback),
+  };
+}
+
+function matchesFallbackRoot(record, identity) {
+  const root = record?.root;
+  return record?.schemaVersion === 1
+    && root?.teamName === identity.teamName
+    && root?.workerName === identity.workerName
+    && root?.runId === identity.runId
+    && root?.workerRunId === identity.workerRunId;
+}
+
+function readCompletedFallback(fallback) {
+  const identity = fallbackRootIdentity(fallback);
+  if (!hasCompleteFallbackRoot(identity)) return null;
+  const handoffId = fallbackRootId(fallback);
+  const record = readClaudeFallback(handoffId);
+  const outputRecord = readClaudeFallbackOutput(handoffId);
+  if (
+    record?.status !== 'completed'
+    || !matchesFallbackRoot(record, identity)
+    || !record.claimToken
+    || outputRecord?.claimToken !== record.claimToken
+  ) return null;
+  return {
+    handoffId,
+    provider: record.provider || null,
+    completedAt: record.completedAt || null,
+    output: outputRecord.output,
+  };
+}
+
+function readCompletedFallbackForWorker(state, worker) {
+  return readCompletedFallback({
+    rootTeamName: state?.teamName,
+    rootWorkerName: worker?.name,
+    rootRunId: state?.runId,
+    rootWorkerRunId: workerRunIdentity(worker),
+    rootPrompt: worker?.originalPrompt || worker?.prompt || '',
+  });
+}
+
+async function markParentFallbackCompleted(dispatched, handoffId, output, completedAt, opts = {}) {
+  const root = fallbackRootIdentity(dispatched);
+  if (!hasCompleteFallbackRoot(root)) return false;
+  const loadParentState = opts.loadParentState || loadTeamState;
+  const saveParentState = opts.saveParentState || saveTeamState;
+  const parent = await loadParentState(root.teamName);
+  if (!parent || parent.runId !== root.runId || !Array.isArray(parent.workers)) return false;
+  const worker = parent.workers.find((candidate) => (
+    candidate?.name === root.workerName
+    && workerRunIdentity(candidate) === root.workerRunId
+  ));
+  if (!worker) return false;
+  worker.status = 'completed';
+  worker.completedAt = new Date(completedAt).toISOString();
+  worker._providerFallback = {
+    schemaVersion: 1,
+    handoffId,
+    provider: dispatched?.replacementWorker?.type || dispatched?.targetProvider || null,
+    completedAt,
+    outputBytes: Buffer.byteLength(String(output ?? ''), 'utf-8'),
+  };
+  delete worker.error;
+  delete worker.errorReason;
+  delete worker.errorMessage;
+  await saveParentState(root.teamName, parent);
+  return true;
+}
+
+async function persistProviderFallbackCompletion(dispatched, output, opts = {}) {
+  const root = fallbackRootIdentity(dispatched);
+  if (!hasCompleteFallbackRoot(root)) return false;
+  const handoffId = fallbackRootId(dispatched);
+  const completedAt = Number(opts.now ?? Date.now());
+  const claimToken = dispatched?.claimToken || `provider-${createHash('sha256').update(JSON.stringify([
+    handoffId,
+    dispatched?.teamName,
+    dispatched?.replacementWorker?.type,
+  ])).digest('hex').slice(0, 24)}`;
+  const writeStateFn = opts.writeFallbackState || writeClaudeFallback;
+  const writeOutputFn = opts.writeFallbackOutput || writeClaudeFallbackOutput;
+  return withFallbackLock(handoffId, async () => {
+    const existing = await (opts.readFallbackState || readClaudeFallback)(handoffId);
+    if (existing?.status === 'completed' && matchesFallbackRoot(existing, root)) {
+      // Unlike dispatchProviderFallback, this completion path owns the real
+      // terminal output bytes. It can safely repair a lost/mismatched output
+      // record using the existing completed claim instead of rerunning work.
+      const existingOutput = await (opts.readFallbackOutput || readClaudeFallbackOutput)(handoffId);
+      const canonicalOutput = existingOutput?.claimToken === existing.claimToken
+        ? existingOutput.output
+        : String(output ?? '');
+      if (existingOutput?.claimToken !== existing.claimToken) {
+        await writeOutputFn(handoffId, canonicalOutput, existing.claimToken, root);
+      }
+      await markParentFallbackCompleted(dispatched, handoffId, canonicalOutput, completedAt, opts);
+      return true;
+    }
+    await writeOutputFn(handoffId, output, claimToken, root);
+    await writeStateFn(handoffId, {
+      status: 'completed',
+      claimToken,
+      claimedAt: dispatched?.claimedAt || null,
+      completedAt,
+      provider: dispatched?.replacementWorker?.type || dispatched?.targetProvider || null,
+      childTeamName: dispatched?.teamName || null,
+      root,
+    });
+    await markParentFallbackCompleted(dispatched, handoffId, output, completedAt, opts);
+    return true;
+  }, opts);
+}
+
+/** Record the native Claude Task result so fresh-process polls can reuse it. */
+export async function completeClaudeFallback(dispatched, output, opts = {}) {
+  if (dispatched?.dispatch !== 'claude-task' || !dispatched.handoffId || !dispatched.claimToken) {
+    throw new Error('completeClaudeFallback requires a claimed claude-task dispatch');
+  }
+  const readStateFn = opts.readState || readClaudeFallback;
+  const writeOutputFn = opts.writeOutput || writeClaudeFallbackOutput;
+  const writeStateFn = opts.writeState || writeClaudeFallback;
+  const now = Number(opts.now ?? Date.now());
+  const root = fallbackRootIdentity(dispatched);
+  return withFallbackLock(dispatched.handoffId, async () => {
+    const current = await readStateFn(dispatched.handoffId);
+    if (current?.status !== 'pending' || current.claimToken !== dispatched.claimToken) {
+      throw new Error(`Claude fallback lease lost for ${dispatched.handoffId}`);
+    }
+    await writeOutputFn(dispatched.handoffId, output, dispatched.claimToken, root);
+    await writeStateFn(dispatched.handoffId, {
+      status: 'completed',
+      claimToken: dispatched.claimToken,
+      claimedAt: dispatched.claimedAt,
+      completedAt: now,
+      provider: 'claude',
+      root,
+    });
+    await markParentFallbackCompleted(dispatched, dispatched.handoffId, output, now, opts);
+    return { handoffId: dispatched.handoffId, output: String(output ?? '') };
+  }, opts);
+}
+
+/**
+ * Execute the provider portion of a reassignment descriptor. Codex/Gemini
+ * replacements run through the existing spawnTeam path under a distinct child
+ * team; Claude remains a native executor handoff owned by the orchestrator.
+ */
+export async function dispatchProviderFallback(fallback, cwd, capabilities = {}, opts = {}) {
+  if (!fallback?.fallbackNeeded || !fallback.replacementWorker || !fallback.targetProvider) {
+    return { dispatch: 'none', teamName: null, workerName: fallback?.workerName ?? null };
+  }
+  const rootIdentity = fallbackRootIdentity(fallback);
+  if (!hasCompleteFallbackRoot(rootIdentity)) {
+    return {
+      dispatch: 'none',
+      teamName: null,
+      workerName: fallback.workerName ?? null,
+      reason: 'incomplete provider fallback root identity',
+    };
+  }
+  const identityFields = fallbackIdentityFields(fallback);
+  const durableCompletion = readCompletedFallback(fallback);
+  if (durableCompletion) {
+    return {
+      dispatch: fallback.targetProvider === 'claude' ? 'claude-completed' : 'fallback-completed',
+      teamName: null,
+      workerName: fallback.workerName,
+      prompt: fallback.replacementWorker.prompt,
+      replacementWorker: fallback.replacementWorker,
+      output: durableCompletion.output,
+      ...identityFields,
+    };
+  }
+  if (fallback.targetProvider === 'claude') {
+    const handoffId = identityFields.handoffId;
+    const readStateFn = opts.readState || readClaudeFallback;
+    const readOutputFn = opts.readOutput || readClaudeFallbackOutput;
+    const writeStateFn = opts.writeState || writeClaudeFallback;
+    const now = Number(opts.now ?? Date.now());
+    return withFallbackLock(handoffId, async () => {
+      const existing = await readStateFn(handoffId);
+      const completedOutput = await readOutputFn(handoffId);
+      const outputValue = typeof completedOutput === 'string'
+        ? { output: completedOutput, claimToken: existing?.claimToken }
+        : completedOutput;
+      // completeClaudeFallback writes the authenticated output before flipping
+      // the lease to completed. If the process dies in that narrow window, the
+      // matching output token is sufficient proof that the native Task already
+      // returned; promote it instead of waiting for lease expiry and running the
+      // same bounded task again.
+      if (
+        existing?.status === 'pending'
+        && existing.claimToken
+        && outputValue?.claimToken === existing.claimToken
+      ) {
+        await writeStateFn(handoffId, {
+          status: 'completed',
+          claimToken: existing.claimToken,
+          claimedAt: existing.claimedAt,
+          completedAt: now,
+          provider: 'claude',
+          root: existing.root || fallbackRootIdentity(fallback),
+        });
+        await markParentFallbackCompleted(fallback, handoffId, outputValue.output, now, opts);
+        return {
+          dispatch: 'claude-completed',
+          handoffId,
+          teamName: null,
+          workerName: fallback.workerName,
+          prompt: fallback.replacementWorker.prompt,
+          replacementWorker: fallback.replacementWorker,
+          output: outputValue.output,
+          ...identityFields,
+        };
+      }
+      if (
+        existing?.status === 'completed'
+        && existing.claimToken
+        && outputValue?.claimToken === existing.claimToken
+      ) {
+        return {
+          dispatch: 'claude-completed',
+          handoffId,
+          teamName: null,
+          workerName: fallback.workerName,
+          prompt: fallback.replacementWorker.prompt,
+          replacementWorker: fallback.replacementWorker,
+          output: outputValue.output,
+          ...identityFields,
+        };
+      }
+      if (existing?.status === 'completed') {
+        // Dispatch has no authenticated terminal bytes with which to repair a
+        // completed lease. Fail closed and surface the loss; silently changing
+        // completed back to pending could repeat committed work in this
+        // worktree. persistProviderFallbackCompletion is intentionally
+        // different because its caller already holds real terminal output.
+        return {
+          dispatch: 'none',
+          reason: 'completed-output-lost',
+          handoffId,
+          teamName: null,
+          workerName: fallback.workerName,
+          replacementWorker: fallback.replacementWorker,
+          ...identityFields,
+        };
+      }
+      if (existing?.status === 'pending') {
+        // A native Task has no durable process handle or cancellation/adoption
+        // proof. Time alone can never prove it stopped, so an expired lease is
+        // ambiguous and must remain owned by the original claim. Re-dispatching
+        // here would run two agents concurrently in the same worktree.
+        return {
+          dispatch: 'claude-pending',
+          handoffId,
+          teamName: null,
+          workerName: fallback.workerName,
+          replacementWorker: fallback.replacementWorker,
+          ...identityFields,
+        };
+      }
+      const claimToken = (opts.createClaimToken || (() => randomBytes(16).toString('hex')))();
+      await writeStateFn(handoffId, {
+        status: 'pending',
+        claimToken,
+        claimedAt: now,
+        completedAt: null,
+        provider: 'claude',
+        root: fallbackRootIdentity(fallback),
+      });
+      return {
+        dispatch: 'claude-task',
+        handoffId,
+        claimToken,
+        claimedAt: now,
+        teamName: null,
+        workerName: fallback.workerName,
+        prompt: fallback.replacementWorker.prompt,
+        replacementWorker: fallback.replacementWorker,
+        ...identityFields,
+      };
+    }, opts);
+  }
+
+  const failoverIdentity = JSON.stringify([
+    fallback.teamName,
+    fallback.workerName,
+    fallback.parentRunId,
+    fallback.parentWorkerRunId,
+    fallback.targetProvider,
+    fallback.retry,
+    fallback.replacementWorker._providerUnavailableAttempts || 0,
+    fallback.replacementWorker._providerCrashAttempts || 0,
+    createHash('sha256').update(String(fallback.replacementWorker.prompt || '')).digest('hex'),
+  ]);
+  const childTeamName = opts.teamName || (
+    `failover-${fallback.targetProvider}-` +
+    createHash('sha256').update(failoverIdentity).digest('hex').slice(0, 12)
+  );
+  // Complete root identities share the SAME lock with completion persistence.
+  // This closes the cleanup race where a stale parent reads "not completed",
+  // the winning poll persists + deletes its child, and the stale caller then
+  // observes no child state and spawns the already-finished task again.
+  const providerClaimId = hasCompleteFallbackRoot(fallbackRootIdentity(fallback))
+    ? identityFields.handoffId
+    : `dispatch-${createHash('sha256').update(childTeamName).digest('hex').slice(0, 24)}`;
+  return withFallbackLock(providerClaimId, async () => {
+    const completionAfterClaim = readCompletedFallback(fallback);
+    if (completionAfterClaim) {
+      return {
+        dispatch: 'fallback-completed',
+        teamName: null,
+        workerName: fallback.workerName,
+        prompt: fallback.replacementWorker.prompt,
+        replacementWorker: fallback.replacementWorker,
+        output: completionAfterClaim.output,
+        ...identityFields,
+      };
+    }
+    const loadTeamStateFn = opts.loadTeamState || loadTeamState;
+    const existingState = await loadTeamStateFn(childTeamName);
+    if (existingState) {
+      const existingWorker = existingState.workers?.[0];
+      const existingPrompt = existingWorker?.originalPrompt ?? existingWorker?.prompt;
+      const sameWorker = existingState.workers?.length === 1
+        && existingWorker?.name === fallback.replacementWorker.name
+        && existingWorker?.type === fallback.replacementWorker.type
+        && existingPrompt === fallback.replacementWorker.prompt;
+      if (sameWorker) {
+        return {
+          dispatch: 'provider-team',
+          teamName: childTeamName,
+          workerName: fallback.replacementWorker.name,
+          prompt: fallback.replacementWorker.prompt,
+          replacementWorker: fallback.replacementWorker,
+          state: existingState,
+          reused: true,
+          ...identityFields,
+        };
+      }
+      const shutdownTeamFn = opts.shutdownTeam || shutdownTeam;
+      await shutdownTeamFn(childTeamName, cwd);
+    }
+    const spawnTeamFn = opts.spawnTeam || spawnTeam;
+    const state = await spawnTeamFn(
+      childTeamName,
+      [fallback.replacementWorker],
+      cwd,
+      capabilities,
+      opts.spawnInject ?? null,
+    );
+    return {
+      dispatch: 'provider-team',
+      teamName: childTeamName,
+      workerName: fallback.replacementWorker.name,
+      prompt: fallback.replacementWorker.prompt,
+      replacementWorker: fallback.replacementWorker,
+      state,
+      reused: false,
+      ...identityFields,
+    };
+  }, opts);
+}
+
+/**
+ * Poll a dispatched child provider chain. Failed children are reassigned and
+ * followed in the same call; deterministic child names make repeated parent
+ * polls idempotent. Returns only when the active child is running, completed,
+ * needs a native Claude task, or the bounded chain is exhausted.
+ */
+export async function pollProviderFallback(dispatched, cwd, capabilities = {}, opts = {}) {
+  const monitorTeamFn = opts.monitorTeam || monitorTeam;
+  const collectResultsFn = opts.collectResults || collectResults;
+  const reassignProviderFn = opts.reassignProvider || reassignProvider;
+  const dispatchProviderFallbackFn = opts.dispatchProviderFallback || dispatchProviderFallback;
+  const persistCompletionFn = opts.persistCompletion
+    || ((value, output) => persistProviderFallbackCompletion(value, output, opts));
+  let current = dispatched;
+  const teamNames = [];
+
+  // Worst valid network path is four observable nodes:
+  // Codex retry -> Gemini attempt -> Gemini retry -> Claude. Keep a little
+  // headroom for a pre-existing child or one crash retry without turning this
+  // into an unbounded self-driving loop.
+  const maxDepth = Number.isInteger(opts.maxDepth) ? opts.maxDepth : 8;
+  for (let depth = 0; depth < maxDepth; depth += 1) {
+    if (!current || current.dispatch === 'none') {
+      if (current?.reason === 'completed-output-lost') {
+        return { status: 'failed', dispatched: current, teamNames, reason: current.reason };
+      }
+      return { status: 'none', dispatched: current, teamNames };
+    }
+    if (current.dispatch === 'claude-completed' || current.dispatch === 'fallback-completed') {
+      await persistCompletionFn(current, current.output ?? '');
+      return { status: 'completed', dispatched: current, teamNames, output: current.output };
+    }
+    if (current.dispatch === 'claude-pending') {
+      return { status: 'running', dispatched: current, teamNames };
+    }
+    if (current.dispatch === 'claude-task') return { status: 'claude-task', dispatched: current, teamNames };
+    if (!teamNames.includes(current.teamName)) teamNames.push(current.teamName);
+
+    const status = monitorTeamFn(current.teamName);
+    const workers = Array.isArray(status?.workers) ? status.workers : [];
+    if (workers.some((worker) => worker.status === 'running' || worker.status === 'retry')) {
+      return { status: 'running', dispatched: current, teamNames };
+    }
+    if (workers.length > 0 && workers.every((worker) => worker.status === 'completed')) {
+      const results = collectResultsFn(current.teamName);
+      const completedWorker = workers.find((worker) => worker.name === current.workerName);
+      const hasDurableOutput = Object.hasOwn(results || {}, current.workerName);
+      const output = hasDurableOutput
+        ? results[current.workerName]
+        : typeof completedWorker?.lastOutput === 'string'
+          ? completedWorker.lastOutput
+          : null;
+      if (output === null) {
+        return {
+          status: 'failed',
+          dispatched: current,
+          teamNames,
+          reason: 'completed provider child has no durable output or snapshot tail',
+        };
+      }
+      await persistCompletionFn(current, output);
+      return {
+        status: 'completed',
+        dispatched: current,
+        output,
+        teamNames,
+      };
+    }
+
+    const failed = workers.find((worker) => worker.status === 'failed');
+    if (!failed) return { status: 'failed', dispatched: current, teamNames, reason: 'missing child worker status' };
+    const root = fallbackRootIdentity(current);
+    const fallback = await reassignProviderFn(
+      current.teamName,
+      current.workerName,
+      current.prompt,
+      { category: failed.errorReason, message: failed.errorMessage },
+      undefined,
+      {
+        capabilities,
+        rootTeamName: root.teamName,
+        rootWorkerName: root.workerName,
+        rootRunId: root.runId,
+        rootWorkerRunId: root.workerRunId,
+        rootPrompt: root.prompt,
+      },
+    );
+    const chainedFallback = {
+      ...fallback,
+      rootTeamName: root.teamName,
+      rootWorkerName: root.workerName,
+      rootRunId: root.runId,
+      rootWorkerRunId: root.workerRunId,
+      rootPrompt: root.prompt,
+    };
+    current = await dispatchProviderFallbackFn(chainedFallback, cwd, capabilities);
+  }
+  return { status: 'failed', dispatched: current, teamNames, reason: 'provider failover depth exceeded' };
 }
 
 /**
@@ -731,12 +1663,7 @@ export function demoteCodexWorkersIfNeeded(workers, level) {
       );
       w.type = 'claude';
       // Strip provider-specific fields that would corrupt the Claude path.
-      for (const field of CODEX_PROVIDER_FIELDS) {
-        if (field in w) {
-          w[`_demoted${field[0].toUpperCase()}${field.slice(1)}`] = w[field];
-          delete w[field];
-        }
-      }
+      stripProviderFields(w, CODEX_PROVIDER_FIELDS);
       demoted++;
     }
   }
@@ -747,23 +1674,29 @@ export function demoteCodexWorkersIfNeeded(workers, level) {
  * Spawn a team of workers via the appropriate adapters.
  *
  * Production call signature is `spawnTeam(teamName, workers, cwd, capabilities)`.
- * Tests can pass a fifth `_inject` parameter to supply a fake `spawnSupervisor`
+ * Callers may pass a fifth options object with a preallocated `runId`. Tests
+ * also use that object to supply a fake `spawnSupervisor`
  * (recorder / fake child instead of a real detached supervisor), a `supervisor`
  * override ({ adapterName, env } — used to route the manifest to the env-gated
  * fixture adapter), and a fake `createTeamSession` (bypassing real tmux).
- * Production callers MUST NOT pass `_inject`; the `_` prefix makes that clear.
+ * Production callers must not use the test-only injection keys.
  *
  * @param {string} teamName
  * @param {Array<Object>} workers
  * @param {string} cwd
  * @param {Object} [capabilities]
  * @param {Object} [_inject] - Test-only dependency injection
+ * @param {string} [_inject.runId] - Preallocated 16-character team generation
  * @param {Function} [_inject.spawnSupervisor] - Replaces the detached supervisor spawn (recorder / fake child)
  * @param {Object} [_inject.supervisor] - { adapterName?, env? } — route the manifest to the env-gated fixture adapter
  * @param {Function} [_inject.createTeamSession] - Replaces tmux session creation
  * @param {Function} [_inject.validateTmux] - Replaces tmux install check
  */
 export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inject = null) {
+  const runId = _inject?.runId ?? allocateTeamRunId();
+  if (!TEAM_RUN_ID.test(runId)) {
+    throw new Error('spawnTeam runId must be a 16-character lowercase hex generation');
+  }
   // ─── Codex permission mirroring + demotion + host sandbox warning ──────
   // Resolve the effective codex level once (intersects permissions.allow
   // with host sandbox detection).
@@ -819,14 +1752,17 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
   // FLIP (P4): a run identity scopes the supervisor's disk files so a STALE
   // supervisor from a prior same-name run can't be read as current. projectRoot
   // is ABSOLUTE so a detached supervisor (different cwd) resolves paths correctly.
-  const runId = randomBytes(8).toString('hex');
   const projectRoot = resolve(cwd);
   const state = {
     teamName,
     runId,
     projectRoot,
+    capabilities: normalizeCapabilities(capabilities),
     workers: workers.map((w, i) => ({
       ...w,
+      // Exists before any adapter/tmux launch can fail, so every logical root
+      // attempt has a durable identity suitable for idempotent failover.
+      _attemptId: randomBytes(8).toString('hex'),
       status: 'pending',
       startedAt: null,
       completedAt: null,
@@ -954,6 +1890,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
         state.workers[i].worktreePath = session?.worktreePath || null;
         state.workers[i].branchName = session?.branchName || null;
         state.workers[i].worktreeCreated = session?.worktreeCreated || false;
+        state.workers[i].worktreeInherited = session?.worktreeInherited || false;
         continue;
       }
 
@@ -976,6 +1913,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
       state.workers[i].worktreePath = session?.worktreePath || null;
       state.workers[i].branchName = session?.branchName || null;
       state.workers[i].worktreeCreated = session?.worktreeCreated || false;
+      state.workers[i].worktreeInherited = session?.worktreeInherited || false;
     }
 
     // Capture this worker's process-group start-time identity IMMEDIATELY after
@@ -1008,6 +1946,7 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
 
   const status = {
     teamName,
+    runId: state.runId,
     phase: state.phase,
     workers: [],
     outboxes: readAllOutboxes(teamName)
@@ -1024,13 +1963,20 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
     const registryEntry = ADAPTER_REGISTRY[adapterName];
     const adapterModule = registryEntry ? adapterModules[adapterName] : null;
     const now = Date.now();
+    const fallbackCompletion = readCompletedFallbackForWorker(state, worker);
 
     // Reader order (Codex-mandated): an in-process live handle → the supervisor's
     // disk snapshot → tmux/legacy. The supervisor branch is gated on an explicit
     // descriptor (isSupervisorWorker) so it stays dormant until spawnTeam (P4)
     // launches supervisors; a disk-loaded handle is stripped/husk so isLiveHandle
     // rejects it.
-    if (registryEntry && adapterModule && isLiveHandle(worker[registryEntry.handleKey])) {
+    if (fallbackCompletion) {
+      // A completed fallback is the canonical outcome for the root task. This
+      // overlay is read from the run+worker-scoped durable record, so cleaning
+      // a child team or resuming in a fresh process cannot resurrect the
+      // original failed adapter attempt.
+      monitorResult = { status: 'completed', output: fallbackCompletion.output };
+    } else if (registryEntry && adapterModule && isLiveHandle(worker[registryEntry.handleKey])) {
       monitorResult = monitorAdapterWorker(worker, adapterModule, registryEntry);
     } else if (isSupervisorWorker(state, worker)) {
       monitorResult = monitorSupervisorWorker(state, worker, now);
@@ -1067,26 +2013,58 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
       stateChanged = true;
     }
 
+    // Count distinct provider-unavailability failures. A worker already marked
+    // failed is the same terminal attempt being re-polled, so it must not
+    // increment the counter again.
+    if (monitorResult.error && PROVIDER_UNAVAILABLE_CATEGORIES.has(monitorResult.error.category)) {
+      // The same terminal snapshot may be polled repeatedly. Count only a new
+      // execution identity, never monitor polls, as another unavailable attempt.
+      const attemptKey = worker._handle?.workerRunId || worker._exitNonce || worker.startedAt || null;
+      if (attemptKey && attemptKey !== worker._providerUnavailableAttemptKey) {
+        state.workers[i]._providerUnavailableAttempts = (worker._providerUnavailableAttempts || 0) + 1;
+        state.workers[i]._providerUnavailableAttemptKey = attemptKey;
+        stateChanged = true;
+      }
+      const exhaustion = detectProviderExhaustion(
+        monitorResult.error,
+        state.workers[i]._providerUnavailableAttempts || 0,
+      );
+      if (exhaustion.exhausted) {
+        monitorResult = {
+          ...monitorResult,
+          error: {
+            category: 'provider_exhausted',
+            message: `${monitorResult.error.message} (repeated provider unavailability)`,
+          },
+        };
+      }
+    } else if (monitorResult.status === 'completed' && worker._providerUnavailableAttempts) {
+      delete state.workers[i]._providerUnavailableAttempts;
+      delete state.workers[i]._providerUnavailableAttemptKey;
+      stateChanged = true;
+    }
+
     // ─── Resolve final status ───
     let resolvedStatus = worker.status;
     if (monitorResult.status === 'completed') {
       resolvedStatus = 'completed';
     } else if (monitorResult.error) {
-      // For crash failures, allow one retry before marking as failed
-      if (monitorResult.error.category === 'crash' && (worker.retryCount || 0) < 1) {
-        resolvedStatus = 'retry';
-        state.workers[i].retryCount = (worker.retryCount || 0) + 1;
-      } else {
-        resolvedStatus = 'failed';
-      }
+      // A retry must be a NEW provider execution, not a status flip over the
+      // same terminal snapshot. planProviderFailover + dispatch own retries.
+      resolvedStatus = 'failed';
     }
 
     const workerEntry = {
       name: worker.name,
       type: worker.type,
       status: resolvedStatus,
+      originalPrompt: worker.originalPrompt || worker.prompt || '',
       lastOutput: monitorResult.output || null,
     };
+    if (fallbackCompletion) {
+      workerEntry.fallbackProvider = fallbackCompletion.provider;
+      workerEntry.fallbackHandoffId = fallbackCompletion.handoffId;
+    }
 
     if (monitorResult.error) {
       workerEntry.errorReason = monitorResult.error.category;
@@ -1118,10 +2096,21 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
       state.workers[i].status = resolvedStatus;
       if (workerEntry.errorReason) {
         state.workers[i].errorReason = workerEntry.errorReason;
+        state.workers[i].errorMessage = workerEntry.errorMessage;
       } else if (resolvedStatus === 'completed') {
         delete state.workers[i].errorReason;
         delete state.workers[i].errorMessage;
       }
+      stateChanged = true;
+    }
+    if (fallbackCompletion && state.workers[i]._providerFallback?.handoffId !== fallbackCompletion.handoffId) {
+      state.workers[i]._providerFallback = {
+        schemaVersion: 1,
+        handoffId: fallbackCompletion.handoffId,
+        provider: fallbackCompletion.provider,
+        completedAt: fallbackCompletion.completedAt,
+        outputBytes: Buffer.byteLength(fallbackCompletion.output, 'utf-8'),
+      };
       stateChanged = true;
     }
   }
@@ -1141,6 +2130,14 @@ export function collectResults(teamName) {
   const state = loadTeamState(teamName);
   if (state) {
     for (const worker of state.workers) {
+      // A fallback completion supersedes partial output from the failed root
+      // attempt (including an outbox message). It is the canonical result.
+      const fallbackCompletion = readCompletedFallbackForWorker(state, worker);
+      if (fallbackCompletion) {
+        results[worker.name] = fallbackCompletion.output;
+        continue;
+      }
+
       // Skip workers that already have outbox results
       if (results[worker.name]) continue;
 

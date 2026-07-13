@@ -1,6 +1,6 @@
 {
   "name": "agent-olympus",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Self-driving AI orchestrator plugin for Claude Code",
   "type": "module",
   "license": "MIT",
@@ -8,7 +8,8 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "test": "node --test scripts/test/**/*.test.mjs",
-    "check": "for f in scripts/*.mjs scripts/lib/*.mjs; do node --check \"$f\" && echo \"OK: $f\"; done"
+    "test": "node scripts/run-tests.mjs",
+    "check": "for f in scripts/*.mjs scripts/lib/*.mjs; do node --check \"$f\" && echo \"OK: $f\"; done",
+    "eval:candidates": "node scripts/eval-candidates.mjs"
   }
 }

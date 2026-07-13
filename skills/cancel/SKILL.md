@@ -7,99 +7,141 @@ description: Graceful shutdown of running Atlas/Athena sessions — clean up sta
 
 ## Purpose
 
-Gracefully shut down any running Atlas or Athena session. Cleans up state files,
-kills tmux sessions, and removes team resources in dependency order.
+Gracefully stop one running Atlas or Athena session without destroying the
+evidence needed to prove its run identity. An active-run pointer and its
+pipeline are authoritative; a checkpoint is only a recovery cache.
 
 ## Use_When
 
 - User says "cancel", "취소", "stop", "abort", "중지"
 - Need to abort a running Atlas/Athena session
-- Something went wrong and you want a clean restart
+- Something went wrong and you need a safe, explicitly terminal restart
 
 ## Steps
 
-### 1. Detect Active Mode
+### 1. Prove the Exact Active Run First
 
-Check for state files to determine what's running:
+Do not infer activity from an old state file or checkpoint. Resolve the active
+pointer and validate that its ledger has exactly one current `in_progress`
+phase before changing any team, worktree, checkpoint, or state file.
 
-```bash
-# Check for Atlas
-ls .ao/state/atlas-state.json 2>/dev/null && echo "ATLAS ACTIVE"
-
-# Check for Athena
-ls .ao/state/athena-state.json 2>/dev/null && echo "ATHENA ACTIVE"
-
-# Check for active tmux sessions
-tmux list-sessions 2>/dev/null | grep -E "atlas-|athena-"
-```
-
-### 2. Shutdown Order (dependency-safe)
-
-**For Atlas:**
-```bash
-# 1. Kill Codex tmux sessions first (workers before lead)
-tmux list-sessions -F "#{session_name}" 2>/dev/null | grep "atlas-codex" | while read s; do
-  tmux kill-session -t "$s"
-done
-
-# 2. Clean state files
-rm -f .ao/state/atlas-state.json
-rm -f .ao/prd.json
-
-# 3. Keep wisdom.jsonl (preserves learnings)
-echo "Atlas session cancelled. Progress preserved in .ao/wisdom.jsonl"
-```
-
-**For Athena:**
-```bash
-# 1. Kill Codex tmux sessions (workers first)
-tmux list-sessions -F "#{session_name}" 2>/dev/null | grep "athena-" | while read s; do
-  tmux kill-session -t "$s"
-done
-
-# 2. Clean team resources
-rm -rf .ao/teams/
-
-# 3. Clean state files
-rm -f .ao/state/athena-state.json
-rm -f .ao/prd.json
-
-# 4. Clean up Claude native team if active
-# TeamDelete("athena-<slug>") if team exists
-
-# 5. Clean up git worktrees (fail-safe — skip if no worktrees exist)
 ```javascript
-import { cleanupTeamWorktrees } from './scripts/lib/worktree.mjs';
-// Read team slug from checkpoint or state before clearing them
-cleanupTeamWorktrees(cwd, teamSlug);  // removes .ao/worktrees/<slug>/ and worker branches
+// AO-CONTRACT:cancel-proof
+import { getActiveRunId } from './scripts/lib/run-artifacts.mjs';
+import { getPhaseSequence, getPipelineState } from './scripts/lib/phase-runner.mjs';
+import { loadCheckpoint } from './scripts/lib/checkpoint.mjs';
+
+const candidates = ['atlas', 'athena']
+  .map(orchestrator => ({ orchestrator, runId: getActiveRunId(orchestrator) }))
+  .filter(candidate => candidate.runId);
+if (candidates.length !== 1) {
+  throw new Error('Active run is absent or ambiguous; preserve state and stop');
+}
+const { orchestrator, runId } = candidates[0];
+const ledger = getPipelineState(runId);
+const inProgressPhases = getPhaseSequence(orchestrator)
+  .filter(({ id }) => ledger?.phases?.[id]?.status === 'in_progress');
+const currentPhase = inProgressPhases[0]?.id;
+if (ledger?.orchestrator !== orchestrator || inProgressPhases.length !== 1) {
+  throw new Error('Run identity or current phase is unproven; preserve everything and stop');
+}
+const checkpoint = await loadCheckpoint(orchestrator);
+if (checkpoint?.runId && checkpoint.runId !== runId) {
+  throw new Error('Checkpoint belongs to another run; preserve everything and stop');
+}
 ```
 
-# 6. Keep wisdom.jsonl
-echo "Athena session cancelled. Progress preserved in .ao/wisdom.jsonl"
+If there is no active pointer but a checkpoint still names a run, use normal
+orphan recovery first. Missing, corrupt, linked, or identity-unproven
+artifacts are a **STOP and preserve** condition — never clear the checkpoint
+to make a new run appear safe.
+
+### 2. Refuse Destructive Live-Team Cancellation
+
+Before terminalization, prove that no external worker remains live. If the
+ledger/checkpoint reports a native team, adapter supervisor, or tmux worker
+whose terminal state cannot be authenticated for this `runId`, preserve the
+run, team, worktree, checkpoint, and state and STOP. Report that the live team
+needs explicit operator recovery; do not silently convert uncertainty into a
+new run.
+
+Do **not** call `shutdownTeam()`, `cleanupTeamWorktrees()`, `TeamDelete`, broad
+tmux enumeration, or manual prefix matching from `/cancel` while the run is
+active: `shutdownTeam()` cleans team state/worktrees, while the terminal-failure
+proof must still read that evidence. There is currently no non-destructive,
+run-bound live-worker cancellation primitive. A session-name similarity is not
+run ownership proof.
+
+For Athena, `spawn` and `monitor` are always preserve-and-stop states. A later
+Athena phase may proceed only when the durable spawn/monitor evidence proves an
+**adapter-only** team with the exact generation and every intended worker already
+`completed`; native, mixed, missing, or live-worker evidence remains
+preserve-and-stop. Atlas may proceed only with the exact current phase proof
+from Step 1 and separately authenticated worker/session state. Do **not**
+delete `.ao/teams`, `.ao/worktrees`, a checkpoint, or state files before that
+proof succeeds.
+
+### 3. Publish a Categorized Terminal Cancellation
+
+Only after the applicable no-live/terminal-roster proof above, terminalize the
+exact current phase. This is the point at which a restart becomes eligible; it
+is not optional bookkeeping.
+
+```javascript
+// AO-CONTRACT:cancel-terminalize
+import { finalizeFailedRun } from './scripts/lib/run-failure.mjs';
+import { getActiveRunId } from './scripts/lib/run-artifacts.mjs';
+
+const terminal = finalizeFailedRun(runId, {
+  orchestrator,
+  failureClass: 'cancelled',
+  code: 'user_cancelled',
+  phase: currentPhase,
+});
+if (!terminal.ok || getActiveRunId(orchestrator) === runId) {
+  throw new Error('Cancellation terminalization or pointer clear failed; preserve everything and stop');
+}
 ```
 
-### 3. Report
+If the ledger is corrupt, the phase is not provably `in_progress`, the failure
+transition cannot be persisted, or the matching pointer remains, do not clean
+up. Preserve the run, team, worktree, checkpoint, and state for manual
+recovery.
+
+### 4. Clean Only the Now-Terminal Resources
+
+After the terminal marker and pointer-clear check succeed:
+
+- Call `clearCheckpoint(orchestrator)` for the exact cancelled run.
+- Remove only that orchestrator's transient state and PRD when no other active
+  run owns it.
+- For Athena, read the proven team slug before cleanup, call the native-team
+  shutdown/delete operation, then call `cleanupTeamWorktrees(cwd, teamSlug)`.
+  Do not use `rm -rf .ao/teams/`; it can erase another run's evidence.
+- Keep `.ao/wisdom.jsonl`.
+
+### 5. Report
 
 Tell user:
 - What was cancelled (Atlas/Athena)
 - What phase it was in when cancelled
-- What was preserved (.ao/wisdom.jsonl)
-- How to resume: "Run /atlas or /athena again with the same task"
+- Whether the terminal marker and active-pointer clear were verified
+- What was cleaned and what was preserved
+- If preservation was required, the exact safety reason and that no restart was attempted
 
 ## Resume After Cancel
 
-Progress is preserved in `.ao/wisdom.jsonl`. When Atlas/Athena is invoked again:
-1. Check if `.ao/wisdom.jsonl` exists
-2. Read previous learnings and completed work
-3. Skip already-completed stories
-4. Continue from where it left off
+After a verified cancellation, a later `/atlas` or `/athena` invocation creates
+a new run and may reuse `.ao/wisdom.jsonl`; it does not resume the cancelled
+run. If cancellation could not be terminalized, preserve state and resolve the
+existing run through recovery rather than starting another team.
 
 ## Notes
 
-- Cancel is always safe — no data loss (wisdom.jsonl preserved)
-- Tmux sessions are killed gracefully (SIGTERM, not SIGKILL)
-- prd.json is deleted so a fresh plan is generated on restart
-- State files are deleted to prevent stale state corruption
-- **Checkpoint files are PRESERVED on cancel** (`.ao/state/checkpoint-atlas.json` / `.ao/state/checkpoint-athena.json`). They are NOT deleted. This enables the next Atlas/Athena invocation to detect the interrupted session and offer to resume from the exact phase where it was cancelled.
+- Cancellation is safe only when its terminal marker and matching pointer-clear
+  are verified; otherwise preservation is the safe result.
+- Tmux sessions are stopped gracefully where possible (SIGTERM, not SIGKILL).
+- Checkpoints are cleared only after terminalization; a checkpoint alone never
+  authorizes a fresh run.
 
 </Cancel>

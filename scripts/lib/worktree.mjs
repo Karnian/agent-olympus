@@ -7,8 +7,9 @@
  */
 
 import { execFileSync } from 'child_process';
-import { existsSync, mkdirSync, rmSync, readFileSync } from 'fs';
-import { join } from 'path';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, realpathSync, rmSync, readFileSync } from 'fs';
+import { isAbsolute, join, relative, resolve, sep } from 'path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 
 const WORKTREE_BASE = '.ao/worktrees';
@@ -16,11 +17,12 @@ const WORKTREE_REGISTRY = '.ao/state/worktree-registry.json';
 
 /**
  * Read the persistent worktree registry.
+ * @param {string} cwd - Project root that owns the registry
  * @returns {Array<{ teamName: string, workerName: string, worktreePath: string, branchName: string, createdAt: string }>}
  */
-function readRegistry() {
+function readRegistry(cwd) {
   try {
-    return JSON.parse(readFileSync(WORKTREE_REGISTRY, 'utf-8'));
+    return JSON.parse(readFileSync(join(cwd, WORKTREE_REGISTRY), 'utf-8'));
   } catch {
     return [];
   }
@@ -28,12 +30,13 @@ function readRegistry() {
 
 /**
  * Write the worktree registry atomically.
+ * @param {string} cwd - Project root that owns the registry
  * @param {Array} entries
  */
-function writeRegistry(entries) {
+function writeRegistry(cwd, entries) {
   try {
-    mkdirSync(join('.ao', 'state'), { recursive: true, mode: 0o700 });
-    atomicWriteFileSync(WORKTREE_REGISTRY, JSON.stringify(entries, null, 2));
+    mkdirSync(join(cwd, '.ao', 'state'), { recursive: true, mode: 0o700 });
+    atomicWriteFileSync(join(cwd, WORKTREE_REGISTRY), JSON.stringify(entries, null, 2));
   } catch {
     // fail-safe
   }
@@ -42,18 +45,18 @@ function writeRegistry(entries) {
 /**
  * Register a worktree in the persistent registry for orphan tracking.
  */
-function registerWorktree(teamName, workerName, worktreePath, branchName) {
-  const entries = readRegistry();
+function registerWorktree(cwd, teamName, workerName, worktreePath, branchName) {
+  const entries = readRegistry(cwd).filter((entry) => entry.worktreePath !== worktreePath);
   entries.push({ teamName, workerName, worktreePath, branchName, createdAt: new Date().toISOString() });
-  writeRegistry(entries);
+  writeRegistry(cwd, entries);
 }
 
 /**
  * Unregister a worktree from the persistent registry.
  */
-function unregisterWorktree(worktreePath) {
-  const entries = readRegistry().filter(e => e.worktreePath !== worktreePath);
-  writeRegistry(entries);
+function unregisterWorktree(cwd, worktreePath) {
+  const entries = readRegistry(cwd).filter(e => e.worktreePath !== worktreePath);
+  writeRegistry(cwd, entries);
 }
 
 /**
@@ -67,7 +70,7 @@ export function cleanupOrphanWorktrees(cwd) {
   let errors = 0;
 
   try {
-    const entries = readRegistry();
+    const entries = readRegistry(cwd);
     if (entries.length === 0) return { cleaned: 0, errors: 0 };
 
     const remaining = [];
@@ -78,7 +81,7 @@ export function cleanupOrphanWorktrees(cwd) {
     }
 
     // Only clear successfully removed entries; keep failed ones for next attempt
-    writeRegistry(remaining);
+    writeRegistry(cwd, remaining);
   } catch {
     errors++;
   }
@@ -97,6 +100,32 @@ function sanitizeName(name) {
 }
 
 /**
+ * Build a stable, collision-resistant path/ref component from a raw identity.
+ *
+ * Normalization alone is not an identity function: `api.v1` and `api-v1`
+ * normalize to the same value, as do long names that differ after character
+ * 50. Keep a short readable prefix, but always bind it to the complete raw
+ * value (and its role) with a full SHA-256 digest. Always hashing also prevents
+ * an already-safe raw name from impersonating the generated form of a lossy
+ * name. The resulting component is at most 97 characters, keeping the full
+ * worker branch below the common 255-byte filesystem component limit.
+ *
+ * @param {string} name
+ * @param {'team'|'worker'} role
+ * @returns {string}
+ */
+function managedIdentityName(name, role) {
+  const raw = String(name);
+  const readable = raw.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 32) || 'unnamed';
+  const digest = createHash('sha256')
+    .update(role)
+    .update('\0')
+    .update(raw)
+    .digest('hex');
+  return `${readable}-${digest}`;
+}
+
+/**
  * Create a git worktree for an Athena worker.
  * Worktree path: .ao/worktrees/<teamSlug>/<workerName>/
  * Branch name:   ao-worker-<teamSlug>-<workerName>
@@ -108,8 +137,8 @@ function sanitizeName(name) {
  */
 export function createWorkerWorktree(cwd, teamName, workerName) {
   try {
-    const slug = sanitizeName(teamName);
-    const worker = sanitizeName(workerName);
+    const slug = managedIdentityName(teamName, 'team');
+    const worker = managedIdentityName(workerName, 'worker');
     const branchName = `ao-worker-${slug}-${worker}`;
     const worktreePath = join(cwd, WORKTREE_BASE, slug, worker);
 
@@ -136,12 +165,12 @@ export function createWorkerWorktree(cwd, teamName, workerName) {
     execFileSync('git', ['-C', cwd, 'worktree', 'add', worktreePath, '-b', branchName], { stdio: 'pipe' });
 
     // Register in persistent registry for orphan tracking
-    registerWorktree(teamName, workerName, worktreePath, branchName);
+    registerWorktree(cwd, teamName, workerName, worktreePath, branchName);
 
     return { worktreePath, branchName, created: true };
   } catch (err) {
-    const slug = sanitizeName(teamName);
-    const worker = sanitizeName(workerName);
+    const slug = managedIdentityName(teamName, 'team');
+    const worker = managedIdentityName(workerName, 'worker');
     return {
       worktreePath: cwd,
       branchName: `ao-worker-${slug}-${worker}`,
@@ -203,6 +232,23 @@ export function createTeamWorktrees(teamName, workers, cwd) {
  * @returns {{ removed: boolean }}
  */
 export function removeWorkerWorktree(cwd, worktreePath, branchName) {
+  // Never let fail-safe cleanup turn a failed worktree allocation (whose
+  // fallback path is `cwd`) into recursive deletion of the project root. All
+  // worktrees created by this module live strictly below .ao/worktrees/.
+  const canonical = (value) => {
+    try { return realpathSync(value); } catch { return resolve(value); }
+  };
+  const projectRoot = canonical(cwd);
+  const worktreeRoot = canonical(join(projectRoot, WORKTREE_BASE));
+  const target = canonical(worktreePath);
+  const relativeTarget = relative(worktreeRoot, target);
+  const safeTarget = relativeTarget !== ''
+    && relativeTarget !== '..'
+    && !relativeTarget.startsWith(`..${sep}`)
+    && !isAbsolute(relativeTarget);
+  if (!safeTarget || target === projectRoot) {
+    return { removed: false, error: `Refusing to remove unsafe worktree path: ${target}` };
+  }
   try {
     try {
       execFileSync('git', ['-C', cwd, 'worktree', 'remove', worktreePath, '--force'], { stdio: 'pipe' });
@@ -210,6 +256,9 @@ export function removeWorkerWorktree(cwd, worktreePath, branchName) {
       if (existsSync(worktreePath)) {
         try { rmSync(worktreePath, { recursive: true, force: true }); } catch {}
       }
+    }
+    if (existsSync(worktreePath)) {
+      return { removed: false, error: `Worktree path still exists after removal: ${worktreePath}` };
     }
 
     try {
@@ -219,10 +268,24 @@ export function removeWorkerWorktree(cwd, worktreePath, branchName) {
     if (branchName) {
       try {
         execFileSync('git', ['-C', cwd, 'branch', '-D', branchName], { stdio: 'pipe' });
-      } catch {}
+      } catch (deleteError) {
+        let branchStillExists = null;
+        try {
+          execFileSync('git', ['-C', cwd, 'show-ref', '--verify', '--quiet', `refs/heads/${branchName}`], { stdio: 'pipe' });
+          branchStillExists = true;
+        } catch (probeError) {
+          branchStillExists = probeError?.status === 1 ? false : null;
+        }
+        if (branchStillExists !== false) {
+          return {
+            removed: false,
+            error: deleteError?.message || `Unable to delete worker branch: ${branchName}`,
+          };
+        }
+      }
     }
 
-    unregisterWorktree(worktreePath);
+    unregisterWorktree(cwd, worktreePath);
 
     return { removed: true };
   } catch {
@@ -240,7 +303,7 @@ export function removeWorkerWorktree(cwd, worktreePath, branchName) {
  */
 export function listTeamWorktrees(cwd, teamName) {
   try {
-    const slug = sanitizeName(teamName);
+    const slug = managedIdentityName(teamName, 'team');
     const prefix = `ao-worker-${slug}-`;
 
     const raw = execFileSync('git', ['-C', cwd, 'worktree', 'list', '--porcelain'], {
@@ -334,7 +397,7 @@ export function cleanupTeamWorktrees(cwd, teamName) {
     }
 
     try {
-      const slug = sanitizeName(teamName);
+      const slug = managedIdentityName(teamName, 'team');
       const baseDir = join(cwd, WORKTREE_BASE, slug);
       if (existsSync(baseDir)) {
         rmSync(baseDir, { recursive: true, force: true });

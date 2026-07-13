@@ -9,7 +9,7 @@ import { promises as fsp, existsSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  createRun,
+  createRun as createRunArtifact,
   addEvent,
   addVerification,
   finalizeRun,
@@ -36,6 +36,13 @@ async function removeTmpDir(dir) {
   await fsp.rm(dir, { recursive: true, force: true });
 }
 
+function createRun(orchestrator, taskDescription, opts = {}) {
+  const isolated = opts.base && !opts.stateDir && opts.activate === undefined
+    ? { ...opts, activate: false }
+    : opts;
+  return createRunArtifact(orchestrator, taskDescription, isolated);
+}
+
 // ---------------------------------------------------------------------------
 // US-001: finalizeRun compare-and-delete
 // ---------------------------------------------------------------------------
@@ -43,7 +50,7 @@ async function removeTmpDir(dir) {
 test('finalizeRun: clears active run on finalize', async () => {
   const tmpDir = await makeTmpDir();
   const stateDir = path.join(tmpDir, 'state');
-  await fsp.mkdir(stateDir, { recursive: true });
+  await fsp.mkdir(stateDir, { recursive: true, mode: 0o700 });
   try {
     const { runId } = createRun('atlas', 'test', { base: tmpDir, stateDir });
     assert.ok(getActiveRunId('atlas', { stateDir }), 'active run should exist after createRun');
@@ -58,15 +65,15 @@ test('finalizeRun: clears active run on finalize', async () => {
 test('finalizeRun: compare-and-delete — does NOT clear if runId mismatch', async () => {
   const tmpDir = await makeTmpDir();
   const stateDir = path.join(tmpDir, 'state');
-  await fsp.mkdir(stateDir, { recursive: true });
+  await fsp.mkdir(stateDir, { recursive: true, mode: 0o700 });
   try {
     const { runId: run1 } = createRun('atlas', 'first run', { base: tmpDir, stateDir });
     // Overwrite active-run with a different runId (simulating a new run started)
-    setActiveRunId('atlas', 'different-run-id', { stateDir });
+    setActiveRunId('atlas', 'atlas-different-run-id', { stateDir, replace: true });
 
     finalizeRun(run1, {}, { base: tmpDir, stateDir });
     // Active run should still point to 'different-run-id'
-    assert.equal(getActiveRunId('atlas', { stateDir }), 'different-run-id');
+    assert.equal(getActiveRunId('atlas', { stateDir }), 'atlas-different-run-id');
   } finally {
     await removeTmpDir(tmpDir);
   }
@@ -75,7 +82,7 @@ test('finalizeRun: compare-and-delete — does NOT clear if runId mismatch', asy
 test('finalizeRun: emits run_finalized event', async () => {
   const tmpDir = await makeTmpDir();
   const stateDir = path.join(tmpDir, 'state');
-  await fsp.mkdir(stateDir, { recursive: true });
+  await fsp.mkdir(stateDir, { recursive: true, mode: 0o700 });
   try {
     const { runId } = createRun('atlas', 'test', { base: tmpDir, stateDir });
     finalizeRun(runId, { storiesCompleted: 5 }, { base: tmpDir, stateDir });
@@ -97,7 +104,7 @@ test('finalizeRun: emits run_finalized event', async () => {
 test('discoverActiveRun: returns null when no active runs', async () => {
   const tmpDir = await makeTmpDir();
   const stateDir = path.join(tmpDir, 'state');
-  await fsp.mkdir(stateDir, { recursive: true });
+  await fsp.mkdir(stateDir, { recursive: true, mode: 0o700 });
   try {
     const result = discoverActiveRun({ stateDir });
     assert.equal(result, null);
@@ -109,7 +116,7 @@ test('discoverActiveRun: returns null when no active runs', async () => {
 test('discoverActiveRun: returns the single active run', async () => {
   const tmpDir = await makeTmpDir();
   const stateDir = path.join(tmpDir, 'state');
-  await fsp.mkdir(stateDir, { recursive: true });
+  await fsp.mkdir(stateDir, { recursive: true, mode: 0o700 });
   try {
     setActiveRunId('atlas', 'atlas-run-1', { stateDir });
     const result = discoverActiveRun({ stateDir });
@@ -124,7 +131,7 @@ test('discoverActiveRun: returns the single active run', async () => {
 test('discoverActiveRun: returns most recent when both active', async () => {
   const tmpDir = await makeTmpDir();
   const stateDir = path.join(tmpDir, 'state');
-  await fsp.mkdir(stateDir, { recursive: true });
+  await fsp.mkdir(stateDir, { recursive: true, mode: 0o700 });
   try {
     setActiveRunId('atlas', 'atlas-old', { stateDir });
     // Small delay to ensure different timestamps

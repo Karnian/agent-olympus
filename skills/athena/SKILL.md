@@ -34,34 +34,76 @@ Athena = many brains collaborating.
 - If reviews reject → fix and re-review
 - Only stop when ALL checks pass, or when the **Loop Guard** (below) returns a stop signal.
 
-## Loop_Guard (persistent cooperative guard — MANDATORY)
+## Phase_Runner (deterministic phase ledger + loop-guard chokepoint — MANDATORY)
 
-Identical mechanism to Atlas. The loop bounds — "15 iterations", "same error 3×",
-"10 monitor iterations", "3 review rounds" — are tracked by
-`scripts/lib/loop-guard.mjs` (persisted per-run to
-`.ao/artifacts/runs/<runId>/loop-guard.json`), NOT self-counted. Counts survive
-context compaction / fresh-process polling, and the guard yields a deterministic
-STOP result once consulted. It is cooperative: you MUST consult it. No hook
-enforces the call yet; a Stop/PreToolUse hook backstop is possible future work.
+Athena phase order, resume policy, and loop bounds are owned by
+`scripts/lib/phase-runner.mjs`. It persists `pipeline.json` beside the run
+artifacts and is the sole caller of `loop-guard.mjs`; Athena never imports or
+calls loop-guard directly. `spawn`, `monitor`, and `integrate` use the runner's
+`recover` policy because blindly re-running any of them can delete worktrees,
+duplicate supervisors, or merge the same branch twice.
 
 ```javascript
+// AO-CONTRACT:runner-init
 import {
-  registerIteration, recordError, registerReviewRound, registerCounter,
-} from './scripts/lib/loop-guard.mjs';
-// runId = the active run id (same one used by addVerification / checkVerificationGate);
-// resolve via getActiveRunId('athena') from ./scripts/lib/run-artifacts.mjs if needed.
+  initPipeline, enterPhase, beginAttempt, reattempt, loopTick,
+  recordPhaseError, recordPhaseOutputs, completePhase, skipPhase,
+  reopenPhase, getPipelineState, isComplete,
+} from './scripts/lib/phase-runner.mjs';
+import { createRun, finalizeRun, getActiveRunId } from './scripts/lib/run-artifacts.mjs';
+import { recoverOrphanedRun } from './scripts/lib/orphan-run-recovery.mjs';
+import { loadCheckpoint } from './scripts/lib/checkpoint.mjs';
+
+const pendingCheckpoint = await loadCheckpoint('athena');
+const activeAthenaRunId = getActiveRunId('athena');
+const orphanRecovery = !activeAthenaRunId && pendingCheckpoint?.runId
+  ? recoverOrphanedRun('athena', pendingCheckpoint.runId)
+  : null;
+if (orphanRecovery && !orphanRecovery.ok && !orphanRecovery.canCreateNewRun) {
+  throw new Error(`Athena active-run recovery conflict: ${orphanRecovery.reason}; preserve all artifacts and stop`);
+}
+// canCreateNewRun is true only for an exact terminal summary revalidated under
+// the transition lock. A missing run directory is not worker-liveness proof.
+// Unknown, absent, corrupt, linked, or identity-unproven evidence stops here;
+// no TeamCreate, Task, adapter spawn, or native teammate launch may follow.
+const recoveredCheckpointRunId = orphanRecovery?.ok ? orphanRecovery.runId : null;
+const createdAthenaRun = (activeAthenaRunId || recoveredCheckpointRunId)
+  ? null
+  : createRun('athena', <user_request>);
+if (createdAthenaRun && !createdAthenaRun.ok) {
+  throw new Error(`Athena run creation failed: ${createdAthenaRun.reason}; preserve all artifacts and stop`);
+}
+const runId = activeAthenaRunId
+  || recoveredCheckpointRunId
+  || createdAthenaRun.runId;
+if (activeAthenaRunId && pendingCheckpoint?.runId && pendingCheckpoint.runId !== activeAthenaRunId) {
+  throw new Error('Athena checkpoint belongs to a different active run; preserve both and stop');
+}
+const pipelineInit = initPipeline(runId, 'athena');
+if (!pipelineInit.ok || pipelineInit.degraded) {
+  throw new Error('Athena pipeline ledger is unavailable or corrupt; preserve all teams/worktrees and stop');
+}
+const { resumePhase, resumePolicy } = pipelineInit;
+// On resume, jump to resumePhase. Earlier completed phases return skip:true;
+// recover phases return reason:'recover' and MUST adopt persisted state.
 ```
 
-Consult points:
-- **Top of each outer iteration:** `registerIteration(runId)` → `!allowed` ⇒ STOP + escalate "15 iteration limit exceeded".
-- **Phase 3 monitor loop (each pass):** `registerCounter(runId, 'monitor-iterations', { cap: 10 })` → `!allowed` ⇒ stop monitoring, force-collect + escalate stalled workers.
-- **Phase 4 on every integration/build/test failure:** `recordError(runId, <error signature>)` → `shouldEscalate` ⇒ STOP + escalate (same error 3×).
-- **Top of each Phase 5 review round:** `registerReviewRound(runId)` → `!allowed` ⇒ stop review loop + escalate unresolved findings.
+Runner consult points:
+- Each phase calls `enterPhase(runId, '<id>')`; terminal phases skip, while
+  successful work ends with `completePhase(runId, '<id>', outputs, {checkpointData})`.
+- The first integrate attempt calls `beginAttempt`; a rejected review calls
+  `reattempt(runId, {reopen:['integrate'], reason:'review_reject'})`.
+- Every monitor/review/CI loop pass calls `loopTick(runId, 'monitor'|'review'|'ci')`.
+- Integration failures call `recordPhaseError(runId, 'integrate', signature)`.
+- Before any worker launch, `recordPhaseOutputs(runId, 'spawn', {teamSlug,
+  intendedWorkers, spawnPath, adapterRunId})` persists bounded recovery identity without
+  prematurely completing the phase.
 
-**Fail-open:** `degraded: true` means the guard could not persist or read clean
-state — fall back to the prose bounds and keep working; never halt the team on a
-tracking glitch. A `!allowed` / `shouldEscalate` with `degraded:false` is
-authoritative — STOP.
+**Persistence failure:** initialization with `degraded:true` is fail-closed for
+Athena because resetting a ledger can destroy a live team. Preserve every
+team/worktree and stop. A later guard result with `degraded:true` must likewise
+preserve live state and stop at the current boundary; a healthy `allowed:false`
+or `shouldEscalate:true` is authoritative.
 
 ## Architecture
 
@@ -87,7 +129,10 @@ authoritative — STOP.
 
 ### Phase 0 — TRIAGE & TEAM DESIGN
 
-#### Light-Mode Resolution (Phase 4, 2026-04-22)
+**Runner entry:** `const triageGate = enterPhase(runId, 'triage')`. If it skips,
+jump to the runner's `resumePhase`; otherwise perform the team design below.
+
+#### Light-Mode Resolution (Phase 4, 2026-04-22) <!-- AO-CONTRACT:light-mode-resolution -->
 
 Identical pattern to Atlas — resolve mode before sub-agent spawning. See
 [skills/atlas/SKILL.md](../atlas/SKILL.md) "Light-Mode Resolution" for the
@@ -98,13 +143,57 @@ In Athena, `skipMomus` additionally wraps the Phase 2 momus validation
 `autoEscalateOnReject` → `orchMode = 'full'` → re-run skipped stages before
 continuing the loop.
 
+Every light-mode rejection uses the same cap-checked policy rewind; never call
+`reopenPhase()` outside this block:
+
+```javascript
+// AO-CONTRACT:light-mode-rewind
+const esc = registerEscalation(runId, 'light-mode-rewind', { cap: 2 });
+if (!esc.allowed) {
+  // STOP and preserve the active team/run for user recovery.
+} else {
+  reopenPhase(runId, 'plan', { reason: 'light_mode_rewind' });
+}
+```
+If a late reviewer triggers this after integration started, re-run the same
+cap-checked rewind block. If the corrected plan changes implementation scope,
+use `reattempt(runId, {reopen:['integrate'], reason:'review_reject'})` before
+continuing review; never reopen `integrate` without ticking the outer cap.
+
 #### Checkpoint Recovery
 
 Before starting any work:
-1. Check for an interrupted session: `loadCheckpoint('athena')`
-2. If found, present to user: "[formatCheckpoint output]. Resume or restart?"
-   - **Resume** → re-run `runPreflight()` to re-evaluate `hasNativeTeamTools` (do NOT cache from crashed session), then skip to saved phase, restore `completedStories` and `activeWorkers` from checkpoint
-   - **Restart** → `clearCheckpoint('athena')`, proceed normally
+1. Resolve the active run and call `initPipeline()` before trusting the payload
+   checkpoint. If the pointer is absent, `recoverOrphanedRun()` first proves a
+   regular/no-follow `summary.json` with the exact running run identity and an
+   existing valid Athena `pipeline.json`, then publishes the pointer with an
+   exclusive create. `pipeline.json` is phase authority; the checkpoint is
+   only the rich payload cache. A regex-shaped `checkpoint.runId` alone is
+   never an adoption proof.
+2. Check for an interrupted session: `loadCheckpoint('athena')`
+3. If found, present to user: "[formatCheckpoint output]. Resume or restart?"
+   - **Resume** → only when the checkpoint matched the active run or
+     `orphanRecovery.ok === true`; re-run `runPreflight()` to re-evaluate
+     `hasNativeTeamTools` (do NOT cache from crashed session), then skip to
+     saved phase, restore `completedStories`, `activeWorkers`, `worktrees`, and
+     `mergedWorkers` from checkpoint. For Phase 4+, a missing `worktrees` map
+     is unsafe: stop and preserve `.ao/worktrees/<slug>/` for manual recovery;
+     never infer that missing state means the branches were merged.
+   - **Proven terminal old run** → only when `orphanRecovery.ok === false`
+     and `canCreateNewRun === true`, do not consume the checkpoint as a resume
+     payload. A new run may be created only because an exact terminal summary
+     was revalidated under the transition lock.
+   - **Unproven or absent run** → a missing run directory is not proof that
+     native teammates, adapter supervisors, or external workers stopped.
+     Missing/corrupt/symlinked summary or pipeline, identity drift, unsafe
+     ancestry, an absent run directory, and unknown pre-launch state all return
+     `canCreateNewRun === false`. STOP and preserve the checkpoint, any team or
+     supervisor state, and all worktrees. Do not call `createRun`, `TeamCreate`,
+     `Task`, adapter spawn, or any native teammate launch.
+   - **Restart** → allowed only after the old run is positively terminal or
+     explicitly terminalized and its active pointer is cleared. Otherwise
+     preserve state and STOP; clearing the checkpoint or observing a missing
+     run directory alone never authorizes a new run or team.
 
 #### Load Prior Wisdom
 1. Run `migrateProgressTxt()` if `.ao/progress.txt` exists (one-time migration to wisdom.jsonl)
@@ -135,12 +224,12 @@ test -f docs/golden-principles.md && echo "HARNESS_FOUND" || echo "HARNESS_MISSI
     `"[Athena] Harness not initialized. Run /harness-init for full setup (recommended). Proceeding without it."`
   - For trivial/moderate tasks → skip silently, proceed.
 
-**Phase Guard — early checkpoint + preflight:**
+**Phase Guard — durable runner entry + preflight:**
 
 ```javascript
-// Step 1: Early checkpoint BEFORE any sub-agent call
-saveCheckpoint('athena', { phase: 0, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request> })
-Output: "[Athena] Phase 0: TRIAGE & TEAM DESIGN started (checkpoint saved)"
+// Step 1: enterPhase('triage') already made the in-progress ledger durable
+// before any sub-agent call. The rich checkpoint is written by completePhase.
+Output: "[Athena] Phase 0: TRIAGE & TEAM DESIGN started (pipeline recorded)"
 
 // Step 2: Clean stale .ao/ state + detect capabilities
 import { runPreflight } from './scripts/lib/preflight.mjs';
@@ -149,6 +238,8 @@ for (const action of preflightReport.actions) {
   Output: "[Athena] Preflight: " + action;
 }
 const { hasNativeTeamTools, hasCodex, hasCodexAppServer, hasCodexExecJson, hasGeminiCli, hasGeminiAcp, hasTmux } = preflightReport.capabilities;
+const cwd = process.cwd();
+const capabilities = preflightReport.capabilities;
 import { formatCapabilityReport } from './scripts/lib/preflight.mjs';
 Output: formatCapabilityReport(preflightReport.capabilities, { orchestrator: 'Athena' })
 
@@ -196,7 +287,7 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   Task: <user_request>")
 ```
 
-**Sub-agent output validation — MANDATORY:**
+**Sub-agent output validation — MANDATORY:** <!-- AO-CONTRACT:subagent-validation -->
 
 After Metis returns, validate before proceeding:
 ```
@@ -225,6 +316,16 @@ If metis_output is empty OR does not contain worker/stream assignments:
 Output: "[Athena] Metis team design complete — <N> workers proposed."
 ```
 
+```javascript
+await completePhase(runId, 'triage', undefined, {
+  checkpointData: { teamDesign: metis_output, completedStories: [], activeWorkers: [] },
+});
+const contextGate = enterPhase(runId, 'context');
+```
+
+The optional context work below runs only when `!contextGate.skip`. A resumed
+completed context phase is never repeated.
+
 **[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
 ```
 Skill(skill="agent-olympus:deep-dive",
@@ -243,11 +344,19 @@ Skill(skill="agent-olympus:external-context",
 ```
 Broadcast the returned markdown brief to all workers via team inbox before Phase 2 spawn.
 
-```
-saveCheckpoint('athena', { phase: 1, completedStories: [], activeWorkers: [], startedAt: new Date().toISOString(), taskDescription: <user_request>, teamDesign: <metis_team_design> })
+After optional context gathering (including the valid "nothing needed" case),
+durably close the phase:
+
+```javascript
+await completePhase(runId, 'context', undefined, {
+  checkpointData: { completedStories: [], activeWorkers: [], teamDesign: <metis_team_design> },
+});
 ```
 
-### Phase 0.5 — SPEC GATE (Hermes validation/creation)
+### Phase 0.5 — SPEC GATE (Hermes validation/creation) <!-- AO-CONTRACT:spec-gate -->
+
+**Runner entry:** `const specGate = enterPhase(runId, 'spec')`. Run Hermes only
+when `!specGate.skip`.
 
 Output: "[Athena] Phase 0.5: SPEC GATE — validating/creating specification..."
 
@@ -332,15 +441,24 @@ If hermes_output is empty OR hermes_output.length < 50:
 Write Hermes output to `.ao/spec.md` and `.ao/prd.json`.
 Output: "[Athena] Spec gate passed — <N> user stories ready for team planning."
 
+```javascript
+await completePhase(runId, 'spec', undefined, {
+  checkpointData: { prdSnapshot: <prd.json contents>, teamDesign: <metis_team_design> },
+});
+```
+
 #### After Spec Gate
 
 Proceed to Phase 1 with a guaranteed spec. Prometheus now receives structured requirements, not raw user intent.
 
 ### Phase 1 — PLAN
 
+**Runner entry:** `const planGate = enterPhase(runId, 'plan')`. If skipped on
+resume, reuse the durable `.ao/prd.json`; otherwise plan and validate below.
+
 Output: "[Athena] Phase 1: PLAN — creating execution plan..."
 
-**[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
+**[OPTIONAL] Consensus Plan** <!-- AO-CONTRACT:consensus-plan --> — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
 ```
 Skill(skill="agent-olympus:consensus-plan",
   args="Run consensus planning for this task.
@@ -405,33 +523,229 @@ Display cost breakdown per model tier to user. If `.ao/autonomy.json` has `budge
 - ✅ "GET /api/users returns 200 with User[] body"
 - ✅ "Test file tests/auth.test.ts exists and all cases pass"
 
-```
-saveCheckpoint('athena', { phase: 2, prdSnapshot: <prd.json contents>, completedStories: [], activeWorkers: [], startedAt, taskDescription })
+```javascript
+await completePhase(runId, 'plan', undefined, {
+  checkpointData: { prdSnapshot: <prd.json contents>, completedStories: [], activeWorkers: [] },
+});
 ```
 
 ### Phase 2 — SPAWN TEAM
 
 Output: "[Athena] Phase 2: SPAWN TEAM — creating worktrees and launching workers..."
 
-**Worktree isolation** (before spawning any worker):
+```javascript
+// AO-CONTRACT:spawn-recover
+const spawnGate = enterPhase(runId, 'spawn');
+// spawnGate.reason === 'recover' enters the adoption policy below. It never
+// falls through to blind worktree creation or worker launch.
+```
+
+**Worktree isolation** <!-- AO-CONTRACT:worktree-isolation --> (before spawning any worker):
 
 Each worker operates in its own git worktree so parallel file changes never collide.
 ```javascript
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { createWorkerWorktree } from './scripts/lib/worktree.mjs';
+import { allocateTeamRunId, monitorTeam } from './scripts/lib/worker-spawn.mjs';
+import {
+  computeAthenaWorktreeDigest,
+  planAthenaSpawnRecovery,
+  validateAthenaCheckpointBinding,
+} from './scripts/lib/athena-recovery.mjs';
 
-// For each worker (Claude and Codex alike):
-const { worktreePath, branchName, created } = createWorkerWorktree(cwd, teamSlug, workerName);
-// worktreePath → .ao/worktrees/<slug>/<workerName>/
-// branchName   → ao-worker-<slug>-<workerName>
-// created: false means git worktree unavailable — fall back to cwd (still safe)
+const prd = JSON.parse(readFileSync('.ao/prd.json', 'utf-8'));
+if (!/^athena-[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(prd.projectName)) {
+  throw new Error('Unsafe Athena projectName for worker state');
+}
+const teamSlug = prd.projectName;
+const baseCommit = execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], {
+  encoding: 'utf-8',
+}).trim();
+if (!/^[a-f0-9]{40,64}$/.test(baseCommit)) {
+  throw new Error('Athena requires a committed base HEAD before spawning workers');
+}
+const rootStatus = execFileSync('git', ['-C', cwd, 'status', '--porcelain'], {
+  encoding: 'utf-8',
+}).trim();
+if (rootStatus) {
+  throw new Error(
+    'Athena parallel worktrees must branch from a committed checkpoint; preserve current changes and use Atlas or commit before team execution',
+  );
+}
+const storiesByWorker = new Map();
+for (const story of prd.userStories) {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(story.assignedWorker)) {
+    throw new Error(`Unsafe assignedWorker: ${story.assignedWorker}`);
+  }
+  if (!['claude', 'codex', 'gemini'].includes(story.workerType)) {
+    throw new Error(`Unsupported workerType: ${story.workerType}`);
+  }
+  const group = storiesByWorker.get(story.assignedWorker) || [];
+  group.push(story);
+  storiesByWorker.set(story.assignedWorker, group);
+}
+const workerDefinitions = [...storiesByWorker.entries()].map(([name, stories]) => {
+  const workerType = stories[0].workerType;
+  if (stories.some((story) => story.workerType !== workerType)) {
+    throw new Error(`Worker ${name} has mixed provider types in one assignment`);
+  }
+  const requestedModels = new Set(stories.map((story) => story.model).filter(Boolean));
+  if (requestedModels.size > 1) {
+    throw new Error(`Worker ${name} has conflicting model assignments`);
+  }
+  return {
+    name,
+    type: workerType,
+    // `sonnet` is a Claude tier, not a valid Codex/Gemini default. External
+    // adapters select their own default unless the PRD supplies a
+    // provider-specific model through a future explicit contract.
+    model: workerType === 'claude' ? (stories[0].model || 'sonnet') : undefined,
+    stories,
+    prompt: stories.map((story) => [
+      `${story.id}: ${story.title}`,
+      `Acceptance criteria:\n${story.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}`,
+    ].join('\n')).join('\n\n'),
+  };
+});
+
+// AO-CONTRACT:spawn-progress — persist exact bounded identity BEFORE the first
+// createWorkerWorktree / TeamCreate / Agent / spawnTeam call.
+const intendedWorkers = workerDefinitions.map((worker) => worker.name).sort().join(',');
+const adapterOnly = workerDefinitions.every((worker) => worker.type !== 'claude');
+const hasAdapterWorkers = workerDefinitions.some((worker) => (
+  worker.type === 'codex' || worker.type === 'gemini'
+));
+const plannedSpawnPath = adapterOnly
+  ? 'adapter-only'
+  : (hasNativeTeamTools ? 'native-or-mixed' : 'fallback-or-mixed');
+const recoverySpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
+// Fresh runs allocate the adapter generation before any launch. Recovery must
+// reuse the exact ledger generation; it never mints a new one for the same run.
+const adapterRunId = spawnGate.reason === 'recover'
+  ? recoverySpawnIdentity?.adapterRunId
+  : (hasAdapterWorkers ? allocateTeamRunId() : 'none');
+const expectedSpawn = {
+  runId,
+  teamSlug,
+  intendedWorkers,
+  spawnPath: plannedSpawnPath,
+  adapterRunId,
+  launchState: 'not-started',
+  baseCommit,
+};
+if (spawnGate.reason !== 'recover') {
+  const spawnProgress = recordPhaseOutputs(runId, 'spawn', expectedSpawn);
+  if (!spawnProgress.ok || spawnProgress.degraded) {
+    throw new Error('Unable to persist exact Athena spawn recovery identity; no worker was launched');
+  }
+}
+
+const spawnCheckpoint = await loadCheckpoint('athena');
+const persistedSpawn = getPipelineState(runId).phases.spawn?.outputs;
+// AO-CONTRACT:team-recover
+const durableAdapterState = hasAdapterWorkers ? monitorTeam(teamSlug) : null;
+const adapterTeamProof = durableAdapterState ? {
+  source: 'adapter-state',
+  teamSlug,
+  runId: durableAdapterState.runId,
+  workers: (durableAdapterState.workers || []).map((worker) => ({
+    name: worker.name,
+    status: worker.status,
+  })),
+} : null;
+const nativeTaskList = !adapterOnly && hasNativeTeamTools ? TaskList(teamSlug) : null;
+const nativeTaskItems = Array.isArray(nativeTaskList)
+  ? nativeTaskList
+  : (nativeTaskList?.tasks || []);
+const nativeObservedWorkers = [...new Map(nativeTaskItems.map((item) => {
+  const name = item.workerName || item.owner || item.name;
+  return [name, { name, status: item.status }];
+})).values()];
+const nativeTeamProof = nativeTaskList ? {
+  source: 'native-task-list',
+  teamSlug,
+  workers: nativeObservedWorkers,
+} : null;
+const recovery = planAthenaSpawnRecovery({
+  recovering: spawnGate.reason === 'recover',
+  expected: expectedSpawn,
+  persisted: persistedSpawn,
+  checkpoint: spawnCheckpoint,
+  adapterOnly,
+  adapterTeamProof,
+  nativeTeamProof,
+  cwd,
+});
+if (recovery.action === 'stop') {
+  // Native/fallback/mixed state is never deleted when adoption is unproven.
+  throw new Error(`Athena spawn recovery stopped safely: ${recovery.reason}; preserve all worktrees and supervisors`);
+}
+const spawnRecoveryMode = recovery.action;
+if (recovery.destructiveCleanupAllowed && !adapterOnly) {
+  throw new Error('Internal recovery policy violation: destructive cleanup is adapter-only');
+}
+
+// Every worktree/dispatch block below is guarded by
+// `spawnRecoveryMode === 'spawn'`. Adopt mode jumps directly to Phase 3 and
+// reuses `spawnCheckpoint.worktrees`; it does not recreate or delete anything.
+const worktrees = {};
+for (const worker of (spawnRecoveryMode === 'spawn' ? workerDefinitions : [])) {
+  const info = createWorkerWorktree(cwd, teamSlug, worker.name);
+  worktrees[worker.name] = {
+    path: info.created ? info.worktreePath : cwd,
+    branch: info.branchName,
+    created: info.created,
+  };
+}
+if (workerDefinitions.length > 1 && Object.values(worktrees).some((item) => !item.created)) {
+  throw new Error('Athena parallel execution requires isolated git worktrees; use Atlas or run workers serially');
+}
+
+let spawnCheckpointPayload = null;
+if (spawnRecoveryMode === 'spawn') {
+  spawnCheckpointPayload = {
+    phase: 2,
+    runId,
+    teamSlug,
+    intendedWorkers,
+    spawnPath: plannedSpawnPath,
+    adapterRunId,
+    baseCommit,
+    launchState: 'not-started',
+    prdSnapshot: prd,
+    completedStories: [],
+    activeWorkers: workerDefinitions.map((worker) => worker.name),
+    worktrees,
+    mergedWorkers: spawnCheckpoint?.mergedWorkers ?? [],
+  };
+  const prelaunchCheckpoint = await saveCheckpoint('athena', spawnCheckpointPayload);
+  if (!prelaunchCheckpoint.ok || prelaunchCheckpoint.degraded) {
+    throw new Error('Unable to persist Athena pre-launch checkpoint; no worker was launched');
+  }
+}
 ```
 
-Track all created worktrees in the checkpoint:
+All Path A/Path B dispatch snippets below run only in `spawnRecoveryMode ===
+'spawn'`. Immediately before the first actual dispatch, update
+`recordPhaseOutputs(..., {launchState:'started'})` and the checkpoint. If that
+write fails, launch nothing. `adopt` mode skips every dispatch block.
+
 ```javascript
-// Build the worktrees map as you spawn each worker
-const worktrees = {
-  "<workerName>": { path: worktreePath, branch: branchName }
-};
+if (spawnRecoveryMode === 'spawn') {
+  const launchRecorded = recordPhaseOutputs(runId, 'spawn', { launchState: 'started' });
+  if (!launchRecorded.ok || launchRecorded.degraded) {
+    throw new Error('Athena launch state was not durable; refusing to dispatch workers');
+  }
+  const launchCheckpoint = await saveCheckpoint('athena', {
+    ...spawnCheckpointPayload,
+    launchState: 'started',
+    worktrees,
+  });
+  if (!launchCheckpoint.ok) {
+    throw new Error('Athena launch checkpoint failed; refusing to dispatch workers');
+  }
+}
 ```
 
 **Claude workers** — dispatch depends on runtime capabilities:
@@ -441,14 +755,15 @@ const worktrees = {
 When `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is set, use native team tools directly:
 
 ```
+IF spawnRecoveryMode !== 'spawn': skip this entire block.
 TeamCreate("athena-<slug>")
 // If TeamCreate fails (tool unavailable, error response) → fall back to Path B for ALL workers.
 // Log wisdom: "Native teams unavailable at runtime — fell back to adapter chain"
 addEvent(runId, { type: 'native_team_created', detail: { teamName: "athena-<slug>" } })
 
 For each Claude worker:
-  1. createWorkerWorktree(cwd, "<slug>", "<worker>") → { worktreePath, branchName }
-  2. Task(team_name="athena-<slug>", name="<worker>",
+  1. Read `{ path: worktreePath, branch: branchName }` from `worktrees[worker.name]` created above.
+  2. Task(team_name=teamSlug, name="<worker>",
        subagent_type="agent-olympus:<agentType>", model="<model>",
        prompt="You are <worker> on team athena.
        YOUR SCOPE: <files>
@@ -473,8 +788,9 @@ For each Claude worker:
 When native teams are unavailable, Claude workers are spawned as independent subagents:
 
 ```
+IF spawnRecoveryMode !== 'spawn': skip this entire block.
 For each Claude worker:
-  1. createWorkerWorktree(cwd, "<slug>", "<worker>") → { worktreePath, branchName }
+  1. Read `{ path: worktreePath, branch: branchName }` from `worktrees[worker.name]` created above.
   2. Agent(subagent_type="agent-olympus:<agentType>", model="<model>",
        prompt="You are <worker>.
        YOUR SCOPE: <files>
@@ -489,21 +805,55 @@ For each Claude worker:
 Note: In Path B, Claude workers are independent batch executors — no inter-worker SendMessage.
 The orchestrator bridges communication by reading worker outputs and injecting context into subsequent tasks.
 
-**Codex workers** (batch executors — spawned via adapter):
+**Codex/Gemini workers** (batch executors — canonical adapter spawn):
 
-The adapter is selected automatically based on detected capabilities (highest priority first):
+The adapter is selected automatically based on detected capabilities. Do not
+launch these workers with ad-hoc tmux commands: create their descriptors once,
+then pass the whole external-worker batch through `spawnTeam()`. The same
+`teamSlug`, `cwd`, and `capabilities` are reused by Phase 3 monitoring and
+provider failover.
+
+- Codex: codex-appserver → codex-exec → tmux
+- Gemini: gemini-acp → gemini-exec → tmux
+
+```javascript
+import { spawnTeam } from './scripts/lib/worker-spawn.mjs';
+
+const externalWorkers = workerDefinitions
+  .filter((worker) => worker.type === 'codex' || worker.type === 'gemini')
+  .map((worker) => ({
+    ...worker,
+    // These come from createWorkerWorktree() above. Passing them into
+    // spawnTeam preserves branch affinity across provider replacement.
+    cwd: worktrees[worker.name]?.path || cwd,
+    worktreePath: worktrees[worker.name]?.created ? worktrees[worker.name].path : null,
+    branchName: worktrees[worker.name]?.created ? worktrees[worker.name].branch : null,
+    prompt: [
+      worker.prompt,
+      worktrees[worker.name]?.created
+        ? `MANDATORY WORKTREE: ${worktrees[worker.name].path}\nWork only in this directory and commit the completed changes to ${worktrees[worker.name].branch} before reporting success.`
+        : 'Work in the current project directory; no isolated worktree was created.',
+    ].join('\n\n'),
+  }));
+
+const externalTeamState = externalWorkers.length === 0
+  ? null
+  : (spawnRecoveryMode === 'spawn'
+    ? await spawnTeam(teamSlug, externalWorkers, cwd, capabilities, { runId: adapterRunId })
+    : (spawnRecoveryMode === 'adopt' ? monitorTeam(teamSlug) : null));
+if (hasAdapterWorkers && externalTeamState?.runId !== adapterRunId) {
+  throw new Error('Athena adapter state belongs to a stale team generation; preserve both generations and stop');
+}
+```
+
+Adapter details (owned by `spawnTeam`, not reimplemented in this skill):
+
+**Codex workers:**
+
+The adapter is selected automatically based on detected capabilities:
 - **codex-appserver adapter** (preferred): Multi-turn JSON-RPC 2.0 via `codex app-server`. Thread/turn lifecycle, live steering, structured errors. Requires `hasCodexAppServer`.
 - **codex-exec adapter**: Single-turn `codex exec --json` via child_process.spawn. Structured JSONL events. Requires `hasCodexExecJson`.
 - **tmux adapter** (fallback): Legacy tmux-based `codex exec`. Used when neither exec-json nor app-server is available.
-
-```bash
-# Adapter auto-selected: codex-appserver > codex-exec > tmux
-# <approval-flag> mirrors Claude's permission level (resolved by codex-approval.mjs)
-# tmux fallback resolves binary + injects PATH for worktree shells:
-CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
-tmux new-session -d -s "athena-<slug>-codex-<N>" -c "<worktreePath>"
-tmux send-keys -t "athena-<slug>-codex-<N>" "\"$CODEX_BIN\" <approval-flag> exec \"<implementation prompt>\"" Enter
-```
 
 **Gemini workers** (for visual/multimodal tasks — spawned via adapter):
 
@@ -511,15 +861,6 @@ The adapter is selected automatically based on detected capabilities (highest pr
 - **gemini-acp adapter** (preferred): Multi-turn JSON-RPC 2.0 via `gemini --acp`. Session lifecycle, message queue for team communication. Requires `hasGeminiAcp`.
 - **gemini-exec adapter**: Single-turn `gemini --output-format json -p` via child_process.spawn. Requires `hasGeminiCli`.
 - **tmux adapter** (fallback): Legacy tmux-based `gemini -p`. Used when neither ACP nor exec is available.
-
-```bash
-# Adapter auto-selected: gemini-acp > gemini-exec > tmux
-# <approval-flag> mirrors Claude's permission level (resolved by gemini-approval.mjs)
-# Override: set gemini.approval in .ao/autonomy.json to "default", "auto_edit", "yolo", or "plan"
-GEMINI_BIN=$(which gemini 2>/dev/null || echo /opt/homebrew/bin/gemini)
-tmux new-session -d -s "athena-<slug>-gemini-<N>" -c "<worktreePath>"
-tmux send-keys -t "athena-<slug>-gemini-<N>" "\"$GEMINI_BIN\" <approval-flag> -p \"$(cat \"${safeFile}\")\"; rm -f \"${safeFile}\"" Enter
-```
 
 Workers must commit their changes to their branch before signalling completion.
 
@@ -531,19 +872,70 @@ Workers must commit their changes to their branch before signalling completion.
 Note: Codex workers do NOT read inbox — they are batch executors. Use task chaining for iterative work.
 Note: Gemini ACP workers receive messages via `enqueueMessage()` → auto-drain on turn completion. Gemini exec/tmux workers are batch executors like Codex.
 
-```
-saveCheckpoint('athena', {
-  phase: 3,
-  prdSnapshot: <prd.json>,
-  completedStories: [],
-  activeWorkers: <spawned worker names>,
-  worktrees: { "<workerName>": { path: worktreePath, branch: branchName }, ... },
-  startedAt,
-  taskDescription
-})
+```javascript
+const activeWorktrees = spawnRecoveryMode === 'adopt'
+  ? spawnCheckpoint.worktrees
+  : worktrees;
+if (hasAdapterWorkers && !/^[a-f0-9]{16}$/.test(adapterRunId || '')) {
+  throw new Error('Athena adapter team generation is missing; preserve the team and stop');
+}
+if (!activeWorktrees || typeof activeWorktrees !== 'object') {
+  throw new Error('Athena spawn has no durable worktree mapping; preserve workers and stop');
+}
+const worktreeDigest = computeAthenaWorktreeDigest(activeWorktrees);
+if (!worktreeDigest) {
+  throw new Error('Athena worktree mapping is invalid or cannot be bound to a digest');
+}
+const spawnCompletion = await completePhase(runId, 'spawn', {
+  launchState: 'durable',
+  worktreeDigest,
+  adapterRunId,
+}, {
+  checkpointData: {
+    runId,
+    teamSlug,
+    intendedWorkers,
+    spawnPath: plannedSpawnPath,
+    baseCommit,
+    launchState: 'durable',
+    worktreeDigest,
+    adapterRunId,
+    prdSnapshot: <prd.json>,
+    completedStories: [],
+    activeWorkers: <spawned worker names>,
+    worktrees: activeWorktrees,
+    mergedWorkers: spawnCheckpoint?.mergedWorkers ?? [],
+  },
+});
+if (!spawnCompletion.ok || spawnCompletion.degraded) {
+  throw new Error('Athena spawn completion was not durable; preserve the live team and worktrees for recovery');
+}
 ```
 
 ### Phase 3 — MONITOR & COORDINATE (loop until all complete)
+
+```javascript
+// AO-CONTRACT:monitor-recover
+const monitorGate = enterPhase(runId, 'monitor');
+// reason:'recover' adopts the persisted teamSlug/worktrees and polls only that
+// team. It never calls createWorkerWorktree, TeamCreate, Agent, or spawnTeam.
+const monitorCheckpoint = await loadCheckpoint('athena');
+const monitorSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
+const phase3TeamSlug = monitorSpawnIdentity?.teamSlug;
+const phase3IntendedWorkers = monitorSpawnIdentity?.intendedWorkers;
+const phase3SpawnPath = monitorSpawnIdentity?.spawnPath;
+const phase3AdapterRunId = monitorSpawnIdentity?.adapterRunId;
+const phase3BaseCommit = monitorSpawnIdentity?.baseCommit;
+const phase3WorktreeDigest = monitorSpawnIdentity?.worktreeDigest;
+if (!validateAthenaCheckpointBinding(monitorCheckpoint, monitorSpawnIdentity, { cwd })
+  || monitorCheckpoint.worktreeDigest !== phase3WorktreeDigest) {
+  throw new Error('Athena monitor checkpoint does not belong to this run/team; preserve all workers and stop');
+}
+const monitorWorktrees = monitorCheckpoint.worktrees;
+if (!monitorWorktrees || typeof monitorWorktrees !== 'object') {
+  throw new Error('Athena monitor checkpoint lacks worktree mappings; preserve all workers and stop');
+}
+```
 
 **Progress Briefing** — output periodic status during monitoring:
 - After each monitoring iteration, output a compact team status:
@@ -563,7 +955,7 @@ saveCheckpoint('athena', {
 
 ```
 ┌─→ MONITOR LOOP (adapts to spawn path used)
-│   registerCounter(runId, 'monitor-iterations', { cap: 10 })
+│   loopTick(runId, 'monitor')
 │     → if !allowed: stop monitoring, force-collect results + escalate any stalled workers
 │
 │   IF Path A (native teams):
@@ -581,35 +973,90 @@ saveCheckpoint('athena', {
 │     ├─ Codex/Gemini completes something Claude needs →
 │     │     Path A: SendMessage to Claude worker
 │     │     Path B: include in next agent prompt (no SendMessage available)
-│     ├─ Codex worker fails (auth/rate-limit/crash/timeout) → reassign to Claude executor
-│     ├─ Gemini worker fails (auth/quota/crash/timeout) → reassign to Claude executor
+│     ├─ Codex worker exhausted → retry once if unavailable, then Gemini, then Claude
+│     ├─ Gemini worker exhausted → retry once if unavailable, then Claude executor
 │     ├─ Worker blocked → unblock or escalate
 │     └─ All done? → proceed to Phase 4
-└── Loop until all workers done or registerCounter('monitor-iterations') returns !allowed (cap 10)
+└── Loop until all workers done or loopTick('monitor') returns !allowed (cap 10)
 ```
 
-**Worker execution & monitoring model (supervisor).** Non-tmux adapter workers (codex-exec, codex-appserver, claude-cli, gemini-exec, gemini-acp) do NOT run in your process — `spawnTeam()` launches a **detached supervisor** per worker that owns the adapter and writes its completion/failure/output to disk. So the canonical monitor loop is:
+**Worker execution & monitoring model (supervisor).** <!-- AO-CONTRACT:provider-failover --> Non-tmux adapter workers (codex-exec, codex-appserver, claude-cli, gemini-exec, gemini-acp) do NOT run in your process — `spawnTeam()` launches a **detached supervisor** per worker that owns the adapter and writes its completion/failure/output to disk. So the canonical monitor loop is:
 
 ```javascript
-import { monitorTeam, collectResults, shutdownTeam } from './scripts/lib/worker-spawn.mjs';
+import {
+  collectResults,
+  completeClaudeFallback,
+  dispatchProviderFallback,
+  monitorTeam,
+  pollProviderFallback,
+  reassignProvider,
+  shutdownTeam,
+} from './scripts/lib/worker-spawn.mjs';
 
-const status = monitorTeam(teamSlug);   // re-reads disk every call — safe across the fresh-process polling model
-for (const w of status.workers) {
-  // w.status: 'running' | 'completed' | 'failed' | 'retry'
+const providerTeamsToShutdown = new Set(monitorCheckpoint.providerTeamsToShutdown || []);
+const monitorTick = loopTick(runId, 'monitor');
+if (!monitorTick.allowed) {
+  // Force-collect available output, record stalled workers, and STOP without
+  // completing the monitor phase. Resume retains the same bounded counter.
+}
+const status = phase3AdapterRunId === 'none'
+  ? null
+  : monitorTeam(phase3TeamSlug);
+if (phase3AdapterRunId !== 'none' && status?.runId !== phase3AdapterRunId) {
+  throw new Error('Athena monitor observed a stale adapter generation; preserve both generations and stop');
+}
+for (const w of status?.workers || []) {
+  // w.status: 'running' | 'completed' | 'failed'
   // w.errorReason / w.errorMessage: set for failures (auth_failed/rate_limited/crash/timeout/…)
   // w.lastOutput: latest snapshot output tail
 }
-const results = collectResults(teamSlug);  // durable per-worker output (supervisor-written file or outbox)
+const results = status ? collectResults(phase3TeamSlug) : {};  // durable supervisor output
+for (const w of (status?.workers || []).filter((worker) => worker.status === 'failed')) {
+  const fallback = await reassignProvider(
+    phase3TeamSlug,
+    w.name,
+    w.originalPrompt,
+    { category: w.errorReason, message: w.errorMessage },
+  );
+  const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
+  const progress = await pollProviderFallback(dispatched, cwd, capabilities);
+  for (const childTeam of progress.teamNames || []) providerTeamsToShutdown.add(childTeam);
+  if (progress.status === 'running') continue;
+  if (progress.status === 'completed') {
+    results[w.name] = progress.output;
+  }
+  if (progress.status === 'claude-task') {
+    const replacementWorker = progress.dispatched.replacementWorker;
+    const replacementCwd = replacementWorker.worktreePath || replacementWorker.cwd || cwd;
+    const claudeOutput = Task(subagent_type="agent-olympus:executor", model="sonnet",
+      prompt=`${replacementWorker.prompt}\n\nMANDATORY WORKTREE: ${replacementCwd}\nWork only in this directory; preserve the existing branch, commit completed changes before returning, and do not edit the project root.`)
+    await completeClaudeFallback(progress.dispatched, claudeOutput);
+    results[w.name] = claudeOutput;
+  }
+}
+// Cleanup is terminal-only. Running children remain registered for the next
+// fresh-process monitor iteration.
+if (status?.workers.every((worker) => worker.status === 'completed')) {
+  for (const childTeam of providerTeamsToShutdown) await shutdownTeam(childTeam, cwd);
+}
 ```
 
-`monitorTeam` already classifies supervisor workers from their disk snapshot (including the error category) and applies one crash-retry — you react to the returned `w.status`/`w.errorReason`, you do NOT need to `capturePane` them. The per-worker `capturePane` + `detectCodexError` snippets below are the **tmux-fallback path** (only for workers running under the legacy tmux adapter).
+`monitorTeam` classifies supervisor workers from their disk snapshot. Actual retry/failover is owned by `reassignProvider()` + `dispatchProviderFallback()` + `pollProviderFallback()` so every retry is a new execution. You do NOT need to `capturePane` supervisor workers. The per-worker `capturePane` + `detectCodexError` snippets below are the **tmux-fallback path** only.
 
-**Codex failure detection and Claude fallback (tmux fallback path):**
+**Legacy checkpoint recovery only (pre-canonical tmux sessions):**
+
+Do **not** run the snippets below for workers created by the Phase 2
+`spawnTeam()` call: `monitorTeam()` already classifies its tmux fallback and the
+canonical loop above owns reassignment. Use this section only when resuming an
+older checkpoint that contains a raw tmux session name but has no matching
+`team-<teamSlug>.json` state.
+
+**Codex failure detection and provider fallback:**
 
 During each monitoring iteration, for every active **tmux** Codex worker, pass its pane output to `detectCodexError()` (from `scripts/lib/worker-spawn.mjs`):
 
 ```javascript
-import { detectCodexError, reassignToClaude } from './scripts/lib/worker-spawn.mjs';
+import { detectCodexError } from './scripts/lib/worker-spawn.mjs';
 import { reportWorkerStatus } from './scripts/lib/worker-status.mjs';
 
 // Inside the monitoring loop, for each Codex worker:
@@ -623,23 +1070,43 @@ if (errorCheck.failed) {
   // Kill tmux session and record wisdom.
   // Pass the session name explicitly to avoid the default sessionName() mismatch
   // (athena uses 'athena-<slug>-codex-N' directly, not 'omc-team-athena-...-codex-N').
-  const fallback = await reassignToClaude(teamName, workerName, originalPrompt, errorCheck.reason, codexSession);
+  const fallback = await reassignProvider(
+    teamName,
+    workerName,
+    originalPrompt,
+    { category: errorCheck.reason, message: errorCheck.message },
+    codexSession,
+    { worker: failedWorker, capabilities },
+  );
+  const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
+  const progress = await pollProviderFallback(dispatched, cwd, capabilities);
+  for (const childTeam of progress.teamNames || []) providerTeamsToShutdown.add(childTeam);
 
   // Report the reassignment so the status table shows the transition
-  reportWorkerStatus(teamName, workerName, 'implementing', `Codex → Claude: ${errorCheck.reason}`);
+  reportWorkerStatus(teamName, workerName, 'implementing', `Codex → ${fallback.targetProvider}: ${errorCheck.reason}`);
 
-  // Spawn Claude replacement with the same prompt
-  Task(subagent_type="agent-olympus:executor", model="sonnet",
-    prompt=`${fallback.prompt}`)
+  if (progress.status === 'running') continue;
+  if (progress.status === 'completed') {
+    results[workerName] = progress.output;
+  }
+  if (progress.status === 'claude-task') {
+    const replacementWorker = progress.dispatched.replacementWorker;
+    const replacementCwd = replacementWorker.worktreePath || replacementWorker.cwd || cwd;
+    const claudeOutput = Task(subagent_type="agent-olympus:executor", model="sonnet",
+      prompt=`${replacementWorker.prompt}\n\nMANDATORY WORKTREE: ${replacementCwd}\nWork only in this directory; preserve the existing branch, commit completed changes before returning, and do not edit the project root.`)
+    await completeClaudeFallback(progress.dispatched, claudeOutput);
+    results[workerName] = claudeOutput;
+  }
 }
 ```
 
 Rules:
 - If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again for any worker in this session.
-- If `errorCheck.reason` is `'crash'`, retry Codex once; if it crashes again, fall back to Claude.
-- Always call `await reassignToClaude()` before spawning the replacement — it handles tmux cleanup and wisdom recording in one step.
+- Crash/timeout/network retries are OWNED by the failover chain: `planProviderFailover` already retries the same provider once before switching. Do NOT manually respawn the failed provider yourself — that would double the retry.
+- Always call `await reassignProvider()` before dispatching the replacement — it handles cleanup and wisdom recording in one step.
+- Never reuse the parent `teamName` for a provider replacement; `dispatchProviderFallback()` creates a distinct child team so parent state is not overwritten.
 
-**Gemini failure detection and Claude fallback:**
+**Gemini failure detection and provider fallback:**
 
 Apply the same pattern for Gemini workers. During each monitoring iteration, for every active Gemini worker, check adapter output for errors:
 
@@ -651,15 +1118,36 @@ Apply the same pattern for Gemini workers. During each monitoring iteration, for
 
 if (geminiWorkerFailed) {
   reportWorkerStatus(teamName, workerName, 'failed', `Gemini error: ${reason}`);
-  const fallback = await reassignToClaude(teamName, workerName, originalPrompt, reason, geminiSession);
-  reportWorkerStatus(teamName, workerName, 'implementing', `Gemini → Claude: ${reason}`);
-  Task(subagent_type="agent-olympus:executor", model="sonnet", prompt=`${fallback.prompt}`)
+  const fallback = await reassignProvider(
+    teamName,
+    workerName,
+    originalPrompt,
+    { category: reason, message: errorMessage },
+    geminiSession,
+    { worker: failedWorker, capabilities },
+  );
+  const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
+  const progress = await pollProviderFallback(dispatched, cwd, capabilities);
+  for (const childTeam of progress.teamNames || []) providerTeamsToShutdown.add(childTeam);
+  reportWorkerStatus(teamName, workerName, 'implementing', `Gemini → ${fallback.targetProvider}: ${reason}`);
+  if (progress.status === 'running') continue;
+  if (progress.status === 'completed') {
+    results[workerName] = progress.output;
+  }
+  if (progress.status === 'claude-task') {
+    const replacementWorker = progress.dispatched.replacementWorker;
+    const replacementCwd = replacementWorker.worktreePath || replacementWorker.cwd || cwd;
+    const claudeOutput = Task(subagent_type="agent-olympus:executor", model="sonnet",
+      prompt=`${replacementWorker.prompt}\n\nMANDATORY WORKTREE: ${replacementCwd}\nWork only in this directory; preserve the existing branch, commit completed changes before returning, and do not edit the project root.`)
+    await completeClaudeFallback(progress.dispatched, claudeOutput);
+    results[workerName] = claudeOutput;
+  }
 }
 ```
 
 Rules (same as Codex):
 - If `reason` is `'auth_failed'`, `'quota_exceeded'`, or `'not_installed'`, do NOT retry Gemini for that error type again.
-- If `reason` is `'crash'`, retry Gemini once; if it crashes again, fall back to Claude.
+- Crash/timeout/network retries are owned by `planProviderFailover`; do not manually respawn Gemini.
 - ACP-specific: if message queue shows `dead_letter` entries, treat as partial failure and collect available output before reassigning.
 
 After checking each worker's status, record it via worker-status (import from `scripts/lib/worker-status.mjs`):
@@ -676,9 +1164,79 @@ const statusTable = formatStatusMarkdown(teamName)
 // Output statusTable to the user so they can see per-worker phase + progress
 ```
 
-After each worker completes a story: `saveCheckpoint('athena', { phase: 3, prdSnapshot: <updated prd.json>, completedStories: <all passing story IDs>, activeWorkers: <remaining in-flight workers>, startedAt, taskDescription })`
+After each worker completes a story, carry the integration state forward instead of replacing it.
+The save is a mandatory terminal-transition boundary; if it fails, keep that
+worker/worktree intact and stop without acknowledging the transition:
+```javascript
+const workerTerminalCheckpoint = await saveCheckpoint('athena', {
+  phase: 3,
+  runId,
+  teamSlug: phase3TeamSlug,
+  intendedWorkers: phase3IntendedWorkers,
+  spawnPath: phase3SpawnPath,
+  adapterRunId: phase3AdapterRunId,
+  baseCommit: phase3BaseCommit,
+  launchState: 'durable',
+  worktreeDigest: phase3WorktreeDigest,
+  prdSnapshot: <updated prd.json>,
+  completedStories: <all passing story IDs>,
+  activeWorkers: <remaining in-flight workers>,
+  worktrees: monitorWorktrees,
+  mergedWorkers: monitorCheckpoint.mergedWorkers ?? [],
+  providerTeamsToShutdown: [...providerTeamsToShutdown],
+  startedAt,
+  taskDescription,
+});
+if (!workerTerminalCheckpoint.ok || workerTerminalCheckpoint.degraded) {
+  throw new Error('Athena worker terminal transition was not durable; preserve its worktree and resume monitoring');
+}
+```
+
+Only after every intended Claude/Codex/Gemini worker has a durable terminal
+result—not merely when `monitorTeam()` returns null or all external workers are
+done—close the phase:
+
+```javascript
+const monitorCompletion = await completePhase(runId, 'monitor', {
+  teamSlug: phase3TeamSlug,
+  intendedWorkers: phase3IntendedWorkers,
+  terminalWorkers: phase3IntendedWorkers,
+  worktreeDigest: phase3WorktreeDigest,
+  adapterRunId: phase3AdapterRunId,
+}, {
+  checkpointData: {
+    runId,
+    teamSlug: phase3TeamSlug,
+    intendedWorkers: phase3IntendedWorkers,
+    spawnPath: phase3SpawnPath,
+    adapterRunId: phase3AdapterRunId,
+    baseCommit: phase3BaseCommit,
+    launchState: 'durable',
+    worktreeDigest: phase3WorktreeDigest,
+    prdSnapshot: <updated prd.json>,
+    completedStories: <all passing story IDs>,
+    activeWorkers: [],
+    worktrees: monitorWorktrees,
+    mergedWorkers: monitorCheckpoint.mergedWorkers ?? [],
+    providerTeamsToShutdown: [...providerTeamsToShutdown],
+  },
+});
+if (!monitorCompletion.ok || monitorCompletion.degraded) {
+  throw new Error('Athena monitor completion was not durable; preserve team state for recovery');
+}
+```
 
 ### Phase 3b — WISDOM TRACKING
+
+```javascript
+// AO-CONTRACT:wisdom-tracking
+const wisdomGate = enterPhase(runId, 'wisdom');
+const wisdomCheckpoint = await loadCheckpoint('athena');
+const wisdomSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
+if (!validateAthenaCheckpointBinding(wisdomCheckpoint, wisdomSpawnIdentity, { cwd })) {
+  throw new Error('Athena wisdom checkpoint does not belong to this run/team; preserve state and stop');
+}
+```
 
 After each worker completes, call `addWisdom()` with learnings:
 ```
@@ -693,34 +1251,114 @@ Use appropriate category per learning:
 
 Wisdom persists across sessions so future runs benefit from team discoveries.
 
-```
-saveCheckpoint('athena', { phase: 4, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
+```javascript
+const wisdomCompletion = await completePhase(runId, 'wisdom', undefined, {
+  checkpointData: {
+    runId,
+    teamSlug: wisdomSpawnIdentity.teamSlug,
+    intendedWorkers: wisdomSpawnIdentity.intendedWorkers,
+    spawnPath: wisdomSpawnIdentity.spawnPath,
+    adapterRunId: wisdomSpawnIdentity.adapterRunId,
+    baseCommit: wisdomSpawnIdentity.baseCommit,
+    launchState: wisdomSpawnIdentity.launchState,
+    worktreeDigest: wisdomSpawnIdentity.worktreeDigest,
+    prdSnapshot: <prd.json>,
+    completedStories,
+    activeWorkers: [],
+    worktrees: wisdomCheckpoint.worktrees,
+    mergedWorkers: wisdomCheckpoint.mergedWorkers ?? [],
+    providerTeamsToShutdown: wisdomCheckpoint.providerTeamsToShutdown ?? [],
+  },
+});
+if (!wisdomCompletion.ok || wisdomCompletion.checkpointDegraded) {
+  throw new Error('Unable to persist Athena worktree mapping; preserve all worker worktrees and retry checkpointing before integration');
+}
 ```
 
 ### Phase 4 — INTEGRATE & VERIFY (loop until pass)
 
+```javascript
+// AO-CONTRACT:outer-attempt
+if (getPipelineState(runId).attempt === 0) {
+  const attempt = beginAttempt(runId);
+  if (!attempt.allowed) {
+    // STOP + escalate; do not enter integration.
+  }
+}
+// AO-CONTRACT:integrate-recover
+const integrateGate = enterPhase(runId, 'integrate');
+// reason:'recover' restores worktrees/mergedWorkers from the checkpoint and
+// resumes the idempotent merge loop. Missing mapping is fail-closed below.
+const integrationCheckpoint = await loadCheckpoint('athena');
+const integrationSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
+if (!validateAthenaCheckpointBinding(integrationCheckpoint, integrationSpawnIdentity, { cwd })) {
+  throw new Error('Athena integration checkpoint does not belong to this run/team; preserve all worktrees and stop');
+}
+```
+
 **Merge worker branches** (sequential, dependency order first):
 ```javascript
+import { execFileSync } from 'node:child_process';
 import { mergeWorkerBranch, removeWorkerWorktree } from './scripts/lib/worktree.mjs';
 
 // Sort workers by dependency order (dependents last)
 const orderedWorkers = sortByDependency(completedWorkers);
+const phase4Worktrees = integrationCheckpoint.worktrees;
+const mergedWorkers = new Set(integrationCheckpoint.mergedWorkers ?? []);
+const integrationProviderTeams = new Set(integrationCheckpoint.providerTeamsToShutdown ?? []);
+if (!phase4Worktrees || typeof phase4Worktrees !== 'object') {
+  throw new Error('Phase 4 checkpoint has no worktree mapping; preserve .ao/worktrees and recover the checkpoint before integration');
+}
 
 for (const worker of orderedWorkers) {
-  const { branch, path } = checkpoint.worktrees[worker.name] ?? {};
-  if (!branch) continue;  // worktree was not created (fallback mode)
+  if (mergedWorkers.has(worker.name)) continue;  // idempotent resume after a durable merge checkpoint
+
+  const { branch, path, created } = phase4Worktrees[worker.name] ?? {};
+  if (!created || !branch || !path || path === cwd) continue;  // fallback/shared-root mode
+
+  const dirty = execFileSync('git', ['-C', path, 'status', '--porcelain'], {
+    encoding: 'utf-8',
+  }).trim();
+  if (dirty) {
+    throw new Error(`Worker ${worker.name} completed with uncommitted work; preserve its worktree and resume integration`);
+  }
 
   const result = mergeWorkerBranch(cwd, branch, worker.name);
   if (!result.success) {
-    // Conflict detected — spawn executor to resolve
-    Task(subagent_type="agent-olympus:executor", model="sonnet",
-      prompt="Resolve merge conflicts for worker <worker.name>.
-      Conflicting files: <result.conflicts.join(', ')>
-      Worker branch: <branch>
-      Resolve all conflicts and commit the resolution.")
+    // mergeWorkerBranch aborts the failed merge. Preserve the branch/worktree;
+    // route the conflict through the normal bounded retry path before cleanup.
+    throw new Error(`Worker ${worker.name} merge failed: ${result.conflicts.join(', ')}`);
   }
 
-  // After successful merge, remove the worktree
+  // Persist the merge before deleting its only isolated worktree. If this save
+  // degrades, keep the branch/worktree; a resumed merge is idempotent.
+  mergedWorkers.add(worker.name);
+  // AO-CONTRACT:merge-checkpoint
+  const mergeCheckpoint = await saveCheckpoint('athena', {
+    phase: 4,
+    runId,
+    teamSlug: integrationSpawnIdentity.teamSlug,
+    intendedWorkers: integrationSpawnIdentity.intendedWorkers,
+    spawnPath: integrationSpawnIdentity.spawnPath,
+    adapterRunId: integrationSpawnIdentity.adapterRunId,
+    baseCommit: integrationSpawnIdentity.baseCommit,
+    launchState: integrationSpawnIdentity.launchState,
+    worktreeDigest: integrationSpawnIdentity.worktreeDigest,
+    prdSnapshot: <prd.json>,
+    completedStories,
+    activeWorkers: [],
+    worktrees: phase4Worktrees,
+    mergedWorkers: [...mergedWorkers],
+    providerTeamsToShutdown: [...integrationProviderTeams],
+    startedAt,
+    taskDescription,
+  });
+  if (!mergeCheckpoint.ok) {
+    mergedWorkers.delete(worker.name);
+    throw new Error(`Worker ${worker.name} merged but its checkpoint could not be persisted; preserve its worktree and retry integration`);
+  }
+
+  // Only a clean, committed, successfully merged, durably checkpointed worktree is disposable.
   removeWorkerWorktree(cwd, path, branch);
 }
 ```
@@ -731,7 +1369,7 @@ Task(subagent_type="agent-olympus:executor", model="sonnet",
   prompt="Integrate Codex output: <codex_result>. Target files: <scope>")
 ```
 
-**Codex Cross-Validation** (per story) — MANDATORY: before marking a story `passes: true`:
+**Codex Cross-Validation** <!-- AO-CONTRACT:cross-validation --> (per story) — MANDATORY: before marking a story `passes: true`:
 ```bash
 # CRITICAL: resolve binary path first — worktree shells may not inherit full PATH
 CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
@@ -781,10 +1419,10 @@ Task(subagent_type="agent-olympus:themis", model="sonnet",
 Note: Skip this checkpoint if Themis agent is absent.
 
 ```
-┌─→ registerIteration(runId) → if !allowed: STOP + escalate "15 iteration limit exceeded"
-│   ALL PASS → Phase 5
+┌─→ Internal integration fix loop (the outer attempt was opened once above)
+│   ALL PASS → complete the integrate phase, then Phase 5
 │   ANY FAIL →
-│     recordError(runId, <first error line or error code>)
+│     recordPhaseError(runId, 'integrate', <first error line or error code>)
 │       → if shouldEscalate (same error 3×): STOP + escalate, do NOT retry the same fix
 │     else spawn debugger (with wisdom learnings: formatWisdomForPrompt(queryWisdom(null,10))), fix, re-verify
 │   Debug escalation chain:
@@ -797,13 +1435,66 @@ Note: Skip this checkpoint if Themis agent is absent.
 └── Loop until ALL PASS or a Loop Guard stop signal fires (local soft budget: ~5 fix cycles)
 ```
 
-```
-saveCheckpoint('athena', { phase: 5, prdSnapshot: <prd.json>, completedStories, activeWorkers: [], startedAt, taskDescription })
+```javascript
+// AO-CONTRACT:debug-escalation — the loop above uses recordPhaseError and the
+// debugger → systematic-debug → trace escalation chain.
+const isolatedWorkerNames = Object.entries(phase4Worktrees)
+  .filter(([, item]) => item?.created && item.path !== cwd)
+  .map(([workerName]) => workerName)
+  .sort();
+const mergedWorkerNames = [...mergedWorkers].sort();
+if (mergedWorkerNames.join(',') !== isolatedWorkerNames.join(',')) {
+  throw new Error('Athena integration cannot complete before every isolated worker is durably merged');
+}
+const integrationCommit = execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], {
+  encoding: 'utf-8',
+}).trim();
+if (!/^[a-f0-9]{40,64}$/.test(integrationCommit)) {
+  throw new Error('Athena integration result lacks a committed identity');
+}
+const integrateCompletion = await completePhase(runId, 'integrate', {
+  teamSlug: integrationSpawnIdentity.teamSlug,
+  intendedWorkers: integrationSpawnIdentity.intendedWorkers,
+  isolatedWorkers: isolatedWorkerNames.join(','),
+  mergedWorkers: mergedWorkerNames.join(','),
+  worktreeDigest: integrationSpawnIdentity.worktreeDigest,
+  verificationPassed: true,
+  integrationCommit,
+}, {
+  checkpointData: {
+    runId,
+    teamSlug: integrationSpawnIdentity.teamSlug,
+    intendedWorkers: integrationSpawnIdentity.intendedWorkers,
+    spawnPath: integrationSpawnIdentity.spawnPath,
+    adapterRunId: integrationSpawnIdentity.adapterRunId,
+    baseCommit: integrationSpawnIdentity.baseCommit,
+    launchState: integrationSpawnIdentity.launchState,
+    worktreeDigest: integrationSpawnIdentity.worktreeDigest,
+    prdSnapshot: <prd.json>,
+    completedStories,
+    activeWorkers: [],
+    worktrees: phase4Worktrees,
+    mergedWorkers: [...mergedWorkers],
+    providerTeamsToShutdown: [...integrationProviderTeams],
+  },
+});
+if (!integrateCompletion.ok || integrateCompletion.checkpointDegraded) {
+  throw new Error('Athena integration result was not durable; preserve merged branches and worktrees');
+}
 ```
 
 ### Phase 5 — REVIEW (loop until approved)
 
-**Step 5.0 — Consult review router (US-005)**
+```javascript
+const reviewGate = enterPhase(runId, 'review');
+const reviewCheckpoint = await loadCheckpoint('athena');
+const reviewSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
+if (!validateAthenaCheckpointBinding(reviewCheckpoint, reviewSpawnIdentity, { cwd })) {
+  throw new Error('Athena review checkpoint does not belong to this run/team; preserve integration state and stop');
+}
+```
+
+**Step 5.0 — Consult review router (US-005)** <!-- AO-CONTRACT:review-router -->
 
 Before fanning out, call `scripts/lib/review-router.mjs` → `routeReviewers()`
 to compute the minimal reviewer set for the actual diff scope. Cuts 60-80% of
@@ -831,23 +1522,68 @@ node -e '
 
 Spawn ONLY the reviewers in `r.reviewers`, in parallel.
 
-**Step 5.1 — Handle reviewer escalation**
+**Step 5.1 — Handle reviewer escalation** <!-- AO-CONTRACT:review-escalation -->
 
 If any reviewer emits `{type: 'RE-REVIEW-REQUESTED', additionalReviewer, reason}`,
 call `handleEscalation(currentSet, flag)` and spawn the requested reviewer in the
 **same iteration** (not the next loop).
 
 ```
-┌─→ registerReviewRound(runId) → if !allowed: stop the review loop, escalate unresolved findings
+┌─→ loopTick(runId, 'review') → if !allowed: stop the review loop, escalate unresolved findings
 │   ALL APPROVED → DONE ✓
 │   ANY ESCALATION → spawn additional reviewer same iteration (does NOT consume a round)
-│   ANY REJECTED → fix, re-review
-└── Loop until ALL APPROVED or registerReviewRound returns !allowed (default cap 3)
+│   ANY REJECTED → use the bounded reattempt below, fix in the root integration tree, re-review
+└── Loop until ALL APPROVED or loopTick('review') returns !allowed (default cap 3)
+```
+
+```javascript
+// AO-CONTRACT:review-reject-reattempt
+const reviewRetry = reattempt(runId, {
+  reopen: ['integrate'],
+  reason: 'review_reject',
+});
+if (!reviewRetry.allowed) {
+  // STOP + preserve run/worktrees; the 15-attempt cap is authoritative.
+}
+// Athena has no `verify` phase. Never target that Atlas-only phase; return through the
+// integrate recovery path and then start the next review round.
 ```
 
 **Rollback**: `.ao/autonomy.json` → `{ "reviewRouter": { "disabled": true } }`.
 
+After all required reviewers approve:
+
+```javascript
+await completePhase(runId, 'review', undefined, {
+  checkpointData: {
+    runId,
+    teamSlug: reviewSpawnIdentity.teamSlug,
+    intendedWorkers: reviewSpawnIdentity.intendedWorkers,
+    spawnPath: reviewSpawnIdentity.spawnPath,
+    adapterRunId: reviewSpawnIdentity.adapterRunId,
+    baseCommit: reviewSpawnIdentity.baseCommit,
+    launchState: reviewSpawnIdentity.launchState,
+    worktreeDigest: reviewSpawnIdentity.worktreeDigest,
+    prdSnapshot: <prd.json>,
+    completedStories,
+    worktrees: reviewCheckpoint.worktrees,
+    mergedWorkers: reviewCheckpoint.mergedWorkers,
+    providerTeamsToShutdown: reviewCheckpoint.providerTeamsToShutdown ?? [],
+  },
+});
+const finalizeGate = enterPhase(runId, 'finalize');
+const finalizeCheckpoint = await loadCheckpoint('athena');
+const finalizeSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
+if (!validateAthenaCheckpointBinding(finalizeCheckpoint, finalizeSpawnIdentity, { cwd })) {
+  throw new Error('Athena finalize checkpoint does not belong to this run/team; preserve integration state and stop');
+}
+```
+
 ### Phase 5b — SLOP CLEAN + COMMIT
+
+Finalize is `reexecute` on resume. Use `runId` as an idempotency marker for the
+changelog and exec-plan row: update an existing row/entry for this run instead
+of appending a duplicate.
 
 After review approved:
 1. Run `Skill(skill="agent-olympus:slop-cleaner")` on all changed files
@@ -886,15 +1622,44 @@ echo "| $(date +%Y-%m-%d) | <task-slug> | <N files changed> | <N stories> | <one
 If an active exec-plan file exists in `docs/exec-plans/active/`, move it to `docs/exec-plans/completed/`.
 Include this file in the commit.
 
+```javascript
+await completePhase(runId, 'finalize', undefined, {
+  checkpointData: {
+    runId,
+    teamSlug: finalizeSpawnIdentity.teamSlug,
+    intendedWorkers: finalizeSpawnIdentity.intendedWorkers,
+    spawnPath: finalizeSpawnIdentity.spawnPath,
+    adapterRunId: finalizeSpawnIdentity.adapterRunId,
+    baseCommit: finalizeSpawnIdentity.baseCommit,
+    launchState: finalizeSpawnIdentity.launchState,
+    worktreeDigest: finalizeSpawnIdentity.worktreeDigest,
+    prdSnapshot: <prd.json>,
+    completedStories,
+    worktrees: finalizeCheckpoint.worktrees,
+    mergedWorkers: finalizeCheckpoint.mergedWorkers,
+    providerTeamsToShutdown: finalizeCheckpoint.providerTeamsToShutdown ?? [],
+  },
+});
+```
+
 ### Phase 6 — SHIP (PR Creation + Issue Linking)
 
 Load autonomy config to determine shipping behavior:
 ```javascript
 import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
 const config = loadAutonomyConfig(cwd);
+const shippingCheckpoint = await loadCheckpoint('athena');
+const shippingSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
+if (!validateAthenaCheckpointBinding(shippingCheckpoint, shippingSpawnIdentity, { cwd })) {
+  throw new Error('Athena shipping checkpoint does not belong to this run/team; stop before any push');
+}
+const shippingApplicable = preflightCheck().ok && (config.ship.autoPush || userApprovedPush);
+const shipGate = shippingApplicable
+  ? enterPhase(runId, 'ship')
+  : skipPhase(runId, 'ship', preflightCheck().ok ? 'user-declined' : 'preflight-unavailable');
 ```
 
-#### Verification Gate (MANDATORY — blocks PR creation)
+#### Verification Gate (MANDATORY — blocks PR creation) <!-- AO-CONTRACT:verification-gate -->
 Before any shipping activity, check that ALL stories have verification records:
 ```javascript
 import { checkVerificationGate } from './scripts/lib/run-artifacts.mjs';
@@ -947,12 +1712,37 @@ If `config.ship.autoPush` is true OR user approves:
 
 If `config.ship.autoPush` is false (default) → ask user: "Push and create PR? [y/n]"
 
-### Phase 6b — CI WATCH (Monitor + Auto-Fix)
+If shipping was applicable and the verification gate plus PR operation reached a
+durable terminal result, call:
+
+```javascript
+await completePhase(runId, 'ship', undefined, {
+  checkpointData: { ...shippingCheckpoint, runId },
+});
+```
+
+A blocked verification gate leaves the phase nonterminal for recovery.
+
+### Phase 6b — CI WATCH (Monitor + Auto-Fix) <!-- AO-CONTRACT:ci-watch -->
+
+```javascript
+const ciApplicable = Boolean(createdPrUrl && config.ci.watchEnabled);
+const ciCheckpoint = await loadCheckpoint('athena');
+const ciSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
+if (!validateAthenaCheckpointBinding(ciCheckpoint, ciSpawnIdentity, { cwd })) {
+  throw new Error('Athena CI checkpoint does not belong to this run/team; stop polling and preserve state');
+}
+const ciGate = ciApplicable
+  ? enterPhase(runId, 'ci')
+  : skipPhase(runId, 'ci', createdPrUrl ? 'watch-disabled' : 'no-pr');
+```
 
 If `config.ci.watchEnabled` is true AND a PR was created:
 
 ```
 ┌─→ Poll CI status:
+│     const ciTick = loopTick(runId, 'ci')
+│     if (!ciTick.allowed) → STOP polling, preserve the nonterminal phase, escalate
 │     node -e "import('./scripts/lib/ci-watch.mjs').then(m =>
 │       m.watchCI({ branch, maxCycles: 1, pollIntervalMs: config.ci.pollIntervalMs })
 │       .then(r => console.log(JSON.stringify(r))))"
@@ -982,31 +1772,131 @@ If `config.ci.watchEnabled` is true AND a PR was created:
 ```
 
 If CI passes → DONE. If CI fails after max cycles → escalate to user with failure logs.
+On passed, timeout, or an explicitly reported provider skip, call
+`await completePhase(runId, 'ci', undefined, { checkpointData: { ...ciCheckpoint, runId } })`.
+Do not separately self-count `config.ci.maxCycles`; the runner's CI counter is
+authoritative.
 
-### COMPLETION
+### COMPLETION <!-- AO-CONTRACT:cleanup -->
+
+```javascript
+import { join } from 'node:path';
+
+const completeGate = enterPhase(runId, 'complete');
+const completionCheckpoint = await loadCheckpoint('athena');
+const completionSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
+if (!validateAthenaCheckpointBinding(completionCheckpoint, completionSpawnIdentity, { cwd })) {
+  throw new Error('Athena completion checkpoint does not belong to this run/team; preserve it and stop');
+}
+
+// Crash recovery after completePhase but before finalizeRun: cleanup already
+// succeeded, so finalize the exact run idempotently and clear the checkpoint.
+if (completeGate.skip) {
+  const cleanupOutputs = getPipelineState(runId).phases.complete?.outputs;
+  if (cleanupOutputs?.teamSlug !== completionSpawnIdentity.teamSlug
+    || cleanupOutputs?.worktreeDigest !== completionSpawnIdentity.worktreeDigest
+    || cleanupOutputs?.cleanupState !== 'done') {
+    throw new Error('Athena completed ledger lacks a cleanup marker bound to this team; retain checkpoint');
+  }
+  if (!isComplete(runId)) {
+    throw new Error('Athena complete phase is terminal but the pipeline is not complete; preserve state');
+  }
+  if (getActiveRunId('athena') === runId) {
+    finalizeRun(runId, { result: 'success', storiesCompleted: completedStories.length });
+  }
+  const resumedSummary = JSON.parse(readFileSync(
+    join(cwd, '.ao', 'artifacts', 'runs', runId, 'summary.json'),
+    'utf-8',
+  ));
+  if (resumedSummary.runId !== runId
+    || resumedSummary.orchestrator !== 'athena'
+    || resumedSummary.status !== 'completed'
+    || resumedSummary.result !== 'success'
+    || getActiveRunId('athena') === runId) {
+    throw new Error('Athena resumed finalization was not durable; retain the recovery checkpoint');
+  }
+  await clearCheckpoint('athena');
+  // Report the already-completed run; do not repeat destructive cleanup.
+  return;
+}
+```
 
 Prune wisdom to prevent unbounded growth:
 - Call `pruneWisdom(200)` to remove entries older than 90 days and cap at 200 most recent
 
 Clean up:
+- Before any destructive cleanup, prove that every isolated worker result was merged:
+  ```javascript
+  if (!completionCheckpoint?.worktrees || !Array.isArray(completionCheckpoint?.mergedWorkers)) {
+    throw new Error('Athena completion checkpoint lacks integration evidence; preserve checkpoint and worktrees');
+  }
+  const requiredMerges = Object.entries(completionCheckpoint.worktrees)
+    .filter(([, item]) => item?.created && item.path !== cwd)
+    .map(([workerName]) => workerName);
+  const finalMergedWorkers = new Set(completionCheckpoint.mergedWorkers);
+  const unmergedWorkers = requiredMerges.filter((workerName) => !finalMergedWorkers.has(workerName));
+  if (unmergedWorkers.length > 0) {
+    throw new Error(`Refusing Athena cleanup with unmerged workers: ${unmergedWorkers.join(', ')}`);
+  }
+  ```
 - `clearTeamStatus(teamName)` — delete `.ao/teams/<slug>/status.jsonl` (import from `scripts/lib/worker-status.mjs`)
-- `clearCheckpoint('athena')`
 - IF Path A (native teams):
   - `TeamDelete("athena-<slug>")` — if TeamDelete fails, log warning but don't block
   - `addEvent(runId, { type: 'native_team_deleted', detail: { teamName: "athena-<slug>" } })`
 - Shut down Codex + Gemini workers properly via adapter lifecycle:
   ```javascript
   import { shutdownTeam } from './scripts/lib/worker-spawn.mjs';
-  await shutdownTeam(teamSlug);  // supervisor-first: signals each worker's detached supervisor group (whose SIGTERM handler shuts the adapter down), then reaps any orphaned adapter group; tmux workers killed directly
+  await shutdownTeam(completionSpawnIdentity.teamSlug, cwd);  // supervisor-first: signals each worker's detached supervisor group (whose SIGTERM handler shuts the adapter down), then reaps any orphaned adapter group; tmux workers killed directly
   ```
 - Remove `.ao/teams/<slug>/`
 - Remove `.ao/state/athena-state.json`, `.ao/prd.json`
 - Clean up any remaining worktrees:
   ```javascript
   import { cleanupTeamWorktrees } from './scripts/lib/worktree.mjs';
-  cleanupTeamWorktrees(cwd, teamSlug);  // removes .ao/worktrees/<slug>/ and branches
+  const cleanupResult = cleanupTeamWorktrees(cwd, completionSpawnIdentity.teamSlug);
+  if (cleanupResult.errors > 0) {
+    throw new Error('Athena worktree cleanup was incomplete; retain checkpoint and resume cleanup');
+  }
   ```
 - Keep `.ao/wisdom.jsonl` (useful for future sessions — never delete)
+
+Only after every cleanup precondition succeeds, durably close and finalize the
+same run identity. Keep the checkpoint through both transitions so either crash
+window is resumable; clear it only after the summary and active-pointer
+postconditions pass. `saveCheckpoint:false` prevents overwriting the retained
+integration checkpoint.
+
+```javascript
+// AO-CONTRACT:run-finalize
+const completion = await completePhase(runId, 'complete', {
+  teamSlug: completionSpawnIdentity.teamSlug,
+  worktreeDigest: completionSpawnIdentity.worktreeDigest,
+  cleanupState: 'done',
+}, {
+  saveCheckpoint: false,
+});
+if (!completion.ok || !isComplete(runId)) {
+  throw new Error('Athena completion ledger did not reach a terminal state; preserve the active run for recovery');
+}
+finalizeRun(runId, {
+  result: 'success',
+  storiesCompleted: completedStories.length,
+});
+if (getActiveRunId('athena') === runId) {
+  throw new Error('Athena finalization did not clear the matching active-run pointer; preserve it for recovery');
+}
+const finalSummary = JSON.parse(readFileSync(
+  join(cwd, '.ao', 'artifacts', 'runs', runId, 'summary.json'),
+  'utf-8',
+));
+if (finalSummary.runId !== runId
+  || finalSummary.orchestrator !== 'athena'
+  || finalSummary.status !== 'completed'
+  || finalSummary.result !== 'success') {
+  throw new Error('Athena final summary postcondition failed; retain the recovery checkpoint');
+}
+await clearCheckpoint('athena');
+```
 
 Notify user of completion:
 ```bash
@@ -1125,20 +2015,40 @@ Phase 5 (Review) → Skill(skill="agent-olympus:slop-cleaner") → Skill(skill="
 
 STOP only when:
 - ✅ All workers complete + integrated + build passes + tests pass + reviews approved
-- ❌ Same error 3 times — signaled by `recordError(runId, sig).shouldEscalate` once consulted (see Loop_Guard)
+- ❌ Same error 3 times — signaled by `recordPhaseError(runId, 'integrate', sig).shouldEscalate` once consulted
   ```
   node scripts/notify-cli.mjs --event escalated --orchestrator athena --body "Same error 3 times: <error summary>"
   ```
-- ❌ 15 iterations exceeded — signaled by `registerIteration(runId).allowed === false` once consulted (see Loop_Guard)
+- ❌ 15 iterations exceeded — signaled by `beginAttempt` / `reattempt` returning `allowed:false`
   ```
   node scripts/notify-cli.mjs --event escalated --orchestrator athena --body "15 iteration limit exceeded"
   ```
 - ❌ Critical security issue (escalate)
 - ❌ Workers in circular deadlock (escalate)
 
-> These limits are tracked by a persistent cooperative guard (`scripts/lib/loop-guard.mjs`), not self-counted.
-> A `degraded:true` result means tracking was unavailable or state was not readable —
-> fall back to the prose numbers above as a backstop and keep the team running.
+> These limits are reached only through the persistent phase-runner chokepoints, not self-counted.
+> A `degraded:true` result means tracking was unavailable or state was not readable.
+> Preserve every live team/worktree and stop at the current recovery boundary.
+
+**Explicit terminal failure (HU-17, review queue only).** <!-- AO-CONTRACT:terminal-failure-ingestion -->
+Only after every safe resume/fix path is exhausted and all workers are terminal,
+record the exact allowlisted outcome:
+
+```javascript
+import { finalizeFailedRun } from './scripts/lib/run-failure.mjs';
+finalizeFailedRun(runId, {
+  orchestrator: 'athena',
+  failureClass: 'orchestration', // or 'task-outcome'
+  code: 'worker_integration_failed',
+  phase: 'integrate',
+});
+```
+
+Never persist raw errors/reasons. Do **not** mark provider unavailability,
+permission/environment failures, cancellation, ambiguous recovery state, or any
+run with active workers as a terminal candidate. SessionEnd may create only a
+local metadata-and-digest review record; it never scaffolds or commits a golden
+task.
 
 **NEVER stop because "it seems done" — verify EVERYTHING.**
 

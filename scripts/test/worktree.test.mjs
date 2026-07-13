@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import { existsSync } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -59,6 +59,9 @@ test('createWorkerWorktree: creates worktree directory and branch', async () => 
     assert.ok(result.worktreePath.includes('my-team'), 'worktreePath should contain team slug');
     assert.ok(result.branchName.startsWith('ao-worker-'), 'branchName should start with ao-worker-');
     assert.ok(existsSync(result.worktreePath), 'worktree directory should exist on disk');
+    const registryPath = path.join(repo, '.ao/state/worktree-registry.json');
+    assert.equal(existsSync(registryPath), true, 'registry must be scoped to the target project');
+    assert.equal(JSON.parse(await fs.readFile(registryPath, 'utf-8')).length, 1);
   } finally {
     await teardownRepo(repo);
   }
@@ -84,6 +87,8 @@ test('createWorkerWorktree: re-creating stale worktree succeeds without error', 
     const r2 = createWorkerWorktree(repo, 'team-stale', 'stale-worker');
     assert.equal(r2.created, true);
     assert.ok(existsSync(r2.worktreePath));
+    const registry = JSON.parse(await fs.readFile(path.join(repo, '.ao/state/worktree-registry.json'), 'utf-8'));
+    assert.equal(registry.length, 1, 'recreating one identity must replace its registry entry');
   } finally {
     await teardownRepo(repo);
   }
@@ -114,6 +119,45 @@ test('createWorkerWorktree: special chars in names are sanitized', async () => {
   }
 });
 
+test('createTeamWorktrees: normalized worker-name collisions keep distinct identities', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const results = createTeamWorktrees('identity-team', [
+      { name: 'api.v1' },
+      { name: 'api-v1' },
+    ], repo);
+
+    assert.ok(results.every(result => result.worktreeCreated));
+    assert.notEqual(results[0].worktreePath, results[1].worktreePath);
+    assert.notEqual(results[0].branchName, results[1].branchName);
+    assert.ok(results.every(result => existsSync(result.worktreePath)));
+    assert.equal(listTeamWorktrees(repo, 'identity-team').length, 2);
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+test('createWorkerWorktree: names differing only after the readable prefix stay distinct', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const commonWorkerPrefix = 'worker-'.repeat(12);
+    const workerA = createWorkerWorktree(repo, 'long-worker-team', `${commonWorkerPrefix}alpha`);
+    const workerB = createWorkerWorktree(repo, 'long-worker-team', `${commonWorkerPrefix}beta`);
+
+    const commonTeamPrefix = 'team-'.repeat(14);
+    const teamA = createWorkerWorktree(repo, `${commonTeamPrefix}alpha`, 'shared-worker');
+    const teamB = createWorkerWorktree(repo, `${commonTeamPrefix}beta`, 'shared-worker');
+
+    assert.ok([workerA, workerB, teamA, teamB].every(result => result.created));
+    assert.notEqual(workerA.worktreePath, workerB.worktreePath);
+    assert.notEqual(workerA.branchName, workerB.branchName);
+    assert.notEqual(teamA.worktreePath, teamB.worktreePath);
+    assert.notEqual(teamA.branchName, teamB.branchName);
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Test: removeWorkerWorktree
 // ---------------------------------------------------------------------------
@@ -138,6 +182,52 @@ test('removeWorkerWorktree: non-existent path returns removed:true (graceful)', 
     const result = removeWorkerWorktree(repo, '/tmp/does-not-exist-ao', 'ao-worker-fake');
     // Should not throw; removed may be true or false depending on git behaviour
     assert.equal(typeof result.removed, 'boolean');
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+test('removeWorkerWorktree: refuses the project root when allocation fell back to cwd', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const marker = path.join(repo, 'DO-NOT-DELETE.txt');
+    await fs.writeFile(marker, 'preserve');
+    const result = removeWorkerWorktree(repo, repo, 'ao-worker-failed-allocation');
+    assert.equal(result.removed, false);
+    assert.match(result.error, /unsafe worktree path/);
+    assert.equal(existsSync(marker), true);
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+test('removeWorkerWorktree: refuses paths outside the managed worktree root', async () => {
+  const repo = await makeGitRepo();
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'ao-unmanaged-path-'));
+  try {
+    const marker = path.join(outside, 'preserve.txt');
+    await fs.writeFile(marker, 'preserve');
+    const result = removeWorkerWorktree(repo, outside, 'ao-worker-unmanaged');
+    assert.equal(result.removed, false);
+    assert.equal(existsSync(marker), true);
+  } finally {
+    await removeDir(outside);
+    await teardownRepo(repo);
+  }
+});
+
+test('removeWorkerWorktree: reports failure when the branch cannot be deleted', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const currentBranch = execSync('git branch --show-current', { cwd: repo, encoding: 'utf-8' }).trim();
+    const missingManagedPath = path.join(repo, '.ao', 'worktrees', 'missing-team', 'missing-worker');
+    const result = removeWorkerWorktree(repo, missingManagedPath, currentBranch);
+    assert.equal(result.removed, false);
+    assert.doesNotThrow(() => execFileSync(
+      'git',
+      ['show-ref', '--verify', '--quiet', `refs/heads/${currentBranch}`],
+      { cwd: repo, stdio: 'pipe' },
+    ));
   } finally {
     await teardownRepo(repo);
   }

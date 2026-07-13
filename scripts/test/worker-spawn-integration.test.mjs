@@ -16,14 +16,25 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { spawn as nodeSpawn } from 'node:child_process';
+import { execFileSync, spawn as nodeSpawn } from 'node:child_process';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { spawnTeam, shutdownTeam, monitorTeam, collectResults, readProcStartId } from '../lib/worker-spawn.mjs';
+import {
+  allocateTeamRunId,
+  collectResults,
+  completeClaudeFallback,
+  dispatchProviderFallback,
+  monitorTeam,
+  pollProviderFallback,
+  planProviderFailover,
+  readProcStartId,
+  shutdownTeam,
+  spawnTeam,
+} from '../lib/worker-spawn.mjs';
 import { manifestPath as supManifestPath, snapshotPath as supSnapshotPath, outputPath as supOutputPath, writeSnapshot as supWriteSnapshot, readSnapshot as supReadSnapshot } from '../lib/supervisor-state.mjs';
 
 const WORKER_SPAWN_PATH = fileURLToPath(new URL('../lib/worker-spawn.mjs', import.meta.url));
@@ -138,6 +149,47 @@ function makeWorkspace(allow = ['Bash(*)', 'Write(*)']) {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
+test('spawnTeam uses an exact launch-time preallocated generation', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    const { spawnSupervisor } = makeFakeAdapters();
+    const runId = allocateTeamRunId();
+    assert.match(runId, /^[a-f0-9]{16}$/);
+    const state = await spawnTeam(
+      'preallocated',
+      [{ type: 'codex', name: 'c1', prompt: 'do it' }],
+      ws.cwd,
+      { hasCodexExecJson: true },
+      { runId, spawnSupervisor },
+    );
+    assert.equal(state.runId, runId);
+    assert.equal(state.workers[0]._handle.runId, runId);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('spawnTeam rejects a malformed preallocated generation before launch', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    const { calls, spawnSupervisor } = makeFakeAdapters();
+    await assert.rejects(
+      spawnTeam(
+        'preallocated-invalid',
+        [{ type: 'codex', name: 'c1', prompt: 'do it' }],
+        ws.cwd,
+        { hasCodexExecJson: true },
+        { runId: 'not-a-generation', spawnSupervisor },
+      ),
+      /runId must be a 16-character lowercase hex generation/,
+    );
+    assert.equal(calls.codexExecSpawn.length, 0);
+    assert.equal(existsSync(join(ws.cwd, '.ao', 'state', 'team-preallocated-invalid.json')), false);
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('spawnTeam integration: codex worker with full-auto host → codex-exec receives level=full-auto', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
@@ -247,7 +299,240 @@ test('spawnTeam integration: mixed team with codex + claude + gemini', async () 
     assert.equal(calls.geminiExecSpawn.length, 1);
     assert.equal(state.workers.length, 3);
     assert.ok(state.workers.every(w => w.status === 'running'));
+    assert.ok(state.workers.every(w => /^[a-f0-9]{16}$/.test(w._attemptId)));
   } finally {
+    ws.cleanup();
+  }
+});
+
+test('provider failover integration: exhausted Codex descriptor dispatches Gemini via spawnTeam', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    const { calls, spawnSupervisor } = makeFakeAdapters();
+    const capabilities = { hasGeminiCli: true, hasClaudeCli: true };
+    const plan = planProviderFailover({
+      type: 'codex',
+      name: 'retry-worker',
+      prompt: 'preserve this exact task',
+      model: 'gpt-5',
+    }, { category: 'rate_limited', message: 'HTTP 429' }, capabilities);
+
+    const dispatched = await dispatchProviderFallback(
+      {
+        ...plan,
+        teamName: 'root-provider-team',
+        workerName: 'retry-worker',
+        parentRunId: 'root-provider-run',
+        parentWorkerRunId: 'root-provider-attempt',
+      },
+      ws.cwd,
+      capabilities,
+      {
+        teamName: 'failover-gemini-integration',
+        spawnInject: { spawnSupervisor },
+      },
+    );
+
+    assert.equal(dispatched.dispatch, 'provider-team');
+    assert.equal(dispatched.state.workers[0]._adapterName, 'gemini-exec');
+    assert.equal(calls.geminiExecSpawn.length, 1);
+    assert.equal(calls.geminiExecSpawn[0].prompt, 'preserve this exact task');
+    assert.equal(calls.geminiExecSpawn[0].opts.model, null);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('provider fallback completion overlays the root worker after child cleanup and resume', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    const parentTeam = 'fallback-parent-provider';
+    const parentRunId = 'root-provider-run';
+    const parentWorkerRunId = '2026-07-12T01:02:03.000Z';
+    const parentState = {
+      teamName: parentTeam,
+      runId: parentRunId,
+      projectRoot: ws.cwd,
+      phase: 'running',
+      workers: [{
+        type: 'codex',
+        name: 'worker',
+        status: 'failed',
+        startedAt: parentWorkerRunId,
+        originalPrompt: 'preserve root output',
+        prompt: 'preserve root output',
+        _adapterName: 'tmux',
+        errorReason: 'provider_exhausted',
+      }],
+    };
+    mkdirSync(join(ws.cwd, '.ao', 'state'), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(ws.cwd, '.ao', 'state', `team-${parentTeam}.json`),
+      JSON.stringify(parentState),
+      { mode: 0o600 },
+    );
+
+    const fallback = {
+      fallbackNeeded: true,
+      targetProvider: 'gemini',
+      teamName: parentTeam,
+      workerName: 'worker',
+      parentRunId,
+      parentWorkerRunId,
+      rootTeamName: parentTeam,
+      rootWorkerName: 'worker',
+      rootRunId: parentRunId,
+      rootWorkerRunId: parentWorkerRunId,
+      rootPrompt: 'preserve root output',
+      replacementWorker: { type: 'gemini', name: 'worker', prompt: 'preserve root output' },
+    };
+    const dispatched = await dispatchProviderFallback(fallback, ws.cwd, { hasGeminiCli: true }, {
+      teamName: 'fallback-child-provider',
+      lockDir: join(ws.cwd, '.ao', 'state'),
+      loadTeamState: () => null,
+      spawnTeam: async (teamName, workers) => ({ teamName, workers, phase: 'running' }),
+    });
+    const result = await pollProviderFallback(dispatched, ws.cwd, {}, {
+      monitorTeam: () => ({ workers: [{ name: 'worker', status: 'completed' }] }),
+      collectResults: () => ({ worker: 'DURABLE PROVIDER OUTPUT' }),
+    });
+    assert.equal(result.status, 'completed');
+
+    // Child lifecycle cleanup must not remove or invalidate the root outcome.
+    rmSync(join(ws.cwd, '.ao', 'state', 'team-fallback-child-provider.json'), { force: true });
+    rmSync(join(ws.cwd, '.ao', 'artifacts', 'team', 'fallback-child-provider'), { recursive: true, force: true });
+
+    const resumed = monitorTeam(parentTeam);
+    assert.equal(resumed.workers[0].status, 'completed');
+    assert.equal(resumed.workers[0].fallbackProvider, 'gemini');
+    assert.equal(collectResults(parentTeam).worker, 'DURABLE PROVIDER OUTPUT');
+    assert.equal(monitorTeam(parentTeam).workers[0].status, 'completed');
+
+    const persistedParent = JSON.parse(readFileSync(
+      join(ws.cwd, '.ao', 'state', `team-${parentTeam}.json`),
+      'utf-8',
+    ));
+    assert.equal(persistedParent.workers[0].status, 'completed');
+    assert.equal(persistedParent.workers[0]._providerFallback.handoffId, dispatched.handoffId);
+    const fallbackStatePath = join(ws.cwd, '.ao', 'state', `provider-fallback-${dispatched.handoffId}.json`);
+    const fallbackOutputPath = join(ws.cwd, '.ao', 'artifacts', 'provider-fallback', `${dispatched.handoffId}.json`);
+    assert.equal(statSync(fallbackStatePath).mode & 0o777, 0o600);
+    assert.equal(statSync(fallbackOutputPath).mode & 0o777, 0o600);
+
+    let resumedSpawnCount = 0;
+    const redispatched = await dispatchProviderFallback(fallback, ws.cwd, { hasGeminiCli: true }, {
+      teamName: 'fallback-child-provider',
+      lockDir: join(ws.cwd, '.ao', 'state'),
+      loadTeamState: () => null,
+      spawnTeam: async () => { resumedSpawnCount += 1; return null; },
+    });
+    assert.equal(redispatched.dispatch, 'fallback-completed');
+    assert.equal(redispatched.output, 'DURABLE PROVIDER OUTPUT');
+    assert.equal(resumedSpawnCount, 0, 'a stale parent poll must not re-spawn after durable completion');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('Claude fallback completion becomes the root canonical result and is not re-claimed', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    const parentTeam = 'fallback-parent-claude';
+    const parentRunId = 'root-claude-run';
+    const parentWorkerRunId = '2026-07-12T02:03:04.000Z';
+    mkdirSync(join(ws.cwd, '.ao', 'state'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(ws.cwd, '.ao', 'state', `team-${parentTeam}.json`), JSON.stringify({
+      teamName: parentTeam,
+      runId: parentRunId,
+      projectRoot: ws.cwd,
+      phase: 'running',
+      workers: [{
+        type: 'gemini',
+        name: 'worker',
+        status: 'failed',
+        startedAt: parentWorkerRunId,
+        originalPrompt: 'same bounded task',
+        prompt: 'same bounded task',
+        _adapterName: 'tmux',
+      }],
+    }), { mode: 0o600 });
+    const fallback = {
+      fallbackNeeded: true,
+      targetProvider: 'claude',
+      teamName: parentTeam,
+      workerName: 'worker',
+      parentRunId,
+      parentWorkerRunId,
+      rootTeamName: parentTeam,
+      rootWorkerName: 'worker',
+      rootRunId: parentRunId,
+      rootWorkerRunId: parentWorkerRunId,
+      rootPrompt: 'same bounded task',
+      replacementWorker: { type: 'claude', name: 'worker', prompt: 'same bounded task' },
+    };
+
+    const claimed = await dispatchProviderFallback(fallback, ws.cwd);
+    assert.equal(claimed.dispatch, 'claude-task');
+    await completeClaudeFallback(claimed, 'DURABLE CLAUDE OUTPUT');
+
+    const resumed = monitorTeam(parentTeam);
+    assert.equal(resumed.workers[0].status, 'completed');
+    assert.equal(resumed.workers[0].fallbackProvider, 'claude');
+    assert.equal(collectResults(parentTeam).worker, 'DURABLE CLAUDE OUTPUT');
+
+    const redispatched = await dispatchProviderFallback(fallback, ws.cwd);
+    assert.equal(redispatched.dispatch, 'claude-completed');
+    assert.equal(redispatched.output, 'DURABLE CLAUDE OUTPUT');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('shutting down a child fallback team does not delete its inherited root worktree branch', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  const worktreeBase = mkdtempSync(join(tmpdir(), 'ao-root-worktree-'));
+  const inheritedWorktree = join(worktreeBase, 'worker');
+  const rootBranch = 'ao-worker-root-team-worker';
+  try {
+    execFileSync('git', ['init'], { cwd: ws.cwd, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: ws.cwd });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: ws.cwd });
+    writeFileSync(join(ws.cwd, 'seed.txt'), 'seed\n');
+    execFileSync('git', ['add', 'seed.txt'], { cwd: ws.cwd });
+    execFileSync('git', ['commit', '-m', 'seed'], { cwd: ws.cwd, stdio: 'pipe' });
+    execFileSync('git', ['worktree', 'add', inheritedWorktree, '-b', rootBranch], {
+      cwd: ws.cwd,
+      stdio: 'pipe',
+    });
+
+    mkdirSync(join(ws.cwd, '.ao', 'state'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(ws.cwd, '.ao', 'state', 'team-fallback-child.json'), JSON.stringify({
+      teamName: 'fallback-child',
+      phase: 'completed',
+      workers: [{
+        type: 'gemini',
+        name: 'worker',
+        status: 'completed',
+        _adapterName: 'tmux',
+        worktreePath: inheritedWorktree,
+        branchName: rootBranch,
+        worktreeCreated: false,
+        worktreeInherited: true,
+      }],
+    }), { mode: 0o600 });
+
+    await shutdownTeam('fallback-child', ws.cwd);
+
+    assert.equal(existsSync(inheritedWorktree), true);
+    const branches = execFileSync('git', ['branch', '--format=%(refname:short)'], {
+      cwd: ws.cwd,
+      encoding: 'utf-8',
+    });
+    assert.match(branches, new RegExp(`^${rootBranch}$`, 'm'));
+  } finally {
+    try { execFileSync('git', ['worktree', 'remove', inheritedWorktree, '--force'], { cwd: ws.cwd, stdio: 'pipe' }); } catch {}
+    try { execFileSync('git', ['branch', '-D', rootBranch], { cwd: ws.cwd, stdio: 'pipe' }); } catch {}
+    rmSync(worktreeBase, { recursive: true, force: true });
     ws.cleanup();
   }
 });

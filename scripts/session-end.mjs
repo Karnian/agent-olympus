@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * SessionEnd hook — cleans up stale state files on session termination.
- * Removes .ao/state/ files and .ao/teams/ directories older than 24 hours.
+ * Removes transient .ao/state/, .ao/teams/, and provider-fallback artifacts
+ * older than 24 hours.
  * Complement to stop-hook.mjs (which handles WIP commits).
  * Never blocks: always exits 0.
  */
@@ -10,7 +11,8 @@ import { readStdin } from './lib/stdin.mjs';
 import { readFileSync, readdirSync, statSync, unlinkSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { atomicWriteFileSync } from './lib/fs-atomic.mjs';
-import { finalizeSession, getCurrentSessionId, pruneSessions } from './lib/session-registry.mjs';
+import { finalizeSession, getCurrentSessionId, getSession, pruneSessions } from './lib/session-registry.mjs';
+import { collectRunFailureCandidate } from './lib/eval-failure-candidates.mjs';
 import { readSnapshot as readSupSnapshot, isHeartbeatFresh as supHeartbeatFresh } from './lib/supervisor-state.mjs';
 import { readProcStartId } from './lib/proc-identity.mjs';
 
@@ -35,6 +37,11 @@ const PROTECTED_NAMES = new Set([
   // in case anyone ever writes a legacy copy under .ao/state/.
   'wisdom.jsonl',
 ]);
+
+// Provider fallback recovery claims form an append-only lineage for the exact
+// stale lock generation. Preserve both its root and optional successor claim:
+// deleting either could let an old observer replay recovery across sessions.
+const PROVIDER_RECOVERY_CLAIM = /^\.provider-fallback-[a-f0-9]{24}-recovery-[a-f0-9]{64}(?:-successor-[a-f0-9]{64})?\.claim$/;
 
 /**
  * Remove entries in `dir` whose mtime exceeds STALE_MS.
@@ -81,7 +88,7 @@ function cleanStaleFiles(dir, now) {
     for (const entry of entries) {
       // v1.0.2 B-X1: protect durable-memory filenames even if they somehow
       // end up in .ao/state/ (defensive; primary storage is .ao/memory/).
-      if (PROTECTED_NAMES.has(entry)) continue;
+      if (PROTECTED_NAMES.has(entry) || PROVIDER_RECOVERY_CLAIM.test(entry)) continue;
       const fullPath = join(dir, entry);
       // F1: the supervisor tree is run-scoped — NEVER wholesale-delete it by its
       // own mtime. Sweep per-run, skipping runs that are still active.
@@ -126,10 +133,32 @@ async function main() {
     const now = Date.now();
     const stateDir = join(process.cwd(), '.ao', 'state');
     const teamsDir = join(process.cwd(), '.ao', 'teams');
+    const providerFallbackDir = join(process.cwd(), '.ao', 'artifacts', 'provider-fallback');
 
     // Finalize session record — use session_id from stdin or pointer file
     const sessionId = _data.session_id || getCurrentSessionId();
     if (sessionId) {
+      // HU-17: inspect only runs explicitly linked to this session. Never scan
+      // the global run-artifact tree from a lifecycle hook. Collection is
+      // local, bounded, metadata-only, and fail-safe; ineligible
+      // infrastructure/cancelled/unfinished runs simply produce no candidate.
+      try {
+        const session = getSession(sessionId);
+        const linkedRunIds = Array.isArray(session?.runIds)
+          ? session.runIds.filter((runId) => typeof runId === 'string').slice(-64)
+          : [];
+        const collectionDeadline = Date.now() + 1_000;
+        for (const runId of linkedRunIds) {
+          if (Date.now() >= collectionDeadline) break;
+          try {
+            collectRunFailureCandidate(runId, {
+              deadlineMs: collectionDeadline,
+              lockRetries: 1,
+              lockWaitMs: 0,
+            });
+          } catch {}
+        }
+      } catch {}
       finalizeSession(sessionId, { status: 'ended' });
     }
 
@@ -147,12 +176,13 @@ async function main() {
 
     const cleanedState = cleanStaleFiles(stateDir, now);
     const cleanedTeams = cleanStaleFiles(teamsDir, now);
+    const cleanedProviderFallbacks = cleanStaleFiles(providerFallbackDir, now);
 
     // Include a debug note when cleanup happened (suppressOutput keeps it invisible to the user)
-    if (cleanedState > 0 || cleanedTeams > 0) {
+    if (cleanedState > 0 || cleanedTeams > 0 || cleanedProviderFallbacks > 0) {
       process.stdout.write(JSON.stringify({
         suppressOutput: true,
-        _debug: `Cleaned ${cleanedState} stale state files, ${cleanedTeams} stale team dirs`,
+        _debug: `Cleaned ${cleanedState} stale state files, ${cleanedTeams} stale team dirs, ${cleanedProviderFallbacks} provider fallback artifacts`,
       }));
     } else {
       process.stdout.write('{}');

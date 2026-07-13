@@ -75,10 +75,17 @@ async function shutdownAdapter() {
   // The adapter shutdowns signal only the GROUP LEADER and stop escalating once
   // it exits — leaving descendants alive. The adapter child is its own detached
   // group leader (pgid === adapterPid), so reap any survivors here. The window
-  // between the graceful shutdown and this reap is microseconds, so PID reuse is
-  // negligible; probe first to avoid signaling an already-gone group.
+  // between the graceful shutdown and this reap can be several seconds. Re-read
+  // the recorded process start identity before group signalling so a recycled
+  // PID/PGID can never target an unrelated process.
   const apid = base && base.adapterPid;
   if (Number.isInteger(apid) && apid > 1) {
+    const expectedStartId = base?.adapterStartId || null;
+    const currentStartId = readProcStartId(apid);
+    // A null current identity commonly means the group leader exited while a
+    // descendant still owns the PGID. Only a readable, different identity
+    // proves PID reuse; otherwise fail open to the descendant group reap.
+    if (expectedStartId && currentStartId !== null && currentStartId !== expectedStartId) return;
     try { process.kill(-apid, 0); process.kill(-apid, 'SIGKILL'); } catch { /* group already gone */ }
   }
 }

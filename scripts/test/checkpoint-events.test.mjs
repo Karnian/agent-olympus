@@ -42,8 +42,8 @@ async function setupTestEnv() {
   const tmpDir = await makeTmpDir();
   const runsBase = path.join(tmpDir, 'runs');
   const stateDir = path.join(tmpDir, 'state');
-  await fsp.mkdir(runsBase, { recursive: true });
-  await fsp.mkdir(stateDir, { recursive: true });
+  await fsp.mkdir(runsBase, { recursive: true, mode: 0o700 });
+  await fsp.mkdir(stateDir, { recursive: true, mode: 0o700 });
   return { tmpDir, runsBase, stateDir };
 }
 
@@ -71,9 +71,9 @@ test('getActiveRunId: returns null when no active run', async () => {
 test('setActiveRunId + getActiveRunId: round-trip', async () => {
   const { tmpDir, stateDir } = await setupTestEnv();
   try {
-    setActiveRunId('atlas', 'test-run-001', { stateDir });
+    setActiveRunId('atlas', 'atlas-test-run-001', { stateDir });
     const result = getActiveRunId('atlas', { stateDir });
-    assert.equal(result, 'test-run-001');
+    assert.equal(result, 'atlas-test-run-001');
   } finally {
     await removeTmpDir(tmpDir);
   }
@@ -114,9 +114,9 @@ test('saveCheckpoint: emits checkpoint_saved event when active run exists', asyn
   process.chdir(tmpDir);
   try {
     // Create .ao/state in tmpDir for checkpoint.mjs
-    await fsp.mkdir(path.join(tmpDir, '.ao', 'state'), { recursive: true });
+    await fsp.mkdir(path.join(tmpDir, '.ao', 'state'), { recursive: true, mode: 0o700 });
     // Create .ao/artifacts/runs in tmpDir for run-artifacts.mjs
-    await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true });
+    await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true, mode: 0o700 });
 
     const { runId } = createRun('atlas', 'test task');
     const result = await saveCheckpoint('atlas', { phase: 0, taskDescription: 'test' });
@@ -138,8 +138,8 @@ test('saveCheckpoint: no event when no active run', async () => {
   const origCwd = process.cwd();
   process.chdir(tmpDir);
   try {
-    await fsp.mkdir(path.join(tmpDir, '.ao', 'state'), { recursive: true });
-    await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true });
+    await fsp.mkdir(path.join(tmpDir, '.ao', 'state'), { recursive: true, mode: 0o700 });
+    await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true, mode: 0o700 });
 
     // No createRun call — no active run
     await saveCheckpoint('atlas', { phase: 0, taskDescription: 'test' });
@@ -163,8 +163,8 @@ test('saveCheckpoint: emits phase_transition on phase change', async () => {
   const origCwd = process.cwd();
   process.chdir(tmpDir);
   try {
-    await fsp.mkdir(path.join(tmpDir, '.ao', 'state'), { recursive: true });
-    await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true });
+    await fsp.mkdir(path.join(tmpDir, '.ao', 'state'), { recursive: true, mode: 0o700 });
+    await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true, mode: 0o700 });
 
     const { runId } = createRun('atlas', 'test task');
     await saveCheckpoint('atlas', { phase: 0, taskDescription: 'test' });
@@ -195,8 +195,8 @@ test('saveCheckpoint: no phase_transition when phase unchanged', async () => {
   const origCwd = process.cwd();
   process.chdir(tmpDir);
   try {
-    await fsp.mkdir(path.join(tmpDir, '.ao', 'state'), { recursive: true });
-    await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true });
+    await fsp.mkdir(path.join(tmpDir, '.ao', 'state'), { recursive: true, mode: 0o700 });
+    await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true, mode: 0o700 });
 
     const { runId } = createRun('atlas', 'test task');
     await saveCheckpoint('atlas', { phase: 3, taskDescription: 'test' });
@@ -226,8 +226,8 @@ test('clearCheckpoint: emits checkpoint_cleared event', async () => {
   const origCwd = process.cwd();
   process.chdir(tmpDir);
   try {
-    await fsp.mkdir(path.join(tmpDir, '.ao', 'state'), { recursive: true });
-    await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true });
+    await fsp.mkdir(path.join(tmpDir, '.ao', 'state'), { recursive: true, mode: 0o700 });
+    await fsp.mkdir(path.join(tmpDir, '.ao', 'artifacts', 'runs'), { recursive: true, mode: 0o700 });
 
     const { runId } = createRun('atlas', 'test task');
     await saveCheckpoint('atlas', { phase: 0 });

@@ -61,7 +61,11 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Layered Opus-skew reduction** *(v1.1.0+)*: Per-subagent model usage logging (`ao-model-usage.jsonl`, schemaVersion:1) for measurement; escalation-first routing pipeline that defaults to Sonnet/Haiku and only promotes to Opus on demonstrated need. Summarise with `node scripts/usage-report.mjs`
 - **Runtime permission_mode capture + `/ask codex` read-only fallback** *(v1.1.6)*: SessionStart + UserPromptSubmit hooks read `permission_mode` from Claude Code's hook stdin (or `CLAUDE_PERMISSION_MODE` env) and persist to `.ao/state/ao-runtime-permissions.json` (schemaVersion:1, 30-min TTL). Permission detection now merges settings ⇧ runtime as **upgrade-only** through the same deny/ask/disableBypassPermissionsMode/allowManagedPermissionRulesOnly pipeline — `--dangerously-skip-permissions` no longer leaves the mirror at `suggest`. Independently, `/ask codex` on suggest-tier hosts now falls back to codex's `read-only` sandbox (`-s read-only -a never`) with a system-prompt guard + `git status --porcelain` post-check, instead of exiting with code 2. New `node scripts/diagnose-sandbox.mjs --explain-permissions` shows the full per-layer breakdown. Closes #67/#68/#69
 - **Detached worker supervisor** *(v1.2.0)*: Adapter team workers (codex-exec/appserver, claude-cli, gemini-exec/acp) no longer run in-process — `spawnTeam` launches a detached supervisor per worker that owns the adapter and writes completion/failure/output to disk, so the fresh-process-per-poll orchestrator (`monitorTeam`/`collectResults`/`shutdownTeam`) finally observes their outcome across the process boundary (they were previously stuck `running` forever). Run-scoped snapshots (schemaVersion:1) with PID start-time identity for crash/reuse detection, supervisor-first shutdown with orphan-group reap, per-run SessionEnd protection, and prompt-bearing-manifest scrubbing. Shipped across P1–P6 phases with 4 Codex cross-review rounds
-- **2376 unit tests**: Comprehensive test suite using `node:test` across 92 test files (v1.4.0: 2376/2376 passing)
+- **HU-01 P2/P3 evaluation harness** *(v1.5.0)*: Six vendored regression/capability tasks run at `k=3` with `pass^k`/`pass@k`, token accounting, declared or measured baselines, benchmark/protocol fingerprints, and trend reports. CI exercises hermetic GREEN/RED fixtures only; paid live Atlas/Athena runs remain an explicit operator action.
+- **Bounded provider failover** *(v1.5.0)*: Exhausted Codex workers move to Gemini when available and then to native Claude, with a fresh retry budget per provider, generation-bound identity, deterministic child teams, and durable completion output. Lost authenticated Claude output fails closed instead of silently rerunning committed work.
+- **Crash-safe event-backed runs** *(v1.5.0)*: Active-run CAS, phase evidence, finalization locks, terminal-failure markers, and Athena generation adoption make resume/restart fail closed. Hardened no-follow artifact I/O tolerates a torn run-event JSONL record, preserves later valid events, validates only the appended tail, and allows a definitely dead recovery claimant to be safely re-elected without weakening ABA fences.
+- **Sanitized failed-run feedback loop** *(v1.5.0)*: SessionEnd queues only independently verified, session-linked terminal task failures as metadata/digests. A human must approve and link candidates; prompts, error text, paths, diffs, evidence payloads, and provider output never enter the queue.
+- **2719 unit tests**: Comprehensive test suite using `node:test` across 108 test files (v1.5.0: 2719/2719 passing)
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -356,7 +360,7 @@ User Request
 agents/              Agent persona definitions (.md files with model + role)
 skills/              User-facing workflow skills (SKILL.md with triggers, steps)
 scripts/             Hook scripts (Node.js ESM, zero dependencies)
-  lib/               Shared libraries (stdin, intent, tmux, wisdom, checkpoint)
+  lib/               Orchestration, hardened artifacts, adapters, and recovery
   run.cjs            Universal hook entry point with version fallback
 config/              Model routing configuration (JSONC)
 hooks/               Hook event registrations (hooks.json)
@@ -404,9 +408,17 @@ If Claude Code crashes or closes during an orchestration:
 2. Orchestrator detects stale checkpoint (< 24h old)
 3. Presents options: **Resume** or **Restart**
    - **Resume** → Skip completed phases, restore story state, continue from where you left off
-   - **Restart** → Clear checkpoint, start fresh
+   - **Restart** → First terminalize the exact active run and verify that its
+     matching active-run pointer was cleared; only then clear its checkpoint and
+     create a fresh run. A missing, corrupt, linked, or identity-unproven Athena
+     orphan is preserved with its teams/worktrees and stops for recovery — deleting
+     a checkpoint alone never authorizes a restart.
 
-This works because checkpoints are saved after each phase transition and store PRD snapshots.
+This works because checkpoints are a recovery cache, while the active-run pointer,
+summary, and pipeline ledger remain the durable run-identity authority.
+Operational `events.jsonl` recovery skips a malformed/torn record without hiding
+later valid events; phase/finalization ensures repair the line boundary and
+verify only their exact appended tail.
 
 ## Wisdom System
 
@@ -546,13 +558,17 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (2376 tests across 92 files as of v1.4.0) covers the core hook libraries. To run:
+A `node:test` based test suite (2719 tests across 108 files in v1.5.0) covers the core hook libraries. To run:
 
 ```bash
-node --test 'scripts/test/**/*.test.mjs'
-# or
 npm test
+# or, invoke the cross-platform Node test enumerator directly
+node scripts/run-tests.mjs
 ```
+
+**Representative covered modules:** phase-runner, run-artifacts, run-failure,
+recovery-claim, hardened-fs, athena-recovery, orphan-run-recovery,
+eval-failure-candidates, worker-spawn, checkpoint, worktree
 
 Additional integration verification:
 

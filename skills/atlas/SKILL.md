@@ -46,11 +46,22 @@ polling, and completed phases are never re-run on resume (exactly-once).
 import {
   initPipeline, enterPhase, beginAttempt, reattempt, loopTick,
   recordPhaseError, completePhase, skipPhase, reopenPhase, getPipelineState,
+  isComplete,
 } from './scripts/lib/phase-runner.mjs';
-// runId is the active run id — the SAME one passed to addVerification() /
-// checkVerificationGate(). Resolve via createRun('atlas', <task>) /
-// getActiveRunId('atlas') from ./scripts/lib/run-artifacts.mjs if not in scope.
-const { resumePhase, resumePolicy } = initPipeline(runId, 'atlas');
+import { createRun, finalizeRun, getActiveRunId } from './scripts/lib/run-artifacts.mjs';
+const activeAtlasRunId = getActiveRunId('atlas');
+const createdAtlasRun = activeAtlasRunId ? null : createRun('atlas', <user_request>);
+if (createdAtlasRun && !createdAtlasRun.ok) {
+  throw new Error(`Atlas run creation failed: ${createdAtlasRun.reason}; preserve state and stop`);
+}
+// runId is the exact active/created id — the SAME one passed to
+// addVerification() / checkVerificationGate().
+const runId = activeAtlasRunId || createdAtlasRun.runId;
+const pipelineInit = initPipeline(runId, 'atlas');
+if (!pipelineInit.ok || pipelineInit.degraded) {
+  throw new Error('Atlas pipeline ledger is unavailable or corrupt; preserve all artifacts and stop');
+}
+const { resumePhase, resumePolicy } = pipelineInit;
 // On resume, jump to resumePhase; every earlier enterPhase below returns { skip:true }.
 ```
 
@@ -72,10 +83,11 @@ The runner methods replace the old direct loop-guard calls one-for-one:
 - **Top of every Phase 5 review round:** `loopTick(runId, 'review')` (cap 3);
   `!allowed` ⇒ stop the review loop, escalate unresolved findings.
 
-**Fail-open:** if a runner call returns `degraded: true`, it could not persist or read
-clean state (missing runId / corrupt state / FS error) — fall back to the prose bounds
-as a backstop and proceed; a tracking glitch must never halt legitimate work. A genuine
-`allowed:false` / `shouldEscalate:true` with `degraded:false` is authoritative — STOP.
+**Persistence safety:** initialization failure, `unsafe-run-path`, a terminal result,
+or a transition denial is authoritative — preserve the active run and STOP. A normal
+non-security `degraded:true` observation can use the prose bounds only as a backstop;
+it never authorizes bypassing a phase boundary, spawning work, or finalizing. A genuine
+`allowed:false` / `shouldEscalate:true` with `degraded:false` is likewise authoritative — STOP.
 
 ## Architecture
 
@@ -210,12 +222,12 @@ above) prevents runaway loops — a SEPARATE budget from the 15-iteration cap.
 #### Checkpoint Recovery + Phase-Ledger Init
 
 Before starting any work, establish the run id and the phase ledger:
-1. `runId = getActiveRunId('atlas') || createRun('atlas', <user_request>).runId` (from `run-artifacts.mjs`).
+1. Resolve `activeAtlasRunId = getActiveRunId('atlas')`; only when absent call `createdAtlasRun = createRun('atlas', <user_request>)`. If `!createdAtlasRun.ok`, STOP and preserve state. Otherwise use `runId = activeAtlasRunId || createdAtlasRun.runId` (from `run-artifacts.mjs`).
 2. `const { resumePhase, resumePolicy } = initPipeline(runId, 'atlas')` — the runner's resume point (see Phase_Runner section).
 3. Check for an interrupted session: `loadCheckpoint('atlas')` (carries the rich payload).
 4. If `resumePhase` is past `triage` OR a checkpoint is found, present to user: "[formatCheckpoint output]. Resume or restart?"
    - **Resume** → jump to `resumePhase`; every earlier `enterPhase` returns `{ skip:true }` (completed phases are never re-run). Restore the rich payload (`prdSnapshot`) from the checkpoint, but read **story-level truth** (which stories passed) from `.ao/prd.json` + the verification ledger, NOT from a possibly-stale `completedStories`.
-   - **Restart** → `clearCheckpoint('atlas')`, start a fresh run id, proceed normally.
+   - **Restart** → first terminalize the exact active run through the categorized `cancelled/user_cancelled` failure path and verify its active pointer was cleared. Then `clearCheckpoint('atlas')`, call `createRun('atlas', <user_request>)`, and check its `ok` result before initializing a fresh ledger. If terminalization, pointer clearing, or new-run creation fails, STOP and preserve the old run; never overwrite its pointer.
 
 #### Load Prior Wisdom
 1. Run `migrateProgressTxt()` if `.ao/progress.txt` exists (one-time migration to wisdom.jsonl)
@@ -264,6 +276,8 @@ for (const action of preflightReport.actions) {
   Output: "[Atlas] Preflight: " + action;
 }
 const { hasCodex, hasCodexAppServer, hasCodexExecJson, hasGeminiCli, hasGeminiAcp, hasTmux } = preflightReport.capabilities;
+const cwd = process.cwd();
+const capabilities = preflightReport.capabilities;
 Output: formatCapabilityReport(preflightReport.capabilities, { orchestrator: 'Atlas' })
 
 // Step 3: Guard input size
@@ -431,6 +445,10 @@ If metis_output.COMPLEXITY != 'trivial' AND
 Output: "[Atlas] Triage + Analysis complete — complexity: <complexity>, scope: <scope>"
 ```
 
+```javascript
+await completePhase(runId, 'triage');   // canonical boundary before any later phase can complete or skip
+```
+
 **Trivial tasks**: Skip phases 1-2, execute directly (Atlas CAN implement simple things itself).
 On the trivial path, mark the skipped phases in the ledger and synthesize a minimal
 PRD so the downstream finalize/ship contract still holds:
@@ -446,10 +464,6 @@ skipPhase(runId, 'plan', 'trivial');
 ```
 **Ambiguous tasks** (ambiguity > 60): Invoke `Skill(skill="agent-olympus:deep-interview")` to clarify before proceeding.
 **Moderate+**: Full pipeline.
-
-```javascript
-await completePhase(runId, 'triage');   // replaces saveCheckpoint({phase:1}); checkpoints triage (index 0)
-```
 
 ### Phase 1 — OPTIONAL DEEP-DIVE / EXTERNAL CONTEXT (skip for trivial)
 
@@ -770,43 +784,94 @@ Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...
   Follow these golden principles: <harness_context>")
 ```
 
-**Codex deep workers** (batch executors — adapter auto-selected by `selectAdapter()`):
-```bash
-# Adapter auto-selected: codex-appserver > codex-exec > tmux
-# tmux fallback resolves binary + injects PATH:
-CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
-tmux new-session -d -s "atlas-codex-<N>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-<N>" "\"$CODEX_BIN\" <approval-flag> exec \"<implementation prompt>\"" Enter
-# Monitor: tmux capture-pane -pt "atlas-codex-<N>" -S -200
-# Cleanup: tmux kill-session -t "atlas-codex-<N>"
+**Codex/Gemini workers** (canonical adapter spawn per parallel group):
+
+Do not launch external workers with ad-hoc tmux commands. For each parallel
+group, build all Codex/Gemini worker descriptors and call `spawnTeam()` exactly
+once. `spawnTeam` owns adapter selection (Codex appserver→exec→tmux; Gemini
+ACP→exec→tmux), permission mirroring, supervisor persistence, and tmux fallback.
+
+```javascript
+import { spawnTeam } from './scripts/lib/worker-spawn.mjs';
+import { execFileSync } from 'node:child_process';
+import {
+  createWorkerWorktree,
+  mergeWorkerBranch,
+  removeWorkerWorktree,
+} from './scripts/lib/worktree.mjs';
+
+// Scope this identity to the current PRD + parallel group. Reuse it unchanged
+// for every monitor/collect/failover poll for this group.
+if (!/^atlas-[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(prd.projectName)) {
+  throw new Error('Unsafe Atlas projectName for worker state');
+}
+const safeGroup = String(parallelGroup).replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 40);
+const teamSlug = `${prd.projectName}-${safeGroup}`;
+const rootStatus = execFileSync('git', ['-C', cwd, 'status', '--porcelain'], {
+  encoding: 'utf-8',
+}).trim();
+if (rootStatus) {
+  throw new Error(
+    'External worktrees must branch from a committed Atlas checkpoint; preserve current changes and route this group serially until the root is clean',
+  );
+}
+const externalStories = groupStories
+  .filter((story) => story.assignTo === 'codex' || story.assignTo === 'gemini');
+const externalWorkers = externalStories.map((story) => {
+  const name = story.id.toLowerCase().replace(/[^a-z0-9._-]/g, '-');
+  const worktree = createWorkerWorktree(cwd, teamSlug, name);
+  if (!worktree.created && externalStories.length > 1) {
+    throw new Error('Parallel external workers require isolated git worktrees');
+  }
+  return {
+    type: story.assignTo,
+    name,
+    prompt: [
+      `Implement ${story.id}: ${story.title}`,
+      `Acceptance criteria:\n${story.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}`,
+      worktree.created
+        ? `MANDATORY WORKTREE: ${worktree.worktreePath}\nWork only in this directory and commit the completed changes to ${worktree.branchName} before reporting success.`
+        : 'Work in the current project directory; no isolated worktree was created.',
+      harness_context ? `Harness constraints:\n${harness_context}` : '',
+    ].filter(Boolean).join('\n\n'),
+    // story.model is a Claude tier (opus/sonnet/haiku), not a portable
+    // Codex/Gemini model selector. External adapters choose their own default.
+    model: undefined,
+    cwd: worktree.created ? worktree.worktreePath : cwd,
+    worktreePath: worktree.created ? worktree.worktreePath : null,
+    branchName: worktree.created ? worktree.branchName : null,
+  };
+});
+
+const externalTeamState = externalWorkers.length > 0
+  ? await spawnTeam(teamSlug, externalWorkers, cwd, capabilities)
+  : null;
 ```
 
-**Gemini workers** (for visual/multimodal tasks — adapter auto-selected by `selectAdapter()`):
-
-When `teamWorkerType === 'gemini'` in model-routing config (visual-engineering, design-review, artistry):
-```bash
-# Adapter auto-selected: gemini-acp > gemini-exec > tmux
-# Gemini approval mode mirrors Claude's permission level (gemini-approval.mjs).
-# Override: set gemini.approval in .ao/autonomy.json to "default", "auto_edit", "yolo", or "plan".
-#
-# gemini-acp (preferred): Multi-turn JSON-RPC 2.0 — newSession/prompt lifecycle, message queue
-# gemini-exec: Single-turn `gemini --output-format json -p "<prompt>"`
-# tmux (fallback): legacy pane capture
-GEMINI_BIN=$(which gemini 2>/dev/null || echo /opt/homebrew/bin/gemini)
-tmux new-session -d -s "atlas-gemini-<N>" -c "<cwd>"
-tmux send-keys -t "atlas-gemini-<N>" "\"$GEMINI_BIN\" <approval-flag> -p \"<implementation prompt>\"" Enter
-# Monitor: tmux capture-pane -pt "atlas-gemini-<N>" -S -200
-# Cleanup: tmux kill-session -t "atlas-gemini-<N>"
-```
+When `teamWorkerType === 'gemini'` for visual/multimodal work, set the worker
+descriptor's `type` to `gemini`; do not bypass this canonical spawn path.
 
 **Worker execution & monitoring model (supervisor).** Non-tmux adapter workers (codex-exec, codex-appserver, claude-cli, gemini-exec, gemini-acp) run inside a **detached supervisor** that `spawnTeam()` launches per worker — NOT in your process. The supervisor owns the adapter and writes completion/failure/output to disk, so `monitorTeam(teamSlug)` (re-reading disk on every call) is the canonical monitor and survives the fresh-process polling model. The per-adapter failure detection below happens inside that supervisor and surfaces through `monitorTeam`'s returned `w.status` / `w.errorReason`; `collectResults(teamSlug)` returns each worker's durable output, and `shutdownTeam(teamSlug)` reaps the supervisor (and any orphaned adapter group). You do NOT `capturePane` supervisor workers — that is the tmux-fallback path only.
 
-**Codex/Gemini failure detection and Claude fallback:**
+**Codex/Gemini failure detection and provider fallback:**
 
 The monitoring system detects failures via the active adapter (inside the supervisor for non-tmux workers):
 
 ```javascript
-import { detectCodexError, reassignToClaude, selectAdapter } from './scripts/lib/worker-spawn.mjs';
+import {
+  collectResults,
+  completeClaudeFallback,
+  detectCodexError,
+  dispatchProviderFallback,
+  monitorTeam,
+  pollProviderFallback,
+  reassignProvider,
+  selectAdapter,
+  shutdownTeam,
+} from './scripts/lib/worker-spawn.mjs';
+const providerTeamsToShutdown = new Set(); // initialize once before the monitor loop
+// teamSlug is the exact per-group name passed to spawnTeam() above. Do not
+// recompute or invent it while polling: team state is keyed by this identity.
 
 // monitorTeam() handles adapter dispatch automatically (supervisor snapshot or tmux pane).
 // For codex-appserver: failures detected via structured CodexErrorInfo + mapAppServerErrorCode()
@@ -814,21 +879,67 @@ import { detectCodexError, reassignToClaude, selectAdapter } from './scripts/lib
 // For tmux: failures detected via detectCodexError(paneOutput) regex patterns
 // Error categories: auth_failed, rate_limited, not_installed, network, crash, context_exceeded, timeout, unknown
 
-if (errorCheck.failed) {
-  // reassignToClaude() is adapter-aware — shuts down correct adapter type
-  const fallback = await reassignToClaude('atlas', `codex-${N}`, originalPrompt, errorCheck.reason);
+const status = monitorTeam(teamSlug);
+const results = status ? collectResults(teamSlug) : {};
+for (const failedWorker of (status?.workers || []).filter((worker) => worker.status === 'failed')) {
+  const fallback = await reassignProvider(
+    teamSlug,
+    failedWorker.name,
+    failedWorker.originalPrompt,
+    { category: failedWorker.errorReason, message: failedWorker.errorMessage },
+    failedWorker.session,
+    { worker: failedWorker, capabilities },
+  );
+  if (!fallback.targetProvider) continue;
+  const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
+  const progress = await pollProviderFallback(dispatched, cwd, capabilities);
+  for (const childTeam of progress.teamNames || []) providerTeamsToShutdown.add(childTeam);
 
-  // Spawn Claude replacement
-  Task(subagent_type="agent-olympus:executor", model="sonnet",
-    prompt=`${fallback.prompt}`)
+  if (progress.status === 'running') continue;
+  if (progress.status === 'completed') {
+    results[failedWorker.name] = progress.output;
+  } else if (progress.status === 'claude-task') {
+    const replacementWorker = progress.dispatched.replacementWorker;
+    const replacementCwd = replacementWorker.worktreePath || replacementWorker.cwd || cwd;
+    const claudeOutput = Task(subagent_type="agent-olympus:executor", model="sonnet",
+      prompt=`${replacementWorker.prompt}\n\nMANDATORY WORKTREE: ${replacementCwd}\nWork only in this directory; preserve the existing branch, commit completed changes before returning, and do not edit the project root.`)
+    await completeClaudeFallback(progress.dispatched, claudeOutput);
+    results[failedWorker.name] = claudeOutput;
+  } else {
+    // No provider remained or the bounded chain failed: mark the story blocked.
+  }
+}
+
+// Cleanup is terminal-only. A running provider child must survive into the next
+// monitor iteration; shutting it down here would restart the bounded task.
+if (status?.workers.every((worker) => worker.status === 'completed')) {
+  // Atlas-created external worktrees are execution state, not disposable
+  // scratch space. Integrate every clean, committed branch before any team
+  // cleanup; otherwise shutdownTeam() would delete the successful changes.
+  for (const worker of externalWorkers.filter((item) => item.worktreePath && item.branchName)) {
+    const dirty = execFileSync(
+      'git', ['-C', worker.worktreePath, 'status', '--porcelain'],
+      { encoding: 'utf-8' },
+    ).trim();
+    if (dirty) {
+      throw new Error(`External worker ${worker.name} completed with uncommitted work; preserve its worktree and resume integration`);
+    }
+    const merged = mergeWorkerBranch(cwd, worker.branchName, worker.name);
+    if (!merged.success) {
+      throw new Error(`External worker ${worker.name} merge failed: ${merged.conflicts.join(', ')}`);
+    }
+    removeWorkerWorktree(cwd, worker.worktreePath, worker.branchName);
+  }
+  for (const childTeam of providerTeamsToShutdown) await shutdownTeam(childTeam, cwd);
+  await shutdownTeam(teamSlug, cwd);
 }
 ```
 
 Rules:
-- If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again in this session.
-- If `errorCheck.reason` is `'crash'`, you may retry Codex once; if it crashes again, fall back to Claude.
-- If `errorCheck.reason` is `'timeout'`, retry once before reassigning.
-- `reassignToClaude()` handles adapter-specific cleanup (app-server shutdown, codex-exec kill, or tmux session kill) and wisdom recording.
+- If a failed worker reports `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT manually retry that provider; let the failover chain select the next provider.
+- Crash/timeout/network retries are OWNED by the failover chain: `planProviderFailover` already retries the same provider once (crash, or first unavailable attempt) before switching. Do NOT manually respawn the failed provider yourself — that would double the retry.
+- `reassignProvider()` handles adapter-specific cleanup and records the reason; `dispatchProviderFallback()` retries one unavailable execution, then follows Codex → Gemini → Claude while preserving the worker prompt/task fields.
+- A provider replacement always uses a deterministic distinct child team name. Re-polling reuses it instead of spawning duplicates; reusing `teamSlug` would overwrite the parent team state.
 
 **Task Chaining** (for iterative Codex work):
 With codex-appserver, use `steerTurn()` for live mid-turn input. For exec/tmux adapters, multi-step work uses sequential calls:
@@ -1115,7 +1226,11 @@ Include this file in the commit.
 
 ### Phase 6 — SHIP (PR Creation + Issue Linking)
 
-**Phase entry (runner):** if shipping is not applicable (no `gh` / no remote / on `main` — see Preflight below), call `skipPhase(runId, 'ship', '<reason>')` and proceed to COMPLETION. Otherwise `const g = enterPhase(runId, 'ship')` (`g.skip` is true only when already shipped, on resume); on PR created, `await completePhase(runId, 'ship')`.
+**Phase entry (runner):** if shipping is not applicable, call
+`skipPhase(runId, 'ship', preflightCheck().ok ? 'user-declined' : 'preflight-unavailable')`
+and proceed to COMPLETION. These are the runner's exact allowlisted reasons.
+Otherwise `const g = enterPhase(runId, 'ship')` (`g.skip` is true only when
+already shipped, on resume); on PR created, `await completePhase(runId, 'ship')`.
 
 Load autonomy config to determine shipping behavior:
 ```javascript
@@ -1178,7 +1293,11 @@ If `config.ship.autoPush` is false (default) → ask user: "Push and create PR? 
 
 ### Phase 6b — CI WATCH (Monitor + Auto-Fix) <!-- AO-CONTRACT:ci-watch -->
 
-**Phase entry (runner):** if no PR was created OR `config.ci.watchEnabled` is false, call `skipPhase(runId, 'ci', '<reason>')` and go to COMPLETION. Otherwise `enterPhase(runId, 'ci')`; each poll cycle is bounded by `loopTick(runId, 'ci')` (cap 2 = CI_CAP); on exit, `await completePhase(runId, 'ci')`.
+**Phase entry (runner):** if no PR was created OR `config.ci.watchEnabled` is
+false, call `skipPhase(runId, 'ci', createdPrUrl ? 'watch-disabled' : 'no-pr')`
+and go to COMPLETION. Otherwise `enterPhase(runId, 'ci')`; each poll cycle is
+bounded by `loopTick(runId, 'ci')` (cap 2 = CI_CAP); on exit,
+`await completePhase(runId, 'ci')`.
 
 If `config.ci.watchEnabled` is true AND a PR was created:
 
@@ -1216,7 +1335,25 @@ If CI passes → DONE. If CI fails after max cycles → escalate to user with fa
 
 ### COMPLETION <!-- AO-CONTRACT:cleanup -->
 
-**Phase entry (runner):** `enterPhase(runId, 'complete')`. Do the cleanup below, then `await completePhase(runId, 'complete')` (the run is now `isComplete`).
+**Phase entry (runner):** `enterPhase(runId, 'complete')`. Do the cleanup below,
+then durably complete and finalize the same run identity:
+
+```javascript
+// AO-CONTRACT:run-finalize
+const completion = await completePhase(runId, 'complete');
+if (!completion.ok || !isComplete(runId)) {
+  throw new Error('Atlas completion ledger did not reach a terminal state; preserve the active run for recovery');
+}
+finalizeRun(runId, { result: 'success' });
+if (getActiveRunId('atlas') === runId) {
+  throw new Error('Atlas run finalization did not clear the matching active-run pointer; preserve it for recovery');
+}
+```
+
+`finalizeRun()` updates the companion run summary to `completed` and clears the
+matching active-run pointer. Never clear or replace that pointer before the
+`complete` phase is durably recorded. Treat a still-matching pointer as a
+finalization failure instead of reporting success.
 
 Prune wisdom to prevent unbounded growth:
 - Call `pruneWisdom(200)` to remove entries older than 90 days and cap at 200 most recent
@@ -1318,6 +1455,26 @@ STOP only when:
 > the sole caller of the underlying loop-guard caps — not self-counted. Consult the runner
 > at each loop point; a `degraded:true` result means tracking was unavailable or state was
 > not readable — fall back to the prose numbers above as a backstop.
+
+**Explicit terminal failure (HU-17, review queue only).** <!-- AO-CONTRACT:terminal-failure-ingestion -->
+Use the categorized marker only after all bounded recovery/fix paths are
+exhausted and the run is genuinely terminal:
+
+```javascript
+import { finalizeFailedRun } from './scripts/lib/run-failure.mjs';
+finalizeFailedRun(runId, {
+  orchestrator: 'atlas',
+  failureClass: 'task-outcome', // or 'orchestration'
+  code: 'verification_exhausted',
+  phase: 'verify',
+});
+```
+
+Choose only an allowlisted class/code pair. Never store raw errors or reasons.
+Do **not** finalize an infrastructure failure, cancellation, resumable
+checkpoint, or a run with live workers; preserve it for recovery instead. This
+marker merely makes the failed run eligible for a local human-review candidate
+at SessionEnd—it never creates, edits, stages, or commits a golden task.
 
 **NEVER stop because "it seems done" — verify EVERYTHING.**
 

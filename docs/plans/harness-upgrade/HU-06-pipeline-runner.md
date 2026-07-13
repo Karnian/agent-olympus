@@ -6,10 +6,19 @@
 > the Olympus state machine. HU-06 code-ifies the phase sequence + phase-state so a
 > run becomes **reproducible and inspectable**, then HU-01 evals *that*.
 >
-> Status: **rev-4** — three Codex cross-review rounds folded (rev-1 NO-GO → rev-2;
-> rev-2 NO-GO, 4/6 RESOLVED → rev-3; rev-3 NO-GO but **B1–B4 CLOSED**, residual
-> precision items → rev-4). Authoring branch `feat/hu-06-pipeline-runner`. Pending a
-> user call: a 4th confirmation review, or proceed to HU-06.1 implementation.
+> Status: **historical rev-4 design record** — three Codex cross-review rounds folded
+> (rev-1 NO-GO → rev-2; rev-2 NO-GO, 4/6 RESOLVED → rev-3; rev-3 NO-GO but
+> **B1–B4 CLOSED**, residual precision items → rev-4). HU-06.1/.2/.3 are now
+> implemented on the current branch; implementation and acceptance evidence live in
+> `scripts/lib/phase-runner.mjs`, the Atlas/Athena skills, and their tests. The
+> unchecked/pending wording below is retained as historical planning context.
+
+> **Current safety addendum (2026-07).** Missing `runId` retains the legacy
+> degraded default, but initialization failure, unsafe run/base/ancestor or artifact
+> paths, terminal state, and transition denial are fail-closed: preserve the active
+> run and stop. Only a caller-specific, non-security degraded observation may use a
+> prose backstop; it never authorizes a phase-boundary bypass, worker launch, or
+> finalization.
 
 ## Confirmed scope (user decisions, 2026-06-18)
 
@@ -46,7 +55,7 @@ The 2nd review confirmed issues 1, 2, 4, 5 **RESOLVED** and flagged residual hol
 
 | Issue | rev-3 resolution |
 |---|---|
-| **Athena spawn crash window** — `spawnTeam()` persists team state only *after* all workers launch (`worker-spawn.mjs:991-993`); a crash mid-spawn leaves no state and an unpersisted `teamSlug`, so `recover` can't adopt and may re-spawn duplicates. | Persist `teamSlug` (+ intended worker set) into the ledger `spawn.outputs` **and** the checkpoint **before** `spawnTeam`. Recover = adopt-if-state-exists, else **clean-respawn** keyed by `teamSlug`. **Explicit v1 guarantee downgrade** (not silent — see Resume + Out of scope): a mid-spawn-window crash may briefly orphan detached supervisors; no committed work is lost. |
+| **Athena spawn crash window** — `spawnTeam()` persists team state only *after* all workers launch; a crash mid-spawn can leave no team-state file. A same-slug state from an older run must never be mistaken for the current launch. | Preallocate the 16-hex adapter generation, persist it with `teamSlug` (+ intended worker set) in ledger `spawn.outputs` **and** checkpoint before `spawnTeam(..., {runId})`, then require exact generation equality in adoption proofs and monitor evidence. Ambiguous started launches fail closed; no clean respawn is inferred from a missing same-slug state. |
 | **Trivial path vs `.ao/prd.json`** — trivial skips spec/plan, but finalize/ship dereference `prd.userStories` (`atlas:1008-1016`, `:1043-1048`). | Trivial path **synthesizes a minimal one-story PRD** so the downstream contract holds unchanged. See "Trivial path & the PRD contract". |
 | **`completePhase` ordering** — `saveCheckpoint` emits events before its write; ledger written after → crash between leaves checkpoint advanced, ledger stale. | **Ledger-first ordering**: write authoritative `pipeline.json` first, then `saveCheckpoint` (payload cache may lag the authority by one transition — tolerable). |
 | **Quality/visual FAIL transitions underspecified** | Full **Backward-edge specification** table added (per-orchestrator quality/visual/review transitions, what ticks the 15-cap, what reopens). |
@@ -98,9 +107,10 @@ A zero-dependency, Node-built-in `scripts/lib/phase-runner.mjs` that:
 4. **Is the single chokepoint that absorbs `loop-guard`** — the orchestrator no
    longer imports `loop-guard`; every cap consult is reached only through a runner
    method, and the phase structure forces the call.
-5. **Fails open** (same polarity as `loop-guard`): missing `runId` / corrupt ledger
-   / FS error → `degraded:true` + permissive result; a genuine cap hit on healthy
-   storage is authoritative STOP.
+5. **Historical baseline:** this revision described broad fail-open behavior for
+   missing/corrupt storage. The current safety addendum above narrows it: unsafe
+   path identity, terminal state, and transition denial are authoritative STOP;
+   only non-security degraded observations may use a caller-specific backstop.
 
 Non-goal restated: the runner does **not** take execution control from the LLM.
 "Deterministic" = sequence + completion ledger + loop-bound consult are code-owned
@@ -118,6 +128,7 @@ Named `phase-runner` (not `pipeline`) to avoid collision with `artifact-pipe.mjs
 ```json
 {
   "schemaVersion": 1,
+  "runId": "atlas-20260712-120000-abcd",
   "orchestrator": "atlas",
   "createdAt": "…", "updatedAt": "…",
   "attempt": 2,
@@ -139,7 +150,7 @@ Named `phase-runner` (not `pipeline`) to avoid collision with `artifact-pipe.mjs
   (ids/counts/flags). The durable payload already lives in checkpoint
   (`prdSnapshot`), `.ao/prd.json`, `verification.jsonl`, team state, and supervisor
   output. (Codex: don't duplicate the payload store.) **Exception:** the Athena
-  `spawn` phase persists `teamSlug` (a short scalar) here *before* launch so a
+  `spawn` phase persists `teamSlug` and the preallocated `adapterRunId` here *before* launch so a
   mid-spawn-crash resume can locate the team (Codex rev-2 B2) — see Resume.
 - Lives alongside `loop-guard.json` / `summary.json` / `events.jsonl`; swept by
   SessionEnd with other run artifacts.
@@ -226,7 +237,7 @@ beginAttempt(runId) → { allowed, count, cap, degraded }
 
 reattempt(runId, { reopen:[phaseIds], reason }) → { allowed, count, cap, reopened, degraded }
     ATOMIC outer re-attempt. Ticks registerIteration exactly once; if allowed,
-    reopens the named phases (verify/execute) to 'pending'; returns the cap result.
+    reopens the named phases (Atlas verify/execute; Athena integrate) to 'pending'; returns the cap result.
     This is the ONLY review-reject / verify-can't-pass backward edge that ticks the
     15-cap. Eliminates the miss/double-count hole (Codex #1/#2).
 
@@ -276,7 +287,8 @@ and **internal fix loop** (no backward edge — same-error-3× only). The comple
 
 | Trigger | Orch | Runner call | Ticks 15-cap | Reopens | Sub-budget |
 |---|:--:|---|:--:|---|---|
-| review REJECT | both | `reattempt({reopen:['verify'],reason:'review_reject'})` | ✅ | verify | review-round cap 3 |
+| review REJECT | Atlas | `reattempt({reopen:['verify'],reason:'review_reject'})` | ✅ | verify | review-round cap 3 |
+| review REJECT | Athena | `reattempt({reopen:['integrate'],reason:'review_reject'})` | ✅ | integrate | review-round cap 3 |
 | quality gate FAIL | Atlas | mark failed stories `passes:false` → `loopTick(_,'quality')` → `reattempt({reopen:['execute','verify'],reason:'quality_fail'})` | ✅ | execute, verify | `quality-cycles` cap 2 (`atlas:921-927`) |
 | quality gate FAIL | Athena | internal `integrate` fix loop (debugger + `recordPhaseError`) | ❌ | — | 2 cycles (`athena:772-780`) |
 | visual regression | both | internal `verify`/`integrate` designer fix loop | ❌ | — | 2 cycles |
@@ -358,34 +370,28 @@ loop-guard stays a generic primitive and does not grow phase policy (Codex OQ4).
 - **`recover` (Athena `spawn`/`monitor`/`integrate`) — the Codex #3 fix:** resume
   must **NOT** blindly re-run the spawn branch. `createWorkerWorktree()` force-removes
   the worktree and `git branch -D`s the branch before recreating (`worktree.mjs:119-136`),
-  and `spawnTeam()` mints a fresh runId/workerRunId each call (`worker-spawn.mjs:822,
-  864`) and persists team state only *after* all workers launch (`:991-993`). So a
+  and `spawnTeam()` mints a fresh runId/workerRunId unless Athena supplies its
+  preallocated runId, then persists team state only *after* all workers launch. So a
   blind re-spawn **deletes live worker branches and orphans supervisors**. To recover,
-  the rewritten Atlas/Athena `spawn` phase persists `teamSlug` (+ intended worker set)
-  into the ledger `spawn.outputs` **and** the checkpoint **BEFORE** calling
-  `spawnTeam` (cheap — the orchestrator knows `teamSlug` pre-launch; closes Codex
+  the rewritten Athena `spawn` phase persists `teamSlug`, intended worker set, and
+  preallocated adapter generation into the ledger `spawn.outputs` **and** the checkpoint
+  **BEFORE** calling `spawnTeam(..., {runId})` (cheap — the orchestrator knows both values pre-launch; closes Codex
   rev-2 B2). On `enterPhase`→`reason:'recover'`:
-  1. `loadCheckpoint('athena')` + read the persisted `teamSlug`.
+  1. `loadCheckpoint('athena')` + read the persisted `teamSlug` and `adapterRunId`.
   2. **Team state exists** (`.ao/state/team-<teamSlug>.json` — `spawnTeam` finished) →
-     `monitorTeam(teamSlug)` → adopt: completed→collect, running→keep, failed→reassign.
+     adopt only when its `runId` exactly equals the persisted generation:
+     completed→collect, running→keep, failed→reassign. A same-slug stale generation
+     fails closed.
      **Never** `createWorkerWorktree()` for a worker whose worktree/branch is recorded.
-  3. **Team state absent but `teamSlug` known** (crash *during* spawn, before the
-     `:991` persist) → **clean-respawn**: `cleanupTeamWorktrees(cwd, teamSlug)` (removes
-     the partial `.ao/worktrees/<slug>/` + branches — safe because no worker has merged
-     yet) → fresh `spawnTeam`.
-  - **v1 guarantee — explicit downgrade, NOT a silent deferral (Codex rev-2):** a crash
-    in the narrow mid-spawn window (after the first supervisor launches, before the
-    `:991` persist) may briefly **orphan detached supervisor processes** — their runId
-    was in-memory and is unrecoverable. **No committed work is lost** (mid-spawn workers
-    have not merged); each orphan runs its single prompt to terminal completion /
-    timeout and exits on its own, its writes landing in the worktree the clean-respawn
-    already removed (harmless). **Correction (Codex rev-3):** SessionEnd *preserves*
-    active supervisor runs (`session-end.mjs:49-74`) — it does NOT kill a live orphan;
-    the stale snapshot dir is swept only once that orphan is no longer active. Honest
-    blast radius = one worker's worth of wasted compute (its prompt duration) + a stale
-    snapshot dir until then — **never lost committed work**. Fully closing the window
-    needs an incremental pre-spawn persist *inside* `worker-spawn.mjs` — deferred past
-    v1 (Out of scope). HU-06 itself does **not** modify `worktree.mjs`/`worker-spawn.mjs`.
+  3. **Team state absent** → respawn only from the exact durable `not-started`
+     checkpoint (no dispatch could have occurred). A `started` or `durable` launch with
+     no exact-generation state is ambiguous and stops without deleting worktrees or
+     launching duplicates.
+  - **v1 boundary:** a crash after the first supervisor starts but before the aggregate
+    team-state write can leave detached work whose generation is known but whose roster
+    is not yet adoptable. Recovery preserves it and fails closed instead of duplicating
+    work in the same worktrees. Incremental per-worker launch-state publication remains
+    a separate worker-spawn improvement.
 - **`failed`:** re-enters under its `onResume` policy.
 
 Resume flow: `initPipeline` → `{resumePhase, resumePolicy}` → the rewritten skill
@@ -421,8 +427,9 @@ expression, not content.
 **Method (per skill):** wrap the body in the runner contract — `initPipeline` →
 resume jump (by policy) → each `### Phase X` becomes `enterPhase('<id>') →
 (skip/recover guard) → <existing prose verbatim> → await completePhase('<id>')`. The
-outer loop becomes an explicit `beginAttempt` head wrapping execute→verify→review;
-review-reject is a single `reattempt({reopen:['verify']})`. Light-mode rewind is
+outer loop becomes an explicit `beginAttempt` head wrapping execute→verify→review
+(Atlas) or integrate→review (Athena); review-reject is one `reattempt` reopening
+Atlas `verify` or Athena `integrate`. Light-mode rewind is
 `reopenPhase('plan',{reason:'light_mode_rewind'})`. Replace the three direct
 loop-guard blocks and the numeric `saveCheckpoint({phase:N})` calls. Update
 `agents/{atlas,athena}.md` Constraints + Stop_Conditions to reference runner
@@ -493,9 +500,10 @@ the rewritten skills / control-flow, NOT the standalone library):
 - **(06.2) Atlas quality_fail does work**: a quality FAIL flips the failed stories
   `passes:false`, ticks `quality-cycles`, and `reattempt` actually re-runs them (not a
   no-op attempt burn);
-- **(06.3) Athena recover**: (a) team state present → adopt path, NO
-  `createWorkerWorktree` for recorded workers; (b) team state absent + persisted
-  `teamSlug` → clean-respawn (asserts no blind re-spawn of recorded work);
+- **(06.3) Athena recover**: (a) exact-generation team state present → adopt path,
+  NO `createWorkerWorktree` for recorded workers; (b) state absent + exact durable
+  `not-started` checkpoint → spawn; (c) missing/stale state after `started` → preserve
+  and stop (asserts no blind re-spawn of recorded work);
 - **2 smokes** (fresh `claude -p`): Atlas trivial path; Athena resume-from-spawn.
 
 **Full suite must stay green** (currently 2249/2249; HU-06.1 adds ~50–60 library
@@ -546,14 +554,10 @@ separate PRs** (Codex OQ5) — they share `phase-runner.mjs` but not a SKILL fil
 - Hook-*enforced* runner consult (HU-21; v1 is structurally-guaranteed but still
   cooperative — no hook fails a run that bypasses the runner).
 - Time / token / spend caps + kill-switch (HU-21, needs HU-03).
-- Modifying `worker-spawn.mjs` to make `spawnTeam` itself crash-idempotent. **Explicit
-  v1 guarantee downgrade (not a silent deferral — Codex rev-2):** Atlas/Athena spawn
-  recovery handles the pre-spawn-persist (`teamSlug`) and post-spawn (`monitorTeam`
-  adopt) cases; a crash in the narrow mid-spawn window does a `teamSlug`-keyed
-  clean-respawn that may briefly orphan detached supervisors (no committed work lost,
-  self-terminate, SessionEnd-swept). Fully closing the window = a future incremental
-  pre-spawn persist inside `worker-spawn.mjs`. HU-06 leaves `worktree.mjs` /
-  `worker-spawn.mjs` unchanged.
+- Making `spawnTeam` fully crash-idempotent through incremental per-worker launch
+  publication. HU-06 preallocates and injects the exact adapter generation, which
+  prevents stale adoption and duplicate respawn, but an aggregate team-state write
+  interrupted mid-launch still cannot prove a complete adoptable roster.
 - Active `artifact-pipe` handoff wiring (Codex: don't blur archival responsibility).
 - Folding `checkpoint.mjs` into the runner.
 

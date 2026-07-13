@@ -92,35 +92,37 @@ agent-olympus/
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (2376 tests, 92 files; v1.4.0: 2376/2376 passing)
+│   ├── test/                     — node:test unit tests (2719 tests, 108 files; v1.5.0: 2719/2719 passing)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
 │       ├── model-router.mjs      — Routing logic with JSONC config merge
 │       ├── tmux-session.mjs      — Tmux session lifecycle + sanitizeForShellArg()
 │       ├── inbox-outbox.mjs      — File-based message queue (legacy, used by tmux fallback)
-│       ├── worker-spawn.mjs      — Team worker lifecycle (spawn/monitor/collect/shutdown); launches detached supervisors + reads their disk snapshots (v1.2.0)
-│       ├── adapter-worker-supervisor.mjs — Detached per-worker supervisor CLI: owns the adapter, writes disk snapshot/output (v1.2.0)
-│       ├── supervisor-state.mjs  — Run-scoped supervisor paths + atomic snapshot I/O (5-way read, heartbeat) (v1.2.0)
-│       ├── supervisor-opts.mjs   — Pure manifest→adapter-call option builders (CLI-free, unit-testable) (v1.2.0)
-│       ├── proc-identity.mjs     — readProcStartId() PID start-time identity for reuse detection (v1.2.0)
+│       ├── worker-spawn.mjs      — Team lifecycle, supervisors, and provider failover
+│       ├── adapter-worker-supervisor.mjs — Detached adapter owner and disk reporter
+│       ├── supervisor-state.mjs  — Run-scoped snapshots and heartbeat
+│       ├── supervisor-opts.mjs   — Pure manifest→adapter option builders
+│       ├── proc-identity.mjs     — PID start-time identity and reuse detection
 │       ├── checkpoint.mjs        — Session checkpoint save/restore (24h expiry)
+│       ├── phase-runner.mjs      — Durable phase ledger and event-backed transitions
+│       ├── athena-recovery.mjs   — Generation-bound Athena resume/adoption
+│       ├── orphan-run-recovery.mjs — Fail-closed orphan terminalization
 │       ├── wisdom.mjs            — Structured learning store (JSONL, intent-aware query)
 │       ├── worker-status.mjs     — Real-time worker status dashboard (inline markdown)
 │       ├── worktree.mjs          — Git worktree isolation for Athena parallel workers
 │       ├── fs-atomic.mjs         — Atomic write helpers (tmp+rename pattern)
+│       ├── hardened-fs.mjs       — Shared no-follow artifact I/O and append validation
 │       ├── provider-detect.mjs   — Shared detectProvider() for concurrency hooks
 │       ├── config-validator.mjs  — Schema validation for model-routing.jsonc
 │       ├── autonomy.mjs          — Ship policy config loader/validator (.ao/autonomy.json)
-│       ├── cost-estimate.mjs     — Token cost estimation before long runs
-│       ├── changelog.mjs         — CHANGELOG.md auto-generation
-│       ├── pr-create.mjs         — GitHub PR creation via gh CLI
-│       ├── ci-watch.mjs          — CI status polling and auto-fix loop
-│       ├── notify.mjs            — OS desktop notifications (macOS/Linux/terminal bell)
-│       ├── input-guard.mjs       — Large input auto-summarization for sub-agents
-│       ├── preflight.mjs         — Stale pointer file detection and cleanup
-│       ├── stuck-recovery.mjs    — Detect and recover from stuck worker states
-│       ├── run-artifacts.mjs     — Per-run event log, summary, and verification storage
+│       ├── {cost-estimate,changelog,pr-create,ci-watch}.mjs — Planning, release, and CI helpers
+│       ├── {notify,input-guard,preflight,stuck-recovery}.mjs — Runtime safeguards
+│       ├── run-artifacts.mjs     — Hardened run events, summaries, and verification
+│       ├── run-failure.mjs       — Terminal failure evidence and policy
+│       ├── run-finalization-lock.mjs — Generation-fenced terminalization lock
+│       ├── recovery-claim.mjs    — Crash-reclaimable stale-owner election
+│       ├── eval-failure-candidates.mjs — Sanitized failed-run review queue
 │       ├── session-registry.mjs  — Cross-session metadata tracking and crash recovery
 │       ├── codex-approval.mjs    — Claude permission detection → Codex sandbox-axis mirroring + host-sandbox intersection (v1.1.0)
 │       ├── gemini-approval.mjs   — Claude permission detection → Gemini approval mode mirroring
@@ -192,7 +194,7 @@ agent-olympus/
 
 ## Testing
 
-Run the 2376-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the 2719-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
@@ -336,7 +338,7 @@ Run the 2376-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | SubagentStop | concurrency-release | Release concurrency slot as safety net (async) |
 | Notification:idle_prompt | notification | Log idle/permission prompts for stall detection |
 | Notification:permission_prompt | notification | Same logging for permission prompts |
-| SessionEnd | session-end | Clean up stale state files older than 24h |
+| SessionEnd | session-end | Sweep stale state; collect linked failed-run candidates |
 | Stop | stop-hook | Auto-commit uncommitted work as WIP commit on session end |
 
 ## State Files
@@ -353,7 +355,7 @@ Run the 2376-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | `.ao/state/ao-concurrency.json` | Active task tracking | Updated per task spawn/complete |
 | `.ao/memory/` | Durable design identity and taste memory (`schemaVersion:1`) | Survives SessionEnd and cancel |
 | `.ao/state/supervisor/<runId>/` | Detached worker snapshots/manifests | Swept per inactive run |
-| `.ao/artifacts/runs/<runId>/` | Run events, summaries, verification, pipeline/loop ledgers | Swept by SessionEnd lifecycle |
+| `.ao/artifacts/runs/<runId>/` | Run evidence + terminal-failure marker | Retained for audit/candidate review |
 | `.ao/artifacts/ask/<jobId>.*` | Async `/ask` raw and rendered outputs | Job-addressable artifacts |
 | `.ao/artifacts/pipe/` | Stage handoff/archive pipe (`plan`, `execute`, `verify`, etc.) | 24h SessionEnd sweep |
 | `.ao/sessions/<sessionId>.json` | Cross-session registry metadata | 90-day TTL |

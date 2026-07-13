@@ -55,3 +55,25 @@ Every new persisted file format introduced in v1.0.2 carries `schemaVersion: 1`:
 - **Writer rule**: callers are responsible for including `schemaVersion: 1` in data passed to memory.mjs writers and artifact writers.
 - **Migration policy**: when schemaVersion increments in a future release, the new loader MUST include a migration path or a clear upgrade message.
 
+### Hardened Append-Only Artifact Policy (v1.5.0+)
+
+Run and phase artifacts must use the shared primitives in
+`scripts/lib/hardened-fs.mjs`; do not create a parallel no-follow/TOCTOU layer.
+Creation and finalization paths require private `0700` directories. A read-only
+audit of a pre-hardening artifact may opt into legacy directory modes, but it
+must still bind and revalidate trusted ancestry without following symlinks.
+Regular artifacts are bounded, single-link `0600` files opened with
+`O_NOFOLLOW` where the platform supports it.
+
+Callers select the generation policy explicitly: phase artifacts retain their
+historical `object-size` compatibility check, while terminal run finalization
+uses the stricter `full` identity/mode/size/time check. This policy difference
+is intentional and documented in the module JSDoc.
+
+Operational `events.jsonl` recovery readers skip malformed or torn records and
+preserve every valid record around them. An invalid record cannot exact-match a
+normal event, so ignoring it does not change the ensure-event idempotency count.
+The phase/finalization ensure paths opt into missing-LF repair and verify the
+exact appended byte range instead of reparsing the complete bounded log. Other
+JSONL artifacts retain their caller-specific policy; notably, eval attestation
+rejects any malformed production event.

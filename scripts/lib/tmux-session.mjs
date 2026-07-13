@@ -132,15 +132,24 @@ export function createTeamSession(teamName, workers, cwd) {
   for (const worker of workers) {
     const name = sessionName(teamName, worker.name);
 
-    // Create an isolated git worktree for this worker (fail-safe: falls back to cwd).
-    // NOTE: this preserves the original interleaving
-    // (worktree → tmux → worktree → tmux) so observable side effects
-    // stay identical to the pre-X1 behavior. The per-team batch helper
-    // `createTeamWorktrees` (new in X1) is not used here — it is an
-    // additive helper for the upcoming X2 path where non-tmux adapters
-    // will consume team-scoped worktrees without running tmux at all.
-    const worktreeInfo = createWorkerWorktree(cwd, teamName, worker.name);
-    const sessionCwd = worktreeInfo.created ? worktreeInfo.worktreePath : cwd;
+    // A failover worker may already belong to the root Athena worker's
+    // worktree. Reuse that exact execution directory without claiming
+    // ownership: the child team must never create/delete a replacement branch
+    // around edits that belong to the root task. Ordinary workers still get a
+    // newly-created isolated worktree (fail-safe: falls back to cwd).
+    // `cwd` is the requested execution directory for every worker; it does not
+    // imply that a caller already created and owns an isolated worktree. Only
+    // an explicit worktreePath carries that ownership/affinity contract.
+    const inheritedCwd = worker?.worktreePath || null;
+    const worktreeInfo = inheritedCwd
+      ? {
+          worktreePath: inheritedCwd,
+          branchName: worker?.branchName || null,
+          created: false,
+          inherited: true,
+        }
+      : createWorkerWorktree(cwd, teamName, worker.name);
+    const sessionCwd = inheritedCwd || (worktreeInfo.created ? worktreeInfo.worktreePath : cwd);
 
     try {
       // Kill existing session if any
@@ -181,6 +190,7 @@ export function createTeamSession(teamName, workers, cwd) {
         worktreePath: worktreeInfo.worktreePath,
         branchName: worktreeInfo.branchName,
         worktreeCreated: worktreeInfo.created,
+        worktreeInherited: Boolean(worktreeInfo.inherited),
       });
     } catch (err) {
       // Redact any secret values that may have been embedded in argv
@@ -197,6 +207,7 @@ export function createTeamSession(teamName, workers, cwd) {
         worktreePath: worktreeInfo.worktreePath,
         branchName: worktreeInfo.branchName,
         worktreeCreated: worktreeInfo.created,
+        worktreeInherited: Boolean(worktreeInfo.inherited),
       });
     }
   }

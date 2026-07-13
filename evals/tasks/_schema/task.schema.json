@@ -9,7 +9,11 @@
     "id",
     "track",
     "orchestrator",
-    "prompt"
+    "prompt",
+    "difficulty",
+    "timeoutMs",
+    "modelTier",
+    "k"
   ],
   "properties": {
     "schemaVersion": {
@@ -45,7 +49,8 @@
     },
     "modelTier": {
       "type": "string",
-      "minLength": 1
+      "minLength": 1,
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]*$"
     },
     "k": {
       "type": "integer",

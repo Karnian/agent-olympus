@@ -52,8 +52,11 @@ Codex/Gemini workers spawn via adapter chain automatically.
   - Same error 3 times = STOP → `recordPhaseError(runId, '<phase>', sig).shouldEscalate === true`
   - Max 15 total iterations = STOP → `beginAttempt(runId).allowed === false` (first pass) / `reattempt(...).allowed === false` (re-pass)
   - Max review rounds = STOP → `loopTick(runId, 'review').allowed === false`
-  - A `degraded:true` result means tracking was unavailable — fall back to the
-    prose limits as a backstop and keep working (never halt on a tracking glitch).
+  - Initialization failure, `unsafe-run-path`, a terminal result, or a transition
+    denial is authoritative: preserve the run and STOP. A non-security
+    `degraded:true` observation is never permission to bypass a phase boundary,
+    spawn work, or finalize; use prose bounds only after the active run path has
+    remained healthy.
 
 ## Output Format
 Report: strategy used, files changed, decisions made, all verification results.

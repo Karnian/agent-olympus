@@ -41,8 +41,7 @@ import { basename, join } from 'path';
  */
 const EXCLUDE_PATTERNS = [
   /(^|\/)\.env/i,           // .env, .env.local, .env.production … at any depth
-  /^\.ao\/state\//,         // transient hook state
-  /^\.ao\/teams\//,         // tmux team inbox/outbox
+  /^\.ao(?:\/|$)/,           // all Agent Olympus runtime/memory/eval artifacts
   /^\.claude\/worktrees\//, // Claude Code worktree gitlink noise
   /credentials/i,
   /secret/i,
