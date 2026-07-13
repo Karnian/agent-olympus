@@ -9,14 +9,442 @@
  * Artifacts live at .ao/artifacts/runs/<runId>/
  */
 
-import { mkdirSync, readFileSync, existsSync, appendFileSync, readdirSync, unlinkSync } from 'fs';
-import { join } from 'path';
+import {
+  closeSync,
+  constants as fsConstants,
+  existsSync,
+  fstatSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  opendirSync,
+  readSync,
+  readdirSync,
+  rmdirSync,
+  unlinkSync,
+  writeSync,
+} from 'fs';
+import { tmpdir } from 'os';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
 import { randomUUID } from 'crypto';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import { getCurrentSessionId, linkRunToSession } from './session-registry.mjs';
+import {
+  acquireRunFinalizationLock,
+  holdsRunFinalizationLock,
+  releaseRunFinalizationLock,
+} from './run-finalization-lock.mjs';
 
 const RUNS_BASE = join('.ao', 'artifacts', 'runs');
 const STATE_DIR = join('.ao', 'state');
+const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+const ORCHESTRATOR_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+const MAX_SUMMARY_BYTES = 256 * 1024;
+const MAX_EVENTS_BYTES = 16 * 1024 * 1024;
+const MAX_POINTER_BYTES = 64 * 1024;
+// Listing is an audit convenience, not an unbounded filesystem dump.  Keep
+// the normal small-run behavior while preventing a poisoned artifact root from
+// turning a status call into an arbitrarily large response.
+const MAX_RUN_LIST_ENTRIES = 10_000;
+const NO_FOLLOW = fsConstants.O_NOFOLLOW || 0;
+const ACTIVE_POINTER_INTENT_PREFIX = '.active-run-intent-';
+const FINALIZATION_CORE_FIELDS = new Set([
+  'runId',
+  'orchestrator',
+  'task',
+  'sessionId',
+  'startedAt',
+  'status',
+  'finishedAt',
+  'duration_ms',
+]);
+
+function canonicalTimestamp(value) {
+  if (typeof value !== 'string') return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value
+    ? timestamp
+    : null;
+}
+
+function sameFsObject(left, right) {
+  return Boolean(left && right)
+    && left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode;
+}
+
+function sameFileGeneration(left, right) {
+  return sameFsObject(left, right)
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs;
+}
+
+function requireSafeDirectory(path, label, requirePrivateMode = false) {
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink()
+    || (requirePrivateMode && process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700)) {
+    throw new Error(`${label} is unsafe`);
+  }
+  return stat;
+}
+
+function isWithinPath(root, candidate) {
+  const rel = relative(root, candidate);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function trustedAnchorFor(target, explicitRoot) {
+  const absoluteTarget = resolve(target);
+  const candidates = explicitRoot
+    ? [resolve(explicitRoot)]
+    : [resolve(process.cwd()), resolve(tmpdir())];
+  const matches = candidates.filter(root => isWithinPath(root, absoluteTarget));
+  if (matches.length === 0) throw new Error('finalization path is outside a trusted root');
+  return matches.sort((left, right) => right.length - left.length)[0];
+}
+
+function bindSafeDirectoryPath(target, label, {
+  trustedRoot,
+  requirePrivateMode = false,
+} = {}) {
+  const absoluteTarget = resolve(target);
+  const anchor = trustedAnchorFor(absoluteTarget, trustedRoot);
+  const rel = relative(anchor, absoluteTarget);
+  const components = rel === '' ? [] : rel.split(sep);
+  const chain = [];
+  let current = anchor;
+  const anchorStat = requireSafeDirectory(current, `${label} trusted root`);
+  chain.push({ path: current, stat: anchorStat, privateMode: false });
+  for (let index = 0; index < components.length; index += 1) {
+    current = join(current, components[index]);
+    const privateMode = requirePrivateMode && index === components.length - 1;
+    chain.push({
+      path: current,
+      stat: requireSafeDirectory(current, label, privateMode),
+      privateMode,
+    });
+  }
+  return { path: absoluteTarget, anchor, chain };
+}
+
+function revalidateDirectoryBinding(binding, label) {
+  for (const item of binding.chain) {
+    const current = requireSafeDirectory(item.path, label, item.privateMode);
+    if (!sameFsObject(current, item.stat)) throw new Error(`${label} ancestry changed`);
+  }
+  return true;
+}
+
+function ensureSafeDirectoryPath(target, label, {
+  trustedRoot,
+  requirePrivateMode = true,
+} = {}) {
+  const absoluteTarget = resolve(target);
+  const anchor = trustedAnchorFor(absoluteTarget, trustedRoot);
+  const rel = relative(anchor, absoluteTarget);
+  const components = rel === '' ? [] : rel.split(sep);
+  const chain = [];
+  let current = anchor;
+  chain.push({
+    path: current,
+    stat: requireSafeDirectory(
+      current,
+      `${label} trusted root`,
+      requirePrivateMode && components.length === 0,
+    ),
+    privateMode: requirePrivateMode && components.length === 0,
+  });
+  for (let index = 0; index < components.length; index += 1) {
+    current = join(current, components[index]);
+    try { mkdirSync(current, { mode: 0o700 }); }
+    catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+    const privateMode = requirePrivateMode && index === components.length - 1;
+    chain.push({
+      path: current,
+      stat: requireSafeDirectory(current, label, privateMode),
+      privateMode,
+    });
+  }
+  const binding = { path: absoluteTarget, anchor, chain };
+  revalidateDirectoryBinding(binding, label);
+  return binding;
+}
+
+/**
+ * Bind the trusted, no-symlink ancestry used by all terminal run finalizers.
+ * The returned guard intentionally exposes only resolved paths and a
+ * revalidation closure; filesystem identity snapshots remain module-private.
+ *
+ * @param {string} runId
+ * @param {object} [opts]
+ * @param {string} [opts.base]
+ * @param {string} [opts.trustedRoot]
+ * @param {object} [_policy] - Internal pre-hardening policy
+ * @param {boolean} [_policy.requirePrivateRunDir=true]
+ * @returns {{base:string,dir:string,revalidate:()=>true}}
+ */
+export function bindRunFinalizationPaths(runId, opts = {}, _policy = {}) {
+  if (!RUN_ID_PATTERN.test(runId || '')) throw new Error('invalid run id');
+  const base = resolve(opts.base || RUNS_BASE);
+  const baseBinding = bindSafeDirectoryPath(base, 'run artifacts base', {
+    trustedRoot: opts.trustedRoot,
+    requirePrivateMode: true,
+  });
+  const dir = runDir(runId, base);
+  const dirBinding = bindSafeDirectoryPath(dir, 'run directory', {
+    trustedRoot: opts.trustedRoot,
+    requirePrivateMode: _policy.requirePrivateRunDir !== false,
+  });
+  const revalidate = () => {
+    revalidateDirectoryBinding(baseBinding, 'run artifacts base');
+    revalidateDirectoryBinding(dirBinding, 'run directory');
+    return true;
+  };
+  revalidate();
+  return Object.freeze({ base, dir, revalidate });
+}
+
+function lstatOrMissing(path) {
+  try { return lstatSync(path); }
+  catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function validateRegularArtifact(stat, label, maxBytes, allowEmpty = false) {
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1
+    || stat.size > maxBytes || (!allowEmpty && stat.size <= 0)
+    || (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600)) {
+    throw new Error(`${label} is unsafe`);
+  }
+}
+
+function readRegularArtifact(path, label, maxBytes, { allowMissing = false, allowEmpty = false } = {}) {
+  const pathStat = lstatOrMissing(path);
+  if (!pathStat) {
+    if (allowMissing) return { present: false, text: '', stat: null };
+    throw new Error(`${label} is missing`);
+  }
+  validateRegularArtifact(pathStat, label, maxBytes, allowEmpty);
+  let fd;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | NO_FOLLOW);
+    const opened = fstatSync(fd);
+    validateRegularArtifact(opened, label, maxBytes, allowEmpty);
+    if (!sameFileGeneration(pathStat, opened)) throw new Error(`${label} changed before open`);
+    const buffer = Buffer.alloc(opened.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const count = readSync(fd, buffer, offset, buffer.length - offset, offset);
+      if (count <= 0) throw new Error(`${label} was truncated during read`);
+      offset += count;
+    }
+    const after = fstatSync(fd);
+    if (!sameFileGeneration(opened, after)) throw new Error(`${label} changed during read`);
+    return { present: true, text: buffer.toString('utf8'), stat: after };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function revalidateRegularArtifact(path, expected, label, maxBytes, allowEmpty = false) {
+  const current = lstatSync(path);
+  validateRegularArtifact(current, label, maxBytes, allowEmpty);
+  if (!sameFileGeneration(current, expected)) throw new Error(`${label} changed during finalization`);
+  return current;
+}
+
+function appendRegularArtifact(path, label, content, maxBytes) {
+  const before = lstatOrMissing(path);
+  if (before) validateRegularArtifact(before, label, maxBytes, true);
+  let fd;
+  try {
+    fd = openSync(
+      path,
+      fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | NO_FOLLOW,
+      0o600,
+    );
+    const opened = fstatSync(fd);
+    validateRegularArtifact(opened, label, maxBytes, true);
+    if (before && !sameFileGeneration(before, opened)) throw new Error(`${label} changed before append`);
+    const bytes = Buffer.from(content, 'utf8');
+    if (opened.size + bytes.length > maxBytes) throw new Error(`${label} exceeds its size bound`);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = writeSync(fd, bytes, offset, bytes.length - offset);
+      if (count <= 0) throw new Error(`${label} could not be appended`);
+      offset += count;
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function writeExclusiveRegularArtifact(path, label, content, maxBytes) {
+  const bytes = Buffer.from(content, 'utf8');
+  if (bytes.length <= 0 || bytes.length > maxBytes) throw new Error(`${label} exceeds its size bound`);
+  let fd;
+  let opened = null;
+  try {
+    fd = openSync(
+      path,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | NO_FOLLOW,
+      0o600,
+    );
+    opened = fstatSync(fd);
+    validateRegularArtifact(opened, label, maxBytes, true);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = writeSync(fd, bytes, offset, bytes.length - offset);
+      if (count <= 0) throw new Error(`${label} could not be written`);
+      offset += count;
+    }
+    fsyncSync(fd);
+    const persisted = fstatSync(fd);
+    validateRegularArtifact(persisted, label, maxBytes);
+    if (!sameFsObject(opened, persisted) || persisted.size !== bytes.length) {
+      throw new Error(`${label} was not durable`);
+    }
+    return persisted;
+  } catch (error) {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch {}
+      fd = undefined;
+    }
+    if (opened) {
+      try {
+        const current = lstatSync(path);
+        if (!current.isSymbolicLink() && sameFsObject(opened, current)) unlinkSync(path);
+      } catch {}
+    }
+    throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function recoverActivePointerPublication(pointerPath) {
+  let pointerStat = lstatSync(pointerPath);
+  if (pointerStat.nlink === 1) return pointerStat;
+  if (!pointerStat.isFile() || pointerStat.isSymbolicLink() || pointerStat.nlink !== 2) {
+    throw new Error('active-run pointer publication is unsafe');
+  }
+  const stateDir = dirname(pointerPath);
+  const matches = [];
+  for (const name of readdirSync(stateDir)) {
+    if (!name.startsWith(ACTIVE_POINTER_INTENT_PREFIX)) continue;
+    try {
+      const intentPath = join(stateDir, name);
+      const stat = lstatSync(intentPath);
+      if (stat.isFile() && !stat.isSymbolicLink()
+        && (process.platform === 'win32' || (stat.mode & 0o777) === 0o600)
+        && sameFsObject(pointerStat, stat)) {
+        matches.push(intentPath);
+      }
+    } catch {}
+  }
+  if (matches.length !== 1) {
+    pointerStat = lstatSync(pointerPath);
+    if (pointerStat.nlink === 1) return pointerStat;
+    throw new Error('active-run pointer publication is ambiguous');
+  }
+  try { unlinkSync(matches[0]); }
+  catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  const recovered = lstatSync(pointerPath);
+  if (!sameFsObject(pointerStat, recovered) || recovered.nlink !== 1) {
+    throw new Error('active-run pointer publication recovery failed');
+  }
+  return recovered;
+}
+
+function publishExclusiveActivePointer(pointerPath, payload, opts = {}) {
+  const stateDir = dirname(pointerPath);
+  const intentPath = join(stateDir, `${ACTIVE_POINTER_INTENT_PREFIX}${randomUUID()}`);
+  const intentStat = writeExclusiveRegularArtifact(
+    intentPath, 'active-run pointer intent', payload, MAX_POINTER_BYTES,
+  );
+  let linked = false;
+  try {
+    if (typeof opts._beforeActivePointerPublish === 'function') {
+      opts._beforeActivePointerPublish(intentPath);
+    }
+    linkSync(intentPath, pointerPath);
+    linked = true;
+    const published = lstatSync(pointerPath);
+    if (!sameFsObject(intentStat, published) || published.nlink !== 2) {
+      throw new Error('active-run pointer publication verification failed');
+    }
+    if (typeof opts._afterActivePointerLink === 'function') {
+      opts._afterActivePointerLink(intentPath);
+    }
+    try { unlinkSync(intentPath); }
+    catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    return recoverActivePointerPublication(pointerPath);
+  } catch (error) {
+    if (linked) {
+      try {
+        const recovered = recoverActivePointerPublication(pointerPath);
+        if (sameFsObject(intentStat, recovered)) return recovered;
+      } catch {}
+    }
+    try { unlinkSync(intentPath); } catch {}
+    throw error;
+  }
+}
+
+function validateFinalizationInput(runId, summary) {
+  if (!RUN_ID_PATTERN.test(runId || '')) return 'invalid-run-id';
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return 'invalid-finalization-summary';
+  if (Object.keys(summary).some(key => FINALIZATION_CORE_FIELDS.has(key))) {
+    return 'core-summary-field-override';
+  }
+  if (Object.hasOwn(summary, 'result') && !['success', 'failure'].includes(summary.result)) {
+    return 'invalid-finalization-result';
+  }
+  if (summary.result !== 'failure'
+    && (Object.hasOwn(summary, 'failureCode') || Object.hasOwn(summary, 'failedPhase'))) {
+    return 'failure-fields-without-failure-result';
+  }
+  return null;
+}
+
+function validateRunSummaryIdentity(existing, runId, now = Date.now()) {
+  if (!existing || typeof existing !== 'object' || Array.isArray(existing)) return null;
+  if (existing.runId !== runId
+    || typeof existing.orchestrator !== 'string'
+    || !ORCHESTRATOR_PATTERN.test(existing.orchestrator)) return null;
+  const startedAt = canonicalTimestamp(existing.startedAt);
+  if (startedAt === null || startedAt > now) return null;
+  return { startedAt };
+}
+
+function validateCompletedRunSummary(existing, runId, now = Date.now()) {
+  const identity = validateRunSummaryIdentity(existing, runId, now);
+  if (!identity || existing.status !== 'completed') return false;
+  const finishedAt = canonicalTimestamp(existing.finishedAt);
+  const resultValid = !Object.hasOwn(existing, 'result') || ['success', 'failure'].includes(existing.result);
+  const failureFieldsValid = existing.result === 'failure'
+    || (!Object.hasOwn(existing, 'failureCode') && !Object.hasOwn(existing, 'failedPhase'));
+  return resultValid
+    && failureFieldsValid
+    && finishedAt !== null
+    && finishedAt >= identity.startedAt
+    && finishedAt <= now + 60_000
+    && Number.isSafeInteger(existing.duration_ms)
+    && existing.duration_ms >= 0
+    && existing.duration_ms === finishedAt - identity.startedAt;
+}
 
 /**
  * Format a Date as YYYYMMDD.
@@ -57,6 +485,7 @@ function rand4() {
  * @returns {string}
  */
 function runDir(runId, base = RUNS_BASE) {
+  if (!RUN_ID_PATTERN.test(runId || '')) throw new Error('invalid run id');
   return join(base, runId);
 }
 
@@ -74,6 +503,25 @@ function activeRunPath(orchestrator, stateDir = STATE_DIR) {
   return join(stateDir, `ao-active-run-${orchestrator}.json`);
 }
 
+function isSafeActiveIdentity(orchestrator, runId) {
+  return ORCHESTRATOR_PATTERN.test(orchestrator || '')
+    && RUN_ID_PATTERN.test(runId || '')
+    && runId.startsWith(`${orchestrator}-`);
+}
+
+function validateActivePointerData(data, orchestrator) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const keys = ['runId', 'orchestrator', 'startedAt'];
+  if (Object.keys(data).length !== keys.length || !keys.every(key => Object.hasOwn(data, key))) {
+    return false;
+  }
+  const startedAt = canonicalTimestamp(data.startedAt);
+  return data.orchestrator === orchestrator
+    && isSafeActiveIdentity(orchestrator, data.runId)
+    && startedAt !== null
+    && startedAt <= Date.now() + 60_000;
+}
+
 /**
  * Get the active runId for an orchestrator.
  * Returns null if no active run exists. Never throws.
@@ -81,14 +529,19 @@ function activeRunPath(orchestrator, stateDir = STATE_DIR) {
  * @param {string} orchestrator - 'atlas' | 'athena'
  * @param {object} [opts]
  * @param {string} [opts.stateDir] - Override state directory (for testing)
+ * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths
  * @returns {string|null}
  */
 export function getActiveRunId(orchestrator, opts = {}) {
   try {
-    const sd = opts.stateDir || STATE_DIR;
-    const raw = readFileSync(activeRunPath(orchestrator, sd), 'utf-8');
-    const data = JSON.parse(raw);
-    return data.runId || null;
+    if (!ORCHESTRATOR_PATTERN.test(orchestrator || '')) return null;
+    const stateDir = resolve(opts.stateDir || STATE_DIR);
+    const binding = bindOptionalStateDirectory(stateDir, opts.trustedRoot);
+    if (!binding) return null;
+    const pointer = readActivePointer(binding, orchestrator);
+    return pointer.present && validateActivePointerData(pointer.data, orchestrator)
+      ? pointer.data.runId
+      : null;
   } catch {
     return null;
   }
@@ -102,38 +555,310 @@ export function getActiveRunId(orchestrator, opts = {}) {
  * @param {string} runId
  * @param {object} [opts]
  * @param {string} [opts.stateDir] - Override state directory (for testing)
+ * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths
+ * @param {boolean} [opts.replace=false] - Explicit admin/test pointer replacement
+ * @param {string} [opts.startedAt] - Exact run start timestamp used by createRun
+ * @returns {{ok:boolean,created?:boolean,replaced?:boolean,reason?:string}}
  */
 export function setActiveRunId(orchestrator, runId, opts = {}) {
   try {
-    const sd = opts.stateDir || STATE_DIR;
-    mkdirSync(sd, { recursive: true, mode: 0o700 });
-    const data = { runId, orchestrator, startedAt: new Date().toISOString() };
-    atomicWriteFileSync(activeRunPath(orchestrator, sd), JSON.stringify(data, null, 2));
+    if (!isSafeActiveIdentity(orchestrator, runId)) {
+      return { ok: false, reason: 'invalid-active-run-identity' };
+    }
+    const startedAt = opts.startedAt || new Date().toISOString();
+    if (canonicalTimestamp(startedAt) === null || Date.parse(startedAt) > Date.now() + 60_000) {
+      return { ok: false, reason: 'invalid-active-run-timestamp' };
+    }
+    const stateDir = resolve(opts.stateDir || STATE_DIR);
+    const binding = ensureSafeDirectoryPath(stateDir, 'run state directory', {
+      trustedRoot: opts.trustedRoot,
+      requirePrivateMode: true,
+    });
+    const pointerPath = activeRunPath(orchestrator, stateDir);
+    const data = { runId, orchestrator, startedAt };
+    const payload = JSON.stringify(data, null, 2);
+    revalidateDirectoryBinding(binding, 'run state directory');
+
+    if (opts.replace === true) {
+      const before = readActivePointer(binding, orchestrator);
+      if (!before.present) {
+        const createdStat = publishExclusiveActivePointer(pointerPath, payload, opts);
+        const current = readActivePointer(binding, orchestrator);
+        if (!current.present || !sameFileGeneration(createdStat, current.stat)
+          || !validateActivePointerData(current.data, orchestrator)
+          || current.data.runId !== runId) {
+          throw new Error('active-run pointer claim verification failed');
+        }
+        return { ok: true, created: true, replaced: false };
+      }
+      revalidateDirectoryBinding(binding, 'run state directory');
+      revalidateRegularArtifact(
+        pointerPath, before.stat, 'active-run pointer', MAX_POINTER_BYTES,
+      );
+      atomicWriteFileSync(pointerPath, payload, { mode: 0o600 });
+      const current = readActivePointer(binding, orchestrator);
+      if (!current.present || !validateActivePointerData(current.data, orchestrator)
+        || current.data.runId !== runId) {
+        throw new Error('active-run pointer replacement verification failed');
+      }
+      return { ok: true, created: false, replaced: true };
+    }
+
+    let claimed;
+    try {
+      claimed = publishExclusiveActivePointer(pointerPath, payload, opts);
+    } catch (error) {
+      if (error?.code === 'EEXIST') return { ok: false, reason: 'active-run-exists' };
+      throw error;
+    }
+    revalidateDirectoryBinding(binding, 'run state directory');
+    const current = readActivePointer(binding, orchestrator);
+    if (!current.present || !sameFileGeneration(claimed, current.stat)
+      || !validateActivePointerData(current.data, orchestrator)
+      || current.data.runId !== runId) {
+      try {
+        const stat = lstatSync(pointerPath);
+        if (!stat.isSymbolicLink() && sameFsObject(claimed, stat)) unlinkSync(pointerPath);
+      } catch {}
+      return { ok: false, reason: 'active-run-claim-verification-failed' };
+    }
+    return { ok: true, created: true, replaced: false };
   } catch {
-    // fail-safe: never throw
+    return { ok: false, reason: 'active-run-write-failed' };
   }
 }
 
-/**
- * Clear the active run pointer for an orchestrator.
- * Only deletes if the current pointer matches the given runId (compare-and-delete).
- *
- * @param {string} orchestrator
- * @param {string} runId - Only clear if this matches the active runId
- * @param {object} [opts]
- * @param {string} [opts.stateDir] - Override state directory (for testing)
- */
-function clearActiveRunId(orchestrator, runId, opts = {}) {
+function bindOptionalStateDirectory(stateDir, trustedRoot) {
   try {
-    const sd = opts.stateDir || STATE_DIR;
-    const filePath = activeRunPath(orchestrator, sd);
-    const raw = readFileSync(filePath, 'utf-8');
-    const data = JSON.parse(raw);
-    if (data.runId === runId) {
-      unlinkSync(filePath);
+    return bindSafeDirectoryPath(stateDir, 'run state directory', {
+      trustedRoot,
+      // Legacy projects may have a 0755 .ao/state directory. The ancestry and
+      // pointer file are still no-follow and identity-bound; new state writes
+      // continue to use the documented private modes.
+      requirePrivateMode: false,
+    });
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function readActivePointer(binding, orchestrator) {
+  if (!binding) return { present: false, data: null, stat: null };
+  revalidateDirectoryBinding(binding, 'run state directory');
+  const pointerPath = activeRunPath(orchestrator, binding.path);
+  if (lstatOrMissing(pointerPath)) recoverActivePointerPublication(pointerPath);
+  const file = readRegularArtifact(
+    pointerPath,
+    'active-run pointer',
+    MAX_POINTER_BYTES,
+    { allowMissing: true },
+  );
+  if (!file.present) return { present: false, data: null, stat: null };
+  let data;
+  try { data = JSON.parse(file.text); }
+  catch { throw new Error('active-run pointer is invalid'); }
+  if (!validateActivePointerData(data, orchestrator)) {
+    throw new Error('active-run pointer identity mismatch');
+  }
+  return { present: true, data, stat: file.stat };
+}
+
+function preflightActiveRunPointer(orchestrator, opts = {}) {
+  const stateDir = resolve(opts.stateDir || STATE_DIR);
+  const binding = bindOptionalStateDirectory(stateDir, opts.trustedRoot);
+  return {
+    stateDir,
+    binding,
+    pointer: readActivePointer(binding, orchestrator),
+  };
+}
+
+/**
+ * Bind an active-run pointer without following either its state-directory
+ * ancestry or the pointer leaf. `required:true` additionally proves that the
+ * exact run/orchestrator pointer generation is still present.
+ *
+ * @param {string} runId
+ * @param {string} orchestrator
+ * @param {object} [opts]
+ * @returns {{stateDir:string,revalidate:(options?:{required?:boolean})=>boolean,verifyRemoved:()=>boolean}}
+ */
+export function bindRunFinalizationPointer(runId, orchestrator, opts = {}) {
+  if (!RUN_ID_PATTERN.test(runId || '') || !ORCHESTRATOR_PATTERN.test(orchestrator || '')) {
+    throw new Error('invalid active-run pointer identity');
+  }
+  const preflight = preflightActiveRunPointer(orchestrator, opts);
+  const revalidate = ({ required = false } = {}) => {
+    if (!preflight.binding) {
+      if (bindOptionalStateDirectory(preflight.stateDir, opts.trustedRoot)
+        || required || preflight.pointer.present) {
+        throw new Error('active-run pointer is missing or unsafe');
+      }
+      return false;
     }
-  } catch {
-    // fail-safe: file may not exist
+    revalidateDirectoryBinding(preflight.binding, 'run state directory');
+    const current = readActivePointer(preflight.binding, orchestrator);
+    if (!current.present) {
+      if (required || preflight.pointer.present) throw new Error('active-run pointer changed');
+      return false;
+    }
+    if (!preflight.pointer.present
+      || preflight.pointer.data.runId !== runId
+      || preflight.pointer.data.orchestrator !== orchestrator
+      || current.data.runId !== runId
+      || current.data.orchestrator !== orchestrator
+      || !sameFileGeneration(current.stat, preflight.pointer.stat)) {
+      throw new Error('active-run pointer identity mismatch');
+    }
+    return true;
+  };
+  const verifyRemoved = () => {
+    if (!preflight.binding) {
+      return bindOptionalStateDirectory(preflight.stateDir, opts.trustedRoot) === null;
+    }
+    revalidateDirectoryBinding(preflight.binding, 'run state directory');
+    return lstatOrMissing(activeRunPath(orchestrator, preflight.stateDir)) === null;
+  };
+  return Object.freeze({ stateDir: preflight.stateDir, revalidate, verifyRemoved });
+}
+
+/** Compare-and-delete a preflighted pointer without following linked paths. */
+function clearActiveRunId(orchestrator, runId, preflight, opts = {}) {
+  try {
+    let binding = preflight.binding;
+    if (!binding) {
+      binding = bindOptionalStateDirectory(preflight.stateDir, opts.trustedRoot);
+      if (!binding) return true;
+    } else {
+      revalidateDirectoryBinding(binding, 'run state directory');
+    }
+    const current = readActivePointer(binding, orchestrator);
+    if (!current.present) return true;
+    if (current.data.runId !== runId || current.data.orchestrator !== orchestrator) return true;
+    if (!preflight.pointer.present
+      || preflight.pointer.data.runId !== runId
+      || preflight.pointer.data.orchestrator !== orchestrator
+      || !sameFileGeneration(current.stat, preflight.pointer.stat)) return false;
+    const filePath = activeRunPath(orchestrator, binding.path);
+    revalidateDirectoryBinding(binding, 'run state directory');
+    revalidateRegularArtifact(filePath, current.stat, 'active-run pointer', MAX_POINTER_BYTES);
+    unlinkSync(filePath);
+    return lstatOrMissing(filePath) === null;
+  } catch { return false; }
+}
+
+function readRunEvents(eventsPath) {
+  try {
+    const file = readRegularArtifact(eventsPath, 'run events', MAX_EVENTS_BYTES, {
+      allowMissing: true,
+      allowEmpty: true,
+    });
+    return file.present ? file.text.split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+  } catch { return null; }
+}
+
+function ensureRunFinalizedEvent(runId, dir, summary) {
+  const eventsPath = join(dir, 'events.jsonl');
+  let events = readRunEvents(eventsPath);
+  if (!events) return false;
+  let finalized = events.filter(event => event?.type === 'run_finalized');
+  if (finalized.length === 0) {
+    const event = {
+      type: 'run_finalized',
+      detail: {
+        status: 'completed',
+        storiesCompleted: summary.storiesCompleted ?? null,
+        duration_ms: summary.duration_ms,
+      },
+      timestamp: new Date().toISOString(),
+    };
+    try {
+      appendRegularArtifact(eventsPath, 'run events', `${JSON.stringify(event)}\n`, MAX_EVENTS_BYTES);
+    } catch {
+      return false;
+    }
+    events = readRunEvents(eventsPath);
+    if (!events) return false;
+    finalized = events.filter(item => item?.type === 'run_finalized');
+  }
+  if (finalized.length !== 1 || events.at(-1) !== finalized[0]) return false;
+  const event = finalized[0];
+  const timestamp = Date.parse(event.timestamp);
+  return event.detail?.status === 'completed'
+    && event.detail.duration_ms === summary.duration_ms
+    && event.detail.storiesCompleted === (summary.storiesCompleted ?? null)
+    && Number.isFinite(timestamp)
+    && timestamp >= Date.parse(summary.finishedAt);
+}
+
+function acquireRunningRunMutation(runId, opts = {}) {
+  let owner = null;
+  let owned = false;
+  let dir = null;
+  try {
+    if (!RUN_ID_PATTERN.test(runId || '')) throw new Error('invalid run id');
+    const base = resolve(opts.base || RUNS_BASE);
+    const baseBinding = bindSafeDirectoryPath(base, 'run artifacts base', {
+      trustedRoot: opts.trustedRoot,
+      requirePrivateMode: false,
+    });
+    dir = runDir(runId, base);
+    const dirBinding = bindSafeDirectoryPath(dir, 'run directory', {
+      trustedRoot: opts.trustedRoot,
+      requirePrivateMode: true,
+    });
+
+    if (opts._runLockOwner) {
+      if (!holdsRunFinalizationLock(dir, opts._runLockOwner)) {
+        throw new Error('run transition lock is not held');
+      }
+      owner = opts._runLockOwner;
+    } else {
+      owner = acquireRunFinalizationLock(dir);
+      owned = true;
+    }
+
+    revalidateDirectoryBinding(baseBinding, 'run artifacts base');
+    revalidateDirectoryBinding(dirBinding, 'run directory');
+    const summaryPath = join(dir, 'summary.json');
+    const summaryFile = readRegularArtifact(summaryPath, 'run summary', MAX_SUMMARY_BYTES);
+    let summary;
+    try { summary = JSON.parse(summaryFile.text); }
+    catch { throw new Error('run summary is invalid'); }
+    if (!validateRunSummaryIdentity(summary, runId) || summary.status !== 'running') {
+      throw new Error('run is not active');
+    }
+    return {
+      baseBinding,
+      dir,
+      dirBinding,
+      owned,
+      owner,
+      summary,
+      summaryFile,
+      summaryPath,
+    };
+  } catch (error) {
+    if (owned && owner && dir) releaseRunFinalizationLock(dir, owner);
+    throw error;
+  }
+}
+
+function revalidateRunningRunMutation(mutation) {
+  revalidateDirectoryBinding(mutation.baseBinding, 'run artifacts base');
+  revalidateDirectoryBinding(mutation.dirBinding, 'run directory');
+  revalidateRegularArtifact(
+    mutation.summaryPath,
+    mutation.summaryFile.stat,
+    'run summary',
+    MAX_SUMMARY_BYTES,
+  );
+}
+
+function releaseRunningRunMutation(mutation) {
+  if (mutation?.owned && mutation.owner && mutation.dir) {
+    releaseRunFinalizationLock(mutation.dir, mutation.owner);
   }
 }
 
@@ -144,21 +869,27 @@ function clearActiveRunId(orchestrator, runId, opts = {}) {
  *
  * @param {object} [opts]
  * @param {string} [opts.stateDir] - Override state directory (for testing)
+ * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths
  * @returns {{ orchestrator: string, runId: string }|null}
  */
 export function discoverActiveRun(opts = {}) {
   try {
-    const sd = opts.stateDir || STATE_DIR;
+    const stateDir = resolve(opts.stateDir || STATE_DIR);
     const candidates = [];
     for (const orch of ['atlas', 'athena']) {
       try {
-        const raw = readFileSync(activeRunPath(orch, sd), 'utf-8');
-        const data = JSON.parse(raw);
-        if (data.runId) {
-          candidates.push({ orchestrator: orch, runId: data.runId, startedAt: data.startedAt || '' });
+        const binding = bindOptionalStateDirectory(stateDir, opts.trustedRoot);
+        if (!binding) continue;
+        const pointer = readActivePointer(binding, orch);
+        if (pointer.present && validateActivePointerData(pointer.data, orch)) {
+          candidates.push({
+            orchestrator: orch,
+            runId: pointer.data.runId,
+            startedAt: pointer.data.startedAt,
+          });
         }
       } catch {
-        // not active for this orchestrator
+        // Invalid, linked, or absent pointers are never active.
       }
     }
     if (candidates.length === 0) return null;
@@ -178,19 +909,67 @@ export function discoverActiveRun(opts = {}) {
  * @param {string} taskDescription - Human-readable description of the task
  * @param {object} [opts]
  * @param {string} [opts.base] - Override base directory (for testing)
- * @returns {{ runId: string, runDir: string }}
+ * @param {string} [opts.stateDir] - Required with a custom base when activate is true
+ * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths
+ * @param {boolean} [opts.activate=true] - Set false for isolated historical/test runs
+ * @returns {{ok:true,runId:string,runDir:string}|{ok:false,runId:null,runDir:'',reason:string}}
  */
 export function createRun(orchestrator, taskDescription, opts = {}) {
+  let dir = null;
+  let summaryStat = null;
+  const failed = reason => ({ ok: false, runId: null, runDir: '', reason });
+  const cleanup = () => {
+    if (!dir) return;
+    const summaryPath = join(dir, 'summary.json');
+    if (summaryStat) {
+      try {
+        const current = lstatSync(summaryPath);
+        if (!current.isSymbolicLink() && sameFsObject(summaryStat, current)) unlinkSync(summaryPath);
+      } catch {}
+    }
+    try { rmdirSync(dir); } catch {}
+  };
   try {
-    const base = opts.base || RUNS_BASE;
+    if (!ORCHESTRATOR_PATTERN.test(orchestrator || '')) return failed('invalid-orchestrator');
+    if (typeof taskDescription !== 'string') return failed('invalid-task-description');
+    const base = resolve(opts.base || RUNS_BASE);
+    const customBase = Object.hasOwn(opts, 'base') && base !== resolve(RUNS_BASE);
+    const activate = opts.activate !== false;
+    if (customBase && activate && !opts.stateDir) return failed('custom-state-dir-required');
+
+    let baseBinding;
+    try {
+      baseBinding = ensureSafeDirectoryPath(base, 'run artifacts base', {
+        trustedRoot: opts.trustedRoot,
+        requirePrivateMode: true,
+      });
+    } catch {
+      return failed('unsafe-run-base');
+    }
     const now = new Date();
     const runId = `${orchestrator}-${formatDate(now)}-${formatTime(now)}-${rand4()}`;
-    const dir = runDir(runId, base);
+    if (!isSafeActiveIdentity(orchestrator, runId)) return failed('invalid-run-identity');
+    dir = runDir(runId, base);
 
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try { mkdirSync(dir, { mode: 0o700 }); }
+    catch { return failed('run-directory-create-failed'); }
+    let runBinding;
+    try {
+      revalidateDirectoryBinding(baseBinding, 'run artifacts base');
+      runBinding = bindSafeDirectoryPath(dir, 'run directory', {
+        trustedRoot: opts.trustedRoot,
+        requirePrivateMode: true,
+      });
+    } catch {
+      cleanup();
+      return failed('unsafe-run-directory');
+    }
 
     // Link to current Claude Code session if available
-    const sessionId = getCurrentSessionId({ stateBase: opts.stateDir || STATE_DIR });
+    const stateDir = opts.stateDir ? resolve(opts.stateDir) : resolve(STATE_DIR);
+    const sessionId = (!customBase || opts.stateDir)
+      ? getCurrentSessionId({ stateBase: stateDir })
+      : null;
 
     const summary = {
       runId,
@@ -201,20 +980,42 @@ export function createRun(orchestrator, taskDescription, opts = {}) {
       ...(sessionId ? { sessionId } : {}),
     };
 
-    atomicWriteFileSync(join(dir, 'summary.json'), JSON.stringify(summary, null, 2));
+    try {
+      revalidateDirectoryBinding(baseBinding, 'run artifacts base');
+      revalidateDirectoryBinding(runBinding, 'run directory');
+      summaryStat = writeExclusiveRegularArtifact(
+        join(dir, 'summary.json'),
+        'run summary',
+        JSON.stringify(summary, null, 2),
+        MAX_SUMMARY_BYTES,
+      );
+    } catch {
+      cleanup();
+      return failed('summary-write-failed');
+    }
 
     // Write active-run pointer (US-001)
-    setActiveRunId(orchestrator, runId, { stateDir: opts.stateDir || STATE_DIR });
+    if (activate) {
+      const claimed = setActiveRunId(orchestrator, runId, {
+        stateDir,
+        trustedRoot: opts.trustedRoot,
+        startedAt: summary.startedAt,
+      });
+      if (!claimed.ok) {
+        cleanup();
+        return failed(claimed.reason || 'active-run-claim-failed');
+      }
+    }
 
     // Link run to session record (cross-reference)
     if (sessionId) {
-      try { linkRunToSession(runId, { stateBase: opts.stateDir || STATE_DIR }); } catch {}
+      try { linkRunToSession(runId, { stateBase: stateDir }); } catch {}
     }
 
-    return { runId, runDir: dir };
+    return { ok: true, runId, runDir: dir };
   } catch {
-    const fallbackId = `${orchestrator || 'unknown'}-fallback-${rand4()}`;
-    return { runId: fallbackId, runDir: '' };
+    cleanup();
+    return failed('create-run-failed');
   }
 }
 
@@ -225,15 +1026,27 @@ export function createRun(orchestrator, taskDescription, opts = {}) {
  * @param {{ phase: string, type: string, detail: * }} event
  * @param {object} [opts]
  * @param {string} [opts.base] - Override base directory (for testing)
+ * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths
+ * @param {object} [opts._runLockOwner] - Existing shared transition-lock owner
  */
 export function addEvent(runId, event, opts = {}) {
+  let mutation = null;
   try {
-    const base = opts.base || RUNS_BASE;
-    const dir = runDir(runId, base);
+    if (!event || typeof event !== 'object' || Array.isArray(event)
+      || event.type === 'run_finalized') return;
+    mutation = acquireRunningRunMutation(runId, opts);
     const line = JSON.stringify({ ...event, timestamp: new Date().toISOString() });
-    appendFileSync(join(dir, 'events.jsonl'), line + '\n', { encoding: 'utf-8', mode: 0o600 });
+    revalidateRunningRunMutation(mutation);
+    appendRegularArtifact(
+      join(mutation.dir, 'events.jsonl'),
+      'run events',
+      `${line}\n`,
+      MAX_EVENTS_BYTES,
+    );
   } catch {
     // fail-safe: event loss is acceptable, never throw
+  } finally {
+    releaseRunningRunMutation(mutation);
   }
 }
 
@@ -245,17 +1058,23 @@ export function addEvent(runId, event, opts = {}) {
  * @param {{ story_id: string, verdict: 'pass'|'fail'|'skip', evidence: *, verifiedBy: string, timestamp: string }} result
  * @param {object} [opts]
  * @param {string} [opts.base] - Override base directory (for testing)
+ * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths
+ * @param {object} [opts._runLockOwner] - Existing shared transition-lock owner
  */
 export function addVerification(runId, result, opts = {}) {
+  let mutation = null;
   try {
-    const base = opts.base || RUNS_BASE;
-    const dir = runDir(runId, base);
-    const filePath = join(dir, 'verification.jsonl');
+    if (!result || typeof result !== 'object' || Array.isArray(result)) return;
+    mutation = acquireRunningRunMutation(runId, opts);
+    const filePath = join(mutation.dir, 'verification.jsonl');
     const line = JSON.stringify({ ...result, timestamp: result.timestamp || new Date().toISOString() });
-    appendFileSync(filePath, line + '\n', { encoding: 'utf-8', mode: 0o600 });
+    revalidateRunningRunMutation(mutation);
+    appendRegularArtifact(filePath, 'run verifications', `${line}\n`, MAX_EVENTS_BYTES);
 
     // Emit verification_result event with full payload (US-006)
-    const activeRunId = getActiveRunId(result.orchestrator || opts.orchestrator || '', { stateDir: opts.stateDir || STATE_DIR });
+    const activeRunId = getActiveRunId(mutation.summary.orchestrator, {
+      stateDir: opts.stateDir || STATE_DIR,
+    });
     if (activeRunId && activeRunId === runId) {
       const criteria = result.criteria || [];
       const failCount = criteria.filter(c => c.verdict === 'fail').length;
@@ -269,10 +1088,16 @@ export function addVerification(runId, result, opts = {}) {
           criteriaCount: criteria.length,
           failCount,
         },
-      }, { base });
+      }, {
+        base: opts.base || RUNS_BASE,
+        trustedRoot: opts.trustedRoot,
+        _runLockOwner: mutation.owner,
+      });
     }
   } catch {
     // fail-safe: verification loss is acceptable, never throw
+  } finally {
+    releaseRunningRunMutation(mutation);
   }
 }
 
@@ -283,25 +1108,87 @@ export function addVerification(runId, result, opts = {}) {
  * @param {object} summary - Additional fields to merge (e.g. storiesCompleted, errors)
  * @param {object} [opts]
  * @param {string} [opts.base] - Override base directory (for testing)
+ * @param {string} [opts.stateDir] - Override active-run state directory
+ * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths outside cwd/tmp
  */
 export function finalizeRun(runId, summary, opts = {}) {
+  let finalizationOwner = null;
+  let ownsFinalizationLock = false;
+  let dir = null;
   try {
-    const base = opts.base || RUNS_BASE;
-    const dir = runDir(runId, base);
+    const inputError = validateFinalizationInput(runId, summary);
+    if (inputError) return { ok: false, reason: inputError };
+    const pathGuard = bindRunFinalizationPaths(runId, opts);
+    dir = pathGuard.dir;
     const filePath = join(dir, 'summary.json');
 
-    let existing = {};
-    try {
-      existing = JSON.parse(readFileSync(filePath, 'utf-8'));
-    } catch {
-      existing = { runId };
+    if (opts._finalizationLockOwner) {
+      if (!holdsRunFinalizationLock(dir, opts._finalizationLockOwner)) {
+        return { ok: false, reason: 'finalization-lock-not-held' };
+      }
+      finalizationOwner = opts._finalizationLockOwner;
+    } else {
+      finalizationOwner = acquireRunFinalizationLock(dir);
+      ownsFinalizationLock = true;
+    }
+    pathGuard.revalidate();
+
+    const summaryFile = readRegularArtifact(filePath, 'run summary', MAX_SUMMARY_BYTES);
+    let existing;
+    try { existing = JSON.parse(summaryFile.text); }
+    catch { return { ok: false, reason: 'run-summary-invalid' }; }
+    if (readRunEvents(join(dir, 'events.jsonl')) === null) {
+      return { ok: false, reason: 'run-events-invalid' };
+    }
+
+    if (existing.status === 'completed') {
+      if (!validateCompletedRunSummary(existing, runId)) {
+        return { ok: false, reason: 'completed-run-summary-invalid' };
+      }
+      if ((existing.result === 'failure' || summary.result === 'failure')
+        && (!opts._finalizationLockOwner || !existsSync(join(dir, 'terminal-failure.json')))) {
+        return { ok: false, reason: 'failure-finalization-not-authorized' };
+      }
+      const pointerPreflight = preflightActiveRunPointer(existing.orchestrator, opts);
+      const sameResult = Object.entries(summary || {}).every(([key, value]) => existing[key] === value);
+      pathGuard.revalidate();
+      revalidateRegularArtifact(filePath, summaryFile.stat, 'run summary', MAX_SUMMARY_BYTES);
+      if (sameResult && !ensureRunFinalizedEvent(runId, dir, existing)) {
+        return { ok: false, reason: 'finalization-event-not-durable' };
+      }
+      pathGuard.revalidate();
+      if (sameResult && existing.orchestrator) {
+        if (!clearActiveRunId(existing.orchestrator, runId, pointerPreflight, opts)) {
+          return { ok: false, reason: 'active-run-pointer-not-cleared' };
+        }
+      }
+      return sameResult
+        ? { ok: true, idempotent: true }
+        : { ok: false, reason: 'run-already-finalized' };
+    }
+    if (existing.status !== 'running') {
+      return { ok: false, reason: 'run-not-active' };
+    }
+    const identity = validateRunSummaryIdentity(existing, runId);
+    if (!identity) {
+      return { ok: false, reason: 'running-run-summary-invalid' };
+    }
+    const pointerPreflight = preflightActiveRunPointer(existing.orchestrator, opts);
+    if (summary.result === 'failure'
+      && (!opts._finalizationLockOwner || !existsSync(join(dir, 'terminal-failure.json')))) {
+      return { ok: false, reason: 'failure-finalization-not-authorized' };
+    }
+    // A published failure marker owns result classification. A concurrent
+    // success path must not overwrite it.
+    if (summary?.result !== 'failure' && existsSync(join(dir, 'terminal-failure.json'))) {
+      return { ok: false, reason: 'terminal-failure-published' };
     }
 
     const finishedAt = new Date().toISOString();
-    const startedAt = existing.startedAt;
-    const duration_ms = startedAt
-      ? new Date(finishedAt).getTime() - new Date(startedAt).getTime()
-      : null;
+    const duration_ms = Date.parse(finishedAt) - identity.startedAt;
+    if (!Number.isSafeInteger(duration_ms) || duration_ms < 0) {
+      return { ok: false, reason: 'run-duration-invalid' };
+    }
 
     const updated = {
       ...existing,
@@ -311,26 +1198,171 @@ export function finalizeRun(runId, summary, opts = {}) {
       status: 'completed',
     };
 
+    pathGuard.revalidate();
+    revalidateRegularArtifact(filePath, summaryFile.stat, 'run summary', MAX_SUMMARY_BYTES);
     atomicWriteFileSync(filePath, JSON.stringify(updated, null, 2));
+    pathGuard.revalidate();
+    const persistedFile = readRegularArtifact(filePath, 'run summary', MAX_SUMMARY_BYTES);
+    let persisted;
+    try { persisted = JSON.parse(persistedFile.text); }
+    catch { return { ok: false, reason: 'finalized-summary-not-durable' }; }
+    if (JSON.stringify(persisted) !== JSON.stringify(updated)) {
+      return { ok: false, reason: 'finalized-summary-not-durable' };
+    }
 
-    // Emit run_finalized event (US-001)
-    addEvent(runId, {
-      type: 'run_finalized',
-      detail: {
-        status: 'completed',
-        storiesCompleted: summary.storiesCompleted || null,
-        duration_ms,
-      },
-    }, { base });
+    if (!ensureRunFinalizedEvent(runId, dir, updated)) {
+      return { ok: false, reason: 'finalization-event-not-durable' };
+    }
+    pathGuard.revalidate();
 
     // Clear active-run pointer with compare-and-delete (US-001 + Codex fix #6)
     const orchestrator = existing.orchestrator;
     if (orchestrator) {
-      clearActiveRunId(orchestrator, runId, { stateDir: opts.stateDir || STATE_DIR });
+      if (!clearActiveRunId(orchestrator, runId, pointerPreflight, opts)) {
+        return { ok: false, reason: 'active-run-pointer-not-cleared' };
+      }
     }
+    return { ok: true, idempotent: false };
   } catch {
     // fail-safe: finalization failure is logged but never throws
+    return { ok: false, reason: 'finalization-failed' };
+  } finally {
+    if (ownsFinalizationLock && finalizationOwner && dir) {
+      releaseRunFinalizationLock(dir, finalizationOwner);
+    }
   }
+}
+
+function emptyRunRecord() {
+  return { summary: {}, events: [], verifications: [] };
+}
+
+/**
+ * Bind a run read to its intended, non-linked artifact tree.  Read callers
+ * deliberately accept legacy directory modes, but never linked ancestry: a
+ * status/replay request must not be able to follow an attacker-controlled
+ * redirect outside the artifact root.
+ */
+function bindRunReadPaths(runId, opts = {}) {
+  if (!RUN_ID_PATTERN.test(runId || '')) throw new Error('invalid run id');
+  const base = resolve(opts.base || RUNS_BASE);
+  const baseBinding = bindSafeDirectoryPath(base, 'run artifacts base', {
+    trustedRoot: opts.trustedRoot,
+    requirePrivateMode: false,
+  });
+  const dir = runDir(runId, base);
+  const dirBinding = bindSafeDirectoryPath(dir, 'run directory', {
+    trustedRoot: opts.trustedRoot,
+    requirePrivateMode: false,
+  });
+  const revalidate = () => {
+    revalidateDirectoryBinding(baseBinding, 'run artifacts base');
+    revalidateDirectoryBinding(dirBinding, 'run directory');
+    return true;
+  };
+  revalidate();
+  return Object.freeze({ base, dir, revalidate });
+}
+
+/** Read a fixed artifact leaf after proving/re-proving its directory chain. */
+function readBoundRunArtifact(paths, fileName, label, maxBytes, options = {}) {
+  paths.revalidate();
+  const filePath = join(paths.dir, fileName);
+  const artifact = readRegularArtifact(filePath, label, maxBytes, options);
+  // The no-follow read protects the leaf; repeat both checks before exposing
+  // data so a directory/leaf replacement race fails closed instead of leaking
+  // a value read through a redirected path.
+  paths.revalidate();
+  if (artifact.present) {
+    revalidateRegularArtifact(
+      filePath,
+      artifact.stat,
+      label,
+      maxBytes,
+      options.allowEmpty === true,
+    );
+    paths.revalidate();
+  }
+  return artifact;
+}
+
+function parseJsonLines(text, { skipInvalid = false } = {}) {
+  const parsed = [];
+  for (const line of text.split('\n')) {
+    if (line.trim().length === 0) continue;
+    try {
+      parsed.push(JSON.parse(line));
+    } catch {
+      if (!skipInvalid) return [];
+    }
+  }
+  return parsed;
+}
+
+function readRunRecord(runId, opts = {}) {
+  const paths = bindRunReadPaths(runId, opts);
+  const summaryArtifact = readBoundRunArtifact(
+    paths,
+    'summary.json',
+    'run summary',
+    MAX_SUMMARY_BYTES,
+    { allowMissing: true },
+  );
+  // A run without its identity record is not a readable run.  This also keeps
+  // callers from combining event data from a partially replaced directory.
+  if (!summaryArtifact.present) return emptyRunRecord();
+
+  let summary;
+  try { summary = JSON.parse(summaryArtifact.text); }
+  catch { return emptyRunRecord(); }
+  if (!validateRunSummaryIdentity(summary, runId)) return emptyRunRecord();
+
+  const eventsArtifact = readBoundRunArtifact(
+    paths,
+    'events.jsonl',
+    'run events',
+    MAX_EVENTS_BYTES,
+    { allowMissing: true, allowEmpty: true },
+  );
+  const verificationsArtifact = readBoundRunArtifact(
+    paths,
+    'verification.jsonl',
+    'run verifications',
+    MAX_EVENTS_BYTES,
+    { allowMissing: true, allowEmpty: true },
+  );
+  return {
+    summary,
+    events: eventsArtifact.present ? parseJsonLines(eventsArtifact.text) : [],
+    verifications: verificationsArtifact.present
+      ? parseJsonLines(verificationsArtifact.text, { skipInvalid: true })
+      : [],
+  };
+}
+
+function normalizedListLimit(limit) {
+  if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) {
+    return MAX_RUN_LIST_ENTRIES;
+  }
+  return Math.min(Math.floor(limit), MAX_RUN_LIST_ENTRIES);
+}
+
+function readBoundRunDirectoryNames(baseBinding) {
+  revalidateDirectoryBinding(baseBinding, 'run artifacts base');
+  const directory = opendirSync(baseBinding.path);
+  const names = [];
+  try {
+    let scanned = 0;
+    let entry;
+    while (scanned < MAX_RUN_LIST_ENTRIES && (entry = directory.readSync()) !== null) {
+      scanned += 1;
+      if (entry.isDirectory() && RUN_ID_PATTERN.test(entry.name)) names.push(entry.name);
+    }
+  } finally {
+    directory.closeSync();
+  }
+  revalidateDirectoryBinding(baseBinding, 'run artifacts base');
+  return names;
 }
 
 /**
@@ -340,93 +1372,82 @@ export function finalizeRun(runId, summary, opts = {}) {
  * @param {string} [opts.orchestrator] - Filter to only runs from this orchestrator
  * @param {number} [opts.limit] - Maximum number of results to return
  * @param {string} [opts.base] - Override base directory (for testing)
+ * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths
  * @returns {Array<{ runId: string, orchestrator: string, startedAt: string, status: string }>}
  */
 export function listRuns(opts = {}) {
-  const base = opts.base || RUNS_BASE;
-  const { orchestrator, limit } = opts;
-
-  let entries = [];
   try {
-    entries = readdirSync(base, { withFileTypes: true })
-      .filter(e => e.isDirectory())
-      .map(e => e.name);
+    const base = resolve(opts.base || RUNS_BASE);
+    const { orchestrator } = opts;
+    if (orchestrator != null && !ORCHESTRATOR_PATTERN.test(orchestrator)) return [];
+    const baseBinding = bindSafeDirectoryPath(base, 'run artifacts base', {
+      trustedRoot: opts.trustedRoot,
+      requirePrivateMode: false,
+    });
+    const names = readBoundRunDirectoryNames(baseBinding);
+
+    const results = [];
+    for (const name of names) {
+      try {
+        // Rebind every directory entry rather than trusting Dirent metadata,
+        // which can be stale or represent a link swapped after readdir().
+        revalidateDirectoryBinding(baseBinding, 'run artifacts base');
+        const paths = bindRunReadPaths(name, {
+          base,
+          trustedRoot: opts.trustedRoot,
+        });
+        const summaryArtifact = readBoundRunArtifact(
+          paths,
+          'summary.json',
+          'run summary',
+          MAX_SUMMARY_BYTES,
+        );
+        const summary = JSON.parse(summaryArtifact.text);
+        if (!validateRunSummaryIdentity(summary, name) || typeof summary.status !== 'string') continue;
+        if (orchestrator && summary.orchestrator !== orchestrator) continue;
+        // `bindRunReadPaths` protects the candidate itself.  Preserve the
+        // identity of the directory that was originally enumerated too, so a
+        // rename to another ordinary (non-symlink) base cannot feed a mixed
+        // listing through this audit call.
+        revalidateDirectoryBinding(baseBinding, 'run artifacts base');
+        results.push({
+          runId: summary.runId,
+          orchestrator: summary.orchestrator,
+          startedAt: summary.startedAt,
+          status: summary.status,
+        });
+      } catch {
+        // An unreadable, linked, oversized, or replaced entry is simply not a
+        // run.  Listing must never dereference it or fail the whole audit.
+      }
+    }
+
+    // Sort by startedAt descending (most recent first) for replay/audit use cases.
+    revalidateDirectoryBinding(baseBinding, 'run artifacts base');
+    results.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+    return results.slice(0, normalizedListLimit(opts.limit));
   } catch {
     return [];
   }
-
-  const results = [];
-  for (const name of entries) {
-    const summaryPath = join(base, name, 'summary.json');
-    try {
-      const s = JSON.parse(readFileSync(summaryPath, 'utf-8'));
-      if (orchestrator && s.orchestrator !== orchestrator) continue;
-      results.push({
-        runId: s.runId,
-        orchestrator: s.orchestrator,
-        startedAt: s.startedAt,
-        status: s.status,
-      });
-    } catch {
-      // skip runs with unreadable summaries
-    }
-  }
-
-  // Sort by startedAt descending (most recent first) for replay/audit use cases
-  results.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
-
-  if (limit != null && limit > 0) {
-    return results.slice(0, limit);
-  }
-  return results;
 }
 
 /**
  * Read a complete run record: summary, events, and verifications.
+ * Invalid, missing, linked, oversized, or changed artifacts deliberately map
+ * to the public empty-record contract rather than exposing an error or data.
  *
  * @param {string} runId
  * @param {object} [opts]
  * @param {string} [opts.base] - Override base directory (for testing)
+ * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths
  * @returns {{ summary: object, events: object[], verifications: object[] }}
  */
 export function getRun(runId, opts = {}) {
-  const base = opts.base || RUNS_BASE;
-  const dir = runDir(runId, base);
-
-  // summary
-  let summary = {};
   try {
-    summary = JSON.parse(readFileSync(join(dir, 'summary.json'), 'utf-8'));
+    return readRunRecord(runId, opts);
   } catch {
-    summary = {};
+    return emptyRunRecord();
   }
-
-  // events (JSONL — one JSON object per line)
-  let events = [];
-  try {
-    const raw = readFileSync(join(dir, 'events.jsonl'), 'utf-8');
-    events = raw
-      .split('\n')
-      .filter(line => line.trim().length > 0)
-      .map(line => JSON.parse(line));
-  } catch {
-    events = [];
-  }
-
-  // verifications (JSONL — one JSON object per line)
-  let verifications = [];
-  try {
-    const raw = readFileSync(join(dir, 'verification.jsonl'), 'utf-8');
-    verifications = raw
-      .split('\n')
-      .filter(line => line.trim().length > 0)
-      .map(line => { try { return JSON.parse(line); } catch { return null; } })
-      .filter(Boolean);
-  } catch {
-    verifications = [];
-  }
-
-  return { summary, events, verifications };
 }
 
 // ---------------------------------------------------------------------------
@@ -441,15 +1462,16 @@ export function getRun(runId, opts = {}) {
  * @returns {object[]}
  */
 function readEvents(runId, opts = {}) {
-  const base = opts.base || RUNS_BASE;
-  const dir = runDir(runId, base);
   try {
-    const raw = readFileSync(join(dir, 'events.jsonl'), 'utf-8');
-    return raw
-      .split('\n')
-      .filter(line => line.trim().length > 0)
-      .map(line => { try { return JSON.parse(line); } catch { return null; } })
-      .filter(Boolean);
+    const paths = bindRunReadPaths(runId, opts);
+    const artifact = readBoundRunArtifact(
+      paths,
+      'events.jsonl',
+      'run events',
+      MAX_EVENTS_BYTES,
+      { allowMissing: true, allowEmpty: true },
+    );
+    return artifact.present ? parseJsonLines(artifact.text, { skipInvalid: true }) : [];
   } catch {
     return [];
   }
@@ -594,10 +1616,11 @@ export function getRunVerificationSummary(runId, opts = {}) {
  * @returns {{ gatePass: boolean, missing: string[], skipped: string[], summary: object }}
  */
 export function checkVerificationGate(runId, storyIds, opts = {}) {
+  const expectedStoryIds = Array.isArray(storyIds) ? storyIds : [];
   try {
     const summary = getRunVerificationSummary(runId, opts);
     const verifiedIds = new Set(Object.keys(summary.stories));
-    const missing = storyIds.filter(id => !verifiedIds.has(id));
+    const missing = expectedStoryIds.filter(id => !verifiedIds.has(id));
     const skipped = Object.entries(summary.stories)
       .filter(([, s]) => s.verdict === 'skip')
       .map(([id]) => id);
@@ -611,7 +1634,7 @@ export function checkVerificationGate(runId, storyIds, opts = {}) {
   } catch {
     return {
       gatePass: false,
-      missing: [...storyIds],
+      missing: [...expectedStoryIds],
       skipped: [],
       summary: { total: 0, passed: 0, failed: 0, skipped: 0, stories: {} },
     };

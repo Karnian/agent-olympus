@@ -7,6 +7,20 @@
 
 ---
 
+> **Current security contract (2026-07, supersedes conflicting historical text below).**
+> Active-run publication is an exclusive, crash-safe CAS: a second ordinary
+> `createRun()` for the same orchestrator returns `{ ok:false, ... }` and never
+> overwrites the pointer. `replace:true` is an explicit test/admin operation.
+> `createRun()` returns a success/failure envelope; an activated custom run base
+> also requires its state directory, while `activate:false` is only for isolated
+> historical/test runs. External custom paths require an explicit `trustedRoot`.
+> Active pointers and run reads use trusted ancestry plus no-follow regular-file
+> checks; unsafe reads return their documented safe defaults. This addendum also
+> supersedes the old same-orchestrator-overwrite and unconditional compatibility
+> claims in this v0.9.2 design record.
+
+---
+
 ## Problem Statement
 
 Atlas and Athena orchestrators currently maintain two disconnected state systems: a run artifacts log (`run-artifacts.mjs`) that nobody calls, and a checkpoint system (`checkpoint.mjs`) that skills call 17+ times but stores only a flat snapshot with no history. When a session is interrupted and resumes, the checkpoint tells you WHERE you were but not HOW you got there or WHAT happened along the way. Verification results are captured at story granularity only, so there is no way to determine which specific acceptance criterion failed. And when orchestration completes, there is no systematic scan for gaps -- things that were skipped, unavailable, or left unresolved -- so operators discover these only by manually auditing output.
@@ -316,8 +330,12 @@ All events share a common envelope: `{ type, phase, timestamp, detail }`.
 
 **Mitigation**: Use sync `addEvent()` from async `saveCheckpoint()`. The append is a single small write; blocking is negligible.
 
-### R2: Active Run File Race Condition (Low)
-If two orchestrators (atlas and athena) run simultaneously, they each have their own active-run file (`ao-active-run-atlas.json`, `ao-active-run-athena.json`), so no conflict. If the same orchestrator is somehow started twice, the second `createRun` overwrites the active-run pointer. This is acceptable -- the old run becomes orphaned but its artifacts are preserved.
+### R2: Active Run File Race Condition (Closed by current CAS contract)
+Atlas and Athena retain separate active-run files, but a same-orchestrator
+second `createRun()` must lose the no-replace CAS and return its failure envelope.
+It may not overwrite or orphan the first active pointer. The only replacement
+path is explicit `replace:true` for controlled test/admin recovery, with
+trusted-ancestry and no-follow validation.
 
 ### R3: Event Log Size (Low)
 A long-running orchestration with many subagents could generate hundreds of events. Each event is one JSONL line (typically 200-500 bytes). At 500 events, the file is ~250KB -- well within acceptable limits. `replayEvents` reads the full file, which is fine at this scale.

@@ -65,11 +65,13 @@ async function tryLoadCheckpointFile(filePath) {
  *
  * @param {'atlas'|'athena'} orchestrator
  * @param {{ phase: number, sessionId?: string, prdSnapshot?: object, completedStories?: string[], activeWorkers?: string[], worktrees?: Object.<string, {path: string, branch: string}>, startedAt?: string, taskDescription?: string }} data
+ * @param {{stateDir?:string,base?:string,trustedRoot?:string,_runLockOwner?:object}} [opts]
  * @returns {Promise<{ ok: boolean, degraded: boolean }>}
  */
-export async function saveCheckpoint(orchestrator, data) {
+export async function saveCheckpoint(orchestrator, data, opts = {}) {
   try {
-    await fs.mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
+    const stateDir = opts.stateDir || STATE_DIR;
+    await fs.mkdir(stateDir, { recursive: true, mode: 0o700 });
 
     const sessionId = data.sessionId || null;
     const checkpoint = {
@@ -78,10 +80,15 @@ export async function saveCheckpoint(orchestrator, data) {
       savedAt: new Date().toISOString(),
     };
 
-    const filePath = path.join(STATE_DIR, checkpointFilename(orchestrator, sessionId));
+    const filePath = path.join(stateDir, checkpointFilename(orchestrator, sessionId));
 
     // Emit events to active run if one exists (US-002 + US-003)
-    const activeRunId = getActiveRunId(orchestrator);
+    const activeRunId = getActiveRunId(orchestrator, { stateDir });
+    const eventOpts = {
+      ...(opts.base ? { base: opts.base } : {}),
+      ...(opts.trustedRoot ? { trustedRoot: opts.trustedRoot } : {}),
+      ...(opts._runLockOwner ? { _runLockOwner: opts._runLockOwner } : {}),
+    };
     if (activeRunId) {
       // Detect phase change for phase_transition event (US-003)
       let previousPhase = null;
@@ -104,7 +111,7 @@ export async function saveCheckpoint(orchestrator, data) {
             fromName: previousPhase !== null ? (PHASE_NAMES[orchestrator]?.[previousPhase] ?? null) : null,
             toName: PHASE_NAMES[orchestrator]?.[currentPhase] ?? null,
           },
-        });
+        }, eventOpts);
       }
 
       // Emit checkpoint_saved event (US-002)
@@ -112,7 +119,7 @@ export async function saveCheckpoint(orchestrator, data) {
         type: 'checkpoint_saved',
         phase: currentPhase,
         detail: { ...data },
-      });
+      }, eventOpts);
     }
 
     await atomicWriteFile(filePath, JSON.stringify(checkpoint, null, 2));

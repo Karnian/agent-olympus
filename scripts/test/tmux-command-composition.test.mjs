@@ -24,12 +24,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildWorkerCommand,
   composeWorkerCommand,
+  createTeamSession,
   spawnWorkerInSession,
   sanitizeForShellArg,
   writePromptFile,
@@ -84,6 +85,81 @@ const WORKER_TYPES = ['codex', 'gemini', 'claude'];
 // via `"$(cat ...)"`, never on the shell source line.
 const ADVERSARIAL_PROMPT = 'fix "auth"; cost $5 `now` & deploy!';
 const ENV = { AO_TEAM_NAME: 'team-1', AO_WORKER_NAME: 'w "1"', AO_WORKER_TYPE: 'codex' };
+
+test('createTeamSession reuses an inherited worktree cwd without claiming its branch', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-inherited-wt-'));
+  const inherited = join(dir, 'root-worker-worktree');
+  const log = join(dir, 'tmux-argv');
+  writeFileSync(
+    join(dir, 'tmux'),
+    '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$AO_TMUX_ARGV_LOG"\nexit 0\n',
+    { mode: 0o755 },
+  );
+  const originalPath = process.env.PATH;
+  const originalLog = process.env.AO_TMUX_ARGV_LOG;
+  process.env.PATH = `${dir}:${originalPath}`;
+  process.env.AO_TMUX_ARGV_LOG = log;
+  clearBinCache();
+  try {
+    const [session] = createTeamSession('failover-child', [{
+      type: 'gemini',
+      name: 'worker',
+      prompt: 'same task',
+      cwd: inherited,
+      worktreePath: inherited,
+      branchName: 'ao-worker-root-worker',
+    }], dir);
+
+    assert.equal(session.status, 'created');
+    assert.equal(session.worktreePath, inherited);
+    assert.equal(session.branchName, 'ao-worker-root-worker');
+    assert.equal(session.worktreeCreated, false);
+    assert.equal(session.worktreeInherited, true);
+    const invocations = readFileSync(log, 'utf-8');
+    assert.match(invocations, new RegExp(`new-session -d -s .* -c ${inherited.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  } finally {
+    process.env.PATH = originalPath;
+    if (originalLog === undefined) delete process.env.AO_TMUX_ARGV_LOG;
+    else process.env.AO_TMUX_ARGV_LOG = originalLog;
+    clearBinCache();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('createTeamSession does not mistake an ordinary worker cwd for an inherited worktree', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-ordinary-cwd-'));
+  const requestedCwd = join(dir, 'requested-cwd');
+  const log = join(dir, 'tmux-argv');
+  mkdirSync(requestedCwd);
+  writeFileSync(
+    join(dir, 'tmux'),
+    '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$AO_TMUX_ARGV_LOG"\nexit 0\n',
+    { mode: 0o755 },
+  );
+  const originalPath = process.env.PATH;
+  const originalLog = process.env.AO_TMUX_ARGV_LOG;
+  process.env.PATH = `${dir}:${originalPath}`;
+  process.env.AO_TMUX_ARGV_LOG = log;
+  clearBinCache();
+  try {
+    const [session] = createTeamSession('ordinary-team', [{
+      type: 'codex',
+      name: 'worker',
+      prompt: 'task',
+      cwd: requestedCwd,
+    }], dir);
+
+    assert.equal(session.status, 'created');
+    assert.equal(session.worktreeInherited, false);
+    assert.notEqual(session.worktreePath, requestedCwd);
+  } finally {
+    process.env.PATH = originalPath;
+    if (originalLog === undefined) delete process.env.AO_TMUX_ARGV_LOG;
+    else process.env.AO_TMUX_ARGV_LOG = originalLog;
+    clearBinCache();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 // ---------------------------------------------------------------------------
 // composeWorkerCommand — pure output (no shell)

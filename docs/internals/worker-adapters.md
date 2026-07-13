@@ -7,7 +7,7 @@
 
 **Fix (the "FLIP").** `spawnTeam` no longer spawns adapters in-process. For every non-tmux worker it launches a **detached supervisor** — `node scripts/lib/adapter-worker-supervisor.mjs <manifest>` (`detached: true`, `unref`, `stdio: 'ignore'`) — that loads the adapter ITSELF, runs one prompt to terminal completion, and writes **atomic disk snapshots + a durable output file**. A fresh-process orchestrator then reads the worker's outcome from disk. tmux workers are unchanged (still `capturePane`-classified).
 
-- **Run identity** — `spawnTeam` stamps the team state with a `runId` (random hex) + absolute `projectRoot`. Each worker gets a `workerRunId`; the persisted `_handle = { supervisorPid, supervisorStartId, runId, workerRunId }` is fully serializable. The supervisor's snapshot/output/manifest paths are DERIVED from the absolute `projectRoot` + these validated hex IDs (the manifest is NOT consulted for any explicit module/snapshot/output path), so a STALE supervisor from a prior same-name run can never be read as the current one.
+- **Run identity** — `allocateTeamRunId()` lets Athena mint the random 16-hex generation before launch, persist it in both the pipeline ledger and checkpoint, and pass it through `spawnTeam(..., { runId })`. Callers that omit the option retain the old behavior: `spawnTeam` allocates the generation internally. The exact ID is stamped into team state together with absolute `projectRoot`; each worker gets a `workerRunId`, and the persisted `_handle = { supervisorPid, supervisorStartId, runId, workerRunId }` is fully serializable. Athena adoption proofs, monitor completion evidence, and runtime team state must all match that preallocated generation, so a same-slug prior team cannot be adopted. The supervisor's snapshot/output/manifest paths are DERIVED from the absolute `projectRoot` + these validated hex IDs (the manifest is NOT consulted for any explicit module/snapshot/output path), so a STALE supervisor from a prior same-name run can never be read as the current one.
 - **Snapshot lifecycle** (`scripts/lib/supervisor-state.mjs`, schemaVersion:1) — atomic `writeSnapshot` (0600, clamped output tail), `readSnapshot(path, expected)` with a 5-way result (`missing` / `corrupt` / `unsupported` / `mismatch` / `ok`), heartbeat freshness (future-skew bounded), HEARTBEAT_INTERVAL 10s / STALE 90s / STARTUP_GRACE 10s.
 - **Readers** (`worker-spawn.mjs`) — `monitorSupervisorWorker` maps a snapshot → MonitorResult: terminal status wins; `running` + dead supervisor (PID start-time identity mismatch) → crash; `running` + stale heartbeat → crash on the 2nd consecutive poll (`_supStaleSeen` latch); missing snapshot past startup grace (or a future `startedAt`) → crash; `mismatch`/`corrupt` → invalid. `collectResults` reads the durable output file (under `.ao/artifacts/team/`). `shutdownSupervisorWorker` is **supervisor-first**: signal the supervisor group (its SIGTERM handler shuts the adapter down) → re-read the snapshot → reap a surviving adapter group via the F3 start-id-checked kill → scrub the prompt-bearing manifest.
 - **Adapter dispatch** — the supervisor's `run*` functions use pure manifest→option builders in `scripts/lib/supervisor-opts.mjs` (`buildExecOpts` / `buildAppserverThreadOpts` / `buildGeminiAcpSessionOpts`), kept in a CLI-free module so the wiring is unit-testable without importing the supervisor (which runs `main()` on import). gemini `model` rides on `createSession` (→ `unstable_setSessionModel`), NOT `startServer`.
@@ -16,6 +16,54 @@
 - **Security** — the built-in `fixture` adapter (test-only) is selectable ONLY when `AO_SUPERVISOR_ALLOW_FIXTURE==='1'`, which `spawnTeam` STRIPS from the child env in production; tests opt in via `_inject.supervisor.env`.
 
 Key files: `scripts/lib/adapter-worker-supervisor.mjs` (detached CLI), `scripts/lib/supervisor-state.mjs` (paths + atomic snapshot I/O), `scripts/lib/supervisor-opts.mjs` (pure option builders), `scripts/lib/proc-identity.mjs` (`readProcStartId` PID start-time identity for reuse detection). See `docs/plans/adapter-worker-supervisor/PLAN.md`.
+
+### Provider-exhaustion failover
+
+`worker-spawn.mjs` owns one bounded replacement chain for external workers.
+Provider exhaustion (quota/rate-limit or repeated network/timeout failure)
+moves Codex to Gemini when available; Gemini receives its own fresh unavailable
+retry budget before the chain terminates at a native Claude Task handoff. A
+generic crash retries that provider once and then demotes to Claude rather than
+pretending the provider is exhausted. Authentication and missing-binary failures
+skip inappropriate manual retries. Atlas creates external workers through one
+canonical `spawnTeam(teamSlug, workers, cwd, capabilities)` call. Athena
+preallocates and durably records its generation, calls
+`spawnTeam(teamSlug, workers, cwd, capabilities, { runId })`, and requires that
+exact identity for adoption, monitor evidence, `collectResults`, and cleanup.
+
+Every transition preserves the root `{teamName, workerName, runId,
+workerRunId, prompt}` identity. A pre-launch attempt id covers adapter/tmux
+startup failures; an incomplete legacy identity fails closed instead of reusing
+another run's output. Provider child-team creation is serialized by an
+owner-record lock (`0600`, PID + process start identity). The fully written
+owner intent is published with a same-directory no-replace hard link, so no
+empty owner path is visible; malformed legacy locks fail closed. Dead-owner recovery is
+bound to the exact observed lock generation by a permanent, create-exclusive
+recovery claim before that generation can be removed. The takeover fence uses
+the same one-winner rule. Re-reading the generation after the claim prevents a
+stale observer from deleting a replacement owner, while the permanent claim
+prevents a third contender from replaying recovery for the same dead owner.
+Provider recovery claims are durable and excluded from SessionEnd's transient
+state sweep. Deterministic child team names make repeated polls idempotent.
+
+Replacement workers inherit the root worker's `cwd`/`worktreePath` and branch,
+but set `worktreeCreated:false`. A child team therefore operates on the same
+task state without claiming or deleting the root Athena worktree. tmux fallback
+uses the inherited directory directly; supervisor adapters receive it in their
+manifest.
+
+Terminal replacement output is written atomically under
+`.ao/artifacts/provider-fallback/<handoffId>.json`, paired with
+`.ao/state/provider-fallback-<handoffId>.json` (`schemaVersion:1`, mode `0600`).
+`monitorTeam` overlays that durable completion onto the failed root worker and
+`collectResults` treats it as canonical, so resume or child-team cleanup cannot
+re-run an already completed task. `SessionEnd` sweeps inactive completion
+artifacts after 24 hours. A native Claude fallback claim is not reclaimed merely
+because its lease timestamp elapsed: elapsed time cannot prove that the Task is
+dead, and a second claim could duplicate work in the same worktree. Recovery
+therefore requires authenticated terminal output or explicit external proof.
+The chain is per worker; a session-global provider circuit breaker/cooldown
+remains a separate follow-up.
 
 
 ### Adapter Priority (highest → lowest)
