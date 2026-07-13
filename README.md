@@ -65,7 +65,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Bounded provider failover** *(v1.5.0)*: Exhausted Codex workers move to Gemini when available and then to native Claude, with a fresh retry budget per provider, generation-bound identity, deterministic child teams, and durable completion output. Lost authenticated Claude output fails closed instead of silently rerunning committed work.
 - **Crash-safe event-backed runs** *(v1.5.0)*: Active-run CAS, phase evidence, finalization locks, terminal-failure markers, and Athena generation adoption make resume/restart fail closed. Hardened no-follow artifact I/O tolerates a torn run-event JSONL record, preserves later valid events, validates only the appended tail, and allows a definitely dead recovery claimant to be safely re-elected without weakening ABA fences.
 - **Sanitized failed-run feedback loop** *(v1.5.0)*: SessionEnd queues only independently verified, session-linked terminal task failures as metadata/digests. A human must approve and link candidates; prompts, error text, paths, diffs, evidence payloads, and provider output never enter the queue.
-- **2719 unit tests**: Comprehensive test suite using `node:test` across 108 test files (v1.5.0: 2719/2719 passing)
+- **2726 unit tests**: Comprehensive test suite using `node:test` across 108 test files (v1.5.0: 2726/2726 passing)
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -400,6 +400,16 @@ hooks/               Hook event registrations (hooks.json)
 - Per-worker communication directories for Codex/Gemini (adapter-managed)
 - Cleaned up after team completion
 
+**Worktrees** (`.ao/worktrees/<slug>/<worker>/`):
+- Isolate parallel workers so file changes do not collide
+- `/codex-goal` gives every goal a unique worktree and fails without mutation if
+  its intended path or branch already exists
+- The legacy replacement policy is only for disposable stale/cancelled workers:
+  it preserves unmerged commits under an `-orphan-<timestamp>` branch but
+  discards uncommitted and untracked files in the replaced worktree
+- Ambiguous stale metadata and concurrent replacement races fail closed; inspect
+  the reported worktree/branch and prune confirmed-stale metadata before retrying
+
 ## Session Recovery
 
 If Claude Code crashes or closes during an orchestration:
@@ -558,7 +568,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (2719 tests across 108 files in v1.5.0) covers the core hook libraries. To run:
+A `node:test` based test suite (2726 tests across 108 files in v1.5.0) covers the core hook libraries. To run:
 
 ```bash
 npm test

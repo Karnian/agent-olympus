@@ -4,7 +4,7 @@
 
 Reliability and evaluation release — HU-01 P2/P3, bounded provider-exhaustion
 failover, event-backed orchestration recovery, and the HU-17 failed-run feedback
-loop. The zero-dependency Node suite is **2719/2719 green across 108 test files**.
+loop. The zero-dependency Node suite is **2726/2726 green across 108 test files**.
 
 ### Added
 - **HU-01 P2/P3 regression harness** — six vendored golden tasks now exercise regression and capability tracks at `k=3`, with `pass^k`/`pass@k`, real token accounting, declared-versus-measured baselines, benchmark and pipeline-protocol fingerprints, trend reporting, and hermetic GREEN/RED fixture proofs. Public graders and candidate execution run in isolated, bounded subprocesses; live Atlas/Athena evaluation remains explicit and operator-only.
@@ -19,6 +19,11 @@ loop. The zero-dependency Node suite is **2719/2719 green across 108 test files*
 - **Cross-platform test entrypoint** — `npm test` now uses `scripts/run-tests.mjs`, avoiding shell-dependent glob semantics while retaining the same `node:test` suite.
 
 ### Fixed
+- `/codex-goal` now allocates a unique worker identity per delegated goal and uses
+  fail-closed collision handling, while default worktree replacement preserves
+  unmerged commits under an orphan branch instead of force-deleting them (#80).
+  Legacy replacement still treats uncommitted and untracked worktree files as
+  disposable and fails closed on stale metadata or concurrent orphan-name races.
 - Node 20 hermetic eval children now receive file-scoped read grants for their exact ESM entry points. Orchestrator timeout timers remain referenced until completion, and a never-settling hidden candidate stays inside the supervisor boundary until the configured timeout instead of exiting without a result.
 - A torn `events.jsonl` record can no longer permanently prevent `completePhase()` or `failPhase()` from reaching a terminal state, including when later valid events were appended after the damaged record.
 - A Claude fallback recorded as completed but missing authenticated output now fails closed with `completed-output-lost` instead of silently flipping back to pending and repeating already committed work. Completion persistence may repair the record only because it already holds the terminal output bytes.

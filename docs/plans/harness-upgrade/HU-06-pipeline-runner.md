@@ -20,6 +20,13 @@
 > prose backstop; it never authorizes a phase-boundary bypass, worker launch, or
 > finalization.
 
+> **Current worktree note (2026-07-13).** The pre-#80 `git branch -D`
+> descriptions below are historical. Current `replace` mode preserves unmerged
+> commits under an `-orphan-<timestamp>` branch, but still force-removes
+> uncommitted and untracked worktree files. Stale Git worktree metadata or a
+> concurrent orphan-name collision can make replacement fail closed. Athena's
+> no-blind-respawn rule therefore remains required.
+
 ## Confirmed scope (user decisions, 2026-06-18)
 
 1. **Orchestrators:** Atlas **and** Athena (library is orchestrator-agnostic).

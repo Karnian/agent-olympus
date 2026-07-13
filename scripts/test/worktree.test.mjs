@@ -94,6 +94,195 @@ test('createWorkerWorktree: re-creating stale worktree succeeds without error', 
   }
 });
 
+test('createWorkerWorktree: onExisting fail preserves an existing worktree and branch', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const first = createWorkerWorktree(repo, 'fail-existing-team', 'worker');
+    assert.equal(first.created, true);
+    const marker = path.join(first.worktreePath, 'uncommitted-marker.txt');
+    await fs.writeFile(marker, 'preserve me\n');
+    const registryPath = path.join(repo, '.ao/state/worktree-registry.json');
+    const registryBefore = await fs.readFile(registryPath, 'utf-8');
+    const branchTipBefore = execFileSync(
+      'git',
+      ['-C', repo, 'rev-parse', first.branchName],
+      { encoding: 'utf-8' },
+    ).trim();
+
+    const second = createWorkerWorktree(
+      repo,
+      'fail-existing-team',
+      'worker',
+      { onExisting: 'fail' },
+    );
+
+    assert.equal(second.created, false);
+    assert.equal(second.worktreePath, first.worktreePath);
+    assert.equal(second.branchName, first.branchName);
+    assert.match(second.error, /Refusing to replace existing/);
+    assert.equal(await fs.readFile(marker, 'utf-8'), 'preserve me\n');
+    assert.equal(
+      execFileSync('git', ['-C', repo, 'rev-parse', first.branchName], { encoding: 'utf-8' }).trim(),
+      branchTipBefore,
+    );
+    assert.equal(await fs.readFile(registryPath, 'utf-8'), registryBefore);
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+test('createWorkerWorktree: onExisting fail preserves a branch-only collision', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const first = createWorkerWorktree(repo, 'fail-branch-team', 'worker');
+    assert.equal(first.created, true);
+    execFileSync(
+      'git',
+      ['-C', repo, 'worktree', 'remove', first.worktreePath],
+      { stdio: 'pipe' },
+    );
+    assert.equal(existsSync(first.worktreePath), false);
+    const branchTipBefore = execFileSync(
+      'git',
+      ['-C', repo, 'rev-parse', first.branchName],
+      { encoding: 'utf-8' },
+    ).trim();
+
+    const second = createWorkerWorktree(
+      repo,
+      'fail-branch-team',
+      'worker',
+      { onExisting: 'fail' },
+    );
+
+    assert.equal(second.created, false);
+    assert.equal(second.worktreePath, first.worktreePath);
+    assert.equal(existsSync(second.worktreePath), false);
+    assert.match(second.error, /branch/);
+    assert.equal(
+      execFileSync('git', ['-C', repo, 'rev-parse', first.branchName], { encoding: 'utf-8' }).trim(),
+      branchTipBefore,
+    );
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+test('createWorkerWorktree: onExisting fail preserves a path-only collision', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const first = createWorkerWorktree(repo, 'fail-path-team', 'worker');
+    assert.equal(first.created, true);
+    execFileSync(
+      'git',
+      ['-C', repo, 'worktree', 'remove', first.worktreePath],
+      { stdio: 'pipe' },
+    );
+    execFileSync('git', ['-C', repo, 'branch', '-d', first.branchName], { stdio: 'pipe' });
+    await fs.mkdir(first.worktreePath, { recursive: true });
+    const marker = path.join(first.worktreePath, 'path-only-marker.txt');
+    await fs.writeFile(marker, 'preserve path\n');
+
+    const second = createWorkerWorktree(
+      repo,
+      'fail-path-team',
+      'worker',
+      { onExisting: 'fail' },
+    );
+
+    assert.equal(second.created, false);
+    assert.equal(second.worktreePath, first.worktreePath);
+    assert.match(second.error, /worktree path/);
+    assert.equal(await fs.readFile(marker, 'utf-8'), 'preserve path\n');
+    assert.throws(() => execFileSync(
+      'git',
+      ['-C', repo, 'show-ref', '--verify', '--quiet', `refs/heads/${first.branchName}`],
+      { stdio: 'pipe' },
+    ));
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+test('createWorkerWorktree: default replacement preserves an unmerged branch', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const baseHead = execFileSync(
+      'git',
+      ['-C', repo, 'rev-parse', 'HEAD'],
+      { encoding: 'utf-8' },
+    ).trim();
+    const first = createWorkerWorktree(repo, 'preserve-team', 'worker');
+    assert.equal(first.created, true);
+    await fs.writeFile(path.join(first.worktreePath, 'feature.txt'), 'unmerged work\n');
+    execFileSync('git', ['-C', first.worktreePath, 'add', 'feature.txt'], { stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-C', first.worktreePath, 'commit', '-m', 'unmerged worker change'],
+      { stdio: 'pipe' },
+    );
+    const unmergedTip = execFileSync(
+      'git',
+      ['-C', first.worktreePath, 'rev-parse', 'HEAD'],
+      { encoding: 'utf-8' },
+    ).trim();
+
+    const second = createWorkerWorktree(repo, 'preserve-team', 'worker');
+
+    assert.equal(second.created, true);
+    assert.ok(Object.hasOwn(second, 'preservedBranch'));
+    assert.ok(second.preservedBranch.startsWith(`${first.branchName}-orphan-`));
+    assert.equal(
+      execFileSync('git', ['-C', repo, 'rev-parse', second.preservedBranch], { encoding: 'utf-8' }).trim(),
+      unmergedTip,
+    );
+    assert.equal(
+      execFileSync('git', ['-C', repo, 'rev-parse', second.branchName], { encoding: 'utf-8' }).trim(),
+      baseHead,
+    );
+    assert.ok(existsSync(second.worktreePath));
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
+test('createWorkerWorktree: default replacement deletes an ancestor branch before recreation', async () => {
+  const repo = await makeGitRepo();
+  try {
+    const baseHead = execFileSync(
+      'git',
+      ['-C', repo, 'rev-parse', 'HEAD'],
+      { encoding: 'utf-8' },
+    ).trim();
+    const first = createWorkerWorktree(repo, 'ancestor-team', 'worker');
+    assert.equal(first.created, true);
+    execFileSync(
+      'git',
+      ['-C', repo, 'worktree', 'remove', first.worktreePath],
+      { stdio: 'pipe' },
+    );
+
+    const second = createWorkerWorktree(repo, 'ancestor-team', 'worker');
+
+    assert.equal(second.created, true);
+    assert.equal(Object.hasOwn(second, 'preservedBranch'), false);
+    assert.equal(
+      execFileSync('git', ['-C', repo, 'rev-parse', second.branchName], { encoding: 'utf-8' }).trim(),
+      baseHead,
+    );
+    assert.equal(
+      execFileSync(
+        'git',
+        ['-C', repo, 'branch', '--list', `${second.branchName}-orphan-*`],
+        { encoding: 'utf-8' },
+      ).trim(),
+      '',
+    );
+  } finally {
+    await teardownRepo(repo);
+  }
+});
+
 test('createWorkerWorktree: non-git directory returns created:false (fail-safe)', async () => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'ao-no-git-'));
   try {
@@ -105,6 +294,21 @@ test('createWorkerWorktree: non-git directory returns created:false (fail-safe)'
   } finally {
     await removeDir(dir);
   }
+});
+
+test('createWorkerWorktree: identity normalization errors remain fail-safe', () => {
+  const invalidName = {
+    toString() {
+      throw new Error('invalid worker identity');
+    },
+  };
+
+  const result = createWorkerWorktree('/tmp', 'team', invalidName);
+
+  assert.equal(result.created, false);
+  assert.equal(result.worktreePath, '/tmp');
+  assert.equal(result.branchName, 'ao-worker-unavailable');
+  assert.match(result.error, /invalid worker identity/);
 });
 
 test('createWorkerWorktree: special chars in names are sanitized', async () => {

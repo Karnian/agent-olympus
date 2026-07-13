@@ -17,6 +17,34 @@
 
 Key files: `scripts/lib/adapter-worker-supervisor.mjs` (detached CLI), `scripts/lib/supervisor-state.mjs` (paths + atomic snapshot I/O), `scripts/lib/supervisor-opts.mjs` (pure option builders), `scripts/lib/proc-identity.mjs` (`readProcStartId` PID start-time identity for reuse detection). See `docs/plans/adapter-worker-supervisor/PLAN.md`.
 
+### Worktree collision and recovery policy
+
+`createWorkerWorktree()` supports two explicit collision policies. Callers that
+cannot prove an existing worktree is disposable must use `onExisting: 'fail'`:
+it returns `created:false` with the intended path and branch without mutating
+either artifact. `/codex-goal` uses that policy together with a unique worker
+identity for every goal, including goals delegated inside the same Atlas or
+Athena run, and stops before launching Codex when allocation fails.
+
+The default `onExisting: 'replace'` policy remains for existing Atlas, Athena,
+and tmux callers that are replacing a stale or cancelled worker. It force-removes
+the existing worktree, so **uncommitted and untracked files are discarded**.
+Committed work not reachable from the current `HEAD` is preserved by renaming
+the branch to `<branch>-orphan-<epochSeconds>[-N]`; a branch already reachable
+from `HEAD` is deleted with Git's checked `-d` path. The orphan branch preserves
+commits only, not dirty worktree contents.
+
+Replacement is fail-closed around ambiguous Git state. Stale worktree metadata
+(for example, a missing directory whose branch is still registered as checked
+out) can make branch rename/deletion fail. Concurrent replacement attempts can
+also race while choosing the same orphan name. In either case the losing call
+returns `created:false` instead of force-deleting the branch. Inspect `git
+worktree list --porcelain` and the reported branch first; when the directory is
+confirmed absent, `git worktree prune` can clear stale metadata before a manual
+retry. On a failed allocation, `created` and `error` are authoritative;
+`preservedBranch` can be only the candidate chosen before a failed rename. Never
+continue in the returned `cwd` fallback when isolation is required.
+
 ### Provider-exhaustion failover
 
 `worker-spawn.mjs` owns one bounded replacement chain for external workers.

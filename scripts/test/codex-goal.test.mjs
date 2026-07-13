@@ -7,6 +7,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 import {
   _setAdapter,
@@ -15,6 +17,11 @@ import {
   parseArgs,
   runGoalTurn,
 } from '../codex-goal.mjs';
+
+const CODEX_GOAL_SKILL = readFileSync(
+  fileURLToPath(new URL('../../skills/codex-goal/SKILL.md', import.meta.url)),
+  'utf-8',
+);
 
 const SAMPLE_RESULT = {
   summary: 'Implemented codex goal helper.',
@@ -63,6 +70,37 @@ function makeFakeAdapter({ collectResult, spawnError } = {}) {
 
   return { adapter, calls };
 }
+
+test('SKILL contract: each goal uses a unique fail-closed worktree', () => {
+  assert.match(
+    CODEX_GOAL_SKILL,
+    /const goalTag\s*=\s*[\s\S]*?randomUUID\(\)\.slice\(0, 4\)/,
+  );
+  assert.match(CODEX_GOAL_SKILL, /`codex-goal-\$\{goalTag\}`/);
+  assert.match(
+    CODEX_GOAL_SKILL,
+    /createWorkerWorktree\(cwd, runId, `codex-goal-\$\{goalTag\}`, \{ onExisting: 'fail' \}\)/,
+  );
+  assert.doesNotMatch(
+    CODEX_GOAL_SKILL,
+    /createWorkerWorktree\(cwd, runId, 'codex-goal'\)/,
+  );
+
+  const collisionStop = CODEX_GOAL_SKILL.indexOf('if (!created)');
+  const firstCodexCommand = CODEX_GOAL_SKILL.indexOf(
+    'node "$CLAUDE_PLUGIN_ROOT"/scripts/codex-goal.mjs',
+  );
+  assert.ok(collisionStop >= 0, 'missing explicit worktree-allocation stop');
+  assert.ok(firstCodexCommand > collisionStop, 'allocation failure must stop before Codex starts');
+  assert.match(
+    CODEX_GOAL_SKILL.slice(collisionStop, firstCodexCommand),
+    /throw new Error[\s\S]*?error \|\| 'unknown error'/,
+  );
+  assert.match(
+    CODEX_GOAL_SKILL,
+    /## Constraints[\s\S]*?Parallel and sequential goals[\s\S]*?never fall back to running Codex in `cwd`/,
+  );
+});
 
 async function withAdapter(fakeAdapter, fn) {
   const previous = _setAdapter(fakeAdapter);
