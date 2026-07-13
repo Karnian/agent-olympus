@@ -14,7 +14,17 @@ import os from 'os';
  *
  * @type {{
  *   version: string,
- *   ship: { autoPush: boolean, draftPR: boolean, autoLink: boolean, labels: string[], issuePattern: string },
+ *   ship: {
+ *     mode: 'never'|'ask'|'auto',
+ *     autoPush: boolean,
+ *     baseBranch: string|null,
+ *     updateChangelog: boolean,
+ *     updateTechDebtTracker: boolean,
+ *     draftPR: boolean,
+ *     autoLink: boolean,
+ *     labels: string[],
+ *     issuePattern: string
+ *   },
  *   ci: { watchEnabled: boolean, maxCycles: number, pollIntervalMs: number, timeoutMs: number },
  *   notify: { onComplete: boolean, onBlocked: boolean, onCIFail: boolean, sound: boolean },
  *   budget: { warnThresholdUsd: number | null }
@@ -23,7 +33,13 @@ import os from 'os';
 export const DEFAULT_AUTONOMY_CONFIG = {
   version: '1',
   ship: {
+    mode: 'ask',
+    // Deprecated compatibility field. Prefer `mode`; legacy true maps to
+    // `auto`, while false or absent maps to the safe `ask` policy.
     autoPush: false,
+    baseBranch: null,
+    updateChangelog: true,
+    updateTechDebtTracker: true,
     draftPR: true,
     autoLink: true,
     labels: [],
@@ -91,7 +107,8 @@ export const DEFAULT_AUTONOMY_CONFIG = {
  *
  * Rules checked:
  *   - config must be a non-null object
- *   - ship must be an object with boolean autoPush, draftPR, autoLink; labels array; issuePattern string
+ *   - ship must be an object with a valid mode, optional base branch, boolean
+ *     update flags and deprecated autoPush, plus labels/issuePattern metadata
  *   - ci.watchEnabled must be boolean
  *   - ci.maxCycles must be a positive integer
  *   - ci.pollIntervalMs must be a positive number
@@ -122,11 +139,36 @@ export function validateAutonomyConfig(config) {
         (config.ship === null ? 'null' : typeof config.ship)
       );
     } else {
-      for (const boolField of ['autoPush', 'draftPR', 'autoLink']) {
+      if (config.ship.mode !== undefined) {
+        const validShipModes = ['never', 'ask', 'auto'];
+        if (typeof config.ship.mode !== 'string' || !validShipModes.includes(config.ship.mode)) {
+          errors.push(
+            'config.ship.mode must be one of: never, ask, auto; received: ' +
+            JSON.stringify(config.ship.mode)
+          );
+        }
+      }
+
+      for (const boolField of [
+        'autoPush',
+        'updateChangelog',
+        'updateTechDebtTracker',
+        'draftPR',
+        'autoLink',
+      ]) {
         const val = config.ship[boolField];
         if (val !== undefined && typeof val !== 'boolean') {
           errors.push(
             `config.ship.${boolField} must be a boolean; received: ${JSON.stringify(val)}`
+          );
+        }
+      }
+
+      if (config.ship.baseBranch !== undefined && config.ship.baseBranch !== null) {
+        if (typeof config.ship.baseBranch !== 'string' || !config.ship.baseBranch.trim()) {
+          errors.push(
+            'config.ship.baseBranch must be null or a non-empty string; received: ' +
+            JSON.stringify(config.ship.baseBranch)
           );
         }
       }
@@ -428,6 +470,29 @@ export function validateAutonomyConfig(config) {
 }
 
 /**
+ * Resolve the effective shipping policy while preserving legacy autoPush
+ * behavior. An explicit valid mode always wins. A present but invalid mode is
+ * fail-safe `ask`; only a missing mode can fall back to deprecated autoPush.
+ *
+ * @param {unknown} config
+ * @returns {'never'|'ask'|'auto'}
+ */
+export function resolveShipMode(config) {
+  try {
+    const ship = config?.ship;
+    if (!ship || typeof ship !== 'object' || Array.isArray(ship)) return 'ask';
+
+    if (Object.prototype.hasOwnProperty.call(ship, 'mode')) {
+      return ['never', 'ask', 'auto'].includes(ship.mode) ? ship.mode : 'ask';
+    }
+
+    return ship.autoPush === true ? 'auto' : 'ask';
+  } catch {
+    return 'ask';
+  }
+}
+
+/**
  * Deep-merge source object into target. Only plain objects are recursed into;
  * arrays and primitives from source overwrite those in target.
  *
@@ -454,6 +519,30 @@ function deepMerge(target, source) {
     }
   }
   return result;
+}
+
+/**
+ * Promote a legacy layer's boolean ship.autoPush into ship.mode before the
+ * layer is merged with defaults. Without this step, the default `mode: ask`
+ * would mask a legacy `autoPush: true`. The input object is never mutated.
+ *
+ * @param {object} layer
+ * @returns {object}
+ */
+function normalizeLegacyShipLayer(layer) {
+  const ship = layer?.ship;
+  if (!ship || typeof ship !== 'object' || Array.isArray(ship)) return layer;
+  if (Object.prototype.hasOwnProperty.call(ship, 'mode')) return layer;
+  if (!Object.prototype.hasOwnProperty.call(ship, 'autoPush')) return layer;
+  if (typeof ship.autoPush !== 'boolean') return layer;
+
+  return {
+    ...layer,
+    ship: {
+      ...ship,
+      mode: ship.autoPush ? 'auto' : 'ask',
+    },
+  };
 }
 
 // ─── Path resolution ──────────────────────────────────────────────────────────
@@ -634,11 +723,12 @@ function _readLayer(filePath, opts = {}) {
     const raw = readFileSync(filePath, 'utf8');
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const normalized = normalizeLegacyShipLayer(parsed);
     // Validate against DEFAULTS merge — only the layer's own fields count,
     // missing fields inherit defaults and pass validation trivially.
-    const hypothetical = deepMerge(DEFAULT_AUTONOMY_CONFIG, parsed);
+    const hypothetical = deepMerge(DEFAULT_AUTONOMY_CONFIG, normalized);
     const { valid } = validateAutonomyConfig(hypothetical);
-    return valid ? parsed : null;
+    return valid ? normalized : null;
   } catch {
     return null;
   }

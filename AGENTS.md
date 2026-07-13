@@ -174,7 +174,7 @@ agent-olympus/
 
 - Workers are selected by adapter priority: Codex `codex-appserver` -> `codex-exec` -> `tmux`; Claude `claude-cli` -> `tmux`; Gemini `gemini-acp` -> `gemini-exec` -> `tmux`.
 - Atlas/Athena run `runPreflight()` before orchestration; trivial work stays Claude-only and cross-validation prefers Codex then Gemini.
-- Autonomy config resolves as `defaults <- global <- project`; project `.ao/autonomy.json` wins, and CI skips the global layer unless explicitly overridden.
+- Autonomy: `defaults <- global <- project`; project wins, CI skips global unless explicit, and task no-ship overrides `ship.mode`.
 - Session names use stable prefixes such as `atlas-codex-<N>`, `athena-<slug>-gemini-<N>`, and `*-xval-<story-id>`.
 - Key files: `scripts/lib/worker-spawn.mjs`, `codex-appserver.mjs`, `codex-exec.mjs`, `claude-cli.mjs`, `gemini-acp.mjs`, `gemini-exec.mjs`, `permission-detect.mjs`.
 - Detached worker supervisor -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md); permission mirroring -> [docs/internals/permission-mirroring.md](docs/internals/permission-mirroring.md); Gemini credentials -> [docs/internals/credentials.md](docs/internals/credentials.md).

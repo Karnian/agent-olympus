@@ -12,6 +12,7 @@ import {
   DEFAULT_AUTONOMY_CONFIG,
   validateAutonomyConfig,
   loadAutonomyConfig,
+  resolveShipMode,
 } from '../lib/autonomy.mjs';
 
 // ---------------------------------------------------------------------------
@@ -62,6 +63,13 @@ test('DEFAULT_AUTONOMY_CONFIG: ship.autoPush defaults to false', () => {
   assert.equal(DEFAULT_AUTONOMY_CONFIG.ship.autoPush, false);
 });
 
+test('DEFAULT_AUTONOMY_CONFIG: ship safety fields use conservative defaults', () => {
+  assert.equal(DEFAULT_AUTONOMY_CONFIG.ship.mode, 'ask');
+  assert.equal(DEFAULT_AUTONOMY_CONFIG.ship.baseBranch, null);
+  assert.equal(DEFAULT_AUTONOMY_CONFIG.ship.updateChangelog, true);
+  assert.equal(DEFAULT_AUTONOMY_CONFIG.ship.updateTechDebtTracker, true);
+});
+
 test('DEFAULT_AUTONOMY_CONFIG: ship.draftPR defaults to true', () => {
   assert.equal(DEFAULT_AUTONOMY_CONFIG.ship.draftPR, true);
 });
@@ -107,6 +115,70 @@ test('validateAutonomyConfig: returns config object on valid input', () => {
   const cfg = minimal();
   const result = validateAutonomyConfig(cfg);
   assert.ok(result.config !== null && typeof result.config === 'object');
+});
+
+// ---------------------------------------------------------------------------
+// Test: ship policy resolution and validation
+// ---------------------------------------------------------------------------
+
+test('resolveShipMode: accepts all explicit ship modes', () => {
+  for (const mode of ['never', 'ask', 'auto']) {
+    assert.equal(resolveShipMode({ ship: { mode } }), mode);
+  }
+});
+
+test('resolveShipMode: explicit mode wins over deprecated autoPush', () => {
+  assert.equal(resolveShipMode({ ship: { mode: 'ask', autoPush: true } }), 'ask');
+  assert.equal(resolveShipMode({ ship: { mode: 'auto', autoPush: false } }), 'auto');
+});
+
+test('resolveShipMode: legacy autoPush maps true to auto and false/missing to ask', () => {
+  assert.equal(resolveShipMode({ ship: { autoPush: true } }), 'auto');
+  assert.equal(resolveShipMode({ ship: { autoPush: false } }), 'ask');
+  assert.equal(resolveShipMode({ ship: {} }), 'ask');
+});
+
+test('resolveShipMode: malformed legacy values and invalid present mode fail safe to ask', () => {
+  assert.equal(resolveShipMode({ ship: { autoPush: 'yes' } }), 'ask');
+  assert.equal(resolveShipMode({ ship: { mode: 'invalid', autoPush: true } }), 'ask');
+  assert.equal(resolveShipMode(null), 'ask');
+});
+
+test('validateAutonomyConfig: rejects invalid ship.mode and returns defaults', () => {
+  const cfg = minimal();
+  cfg.ship.mode = 'sometimes';
+  const result = validateAutonomyConfig(cfg);
+  assert.equal(result.valid, false);
+  assert.ok(result.errors.some(e => e.includes('ship.mode')));
+  assert.deepEqual(result.config, DEFAULT_AUTONOMY_CONFIG);
+});
+
+test('validateAutonomyConfig: rejects blank and non-string ship.baseBranch', () => {
+  for (const baseBranch of ['', '   ', 42, false]) {
+    const cfg = minimal();
+    cfg.ship.baseBranch = baseBranch;
+    const result = validateAutonomyConfig(cfg);
+    assert.equal(result.valid, false, `baseBranch=${JSON.stringify(baseBranch)}`);
+    assert.ok(result.errors.some(e => e.includes('ship.baseBranch')));
+  }
+});
+
+test('validateAutonomyConfig: accepts null and nonblank ship.baseBranch', () => {
+  for (const baseBranch of [null, 'main', 'release/1.x']) {
+    const cfg = minimal();
+    cfg.ship.baseBranch = baseBranch;
+    assert.equal(validateAutonomyConfig(cfg).valid, true);
+  }
+});
+
+test('validateAutonomyConfig: rejects non-boolean ship update flags', () => {
+  for (const field of ['updateChangelog', 'updateTechDebtTracker']) {
+    const cfg = minimal();
+    cfg.ship[field] = 'yes';
+    const result = validateAutonomyConfig(cfg);
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some(e => e.includes(field)));
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -250,6 +322,38 @@ test('loadAutonomyConfig: returns object with required keys', async () => {
     assert.ok('ci' in config);
     assert.ok('notify' in config);
     assert.ok('budget' in config);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('loadAutonomyConfig: legacy project autoPush=true promotes mode before defaults merge', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    await fs.mkdir(path.join(tmpDir, '.ao'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.ao', 'autonomy.json'),
+      JSON.stringify({ ship: { autoPush: true } }),
+    );
+    const config = loadAutonomyConfig(tmpDir, { skipGlobal: true });
+    assert.equal(config.ship.mode, 'auto');
+    assert.equal(resolveShipMode(config), 'auto');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('loadAutonomyConfig: explicit project mode wins over conflicting legacy autoPush', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    await fs.mkdir(path.join(tmpDir, '.ao'), { recursive: true });
+    await fs.writeFile(
+      path.join(tmpDir, '.ao', 'autonomy.json'),
+      JSON.stringify({ ship: { mode: 'ask', autoPush: true } }),
+    );
+    const config = loadAutonomyConfig(tmpDir, { skipGlobal: true });
+    assert.equal(config.ship.mode, 'ask');
+    assert.equal(resolveShipMode(config), 'ask');
   } finally {
     await removeTmpDir(tmpDir);
   }
@@ -634,6 +738,44 @@ test('loadAutonomyConfig: project overrides global (project wins)', async () => 
     withEnv({ XDG_CONFIG_HOME: xdg, CI: undefined, AO_AUTONOMY_CONFIG: undefined, GITHUB_ACTIONS: undefined }, () => {
       const cfg = loadAutonomyConfig(tmp);
       assert.equal(cfg.planExecution, 'atlas', 'project layer must override global');
+    });
+  } finally {
+    await removeTmpDir(tmp);
+    await removeTmpDir(xdg);
+  }
+});
+
+test('loadAutonomyConfig: legacy ship policy is normalized per layer before precedence merge', async () => {
+  const tmp = await makeTmpDir();
+  const xdg = await makeTmpDir();
+  try {
+    const globalDir = path.join(xdg, 'agent-olympus');
+    await makeLayeredFixture(
+      tmp,
+      { planExecution: 'atlas' },
+      { ship: { autoPush: true } },
+      globalDir,
+    );
+    const env = {
+      XDG_CONFIG_HOME: xdg,
+      CI: undefined,
+      AO_AUTONOMY_CONFIG: undefined,
+      GITHUB_ACTIONS: undefined,
+    };
+    withEnv(env, () => {
+      assert.equal(loadAutonomyConfig(tmp).ship.mode, 'auto');
+    });
+
+    await fs.writeFile(
+      path.join(tmp, '.ao', 'autonomy.json'),
+      JSON.stringify({ ship: { autoPush: false } }),
+    );
+    await fs.writeFile(
+      path.join(globalDir, 'autonomy.json'),
+      JSON.stringify({ ship: { mode: 'auto' } }),
+    );
+    withEnv(env, () => {
+      assert.equal(loadAutonomyConfig(tmp).ship.mode, 'ask');
     });
   } finally {
     await removeTmpDir(tmp);

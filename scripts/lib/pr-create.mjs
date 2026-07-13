@@ -5,7 +5,18 @@
  * Callers receive structured result objects on both success and failure.
  */
 
-import { execFileSync } from 'child_process';
+import { execFileSync as nodeExecFileSync } from 'child_process';
+
+let _execFileSync = nodeExecFileSync;
+
+/** @param {typeof nodeExecFileSync} fn */
+export function __setExecFileSyncForTest(fn) {
+  _execFileSync = fn;
+}
+
+export function __resetForTest() {
+  _execFileSync = nodeExecFileSync;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,14 +28,54 @@ import { execFileSync } from 'child_process';
  *
  * @param {string} cmd
  * @param {string[]} args
+ * @param {string} [cwd]
  * @returns {string|null}
  */
-function run(cmd, args) {
+function run(cmd, args, cwd) {
   try {
-    return execFileSync(cmd, args, { encoding: 'utf8' }).trim();
+    const repoCwd = typeof cwd === 'string' && cwd ? cwd : process.cwd();
+    return _execFileSync(cmd, args, { encoding: 'utf8', cwd: repoCwd }).trim();
   } catch {
     return null;
   }
+}
+
+/**
+ * Detect the pull request base branch without throwing.
+ *
+ * Resolution order: explicit override, origin/HEAD, GitHub default branch,
+ * then the conservative historical fallback `main`.
+ *
+ * @param {string} [cwd]
+ * @param {string|null} [override]
+ * @returns {string}
+ */
+export function detectBaseBranch(cwd, override = null) {
+  try {
+    if (typeof override === 'string' && override.trim()) return override.trim();
+    const repoCwd = typeof cwd === 'string' && cwd ? cwd : process.cwd();
+
+    const symbolicRef = run(
+      'git',
+      ['symbolic-ref', 'refs/remotes/origin/HEAD'],
+      repoCwd,
+    );
+    const prefix = 'refs/remotes/origin/';
+    if (symbolicRef?.startsWith(prefix)) {
+      const branch = symbolicRef.slice(prefix.length).trim();
+      if (branch && branch !== 'HEAD') return branch;
+    }
+
+    const githubDefault = run(
+      'gh',
+      ['repo', 'view', '--json', 'defaultBranchRef', '-q', '.defaultBranchRef.name'],
+      repoCwd,
+    );
+    if (githubDefault?.trim()) return githubDefault.trim();
+  } catch {
+    // Fall through to the safe historical default.
+  }
+  return 'main';
 }
 
 // ---------------------------------------------------------------------------
@@ -203,19 +254,29 @@ export function findExistingPR(branch) {
  * @param {{
  *   title: string,
  *   body: string,
- *   baseBranch: string,
+ *   baseBranch?: string|null,
  *   draft?: boolean,
- *   labels?: string[]
+ *   labels?: string[],
+ *   cwd?: string
  * }} opts
  * @returns {{ ok: boolean, prUrl?: string, error?: string }}
  */
-export function createPR({ title, body, baseBranch, draft = false, labels = [] }) {
+export function createPR({
+  title,
+  body,
+  baseBranch = null,
+  draft = false,
+  labels = [],
+  cwd,
+}) {
   try {
+    const repoCwd = typeof cwd === 'string' && cwd ? cwd : process.cwd();
+    const resolvedBaseBranch = detectBaseBranch(repoCwd, baseBranch);
     const args = [
       'pr', 'create',
       '--title', title,
       '--body', body,
-      '--base', baseBranch,
+      '--base', resolvedBaseBranch,
     ];
 
     if (draft) {
@@ -229,7 +290,7 @@ export function createPR({ title, body, baseBranch, draft = false, labels = [] }
 
     let output;
     try {
-      output = execFileSync('gh', args, { encoding: 'utf8' }).trim();
+      output = _execFileSync('gh', args, { encoding: 'utf8', cwd: repoCwd }).trim();
     } catch (err) {
       const message = err?.stderr?.trim() || err?.message || 'gh pr create failed';
       return { ok: false, error: message };

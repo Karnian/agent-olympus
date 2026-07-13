@@ -43,6 +43,52 @@ loadAutonomyConfig(cwd, { skipEnv: true })     // ignore AO_AUTONOMY_CONFIG only
 concatenated) so `ship.labels` in the project config cleanly overrides the
 global one without accidental concatenation.
 
+## Ship Policy
+
+`ship.mode` controls release side effects and defaults to the conservative
+`"ask"` policy:
+
+- `"never"` — do not update the changelog or tech-debt tracker, push, create a
+  PR, or start CI watching. Leave the branch ready for the user to ship.
+- `"ask"` — require an actual human approval from an interactive channel before
+  push/PR. In a headless or unattended run, notify when `notify.onBlocked` is
+  enabled, then skip shipping and CI without pushing.
+- `"auto"` — push and create a PR automatically after preflight succeeds.
+
+An explicit no-push/no-PR constraint in the original task always overrides the
+configured mode, including `"auto"`. The orchestrator cannot approve its own
+prompt; only an actual user response satisfies `"ask"`.
+
+`ship.autoPush` is deprecated but remains validated for compatibility. Within
+a valid config layer that omits `ship.mode`, legacy `autoPush: true` maps to
+`"auto"` and `false` maps to `"ask"`; if both fields are absent, the lower layer
+or default remains in effect. An explicit valid `ship.mode` always wins over a
+conflicting legacy value. Persisted layers with malformed `autoPush` or invalid
+`mode` retain the loader's existing fail-safe behavior: that layer is rejected
+while valid lower layers continue to apply. Direct calls to
+`resolveShipMode(rawConfig)` return `"ask"` for malformed input or an invalid
+present mode.
+
+`ship.baseBranch` defaults to `null`. A nonblank override is used as-is;
+otherwise the PR helper detects `origin/HEAD`, then asks `gh` for the repository
+default branch, and finally falls back to `main`. The same resolved branch is
+used for the diff and PR base.
+
+`ship.updateChangelog` and `ship.updateTechDebtTracker` both default to `true`
+and independently gate their finalize-time updates. `ship.mode: "never"`
+suppresses both regardless of those flags.
+
+```json
+{
+  "ship": {
+    "mode": "ask",
+    "baseBranch": null,
+    "updateChangelog": true,
+    "updateTechDebtTracker": true
+  }
+}
+```
+
 **Quick setup** — turn codex into full-auto globally:
 ```bash
 mkdir -p ~/.config/agent-olympus
