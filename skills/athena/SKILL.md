@@ -1585,15 +1585,39 @@ Finalize is `reexecute` on resume. Use `runId` as an idempotency marker for the
 changelog and exec-plan row: update an existing row/entry for this run instead
 of appending a duplicate.
 
+Resolve the release policy before invoking any helper that can offer or perform
+shipping. Explicit shipping constraints in the original task brief always take
+precedence over `.ao/autonomy.json`, including `ship.mode: "auto"`.
+
+```javascript
+import { loadAutonomyConfig, resolveShipMode } from './scripts/lib/autonomy.mjs';
+
+const config = loadAutonomyConfig(cwd);
+const taskForbidsShipping = <true only when the original task explicitly forbids push or PR>;
+const configuredShipMode = resolveShipMode(config);
+const shipMode = taskForbidsShipping ? 'never' : configuredShipMode;
+const noShip = shipMode === 'never';
+```
+
+The orchestrator model answering its own y/n prompt is not user approval. In
+`ask` mode, only an actual human response from an interactive user channel
+counts as approval.
+
 After review approved:
 1. Run `Skill(skill="agent-olympus:slop-cleaner")` on all changed files
 2. Re-run build + tests to verify no regression
 3. Run `Skill(skill="agent-olympus:git-master")` for atomic commits
-4. **Optional branch completion**: invoke `Skill(skill="agent-olympus:finish-branch")` for a full
-   pre-merge checklist (tests re-run, lint, coverage, code review, merge option presentation).
-   Use when the task represents a complete feature branch ready for integration.
+4. **Optional branch completion**: only when `shipMode === 'auto'`, invoke
+   `Skill(skill="agent-olympus:finish-branch")` for its local verification
+   checklist. Explicitly stop it before any push, PR, merge, or option prompt;
+   Phase 6 below is the sole owner of outward shipping actions. Skip this helper
+   entirely for `never` and `ask`.
 
 ### Phase 5c — CHANGELOG UPDATE
+
+Skip the entire changelog update when
+`noShip || config.ship.updateChangelog === false`. In particular,
+`ship.mode: "never"` suppresses this release side effect.
 
 Generate a CHANGELOG entry from the completed PRD:
 ```bash
@@ -1608,6 +1632,10 @@ node -e "
 If no CHANGELOG.md exists, one is created. Include in the next commit.
 
 ### Phase 5d — EXEC-PLAN UPDATE
+
+Skip the entire tracker update (including moving an active plan) when
+`noShip || config.ship.updateTechDebtTracker === false`. In particular,
+`ship.mode: "never"` suppresses this release side effect.
 
 If `docs/exec-plans/` exists, record this task as a completed plan entry:
 ```bash
@@ -1644,20 +1672,61 @@ await completePhase(runId, 'finalize', undefined, {
 
 ### Phase 6 — SHIP (PR Creation + Issue Linking)
 
-Load autonomy config to determine shipping behavior:
+Resolve approval without allowing the orchestrator to approve its own prompt.
+In unattended/headless `ask` mode, optionally send the blocked notification,
+halt shipping without a push, terminally skip ship/CI, and proceed safely to
+COMPLETION. The notification is gated by `config.notify.onBlocked`:
+
 ```javascript
-import { loadAutonomyConfig } from './scripts/lib/autonomy.mjs';
-const config = loadAutonomyConfig(cwd);
+import { execFileSync } from 'node:child_process';
+import { preflightCheck } from './scripts/lib/pr-create.mjs';
+
 const shippingCheckpoint = await loadCheckpoint('athena');
 const shippingSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
 if (!validateAthenaCheckpointBinding(shippingCheckpoint, shippingSpawnIdentity, { cwd })) {
   throw new Error('Athena shipping checkpoint does not belong to this run/team; stop before any push');
 }
-const shippingApplicable = preflightCheck().ok && (config.ship.autoPush || userApprovedPush);
+
+const hasInteractiveUserChannel = <true only when an actual human can answer now>;
+let userApprovedPush = false;
+let pushPerformed = false;
+let createdPrUrl = null;
+
+if (shipMode === 'ask' && hasInteractiveUserChannel) {
+  userApprovedPush = <true only after the actual human answers yes>;
+} else if (shipMode === 'ask') {
+  if (config.notify.onBlocked) {
+    // node scripts/notify-cli.mjs --event blocked --orchestrator athena --body "branch ready to ship: <branchName>"
+    try {
+      execFileSync('node', [
+        'scripts/notify-cli.mjs', '--event', 'blocked', '--orchestrator', 'athena',
+        '--body', `branch ready to ship: ${branchName}`,
+      ], { cwd, stdio: 'inherit' });
+    } catch { /* notification failure must never authorize or block completion */ }
+  }
+}
+
+const shippingApproved = shipMode === 'auto'
+  || (shipMode === 'ask' && userApprovedPush === true);
+const preflight = shippingApproved
+  ? preflightCheck()
+  : { ok: true, errors: [] };
+const shippingApplicable = preflight.ok && shippingApproved;
+// `user-declined` is the runner's allowlisted no-approval bucket; it also
+// covers headless ask where no human approval channel existed.
+const shipSkipReason = noShip
+  ? 'not-applicable'
+  : (!preflight.ok ? 'preflight-unavailable' : 'user-declined');
 const shipGate = shippingApplicable
   ? enterPhase(runId, 'ship')
-  : skipPhase(runId, 'ship', preflightCheck().ok ? 'user-declined' : 'preflight-unavailable');
+  : skipPhase(runId, 'ship', shipSkipReason);
 ```
+
+For `shipMode === 'never'`, report exactly:
+`branch ready: <branchName> — push/PR은 사용자가 직접`.
+If preflight fails (no gh, no remote, on main branch), report its errors and do
+not push. Verification and PR creation below run only when
+`shippingApplicable && !shipGate.skip`.
 
 #### Verification Gate (MANDATORY — blocks PR creation) <!-- AO-CONTRACT:verification-gate -->
 Before any shipping activity, check that ALL stories have verification records:
@@ -1693,24 +1762,60 @@ if (gate.skipped.length > 0) {
 ```
 
 #### Preflight
-```bash
-node -e "import('./scripts/lib/pr-create.mjs').then(m => console.log(JSON.stringify(m.preflightCheck())))"
-```
-If preflight fails (no gh, no remote, on main branch) → skip shipping, report to user.
+
+Use the cached `preflight` result above for the shipping decision; do not rerun
+preflight after the runner phase transition. If it failed, shipping is already
+terminally skipped with `preflight-unavailable`, so report its errors and
+continue to COMPLETION.
 
 #### Push & Create PR
-If `config.ship.autoPush` is true OR user approves:
-1. `git push -u origin HEAD`
-2. Check for existing PR: `findExistingPR(branch)`
-3. If existing PR found → update it. If not → create draft PR:
-   ```javascript
-   const body = buildPRBody({ prd, diffStat: execSync('git diff --stat main...HEAD'), verifyResults });
-   const issues = extractIssueRefs(commitMessages + branchName);
-   createPR({ title: prd.projectName, body: body + (issues.length ? '\n\nCloses ' + issues.map(i => '#'+i).join(', ') : ''), draft: config.ship.draftPR, baseBranch: 'main' });
-   ```
-4. Report PR URL to user.
+If `shippingApplicable && !shipGate.skip`, push once and then reuse an existing
+PR or create a new draft. The push is common to both PR branches:
 
-If `config.ship.autoPush` is false (default) → ask user: "Push and create PR? [y/n]"
+```javascript
+import { execFileSync } from 'node:child_process';
+import {
+  buildPRBody,
+  createPR,
+  detectBaseBranch,
+  extractIssueRefs,
+  findExistingPR,
+} from './scripts/lib/pr-create.mjs';
+
+execFileSync('git', ['push', '-u', 'origin', 'HEAD'], { cwd, stdio: 'inherit' });
+pushPerformed = true;
+
+const existing = findExistingPR(branchName);
+if (existing.found) {
+  createdPrUrl = existing.prUrl ?? null;
+} else {
+  const baseBranch = detectBaseBranch(cwd, config.ship.baseBranch);
+  let diffStat = '';
+  try {
+    diffStat = execFileSync(
+      'git',
+      ['diff', '--stat', `origin/${baseBranch}...HEAD`],
+      { cwd, encoding: 'utf8' },
+    ).trim();
+  } catch { /* PR body keeps the safe no-diff fallback */ }
+  const body = buildPRBody({ prd, diffStat, verifyResults });
+  const issues = extractIssueRefs(commitMessages + branchName);
+  const created = createPR({
+    title: prd.projectName,
+    body: body + (issues.length ? '\n\nCloses ' + issues.map(i => '#'+i).join(', ') : ''),
+    draft: config.ship.draftPR,
+    baseBranch,
+    cwd,
+  });
+  createdPrUrl = created.ok ? created.prUrl : null;
+}
+```
+
+Report `createdPrUrl` to the user when present.
+
+In `ask` mode, ask `"Push and create PR? [y/n]"` only through an actual
+interactive user channel. A decline and a headless/unattended run both leave
+`pushPerformed === false`.
 
 If shipping was applicable and the verification gate plus PR operation reached a
 durable terminal result, call:
@@ -1726,7 +1831,7 @@ A blocked verification gate leaves the phase nonterminal for recovery.
 ### Phase 6b — CI WATCH (Monitor + Auto-Fix) <!-- AO-CONTRACT:ci-watch -->
 
 ```javascript
-const ciApplicable = Boolean(createdPrUrl && config.ci.watchEnabled);
+const ciApplicable = Boolean(pushPerformed && createdPrUrl && config.ci.watchEnabled);
 const ciCheckpoint = await loadCheckpoint('athena');
 const ciSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
 if (!validateAthenaCheckpointBinding(ciCheckpoint, ciSpawnIdentity, { cwd })) {
@@ -1734,10 +1839,10 @@ if (!validateAthenaCheckpointBinding(ciCheckpoint, ciSpawnIdentity, { cwd })) {
 }
 const ciGate = ciApplicable
   ? enterPhase(runId, 'ci')
-  : skipPhase(runId, 'ci', createdPrUrl ? 'watch-disabled' : 'no-pr');
+  : skipPhase(runId, 'ci', pushPerformed && createdPrUrl ? 'watch-disabled' : 'no-pr');
 ```
 
-If `config.ci.watchEnabled` is true AND a PR was created:
+If an actual push completed, a PR URL exists, and `config.ci.watchEnabled` is true:
 
 ```
 ┌─→ Poll CI status:
@@ -1898,12 +2003,24 @@ if (finalSummary.runId !== runId
 await clearCheckpoint('athena');
 ```
 
-Notify user of completion:
+Notify user of the actual completion outcome. Never claim a PR exists on a
+no-ship, declined, headless, preflight-failed, or PR-failed path:
+
 ```bash
+# When createdPrUrl exists:
 node scripts/notify-cli.mjs --event complete --orchestrator athena --body "N/N stories passed. PR: <url>"
+
+# When pushPerformed is true but PR creation failed:
+node scripts/notify-cli.mjs --event complete --orchestrator athena --body "N/N stories passed. Branch pushed; PR creation failed — create the PR manually."
+
+# Otherwise (no push):
+node scripts/notify-cli.mjs --event complete --orchestrator athena --body "N/N stories passed. branch ready: <branchName> — push/PR은 사용자가 직접"
 ```
 
-Report: PRD stories (N/N), per-worker summary, files changed, coordination log, verification results.
+Report: PRD stories (N/N), per-worker summary, files changed, coordination log,
+verification results, and the shipping outcome. Include the PR URL when one
+exists; report a pushed-branch/PR-failure warning when applicable; otherwise
+report exactly `branch ready: <branchName> — push/PR은 사용자가 직접`.
 
 ## Team_Sizing
 

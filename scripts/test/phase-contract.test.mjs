@@ -29,6 +29,81 @@ function callsLoopTick(text, key) {
   return new RegExp(`loopTick\\([^)]*['"]${key}['"]`).test(text);
 }
 
+function assertShipSafetyContract(skill, orchestrator) {
+  assert.match(skill, /resolveShipMode\(config\)/, 'ship mode must resolve through the compatibility helper');
+  assert.match(
+    skill,
+    /taskForbidsShipping\s*\?\s*['"]never['"]\s*:\s*configuredShipMode/,
+    'an explicit task no-ship constraint must override configured auto mode',
+  );
+  assert.match(skill, /orchestrator model answering its own y\/n prompt is not user approval/i);
+  assert.match(skill, /only an actual human response[^\n]*interactive user channel/i);
+  assert.match(skill, /noShip\s*\|\|\s*config\.ship\.updateChangelog\s*===\s*false/);
+  assert.match(skill, /noShip\s*\|\|\s*config\.ship\.updateTechDebtTracker\s*===\s*false/);
+  assert.match(skill, /ship\.mode:\s*["']never["'][\s\S]*?suppresses this release side effect/i);
+  assert.match(skill, /unattended\/headless[\s\S]*?halt shipping without a push/i);
+  assert.match(skill, /config\.notify\.onBlocked/);
+  assert.ok(
+    skill.includes(
+      `node scripts/notify-cli.mjs --event blocked --orchestrator ${orchestrator} --body "branch ready to ship: <branchName>"`,
+    ),
+    'headless ask must emit the documented blocked notification',
+  );
+  assert.match(skill, /shipMode\s*===\s*['"]auto['"]/);
+  assert.match(skill, /shipMode\s*===\s*['"]ask['"]\s*&&\s*userApprovedPush\s*===\s*true/);
+  assert.match(skill, /branch ready: <branchName> — push\/PR은 사용자가 직접/);
+
+  const policyResolution = skill.indexOf('const configuredShipMode = resolveShipMode(config);');
+  const finishBranch = skill.indexOf('Skill(skill="agent-olympus:finish-branch")', policyResolution);
+  assert.ok(
+    policyResolution >= 0 && finishBranch > policyResolution,
+    'ship policy must resolve before the optional finish-branch helper',
+  );
+  assert.match(skill, /only when `shipMode === 'auto'`[\s\S]*?finish-branch[\s\S]*?stop it before any push, PR, merge/i);
+  assert.match(skill, /Phase 6 below is the sole owner of outward shipping actions/);
+
+  assert.doesNotMatch(skill, /baseBranch:\s*['"]main['"]/);
+  assert.doesNotMatch(skill, /git diff --stat main\.\.\.HEAD/);
+  assert.match(skill, /detectBaseBranch\(cwd,\s*config\.ship\.baseBranch\)/);
+  assert.match(skill, /\['diff',\s*'--stat',\s*`origin\/\$\{baseBranch\}\.\.\.HEAD`\]/);
+  assert.match(skill, /baseBranch,\s*\n\s*cwd,/);
+
+  const phase6Start = skill.indexOf('### Phase 6 — SHIP');
+  const phase6End = skill.indexOf('### Phase 6b — CI WATCH', phase6Start);
+  const phase6 = skill.slice(phase6Start, phase6End);
+  assert.equal(
+    (phase6.match(/\bpreflightCheck\(\)/g) || []).length,
+    1,
+    'Phase 6 must make one cached preflight decision',
+  );
+
+  const shippingDecision = skill.indexOf('const shippingApplicable = preflight.ok && shippingApproved;', phase6Start);
+  const pushDefault = skill.indexOf('let pushPerformed = false;', phase6Start);
+  const prDefault = skill.indexOf('let createdPrUrl = null;', phase6Start);
+  assert.ok(pushDefault >= phase6Start && pushDefault < shippingDecision);
+  assert.ok(prDefault >= phase6Start && prDefault < shippingDecision);
+  assert.equal((phase6.match(/let pushPerformed = false;/g) || []).length, 1);
+  assert.equal((phase6.match(/let createdPrUrl = null;/g) || []).length, 1);
+
+  const pushCall = skill.indexOf("execFileSync('git', ['push', '-u', 'origin', 'HEAD']", phase6Start);
+  const pushed = skill.indexOf('pushPerformed = true;', pushCall);
+  assert.ok(pushCall >= 0 && pushed > pushCall, 'pushPerformed becomes true only after successful push');
+  assert.match(phase6, /findExistingPR\(branchName\)[\s\S]*?existing\.found[\s\S]*?createdPrUrl = existing\.prUrl/);
+  const createCall = skill.indexOf('const created = createPR({', pushed);
+  const prAssigned = skill.indexOf('createdPrUrl = created.ok ? created.prUrl : null;', createCall);
+  assert.ok(createCall > pushed && prAssigned > createCall, 'PR URL is assigned only after createPR returns');
+  assert.match(
+    skill,
+    /Boolean\(pushPerformed\s*&&\s*createdPrUrl\s*&&\s*config\.ci\.watchEnabled\)/,
+    'CI requires an actual push, PR URL, and enabled watching',
+  );
+  assert.match(skill, /Never claim a PR exists on a[\s\S]*?no-ship, declined, headless, preflight-failed, or PR-failed path/);
+  assert.ok(
+    skill.includes(`--orchestrator ${orchestrator} --body "N/N stories passed. branch ready: <branchName> — push/PR은 사용자가 직접"`),
+    'completion notification must preserve the branch-ready outcome when no PR exists',
+  );
+}
+
 function findMatchingBrace(text, openIndex) {
   assert.equal(text[openIndex], '{', 'openIndex must point at an opening brace');
   let depth = 0;
@@ -207,6 +282,10 @@ describe('atlas SKILL.md phase-runner contract', () => {
   test('dynamic ship/ci skips use skipPhase, not enterPhase().skip', () => {
     assert.match(skill, /skipPhase\(runId, 'ship'/, "ship's not-applicable path must call skipPhase('ship')");
     assert.match(skill, /skipPhase\(runId, 'ci'/, "ci's not-applicable path must call skipPhase('ci')");
+  });
+
+  test('ship safety contract gates release effects, approval, base detection, and CI', () => {
+    assertShipSafetyContract(skill, 'atlas');
   });
 
   test('completion finalizes the exact run only after the pipeline is complete', () => {
@@ -402,6 +481,10 @@ describe('athena SKILL.md phase-runner contract', () => {
     assert.match(skill, /skipPhase\(runId, 'ci'/);
     assert.match(skill, /completePhase\(runId, 'ship'/);
     assert.match(skill, /completePhase\(runId, 'ci'/);
+  });
+
+  test('ship safety contract gates release effects, approval, base detection, and CI', () => {
+    assertShipSafetyContract(skill, 'athena');
   });
 
   test('every Athena behavior marker is present', () => {
