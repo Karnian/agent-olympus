@@ -61,7 +61,7 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **레이어드 Opus-skew 감소** *(v1.1.0+)*: 서브에이전트별 모델 사용 로깅(`ao-model-usage.jsonl`, schemaVersion:1) 측정 + 기본 Sonnet/Haiku로 routing하고 입증된 필요시에만 Opus로 escalation하는 routing 파이프라인. `node scripts/usage-report.mjs`로 요약
 - **런타임 permission_mode 캡처 + `/ask codex` read-only 폴백** *(v1.1.6)*: SessionStart + UserPromptSubmit 훅이 Claude Code의 hook stdin(또는 `CLAUDE_PERMISSION_MODE` 환경변수)에서 `permission_mode`를 읽어 `.ao/state/ao-runtime-permissions.json` (schemaVersion:1, 30분 TTL)에 저장. 권한 감지가 settings ⇧ runtime을 **upgrade-only**로 병합하며 동일한 deny/ask/disableBypass/allowManagedOnly 파이프라인을 통과 — `--dangerously-skip-permissions`로 띄워도 mirror가 `suggest`로 남지 않음. 별개로 `/ask codex`가 suggest 티어 호스트에서 codex의 `read-only` 샌드박스(`-s read-only -a never`)로 폴백 + 시스템 프롬프트 가드 + `git status --porcelain` post-check, 더 이상 exit 2로 끊기지 않음. `node scripts/diagnose-sandbox.mjs --explain-permissions`로 layer별 분석 가능. #67/#68/#69 해결
 - **분리형 워커 슈퍼바이저** *(v1.2.0)*: 어댑터 팀 워커(codex-exec/appserver, claude-cli, gemini-exec/acp)가 더 이상 in-process로 실행되지 않음 — `spawnTeam`이 워커마다 분리된(detached) 슈퍼바이저를 띄워 어댑터를 소유하고 완료/실패/출력을 디스크에 기록하므로, fresh-process-per-poll 오케스트레이터(`monitorTeam`/`collectResults`/`shutdownTeam`)가 프로세스 경계 너머로 결과를 관측 가능(이전엔 영원히 `running`에 멈춰 있었음). run 단위 스냅샷(schemaVersion:1) + PID 시작시간 identity 기반 crash/재사용 감지, supervisor-first 셧다운 + 고아 그룹 reap, SessionEnd run 단위 보호, 프롬프트 포함 매니페스트 scrub. P1–P6 단계로 진행, 코덱스 교차리뷰 4라운드
-- **2376개 단위 테스트**: `node:test` 기반 92개 파일의 종합 테스트 스위트 (v1.4.0: 2376/2376 통과)
+- **2704개 단위 테스트**: `node:test` 기반 108개 파일의 종합 테스트 스위트 (현재 브랜치: 2704/2704 통과)
 - **페일-세이프 아키텍처**: 훅이 Claude Code를 절대 차단하지 않음; 에러 시 우아한 저하
 
 ## 설치
@@ -403,9 +403,13 @@ Claude Code가 오케스트레이션 중 충돌하거나 닫히면:
 2. 오케스트레이터가 오래된 체크포인트 감지 (24시간 미만)
 3. 옵션 제시: **재개** 또는 **재시작**
    - **재개** → 완료된 단계 건너뛰고, 스토리 상태 복원, 중단된 곳에서 계속
-   - **재시작** → 체크포인트 삭제, 처음부터 시작
+   - **재시작** → 먼저 정확한 활성 실행을 종료 처리하고 해당 active-run 포인터가
+     지워졌음을 확인한 뒤에만 체크포인트를 지우고 새 실행을 만듭니다. Athena의
+     누락·손상·링크·식별 불가 orphan은 팀/worktree와 함께 보존하고 중단합니다.
+     체크포인트만 삭제해서 재시작을 허용하지 않습니다.
 
-각 단계 전환 후 체크포인트가 저장되고 PRD 스냅샷이 포함되므로 작동합니다.
+체크포인트는 복구 캐시이며, active-run 포인터·summary·pipeline ledger가 실행
+식별의 영속 권한입니다.
 
 ## Wisdom 시스템
 
@@ -539,12 +543,12 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## 테스트
 
-`node:test` 기반 테스트 스위트 (84개 파일, 2191개 테스트, v1.2.0 기준)가 핵심 훅 라이브러리를 커버합니다:
+`node:test` 기반 테스트 스위트 (108개 파일, 2704개 테스트, 현재 브랜치 기준)가 핵심 훅 라이브러리를 커버합니다:
 
 ```bash
-node --test 'scripts/test/**/*.test.mjs'
-# 또는
 npm test
+# 또는 크로스플랫폼 Node 테스트 열거기를 직접 실행
+node scripts/run-tests.mjs
 ```
 
 **커버된 모듈:** checkpoint, concurrency-gate, config-validator, fs-atomic, inbox-outbox, intent-patterns, provider-detect, stdin, tmux-session, wisdom, worker-spawn, worker-status, worktree

@@ -39,10 +39,19 @@ IDs, and aggregates task verdicts, track rollups, and tokens. Suite baseline
 refresh is intentionally rejected because task-by-task writes would not be
 atomic as a set.
 
-Each real task runs at `k=3`. `passHatK` reports all-trials reliability and
-`passAtK` reports any-trial capability. Fixture runs always report zero
+Each real task runs at `k=3`. Regression track rollups use `passHatK`
+(all-trials reliability), while capability track rollups use `passAtK`
+(at least one successful trial). Raw JSONL trial rows retain their individual
+`pass` verdicts. Fixture runs always report zero
 aggregate tokens and `null` raw usage; they must not be used to claim provider
 cost or live reliability.
+
+`task.json.modelTier` is passed to Claude as `--model <tier>` for live runs and
+is persisted on trial, task, suite, and trend records. Model selectors are
+restricted to option-safe model names so task metadata cannot inject CLI flags.
+Task metadata is enforced with the same exact required-key contract as the
+checked-in JSON schema; unknown or missing fields fail instead of silently
+falling back to another model, timeout, or k.
 
 ## Task Contract
 
@@ -56,7 +65,18 @@ Each task directory must contain:
 The runner copies `seed/` with Node built-ins instead of creating a git worktree
 from repository HEAD, so vendored task seeds are graded exactly as shipped.
 Graders use deterministic local tests and hidden behavioral checks; they never
-trust the agent's self-report.
+trust the agent's self-report. Public tests and hidden checks run sequentially
+in bounded child processes. A small supervisor owns a private process group,
+reaps descendants, caps output, and uses a close watchdog. Hidden checks also
+run under Node's permission model: candidate code can read/write its workdir,
+but cannot spawn child processes or workers. The selected grader and generic
+grader library are copied to a fresh private snapshot that omits the task seed,
+reference solution, and source task directory. Grader coordinates are delivered
+over consumed stdin; `argv`, `execArgv`, diagnostic reports, hidden stack frames,
+and callback source are redacted before candidate code loads. These controls
+protect runner availability and reduce oracle leakage, but they remain
+defense-in-depth inside one Node process, not an OS sandbox for arbitrary hostile
+native code or heap-introspection techniques.
 
 ## Hermetic CI and baseline
 
@@ -79,22 +99,79 @@ this branch's Agent Olympus plugin. The existing `--bare` worker-adapter path
 does not load hooks or plugins, so it would not exercise `/atlas` correctly.
 
 Live orchestration is an operator-only or private nightly action. Run each
-regression task explicitly with `--live`, then inspect `summary.json`:
-`delta_vs_baseline` is `-1`, `0`, or `1`, and `tokenUsage` contains aggregate
-result-event usage. The deterministic grader measures task outcome; it is a
-reliability floor, not a trajectory-quality judgment.
+regression task explicitly with `--live`, then inspect `summary.json`.
+Before each Claude trial, the runner copies only runtime plugin roots
+(`.claude-plugin/`, agents, skills, hooks, scripts excluding tests, config, and
+schemas) into a fresh private temporary snapshot; `summary.json` records this as
+`oracleIsolation: "staged-plugin-best-effort"`. This reduces accidental access
+to reference solutions and graders, but `bypassPermissions` is not an OS
+sandbox, so the snapshot is not a security boundary against a malicious agent.
+
+For Atlas and Athena live trials, the harness also pre-allocates one production
+run identity inside the fresh trial workdir before the provider starts. A trial
+can pass only when the provider adopts that exact run, writes a strict
+`pipeline.json` plus ordered `events.jsonl`, completes every required phase,
+matches the production iteration/review/CI counters in `loop-guard.json`,
+finalizes `summary.json`, and clears the matching active-run pointer. The
+pipeline is checked before the independent grader runs, so grader-side writes
+cannot manufacture orchestration evidence. Pre-existing `.ao` state, extra run
+directories, corrupt or future schemas, symlinks, incomplete phases, and
+out-of-order completion events fail closed. Evidence files are opened without
+following symlinks, size-bounded, and required to have been written during the
+trial. Fixture runs record pipeline evidence as not applicable and never
+satisfy this live-only gate.
+
+Athena uses its own production phase sequence and recovery phases
+(`spawn`/`monitor`/`integrate`). The evidence verifier applies the Athena phase
+contract and requires monitor-loop authority instead of treating it as an Atlas
+run with renamed output. Live execution is still operator-only because it can
+spawn multiple paid workers and is never exercised by CI.
+
+This evidence is deliberately labelled `trust: "candidate-asserted"`: it closes
+stale, missing, and accidental false-PASS paths for a cooperative orchestrator,
+but the live process can still write its own workdir under
+`bypassPermissions`. It is not cryptographic or OS-level attestation. HU-11
+must provide a candidate-inaccessible event channel and sandbox boundary before
+the project can claim adversarially tamper-resistant trajectory evidence.
+
+`delta_vs_baseline` is a measured-outcome comparison. It is `-1`, `0`, or `1`
+only for a live run whose k exactly matches both the baseline's root k and that
+task's k, whose orchestrator and `modelTier` match, and whose
+`benchmarkFingerprint` matches. That fingerprint covers `task.json`, `seed/`,
+`grader.mjs`, and the shared grader-isolation runtime.
+
+The measurement machinery has a separate `pipelineProtocolFingerprint` over
+the live harness, pipeline-evidence policy, and production
+phase/loop-guard/run-artifact roots plus their repo-local relative-import
+closure. Builtins, packages, and unreferenced SUT files are excluded. A
+protocol-only change therefore does
+not erase an otherwise valid outcome delta. It sets
+`baselineComparison.protocolGate.passed: false` and
+`decisionEligible: false` with reason `pipeline-protocol-mismatch`; a human must
+review or refresh the measurement before using that delta as a release gate.
+Benchmark changes remain outcome-incomparable. `baselineComparison` always
+includes both identities and baseline provenance in machine output.
+For a measured live LKG, its historical protocol fingerprint is immutable:
+`verify-baseline.mjs` reports it in `protocolReviewRequired` instead of
+pretending the old run used the current protocol. Only a newly reviewed live
+run with `--update-baseline` may replace that measured fingerprint.
 
 The initial committed `baseline.json` is a declared target (regression tasks
 must hold 100% `pass^k` at `k=3`), not a measured live result — no live run has
-produced it yet. Until the first trusted operator live run refreshes it, a live
-`delta_vs_baseline` of `-1` may reflect that unmeasured seed rather than a real
-regression.
+produced it yet. Declared targets never return `comparable: true` and never
+populate `delta_vs_baseline`; machine output reports `baseline-unmeasured`,
+preserves the null live provenance, and puts the goal-relative result in the
+separate `delta_vs_target` field. Each task records `source`, `runId`,
+`measuredAt`, `modelTier`, `orchestrator`, `benchmarkFingerprint`, and
+`pipelineProtocolFingerprint`, so targets cannot masquerade as a measured LKG.
 
 After reviewing a trusted live run, refresh that task's committed baseline with
 the same command plus `--update-baseline`. Refresh is rejected for capability
 tasks, failed runs, fixture runs, ambiguous `--live`+`--fixture` invocations,
 unknown tasks, or a `k` that differs from the committed baseline. Review the
 resulting `evals/baseline.json` diff before committing it.
+Concurrent refreshes are rejected by a sibling lock rather than silently
+overwriting another task's baseline update.
 
 Inspect release-over-release per-track pass rates and token totals with:
 
@@ -104,7 +181,42 @@ node evals/report.mjs --trend
 
 Trend output excludes fixture and legacy unknown-mode summaries by default so
 hermetic GREEN/RED proofs cannot masquerade as live reliability history. Use
-`--include-fixtures` only when debugging the reporter itself.
+`--include-fixtures` only when debugging the reporter itself. Each trend point
+also carries `k`/`ks`, a track-level `benchmarkFingerprint`, and the observed
+`pipelineProtocolFingerprint` set. Compare outcomes only when benchmark fields
+match, and require review when protocol identities differ.
 
-Live evals burn real tokens and run Atlas or Athena unsupervised. They are never
-run by CI or this repository's test suite.
+Local run artifacts under `evals/results/` are gitignored so live output cannot
+be swept into an automatic WIP commit.
+
+Supported Atlas and Athena live evals burn real tokens and run unsupervised.
+Neither path is run by CI or this repository's test suite.
+
+## Failed-run candidate feedback loop (HU-17)
+
+Atlas/Athena may explicitly finalize a genuinely terminal task-outcome or
+orchestration failure with a minimal categorized marker. At SessionEnd, only
+runs linked to that session are inspected (newest 64 maximum). Eligible runs
+become local review records under `.ao/eval-candidates/records/`; candidates
+contain allowlisted metadata, hashes, sizes, and counts—not prompts, errors,
+paths, diffs, evidence text, checkpoint payloads, or provider output.
+The collector independently verifies the exact failed pipeline cut and its
+single failure event, caps pending/total records at 500/2,000, and gives
+SessionEnd one non-waiting queue-lock attempt inside a one-second deadline.
+
+Review the queue with:
+
+```sh
+node scripts/eval-candidates.mjs list
+node scripts/eval-candidates.mjs show <candidateId>
+node scripts/eval-candidates.mjs approve <candidateId>
+node scripts/eval-candidates.mjs reject <candidateId>
+node scripts/eval-candidates.mjs link <candidateId> <reviewed-task-id>
+```
+
+Approval never creates a golden task. A human must separately author and review
+the vendored seed, deterministic grader, and reference solution, then `link`
+the candidate to that task ID. The CLI has no promote/scaffold, provider,
+network, or git mutation path. Infrastructure failures and cancellations are
+not candidate-eligible. See
+[HU-17-failure-ingestion.md](../docs/plans/harness-upgrade/HU-17-failure-ingestion.md).

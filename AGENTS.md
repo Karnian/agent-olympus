@@ -92,7 +92,7 @@ agent-olympus/
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (2376 tests, 92 files; v1.4.0: 2376/2376 passing)
+│   ├── test/                     — node:test unit tests (2704 tests, 108 files; current branch: 2704/2704 passing)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
@@ -192,7 +192,7 @@ agent-olympus/
 
 ## Testing
 
-Run the 2376-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the 2704-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
@@ -336,7 +336,7 @@ Run the 2376-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | SubagentStop | concurrency-release | Release concurrency slot as safety net (async) |
 | Notification:idle_prompt | notification | Log idle/permission prompts for stall detection |
 | Notification:permission_prompt | notification | Same logging for permission prompts |
-| SessionEnd | session-end | Clean up stale state files older than 24h |
+| SessionEnd | session-end | Sweep stale state; collect linked failed-run candidates |
 | Stop | stop-hook | Auto-commit uncommitted work as WIP commit on session end |
 
 ## State Files
@@ -353,7 +353,7 @@ Run the 2376-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | `.ao/state/ao-concurrency.json` | Active task tracking | Updated per task spawn/complete |
 | `.ao/memory/` | Durable design identity and taste memory (`schemaVersion:1`) | Survives SessionEnd and cancel |
 | `.ao/state/supervisor/<runId>/` | Detached worker snapshots/manifests | Swept per inactive run |
-| `.ao/artifacts/runs/<runId>/` | Run events, summaries, verification, pipeline/loop ledgers | Swept by SessionEnd lifecycle |
+| `.ao/artifacts/runs/<runId>/` | Run evidence + terminal-failure marker | Retained for audit/candidate review |
 | `.ao/artifacts/ask/<jobId>.*` | Async `/ask` raw and rendered outputs | Job-addressable artifacts |
 | `.ao/artifacts/pipe/` | Stage handoff/archive pipe (`plan`, `execute`, `verify`, etc.) | 24h SessionEnd sweep |
 | `.ao/sessions/<sessionId>.json` | Cross-session registry metadata | 90-day TTL |
