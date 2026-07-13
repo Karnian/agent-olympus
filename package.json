@@ -9,6 +9,7 @@
   },
   "scripts": {
     "test": "node scripts/run-tests.mjs",
-    "check": "for f in scripts/*.mjs scripts/lib/*.mjs; do node --check \"$f\" && echo \"OK: $f\"; done"
+    "check": "for f in scripts/*.mjs scripts/lib/*.mjs; do node --check \"$f\" && echo \"OK: $f\"; done",
+    "eval:candidates": "node scripts/eval-candidates.mjs"
   }
 }

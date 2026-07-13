@@ -405,6 +405,54 @@ describe('stop-hook: descriptive message with many files uses count format', () 
 });
 
 // ---------------------------------------------------------------------------
+// .ao/ exclusion — runtime artifacts can contain prompts, errors, and outputs
+// ---------------------------------------------------------------------------
+
+describe('stop-hook: never stages Agent Olympus runtime artifacts', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    const runDir = path.join(tmpDir, '.ao', 'artifacts', 'runs', 'atlas-private-run');
+    const candidateDir = path.join(tmpDir, '.ao', 'eval-candidates', 'records');
+    mkdirSync(runDir, { recursive: true });
+    mkdirSync(candidateDir, { recursive: true });
+    writeFileSync(
+      path.join(runDir, 'summary.json'),
+      JSON.stringify({ task: 'TOP_SECRET_PRIVATE_PROMPT' }),
+      'utf-8',
+    );
+    writeFileSync(
+      path.join(candidateDir, 'efc-private.json'),
+      JSON.stringify({ digest: 'private' }),
+      'utf-8',
+    );
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('creates no WIP commit when only .ao files are dirty', () => {
+    const beforeCount = commitCount(tmpDir);
+    runHook(tmpDir);
+    assert.equal(commitCount(tmpDir), beforeCount);
+  });
+
+  it('keeps .ao files out when a real source change is committed', () => {
+    writeFileSync(path.join(tmpDir, 'safe-source.js'), 'export const safe = true;\n', 'utf-8');
+    const beforeCount = commitCount(tmpDir);
+    runHook(tmpDir);
+    assert.equal(commitCount(tmpDir), beforeCount + 1);
+    const names = execSync('git show --name-only --format=', {
+      encoding: 'utf-8', cwd: tmpDir, stdio: 'pipe',
+    }).trim().split('\n').filter(Boolean);
+    assert.deepEqual(names, ['safe-source.js']);
+    const committed = execSync('git show --format= --no-ext-diff', {
+      encoding: 'utf-8', cwd: tmpDir, stdio: 'pipe',
+    });
+    assert.equal(committed.includes('TOP_SECRET_PRIVATE_PROMPT'), false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // .claude/worktrees/ exclusion — pure noise from Claude Code worktree gitlinks
 // ---------------------------------------------------------------------------
 
