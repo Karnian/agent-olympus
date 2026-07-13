@@ -4,7 +4,7 @@
 > answer the question Olympus currently **cannot**: *did this prompt/agent/skill
 > edit make the orchestrators better or worse?*
 
-## Implemented P2/P3 contract (2026-07-12)
+## Implemented P2/P3 contract (2026-07-13)
 
 This section supersedes the older aspirational details below wherever they
 differ:
@@ -43,11 +43,18 @@ differ:
 - HU-17 now supplies explicit terminal-failure markers and a local
   metadata/digest-only human review queue. It intentionally does not generate
   golden tasks automatically and remains separate from HU-01's CI gate.
+- Production recovery/finalization uses bounded no-follow artifact I/O. Its
+  operational event reader skips malformed/torn JSONL records. The
+  phase/finalization ensure writers repair a missing LF and verify the exact
+  appended tail. The independent eval evidence verifier is intentionally
+  stricter: any malformed production event makes that trial ineligible with
+  `invalid-events-jsonl`.
 
 ## Problem
 
-The 79 test files exercise hooks and lib functions; **none measure orchestration
-quality**. There is no fixed task set the orchestrators are scored against, so:
+Before HU-01, 79 test files exercised hooks and library functions but **none
+measured orchestration quality**. There was no fixed task set the orchestrators
+were scored against, so:
 - A one-line edit to `agents/*.md`, `skills/atlas|athena/SKILL.md`, an intent
   pattern, or a model-routing rule can silently degrade end-to-end quality.
 - "It worked once" (best-of-1 on a non-deterministic agent) is reported as success
@@ -179,8 +186,10 @@ Each grader is deterministic and **self-contained** (no network, no model):
   (HU-03), pipeline-evidence policy/trust rollups, and `delta_vs_baseline`.
 - A `node evals/report.mjs --trend` rolls `results/*/summary.json` into a
   release-over-release quality line (the cross-run trend Olympus lacks today).
-- Reuse `scripts/lib/run-artifacts.mjs` conventions (append-only JSONL,
-  `schemaVersion:1`, fail-safe writes).
+- Eval `summary.json` and `results.jsonl` outputs use atomic full-file writes.
+  Production run artifacts inspected by the verifier use the bounded no-follow
+  `run-artifacts.mjs`/`hardened-fs.mjs` contract, but attestation parsing remains
+  fail-closed on every malformed event rather than inheriting recovery tolerance.
 
 ## Phasing
 

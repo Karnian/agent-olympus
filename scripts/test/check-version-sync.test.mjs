@@ -9,7 +9,7 @@ const SCRIPT = join(__dirname, '..', 'check-version-sync.mjs');
 
 describe('check-version-sync', () => {
   it('exits 0 when versions are in sync', () => {
-    // Since we just synced all versions to 0.9.1, this should pass
+    // The repository's four manifest version fields must stay synchronized.
     const result = execFileSync('node', [SCRIPT], { encoding: 'utf-8' });
     assert.ok(result.includes('OK'));
   });

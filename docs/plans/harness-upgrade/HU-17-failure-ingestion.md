@@ -1,6 +1,6 @@
 # HU-17 — Failed-run review candidate ingestion
 
-Status: implemented locally on the 2026-07-12 harness/failover branch.
+Status: implemented for v1.5.0 (2026-07-13).
 
 ## Decision
 
@@ -48,6 +48,14 @@ only the marker-owning internal path may finalize or repair a failure result.
 It rejects linked or replaced run/summary/event artifacts, opens bounded regular
 files with no-follow semantics, and rechecks directory/file identity before
 terminal writes.
+
+Run and phase finalization share `scripts/lib/hardened-fs.mjs` rather than
+maintaining parallel filesystem guards. Snapshot/record creation keeps private
+`0700` directories and bounded single-link `0600` files; legacy audit reads may
+relax only the directory-mode requirement. Operational `events.jsonl` readers
+skip a malformed/torn record because it cannot exact-match a valid ensure event;
+the phase/finalization ensure paths opt into missing-LF repair and validate only
+the exact appended tail. Other JSONL artifacts keep their explicit policies.
 
 Athena additionally rejects failures at `spawn` or `monitor`. For later phases,
 terminal liveness is eligible only when a completed adapter-only roster, its
@@ -105,4 +113,5 @@ eval process.
 - No infrastructure/cancelled candidate ingestion.
 - No mutation of an active or resumable run.
 - No network, provider, git staging, commit, push, or PR behavior.
-- Persisted formats use `schemaVersion:1` and atomic writes.
+- Persisted formats use `schemaVersion:1`; snapshot/record files use atomic or
+  exclusive writes, while JSONL uses hardened bounded append.

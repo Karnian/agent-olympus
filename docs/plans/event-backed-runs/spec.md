@@ -17,7 +17,10 @@
 > Active pointers and run reads use trusted ancestry plus no-follow regular-file
 > checks; unsafe reads return their documented safe defaults. This addendum also
 > supersedes the old same-orchestrator-overwrite and unconditional compatibility
-> claims in this v0.9.2 design record.
+> claims in this v0.9.2 design record. Run and phase artifacts now share
+> `hardened-fs.mjs`: malformed/torn JSONL records are skipped while surrounding
+> valid events remain replayable, a missing LF is repaired before the next
+> append, and post-append ensure verification reads only the exact new tail.
 
 ---
 
@@ -152,9 +155,13 @@ These three gaps compound: without event history, you cannot replay state; witho
   WHEN `replayEvents(runId)` is called
   THEN the returned state includes `verifications: [...]` aggregated from those events
 
-- GIVEN the events.jsonl file does not exist or is corrupt
+- GIVEN the events.jsonl file is missing, unsafe, unreadable, or contains no valid checkpoint event
   WHEN `replayEvents(runId)` is called
   THEN it returns `null` (never throws)
+
+- GIVEN malformed or torn JSONL records occur before or between valid records
+  WHEN `replayEvents(runId)` is called
+  THEN it skips only the invalid records and replays the valid records in order
 
 **Implementation notes:**
 - New export from `run-artifacts.mjs`: `replayEvents(runId, opts)`
@@ -338,7 +345,7 @@ path is explicit `replace:true` for controlled test/admin recovery, with
 trusted-ancestry and no-follow validation.
 
 ### R3: Event Log Size (Low)
-A long-running orchestration with many subagents could generate hundreds of events. Each event is one JSONL line (typically 200-500 bytes). At 500 events, the file is ~250KB -- well within acceptable limits. `replayEvents` reads the full file, which is fine at this scale.
+A long-running orchestration with many subagents can generate hundreds of events. Each event is one JSONL line and reads remain bounded by the 16 MiB artifact cap. `replayEvents` performs one bounded full-log read; phase ensure/finalization paths avoid a second full parse by verifying only the exact byte range appended in that transition.
 
 ### R4: Completion Notice False Positives (Medium)
 Evidence-matching for gap detection uses substring search on the `evidence` field. If a passing criterion mentions "codex" in its evidence text, it would NOT trigger a false positive because we only scan `verdict: 'skip'` or `verdict: 'fail'` entries. However, creative evidence wording could still cause misclassification.

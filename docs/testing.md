@@ -6,17 +6,31 @@ Run `node scripts/check-agents-size.mjs` to verify `AGENTS.md` stays under the 2
 ## Testing
 
 ```bash
-# Run unit tests (2704 tests, 108 files; current branch: 2704/2704 passing)
+# Run unit tests (2719 tests, 108 files; v1.5.0: 2719/2719 passing)
 npm test
 
 # Or invoke the cross-platform Node test enumerator directly
 node scripts/run-tests.mjs
 
 # Syntax check all scripts
-for f in scripts/*.mjs scripts/lib/*.mjs; do node --check "$f" && echo "OK: $f"; done
+npm run check
+
+# Verify the committed hermetic eval contract (never spawns live workers)
+node evals/verify-baseline.mjs
+node evals/verify-fixtures.mjs
+
+# Release metadata and shared-instruction gates
+node scripts/check-version-sync.mjs
+claude plugin validate .
+node scripts/check-agents-size.mjs
+git diff --check
 
 # Check for stale namespace references
 grep -r "oh-my-claude:" agents/ skills/ scripts/ config/   # should return nothing
 grep -r "oh-my-claudecode:" skills/ agents/                 # should return nothing
 grep -r '\.omc/' scripts/ skills/ agents/                   # should return nothing
 ```
+
+The pull-request workflow runs the same unit, baseline, and fixture gates when
+the PR has the `run-evals` label. Live Atlas/Athena evals are paid,
+operator-controlled runs and are intentionally excluded from CI.

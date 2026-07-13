@@ -42,7 +42,9 @@ recovery is bound to the exact observed lock generation by a create-exclusive
 root claim before that generation can be removed. If that claimant dies, a
 contender may publish one no-replace successor keyed to the dead predecessor's
 token, but only after proving the predecessor stale and revalidating that the
-observed lock generation is unchanged. Each predecessor therefore elects one
+observed lock generation is unchanged. Staleness requires the 30-second grace
+period plus either `ESRCH` or a live PID whose process start identity differs;
+a live matching owner is never stealable. Each predecessor therefore elects one
 successor while a late observer of an older generation still cannot delete a
 replacement owner. Provider root and successor claims are durable and excluded
 from SessionEnd's transient state sweep. Deterministic child team names make
@@ -63,8 +65,10 @@ re-run an already completed task. `SessionEnd` sweeps inactive completion
 artifacts after 24 hours. A native Claude fallback claim is not reclaimed merely
 because its lease timestamp elapsed: elapsed time cannot prove that the Task is
 dead, and a second claim could duplicate work in the same worktree. Recovery
-therefore requires authenticated terminal output or explicit external proof. If
-the state is already `completed` but its authenticated output record is missing
+through the current API therefore requires authenticated terminal output; any
+other proof would be an out-of-band operator recovery, not an implemented
+dispatch input. If the state is already `completed` but its authenticated
+output record is missing
 or has a different claim token, dispatch fails closed with
 `completed-output-lost` instead of changing the state back to `pending`. A
 completion-persistence caller is different: it already holds the real terminal

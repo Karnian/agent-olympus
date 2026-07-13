@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.5.0] - 2026-07-13
+
+Reliability and evaluation release — HU-01 P2/P3, bounded provider-exhaustion
+failover, event-backed orchestration recovery, and the HU-17 failed-run feedback
+loop. The zero-dependency Node suite is **2719/2719 green across 108 test files**.
+
+### Added
+- **HU-01 P2/P3 regression harness** — six vendored golden tasks now exercise regression and capability tracks at `k=3`, with `pass^k`/`pass@k`, real token accounting, declared-versus-measured baselines, benchmark and pipeline-protocol fingerprints, trend reporting, and hermetic GREEN/RED fixture proofs. Public graders and candidate execution run in isolated, bounded subprocesses; live Atlas/Athena evaluation remains explicit and operator-only.
+- **Provider-exhaustion failover** — external workers use one bounded Codex → Gemini → native Claude chain with a fresh unavailable retry budget on provider switches, exact root/run/worker identity propagation, deterministic child teams, and durable completion fencing. Authentication and missing-binary failures skip inappropriate retries; generic crashes retry once before demotion.
+- **Event-backed run recovery and terminalization** — Atlas/Athena persist generation-bound phase evidence, finalization locks, terminal failure markers, and fail-closed orphan recovery. Restart/cancel paths preserve active evidence until the exact run is safely terminalized, and Athena only adopts a team whose preallocated run generation matches its ledger and checkpoint.
+- **HU-17 failed-run candidate queue** — SessionEnd collects only session-linked, independently verified terminal task failures into sanitized digest/metadata records. Review remains explicitly human-gated through `list`, `show`, `approve`, `reject`, and `link`; no prompt, error text, path, diff, provider output, or automatic golden-task generation is exposed.
+- **Shared hardened artifact I/O** — `scripts/lib/hardened-fs.mjs` centralizes no-follow, regular-file, mode, size, ancestry, generation, and append validation while keeping creation-time `0700` enforcement and legacy-compatible reads as explicit policies.
+
+### Changed
+- **Run event tolerance and append verification** — malformed JSONL records are skipped while valid records before and after them remain usable. Appends repair a missing line boundary, and phase event ensures validate only the newly appended byte range instead of reparsing up to 16 MiB twice; exact-match idempotency is unchanged.
+- **Crash-reclaimable recovery claims** — recovery claims are an append-only, generation-bound successor lineage. A definitely dead claimant can be replaced after the stale grace period, while live claimants and changed lock generations remain untouchable and concurrent contenders still elect one winner.
+- **Cross-platform test entrypoint** — `npm test` now uses `scripts/run-tests.mjs`, avoiding shell-dependent glob semantics while retaining the same `node:test` suite.
+
+### Fixed
+- A torn `events.jsonl` record can no longer permanently prevent `completePhase()` or `failPhase()` from reaching a terminal state, including when later valid events were appended after the damaged record.
+- A Claude fallback recorded as completed but missing authenticated output now fails closed with `completed-output-lost` instead of silently flipping back to pending and repeating already committed work. Completion persistence may repair the record only because it already holds the terminal output bytes.
+- A recovery process that dies after claiming a stale finalization/provider lock no longer poisons that lock generation forever; stale-owner takeover remains fenced against PID reuse and ABA replacement.
+- Removed the dead `${lockPath}.takeover` recovery path and its SessionEnd claim namespace; no producer for that legacy artifact exists.
+- Cancellation no longer deletes the only checkpoint/evidence needed to diagnose or recover an active run.
+
 ## [1.4.0] - 2026-07-10
 
 Reference-refresh release — Antigravity `agy` fallback, a Codex CLI version gate, and the `/codex-review` skill, plus adapter cleanups. Validated against codex-cli 0.143.0 and gemini-cli 0.50.0. Full suite 2376/2376.

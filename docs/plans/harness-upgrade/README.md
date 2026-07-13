@@ -4,11 +4,11 @@
 > harness-engineering review on **2026-06-16** (baseline: `main` @ v1.1.6 +
 > `feat/adapter-worker-supervisor` @ v1.2.0).
 
-## Status & handoff — START HERE (updated 2026-06-19)
+## Status & handoff — START HERE (updated 2026-07-13)
 
-### Branch addendum — 2026-07-12
+### v1.5.0 implementation addendum — 2026-07-13
 
-- **HU-01 implementation is now present on the current feature branch:** six
+- **HU-01 P2/P3 is included in v1.5.0:** six
   vendored tasks, regression/capability tracks, `k=3`, pass^k/pass@k, real
   Claude result-event usage capture, baseline provenance, trend reporting, and
   a hermetic CI GREEN/RED gate. Live evals were intentionally not run; the
@@ -20,7 +20,7 @@
   successful completion now calls `finalizeRun()` after the durable `complete`
   phase. The evidence is explicitly candidate-asserted, not HU-11-grade
   tamper-resistant attestation.
-- **HU-06.3 is implemented on this branch:** Athena now uses the deterministic
+- **HU-06.3 is completed in v1.5.0:** Athena now uses the deterministic
   phase runner across all 13 phases, persists bounded spawn identity before any
   launch, adopts only provable recovery state, preserves ambiguous native/mixed
   teams, and finalizes the exact run. Athena live eval evidence now validates
@@ -32,28 +32,31 @@
   durable completion across Codex → Gemini → Claude. Session-global provider
   cooldown remains follow-up work; HU-19 should absorb the cross-provider
   conformance matrix.
-- The next roadmap seam is **HU-17 failed-run → reviewed candidate ingestion**.
-  Failed artifacts do not contain a safe, deterministic task seed/grader, so
-  ingestion produces a minimal local review candidate and never auto-generates
-  or commits a golden task.
-- **HU-17's safe local seam is implemented:** explicit allowlisted terminal
+- **HU-17's safe local seam is included in v1.5.0:** explicit allowlisted terminal
   markers, session-linked bounded collection, metadata/digest-only candidates,
   and approve/reject/link review commands. Automatic task generation remains
   intentionally out of scope; see [HU-17-failure-ingestion.md](HU-17-failure-ingestion.md).
+- Finalization hardening now uses one shared no-follow filesystem layer,
+  torn-line-tolerant JSONL parsing with LF repair and tail-only append checks,
+  crash-reclaimable successor claims, and fail-closed Claude completed-output
+  loss. These close the adversarial follow-up review without weakening ABA or
+  live-owner protections.
 
-**Shipped on `main` (pushed, tagged):**
+**Version history and current release preparation:**
 - **v1.2.0** — detached worker supervisor.
 - **v1.2.1** — HU-02b Tier-1 read-only tool-scoping (`explore`, `architect`, `code-reviewer`, `security-reviewer`, `momus`) + **HU-18** contract linter.
 - **v1.2.2** — read-only tiers generalized: **Tier-2** `aphrodite` (read-only + Claude Preview MCP), **Tier-3** `themis` (no-direct-edit verify, `Bash` allowed). All 7 read-only-family agents are contract- AND runtime-verified (fresh `claude -p` probe).
-- **v1.2.3** — **HU-06.1** deterministic phase runner (`scripts/lib/phase-runner.mjs` + the `pipeline.json` per-run ledger; absorbs `loop-guard` as its sole caller) + **HU-06.2** Atlas `SKILL.md` rewritten onto the runner + `phase-contract.test.mjs` (15-assertion contract linter). Plan converged through 3 Codex rounds; library Codex-implemented/Claude-reviewed; Atlas rewrite Claude-implemented/Codex-reviewed ×2. Suite 2289/2289. ⚠️ runtime `claude -p` smoke deferred (Atlas would run unsupervised). **Remaining HU-06:** `.3` (Athena rewrite, incl. the `recover` branches).
+- **v1.2.3** — **HU-06.1** deterministic phase runner (`scripts/lib/phase-runner.mjs` + the `pipeline.json` per-run ledger; absorbs `loop-guard` as its sole caller) + **HU-06.2** Atlas `SKILL.md` rewritten onto the runner + `phase-contract.test.mjs` (15-assertion contract linter). Plan converged through 3 Codex rounds; library Codex-implemented/Claude-reviewed; Atlas rewrite Claude-implemented/Codex-reviewed ×2. Suite 2289/2289. ⚠️ runtime `claude -p` smoke deferred (Atlas would run unsupervised). HU-06.3 was completed later in v1.5.0.
+- **v1.4.0** — reference refresh: Antigravity `agy` fallback, Codex CLI advisory version gate, `/codex-review`, and adapter metadata cleanup.
+- **v1.5.0 (prepared here)** — HU-01 P2/P3, HU-06.3, event-backed fail-closed recovery, bounded provider failover, HU-17 candidate ingestion, and hardened run finalization. Suite 2719/2719.
 
-**Historical 2026-06-19 snapshot (HU-01 and HU-06.3 superseded by the addendum above):** the rest of the backlog was not started (HU-01, HU-02a, HU-03–05, HU-07–20) + the **4 deferred agents** (`metis`, `prometheus`, `hermes`, `ask` — decide read-only/Bash/unrestricted per their bodies). HU-06 `.1`/`.2` shipped in v1.2.3 and `.4` documentation shipped there; `.3` is implemented on this branch.
+**Historical 2026-06-19 snapshot (HU-01 and HU-06.3 superseded by the addendum above):** the rest of the backlog was not started (HU-01, HU-02a, HU-03–05, HU-07–20) + the **4 deferred agents** (`metis`, `prometheus`, `hermes`, `ask` — decide read-only/Bash/unrestricted per their bodies). HU-06 `.1`/`.2` shipped in v1.2.3 and `.4` documentation shipped there; `.3` completed in v1.5.0.
 
 **Absorbed into v1.2.3 (was "partial / unmerged"):**
 - **`loop-guard`** (`scripts/lib/loop-guard.mjs`) — the iteration / same-error-3× / review-round caps. The **phase runner is its sole caller** — the structural chokepoint that guarantees the consult — so both Atlas and Athena reach caps through `beginAttempt`/`reattempt`/`loopTick`/`recordPhaseError`. ⚠️ Still a cooperative guardrail, not a hard safety boundary: **time / token / spend caps + a user-visible kill-switch remain unimplemented (HU-21)**.
 
 **Recommended next:**
-- **A — adversarially close HU-06.3:** keep the Athena recovery/evidence contracts under focused review, then run the full local suite. Paid live validation remains an explicit operator action.
+- **A — perform operator-only live validation:** run reviewed Atlas and Athena trials when the token/cost budget is explicitly approved; public CI remains hermetic.
 - **B — operationalize HU-01:** run the first reviewed private/operator Atlas eval and refresh declared-target baselines with measured provenance. Public CI remains hermetic and must not perform this step.
 - **C — exercise the feedback loop:** review real HU-17 candidates and manually author deterministic golden tasks for the valuable failures.
 - **D — small:** tier the 4 deferred agents (`metis`, `prometheus`, `hermes`, `ask`).
@@ -61,7 +64,7 @@
 **Workflow conventions (author's preferred flow):**
 1. Claude writes a plan (doc in this dir). 2. **Codex cross-reviews** the plan (`codex -a never -s read-only -c model_reasoning_effort=high exec`) → GO / GO-WITH-CHANGES / NO-GO → fold into a rev-2 plan. 3. **Codex implements** (`-s workspace-write`), does NOT commit. 4. **Claude reviews** the diff + runs tests (+ a real-file mutation test for linter changes). 5. Parallelize (Athena / parallel Codex) only when sub-tasks don't share a file; a single shared artifact → one cohesive flow.
 
-**Release procedure:** branch off `main`, FF-merge back. Bump version in **4 strings** (`package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` ×2) + prepend a CHANGELOG entry. Gate order: 4-count recheck → `claude plugin validate .` → full suite → `git fetch` + verify `main == origin/main` → FF-merge → annotated tag `vX.Y.Z` → push `main` THEN the tag. User then runs `claude plugin marketplace update` + `claude plugin update` + restart.
+**Release procedure:** branch from an up-to-date `main`. Bump version in **4 strings** (`package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json` ×2) and prepend a CHANGELOG entry. Gate order: version-sync check → `claude plugin validate .` → full suite + baseline/fixture verification → `git fetch` and rebase/conflict check → pull request with the `run-evals` gate → reviewed merge. Publishing is a separate explicit action: update local `main`, create annotated tag `vX.Y.Z`, push the tag, then run `claude plugin marketplace update` + `claude plugin update` + restart.
 
 **Gotchas:**
 - **Subagent defs load at session START** — a plugin update mid-session does NOT reload them; runtime tool restrictions only apply in a session started *after* the update. Verify with a **fresh `claude -p`** (the running session is stale).
