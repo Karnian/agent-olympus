@@ -523,21 +523,24 @@ describe('session-end: PROTECTED_NAMES allow-list defense', () => {
   });
 });
 
-describe('session-end: provider recovery claims remain one-shot across sessions', () => {
+describe('session-end: provider recovery claim lineages survive across sessions', () => {
   let tmpDir;
   const claimName = `.provider-fallback-${'a'.repeat(24)}-recovery-${'b'.repeat(64)}.claim`;
+  const successorName = `.provider-fallback-${'a'.repeat(24)}-recovery-${'b'.repeat(64)}-successor-${'c'.repeat(64)}.claim`;
   before(async () => {
     tmpDir = await makeTmpDir();
     const stateDir = path.join(tmpDir, '.ao', 'state');
     createFile(stateDir, claimName, STALE_MS + 60 * 1000);
+    createFile(stateDir, successorName, STALE_MS + 60 * 1000);
     createFile(stateDir, '.provider-fallback-malformed-recovery.claim', STALE_MS + 60 * 1000);
   });
   after(async () => { await removeTmpDir(tmpDir); });
 
-  it('preserves exact permanent claims but still sweeps lookalikes', () => {
+  it('preserves exact root and successor claims but still sweeps lookalikes', () => {
     runHook(tmpDir);
     const stateDir = path.join(tmpDir, '.ao', 'state');
     assert.ok(existsSync(path.join(stateDir, claimName)));
+    assert.ok(existsSync(path.join(stateDir, successorName)));
     assert.equal(existsSync(path.join(stateDir, '.provider-fallback-malformed-recovery.claim')), false);
   });
 });

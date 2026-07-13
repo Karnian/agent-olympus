@@ -232,6 +232,33 @@ test('finalizeFailedRun writes an immutable minimal marker, finalizes summary, a
   assert.equal(events.at(-1).detail.status, 'completed');
 });
 
+test('finalizeFailedRun recovers a trailing torn event and keeps run_finalized last', (t) => {
+  const env = setupRun(t, 'atlas', 'verify');
+  const eventsPath = path.join(env.runDir, 'events.jsonl');
+  writeFileSync(eventsPath, [
+    JSON.stringify({ type: 'before_damage', detail: 'kept' }),
+    '{"type":"torn"',
+  ].join('\n'), { mode: 0o600 });
+
+  const result = finalizeFailedRun(env.runId, DEFAULT_FAILURE, {
+    base: env.base,
+    stateDir: env.stateDir,
+  });
+
+  assert.equal(result.ok, true);
+  const valid = [];
+  for (const line of readFileSync(eventsPath, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try { valid.push(JSON.parse(line)); } catch {}
+  }
+  assert.deepEqual(valid.map(event => event.type), [
+    'before_damage',
+    'pipeline_phase_failed',
+    'run_finalized',
+  ]);
+  assert.equal(valid.at(-1).type, 'run_finalized');
+});
+
 test('every exact class/code mapping is accepted', async (t) => {
   for (const [failureClass, codes] of Object.entries(EXPECTED_CODES)) {
     for (const code of codes) {

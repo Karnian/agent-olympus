@@ -395,12 +395,25 @@ function acquireQueueLock(lockPath, opts = {}) {
       if (!existingOwner
         && Date.now() - stats.mtimeMs > LOCK_STALE_MS
         && readdirSync(lockPath).length === 0) {
+        const generation = statGeneration(stats);
         const claim = acquireRecoveryClaim(
-          path.dirname(lockPath), 'candidate-queue-ownerless', statGeneration(stats),
+          path.dirname(lockPath),
+          'candidate-queue-ownerless',
+          generation,
+          {
+            isGenerationCurrent: () => {
+              try {
+                return statGeneration(lstatSync(lockPath)) === generation
+                  && readdirSync(lockPath).length === 0;
+              } catch {
+                return false;
+              }
+            },
+          },
         );
         if (!claim.won) throw new CandidateQueueError('queue-busy');
         const current = lstatSync(lockPath);
-        if (statGeneration(current) === statGeneration(stats)) {
+        if (statGeneration(current) === generation) {
           try { rmdirSync(lockPath); } catch {}
         }
         continue;
@@ -411,7 +424,20 @@ function acquireQueueLock(lockPath, opts = {}) {
         && !confirmedLiveOwners.has(existingOwner.token)) {
         if (ownerIsDefinitelyStale(existingOwner)) {
           const claim = acquireRecoveryClaim(
-            path.dirname(lockPath), 'candidate-queue', existingOwner.token,
+            path.dirname(lockPath),
+            'candidate-queue',
+            existingOwner.token,
+            {
+              isGenerationCurrent: () => {
+                try {
+                  const current = readLockOwner(lockPath);
+                  return sameLockOwner(current, existingOwner)
+                    && ownerIsDefinitelyStale(current);
+                } catch {
+                  return false;
+                }
+              },
+            },
           );
           if (!claim.won) throw new CandidateQueueError('queue-busy');
           const current = readLockOwner(lockPath);
@@ -513,21 +539,22 @@ function parseJson(buffer) {
   }
 }
 
-function parseJsonl(buffer) {
-  try {
-    const lines = buffer.toString('utf-8').split('\n');
-    const values = [];
-    for (const line of lines) {
-      if (line.trim() === '') continue;
-      if (values.length >= MAX_JSONL_RECORDS) return { ok: false, reason: 'too-many-records' };
-      const value = JSON.parse(line);
-      if (!isPlainObject(value)) return { ok: false, reason: 'invalid-jsonl-shape' };
-      values.push(value);
+function parseJsonl(buffer, { skipInvalid = false } = {}) {
+  const lines = buffer.toString('utf-8').split('\n');
+  const values = [];
+  for (const line of lines) {
+    if (line.trim() === '') continue;
+    if (values.length >= MAX_JSONL_RECORDS) return { ok: false, reason: 'too-many-records' };
+    let value;
+    try { value = JSON.parse(line); }
+    catch {
+      if (skipInvalid) continue;
+      return { ok: false, reason: 'invalid-jsonl' };
     }
-    return { ok: true, values };
-  } catch {
-    return { ok: false, reason: 'invalid-jsonl' };
+    if (!isPlainObject(value)) return { ok: false, reason: 'invalid-jsonl-shape' };
+    values.push(value);
   }
+  return { ok: true, values };
 }
 
 function validateFailureMarker(marker, runId, opts) {
@@ -941,7 +968,10 @@ function buildCandidate(runId, runDir, opts) {
 
   const eventsFile = readRegularFile(path.join(runDir, 'events.jsonl'), MAX_EVENTS_BYTES);
   if (!eventsFile.ok) return eventsFile;
-  const eventsParsed = parseJsonl(eventsFile.buffer);
+  // Run finalization treats syntactically torn event records as absent. Keep
+  // candidate ingestion aligned: valid events after a damaged line remain
+  // authoritative, while parseable non-object records still fail closed.
+  const eventsParsed = parseJsonl(eventsFile.buffer, { skipInvalid: true });
   if (!eventsParsed.ok) return eventsParsed;
   if (!validateFinalization(eventsParsed.values, summary, marker)) {
     return { ok: false, reason: 'run-not-finalized' };

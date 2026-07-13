@@ -40,8 +40,9 @@ and every successor must remain pending. It durably records one matching
 `pipeline_phase_failed` event, writes an immutable 0600 marker, finalizes the
 exact run as `result:"failure"`, and clears the pointer only after the matching
 `run_finalized` event is durable. Success and failure finalizers share one
-run-scoped lock; stale-owner recovery is limited to one permanent claim for the
-exact observed generation. The shared finalizer validates canonical non-future
+run-scoped lock; stale-owner recovery uses an append-only claim lineage for the
+exact observed generation, so a dead recoverer can be succeeded without
+weakening the generation fence. The shared finalizer validates canonical non-future
 start time and immutable run/orchestrator/task/session identity before mutation;
 only the marker-owning internal path may finalize or repair a failure result.
 It rejects linked or replaced run/summary/event artifacts, opens bounded regular

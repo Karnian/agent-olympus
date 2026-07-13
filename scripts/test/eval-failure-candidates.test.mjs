@@ -331,6 +331,20 @@ test('only marker-backed finalized task-outcome and orchestration failures are e
 });
 
 test('finalization ordering and cleared active identity are mandatory', async (t) => {
+  await t.test('a torn record before run_finalized does not hide durable finalization', (st) => {
+    const env = tempEnvironment(st, 'torn-event-');
+    const run = createFailedRun(st, env);
+    const eventsPath = path.join(run.runDir, 'events.jsonl');
+    const lines = readFileSync(eventsPath, 'utf8').trimEnd().split('\n');
+    lines.splice(lines.length - 1, 0, '{"type":"torn"');
+    writeFileSync(eventsPath, `${lines.join('\n')}\n`, { mode: 0o600 });
+
+    const result = collectRunFailureCandidate(run.runId, candidateOpts(env));
+
+    assert.equal(result.ok, true);
+    assert.equal(result.candidate.signals.events.records, lines.length - 1);
+  });
+
   await t.test('event after run_finalized', (st) => {
     const env = tempEnvironment(st, 'late-event-');
     const run = createFailedRun(st, env);
@@ -630,6 +644,38 @@ test('a provably dead stale queue owner is reclaimed without weakening ownership
   });
 
   const collected = collectRunFailureCandidate(run.runId, candidateOpts(env));
+  assert.equal(collected.ok, true);
+  assert.equal(collected.created, true);
+  assert.equal(existsSync(lockPath), false);
+});
+
+test('a stale queue lock is recoverable after its first elected recoverer dies', (t) => {
+  const env = tempEnvironment(t, 'dead-recoverer-lock-');
+  const run = createFailedRun(t, env, { knownArtifacts: false });
+  const token = '00000000-0000-4000-8000-000000000004';
+  const lockPath = installQueueLock(env, {
+    schemaVersion: 1,
+    token,
+    pid: 99_999_999,
+    startId: 'dead-process-start-id',
+    createdAt: new Date(Date.now() - 120_000).toISOString(),
+  });
+  const generationDigest = createHash('sha256').update(token).digest('hex');
+  writeFileSync(
+    path.join(env.candidateBase, `.candidate-queue-recovery-${generationDigest}.claim`),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      token: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      pid: 99_999_999,
+      startId: 'dead-recoverer-start-id',
+      generationDigest,
+      createdAt: new Date(Date.now() - 120_000).toISOString(),
+    })}\n`,
+    { mode: 0o600 },
+  );
+
+  const collected = collectRunFailureCandidate(run.runId, candidateOpts(env));
+
   assert.equal(collected.ok, true);
   assert.equal(collected.created, true);
   assert.equal(existsSync(lockPath), false);

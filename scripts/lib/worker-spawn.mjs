@@ -16,7 +16,6 @@ import {
   existsSync,
   statSync,
   unlinkSync,
-  rmSync,
   writeFileSync,
 } from 'fs';
 import { join, resolve } from 'path';
@@ -1004,29 +1003,11 @@ function fallbackLockIsStale(lockPath, opts = {}) {
   } catch { return false; }
 }
 
-function fallbackTakeoverIsStale(takeoverPath, opts = {}) {
-  try {
-    const owner = JSON.parse(readFileSync(join(takeoverPath, 'owner.json'), 'utf-8'));
-    if (owner?.schemaVersion !== 1 || !Number.isInteger(owner.pid) || !owner.token) {
-      // A legacy takeover directory without authenticated owner metadata may
-      // be in the old publish window. Never recursively reclaim it by age.
-      return false;
-    }
-    if (!processIsAlive(owner.pid)) return true;
-    if (typeof owner.startId === 'string' && owner.startId.length > 0) {
-      const currentStartId = readProcStartId(owner.pid);
-      if (currentStartId !== null && currentStartId !== owner.startId) return true;
-    }
-    return false;
-  } catch { return false; }
-}
-
 async function withFallbackLock(handoffId, fn, opts = {}) {
   if (opts.withLock) return opts.withLock(handoffId, fn);
   const lockDir = opts.lockDir || STATE_DIR;
   mkdirSync(lockDir, { recursive: true, mode: 0o700 });
   const lockPath = fallbackLockPath(handoffId, lockDir);
-  const takeoverPath = `${lockPath}.takeover`;
   const startedAt = Date.now();
   const lockTimeoutMs = Number.isFinite(opts.lockTimeoutMs)
     ? Math.max(0, opts.lockTimeoutMs)
@@ -1055,25 +1036,6 @@ async function withFallbackLock(handoffId, fn, opts = {}) {
     }
   };
   while (true) {
-    if (existsSync(takeoverPath)) {
-      if (fallbackTakeoverIsStale(takeoverPath, opts)) {
-        const observed = statSync(takeoverPath);
-        const claim = acquireRecoveryClaim(
-          lockDir, `provider-takeover-${handoffId}`, statGeneration(observed),
-        );
-        if (!claim.won) throw new Error(`Provider fallback takeover recovery already claimed for ${handoffId}`);
-        const current = statSync(takeoverPath);
-        if (statGeneration(current) === statGeneration(observed)) {
-          rmSync(takeoverPath, { recursive: true, force: true });
-        }
-        continue;
-      }
-      if (Date.now() - startedAt >= lockTimeoutMs) {
-        throw new Error(`Timed out acquiring provider fallback lock for ${handoffId}`);
-      }
-      await sleep(25);
-      continue;
-    }
     try {
       createOwnedLock();
       break;
@@ -1084,8 +1046,24 @@ async function withFallbackLock(handoffId, fn, opts = {}) {
         let observedOwner = null;
         try { observedOwner = JSON.parse(readFileSync(lockPath, 'utf8')); } catch {}
         const generation = observedOwner?.token || statGeneration(observedStat);
+        const observedGenerationIsCurrent = () => {
+          try {
+            const currentStat = statSync(lockPath);
+            let currentOwner = null;
+            try { currentOwner = JSON.parse(readFileSync(lockPath, 'utf8')); } catch {}
+            const sameGeneration = observedOwner?.token
+              ? currentOwner?.token === observedOwner.token
+              : statGeneration(currentStat) === statGeneration(observedStat);
+            return sameGeneration && fallbackLockIsStale(lockPath, opts);
+          } catch {
+            return false;
+          }
+        };
         const claim = acquireRecoveryClaim(
-          lockDir, `provider-fallback-${handoffId}`, generation,
+          lockDir,
+          `provider-fallback-${handoffId}`,
+          generation,
+          { isGenerationCurrent: observedGenerationIsCurrent },
         );
         if (!claim.won) throw new Error(`Provider fallback recovery already claimed for ${handoffId}`);
         const currentStat = statSync(lockPath);
@@ -1265,6 +1243,9 @@ async function persistProviderFallbackCompletion(dispatched, output, opts = {}) 
   return withFallbackLock(handoffId, async () => {
     const existing = await (opts.readFallbackState || readClaudeFallback)(handoffId);
     if (existing?.status === 'completed' && matchesFallbackRoot(existing, root)) {
+      // Unlike dispatchProviderFallback, this completion path owns the real
+      // terminal output bytes. It can safely repair a lost/mismatched output
+      // record using the existing completed claim instead of rerunning work.
       const existingOutput = await (opts.readFallbackOutput || readClaudeFallbackOutput)(handoffId);
       const canonicalOutput = existingOutput?.claimToken === existing.claimToken
         ? existingOutput.output
@@ -1408,6 +1389,22 @@ export async function dispatchProviderFallback(fallback, cwd, capabilities = {},
           ...identityFields,
         };
       }
+      if (existing?.status === 'completed') {
+        // Dispatch has no authenticated terminal bytes with which to repair a
+        // completed lease. Fail closed and surface the loss; silently changing
+        // completed back to pending could repeat committed work in this
+        // worktree. persistProviderFallbackCompletion is intentionally
+        // different because its caller already holds real terminal output.
+        return {
+          dispatch: 'none',
+          reason: 'completed-output-lost',
+          handoffId,
+          teamName: null,
+          workerName: fallback.workerName,
+          replacementWorker: fallback.replacementWorker,
+          ...identityFields,
+        };
+      }
       if (existing?.status === 'pending') {
         // A native Task has no durable process handle or cancellation/adoption
         // proof. Time alone can never prove it stopped, so an expired lease is
@@ -1547,7 +1544,12 @@ export async function pollProviderFallback(dispatched, cwd, capabilities = {}, o
   // into an unbounded self-driving loop.
   const maxDepth = Number.isInteger(opts.maxDepth) ? opts.maxDepth : 8;
   for (let depth = 0; depth < maxDepth; depth += 1) {
-    if (!current || current.dispatch === 'none') return { status: 'none', dispatched: current, teamNames };
+    if (!current || current.dispatch === 'none') {
+      if (current?.reason === 'completed-output-lost') {
+        return { status: 'failed', dispatched: current, teamNames, reason: current.reason };
+      }
+      return { status: 'none', dispatched: current, teamNames };
+    }
     if (current.dispatch === 'claude-completed' || current.dispatch === 'fallback-completed') {
       await persistCompletionFn(current, current.output ?? '');
       return { status: 'completed', dispatched: current, teamNames, output: current.output };

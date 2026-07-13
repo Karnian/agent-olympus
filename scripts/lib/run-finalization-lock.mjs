@@ -118,9 +118,16 @@ function reclaimOwnerlessReleaseCrash(path, runDir) {
   // Only the known empty release-crash state is automatically reclaimable.
   if (entries !== null) return false;
   try {
-    if (!acquireRecoveryClaim(runDir, 'run-finalize-ownerless', statGeneration(stat)).won) return false;
+    const generation = statGeneration(stat);
+    const claim = acquireRecoveryClaim(runDir, 'run-finalize-ownerless', generation, {
+      isGenerationCurrent: () => {
+        try { return statGeneration(lstatSync(path)) === generation; }
+        catch { return false; }
+      },
+    });
+    if (!claim.won) return false;
     const current = lstatSync(path);
-    if (statGeneration(current) !== statGeneration(stat)) return false;
+    if (statGeneration(current) !== generation) return false;
     rmdirSync(path);
     return true;
   } catch {
@@ -149,7 +156,16 @@ export function acquireRunFinalizationLock(runDir) {
       if (!definitelyStale(existing)) {
         throw new Error('run finalization is already in progress');
       }
-      const claim = acquireRecoveryClaim(runDir, 'run-finalize', existing.token);
+      const claim = acquireRecoveryClaim(runDir, 'run-finalize', existing.token, {
+        isGenerationCurrent: () => {
+          try {
+            const current = readOwner(path);
+            return sameOwner(current, existing) && definitelyStale(current);
+          } catch {
+            return false;
+          }
+        },
+      });
       if (!claim.won) throw new Error('stale run finalization recovery is already claimed');
       const current = readOwner(path);
       if (!sameOwner(current, existing) || !definitelyStale(current)) {

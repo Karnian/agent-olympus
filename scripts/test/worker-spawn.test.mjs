@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -570,6 +570,95 @@ test('Claude fallback recovers an authenticated output written before the comple
   assert.equal(tokenIndex, 1, 'recovery must not claim a second Claude Task');
 });
 
+test('Claude fallback completed state without authenticated output fails closed without a new claim', async () => {
+  const fallback = {
+    fallbackNeeded: true,
+    targetProvider: 'claude',
+    teamName: 'completed-parent',
+    workerName: 'worker',
+    parentRunId: 'completed-run',
+    parentWorkerRunId: 'completed-worker-run',
+    replacementWorker: { type: 'claude', name: 'worker', prompt: 'same task' },
+  };
+
+  for (const outputRecord of [null, { output: 'untrusted output', claimToken: 'wrong-token' }]) {
+    const completedState = {
+      schemaVersion: 1,
+      status: 'completed',
+      claimToken: 'completed-token',
+      claimedAt: 100,
+      completedAt: 200,
+      provider: 'claude',
+    };
+    let writes = 0;
+    let tokenAllocations = 0;
+    const result = await dispatchProviderFallback(fallback, '/workspace', {}, {
+      withLock: async (_handoffId, fn) => fn(),
+      readState: async () => completedState,
+      readOutput: async () => outputRecord,
+      writeState: async () => { writes += 1; },
+      createClaimToken: () => { tokenAllocations += 1; return 'new-token'; },
+    });
+
+    assert.equal(result.dispatch, 'none');
+    assert.equal(result.reason, 'completed-output-lost');
+    assert.equal(writes, 0, 'completed state must never be overwritten with pending');
+    assert.equal(tokenAllocations, 0, 'completed state must never allocate a rerun claim');
+
+    const polled = await pollProviderFallback(result, '/workspace');
+    assert.equal(polled.status, 'failed');
+    assert.equal(polled.reason, 'completed-output-lost');
+  }
+});
+
+test('pollProviderFallback repairs lost completed output with bytes already in hand', async () => {
+  const repaired = [];
+  const root = {
+    teamName: 'repair-parent',
+    workerName: 'worker',
+    runId: 'repair-run',
+    workerRunId: 'repair-worker-run',
+    prompt: 'same task',
+  };
+  const result = await pollProviderFallback({
+    dispatch: 'claude-completed',
+    output: 'known terminal output',
+    replacementWorker: { type: 'claude', name: 'worker', prompt: 'same task' },
+    rootTeamName: root.teamName,
+    rootWorkerName: root.workerName,
+    rootRunId: root.runId,
+    rootWorkerRunId: root.workerRunId,
+    rootPrompt: root.prompt,
+  }, '/workspace', {}, {
+    withLock: async (_handoffId, fn) => fn(),
+    readFallbackState: async () => ({
+      schemaVersion: 1,
+      status: 'completed',
+      claimToken: 'original-token',
+      root,
+    }),
+    readFallbackOutput: async () => ({
+      output: 'mismatched output',
+      claimToken: 'wrong-token',
+    }),
+    writeFallbackOutput: async (handoffId, output, claimToken, writtenRoot) => {
+      repaired.push({ handoffId, output, claimToken, root: writtenRoot });
+    },
+    writeFallbackState: async () => {
+      throw new Error('completed state must not be rewritten while repairing its output');
+    },
+    loadParentState: async () => null,
+    now: 300,
+  });
+
+  assert.equal(result.status, 'completed');
+  assert.equal(result.output, 'known terminal output');
+  assert.equal(repaired.length, 1);
+  assert.equal(repaired[0].output, 'known terminal output');
+  assert.equal(repaired[0].claimToken, 'original-token');
+  assert.deepEqual(repaired[0].root, root);
+});
+
 test('dispatchProviderFallback replaces stale child state with mismatched task identity', async () => {
   let shutdownCount = 0;
   let spawnCount = 0;
@@ -641,7 +730,7 @@ test('dispatchProviderFallback atomically spawns one provider child under concur
   assert.deepEqual(results.map((result) => result.reused).sort(), [false, true]);
 });
 
-test('dispatchProviderFallback takes over a lock whose owning process is gone', async (t) => {
+test('dispatchProviderFallback re-elects when the stale-lock recoverer also died', async (t) => {
   const lockDir = mkdtempSync(join(tmpdir(), 'ao-provider-stale-lock-'));
   t.after(() => rmSync(lockDir, { recursive: true, force: true }));
   const childTeamName = 'failover-stale-lock-child';
@@ -660,6 +749,19 @@ test('dispatchProviderFallback takes over a lock whose owning process is gone', 
     createdAt: 1,
     token: 'stale-token',
   }), { mode: 0o600 });
+  const recoveryDigest = createHash('sha256').update('stale-token').digest('hex');
+  writeFileSync(
+    join(lockDir, `.provider-fallback-${claimId}-recovery-${recoveryDigest}.claim`),
+    `${JSON.stringify({
+      schemaVersion: 1,
+      token: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      pid: 2_147_483_647,
+      startId: 'dead-recoverer',
+      generationDigest: recoveryDigest,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+    })}\n`,
+    { mode: 0o600 },
+  );
   let spawnCount = 0;
 
   const dispatched = await dispatchProviderFallback({
@@ -682,44 +784,6 @@ test('dispatchProviderFallback takes over a lock whose owning process is gone', 
 
   assert.equal(dispatched.dispatch, 'provider-team');
   assert.equal(spawnCount, 1);
-});
-
-test('dispatchProviderFallback fails closed on a takeover fence without owner metadata', async (t) => {
-  const lockDir = mkdtempSync(join(tmpdir(), 'ao-provider-stale-takeover-'));
-  t.after(() => rmSync(lockDir, { recursive: true, force: true }));
-  const fallback = {
-    fallbackNeeded: true,
-    targetProvider: 'gemini',
-    teamName: 'takeover-parent',
-    workerName: 'worker',
-    parentRunId: 'takeover-run',
-    parentWorkerRunId: 'takeover-worker-run',
-    replacementWorker: { type: 'gemini', name: 'worker', prompt: 'same task' },
-  };
-  const handoffId = createHash('sha256').update(JSON.stringify([
-    'takeover-parent',
-    'worker',
-    'takeover-run',
-    'takeover-worker-run',
-    'same task',
-  ])).digest('hex').slice(0, 24);
-  const takeoverPath = join(lockDir, `provider-fallback-${handoffId}.lock.takeover`);
-  mkdirSync(takeoverPath, { mode: 0o700 });
-  let spawnCount = 0;
-
-  await assert.rejects(
-    () => dispatchProviderFallback(fallback, '/workspace', { hasGeminiCli: true }, {
-      lockDir,
-      lockTimeoutMs: 50,
-      takeoverStaleMs: 0,
-      loadTeamState: () => null,
-      spawnTeam: async () => { spawnCount += 1; return null; },
-    }),
-    /Timed out acquiring provider fallback lock/,
-  );
-
-  assert.equal(spawnCount, 0);
-  assert.equal(existsSync(takeoverPath), true);
 });
 
 test('dispatchProviderFallback never reclaims a partially published legacy lock by age', async (t) => {
@@ -758,50 +822,6 @@ test('dispatchProviderFallback never reclaims a partially published legacy lock 
 
   assert.equal(spawnCount, 0);
   assert.equal(readFileSync(lockPath, 'utf8'), '');
-});
-
-test('dispatchProviderFallback does not steal a live takeover fence owner', async (t) => {
-  const lockDir = mkdtempSync(join(tmpdir(), 'ao-provider-live-takeover-'));
-  t.after(() => rmSync(lockDir, { recursive: true, force: true }));
-  const fallback = {
-    fallbackNeeded: true,
-    targetProvider: 'gemini',
-    teamName: 'live-takeover-parent',
-    workerName: 'worker',
-    parentRunId: 'live-takeover-run',
-    parentWorkerRunId: 'live-takeover-worker-run',
-    replacementWorker: { type: 'gemini', name: 'worker', prompt: 'same task' },
-  };
-  const handoffId = createHash('sha256').update(JSON.stringify([
-    'live-takeover-parent',
-    'worker',
-    'live-takeover-run',
-    'live-takeover-worker-run',
-    'same task',
-  ])).digest('hex').slice(0, 24);
-  const takeoverPath = join(lockDir, `provider-fallback-${handoffId}.lock.takeover`);
-  mkdirSync(takeoverPath, { mode: 0o700 });
-  writeFileSync(join(takeoverPath, 'owner.json'), JSON.stringify({
-    schemaVersion: 1,
-    pid: process.pid,
-    startId: readProcStartId(process.pid),
-    createdAt: Date.now(),
-    token: 'live-takeover-owner',
-  }), { mode: 0o600 });
-  let spawnCount = 0;
-
-  await assert.rejects(
-    () => dispatchProviderFallback(fallback, '/workspace', { hasGeminiCli: true }, {
-      lockDir,
-      lockTimeoutMs: 50,
-      takeoverStaleMs: 0,
-      loadTeamState: () => null,
-      spawnTeam: async () => { spawnCount += 1; return null; },
-    }),
-    /Timed out acquiring provider fallback lock/,
-  );
-  assert.equal(spawnCount, 0);
-  assert.equal(existsSync(takeoverPath), true);
 });
 
 test('dispatchProviderFallback does not steal a live PID 1 lock owner', async (t) => {

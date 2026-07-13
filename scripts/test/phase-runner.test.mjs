@@ -77,6 +77,17 @@ function readEvents(cwd, runId) {
     .map(line => JSON.parse(line));
 }
 
+function readValidEvents(cwd, runId) {
+  const file = eventsPath(cwd, runId);
+  if (!existsSync(file)) return [];
+  const events = [];
+  for (const line of readFileSync(file, 'utf-8').split('\n')) {
+    if (!line.trim()) continue;
+    try { events.push(JSON.parse(line)); } catch {}
+  }
+  return events;
+}
+
 async function completeNoCheckpoint(runId, phaseId, cwd, outputs = undefined) {
   return completePhase(runId, phaseId, outputs, { cwd, saveCheckpoint: false });
 }
@@ -692,6 +703,31 @@ describe('recordPhaseError', () => {
 // ---------------------------------------------------------------------------
 
 describe('failPhase', () => {
+  test('repairs a trailing torn event and terminalizes the active phase exactly once', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-torn-failure-event';
+      initPipeline(runId, 'atlas', { cwd });
+      enterPhase(runId, 'triage', { cwd });
+      writeFileSync(eventsPath(cwd, runId), '{"type":"torn"', { mode: 0o600 });
+
+      assert.deepEqual(failPhase(runId, 'triage', 'plan_validation_failed', { cwd }), {
+        ok: true, idempotent: false, degraded: false,
+      });
+      assert.deepEqual(failPhase(runId, 'triage', 'plan_validation_failed', { cwd }), {
+        ok: true, idempotent: true, degraded: false,
+      });
+
+      const raw = readFileSync(eventsPath(cwd, runId), 'utf8');
+      assert.match(raw, /^\{"type":"torn"\n\{/,
+        'a missing LF must be repaired before the next JSONL record');
+      assert.equal(readValidEvents(cwd, runId)
+        .filter(event => event.type === 'pipeline_phase_failed').length, 1);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
   test('fails only the exact active phase and is idempotent for the same code', async () => {
     const cwd = await makeTmpDir();
     try {
@@ -770,6 +806,33 @@ describe('failPhase', () => {
 // ---------------------------------------------------------------------------
 
 describe('completePhase', () => {
+  test('skips torn middle/trailing records and appends one durable completion event', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-torn-completion-event';
+      initPipeline(runId, 'atlas', { cwd });
+      enterPhase(runId, 'triage', { cwd });
+      const before = { type: 'diagnostic', detail: { position: 'before' } };
+      const after = { type: 'diagnostic', detail: { position: 'after' } };
+      writeFileSync(eventsPath(cwd, runId), [
+        JSON.stringify(before),
+        '{"type":broken}',
+        JSON.stringify(after),
+        '{"type":"trailing"',
+      ].join('\n'), { mode: 0o600 });
+
+      assert.equal((await completeNoCheckpoint(runId, 'triage', cwd)).ok, true);
+      assert.equal((await completeNoCheckpoint(runId, 'triage', cwd)).ok, true);
+
+      const events = readValidEvents(cwd, runId);
+      assert.deepEqual(events.filter(event => event.type === 'diagnostic'), [before, after],
+        'valid records after a damaged line must remain visible');
+      assert.equal(events.filter(event => event.type === 'pipeline_phase_completed').length, 1);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
   test('rejects pending, future, and already-terminal completion on a valid ledger', async () => {
     const cwd = await makeTmpDir();
     try {
@@ -1014,6 +1077,29 @@ describe('completePhase', () => {
 });
 
 describe('recordPhaseOutputs', () => {
+  test('repairs a torn log while recording recovery outputs exactly once', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-torn-output-event';
+      initPipeline(runId, 'athena', { cwd });
+      await completeThrough(runId, cwd, ['triage', 'context', 'spec', 'plan']);
+      enterPhase(runId, 'spawn', { cwd });
+      writeFileSync(eventsPath(cwd, runId), '{"type":"torn"', { mode: 0o600 });
+
+      const outputs = { teamSlug: 'recoverable-team' };
+      assert.deepEqual(recordPhaseOutputs(runId, 'spawn', outputs, { cwd }), {
+        ok: true, degraded: false,
+      });
+      assert.deepEqual(recordPhaseOutputs(runId, 'spawn', outputs, { cwd }), {
+        ok: true, degraded: false,
+      });
+      assert.equal(readValidEvents(cwd, runId)
+        .filter(event => event.type === 'pipeline_phase_outputs_recorded').length, 1);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
   test('persists bounded recovery identity without completing the phase', async () => {
     const cwd = await makeTmpDir();
     try {

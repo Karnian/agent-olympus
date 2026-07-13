@@ -65,6 +65,15 @@ function readJsonl(filePath) {
     .map(l => JSON.parse(l));
 }
 
+function readValidJsonl(filePath) {
+  const values = [];
+  for (const line of readFileSync(filePath, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try { values.push(JSON.parse(line)); } catch {}
+  }
+  return values;
+}
+
 function assertEmptyRunRecord(record) {
   assert.deepEqual(record, { summary: {}, events: [], verifications: [] });
 }
@@ -440,6 +449,27 @@ test('addEvent: multiple calls produce multiple JSONL lines', async () => {
   }
 });
 
+test('addEvent repairs a missing LF and getRun preserves valid records after damaged JSONL', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId, runDir } = createRun('atlas', 'torn event log', { base: tmpDir });
+    const eventsPath = path.join(runDir, 'events.jsonl');
+    const before = { type: 'before_damage', detail: 'kept' };
+    writeFileSync(eventsPath, `${JSON.stringify(before)}\n{"type":"torn"`, { mode: 0o600 });
+
+    addEvent(runId, { type: 'after_damage', detail: 'also kept' }, { base: tmpDir });
+
+    const raw = readFileSync(eventsPath, 'utf8');
+    assert.match(raw, /\{"type":"torn"\n\{"type":"after_damage"/);
+    assert.deepEqual(getRun(runId, { base: tmpDir }).events.map(event => event.type), [
+      'before_damage',
+      'after_damage',
+    ]);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Test 5: addVerification creates verification.jsonl with first result
 // ---------------------------------------------------------------------------
@@ -615,6 +645,38 @@ test('terminal run rejects late events and verifications while keeping run_final
       base: tmpDir,
       stateDir,
     }), { ok: true, idempotent: true });
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('finalizeRun skips torn events, repairs EOF, and remains idempotent with run_finalized last', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId, runDir } = createRun('atlas', 'torn finalization log', { base: tmpDir });
+    const eventsPath = path.join(runDir, 'events.jsonl');
+    writeFileSync(eventsPath, [
+      JSON.stringify({ type: 'before_damage', detail: 1 }),
+      '{"type":broken}',
+      JSON.stringify({ type: 'after_damage', detail: 2 }),
+      '{"type":"trailing"',
+    ].join('\n'), { mode: 0o600 });
+
+    assert.deepEqual(finalizeRun(runId, { result: 'success' }, { base: tmpDir }), {
+      ok: true, idempotent: false,
+    });
+    assert.deepEqual(finalizeRun(runId, { result: 'success' }, { base: tmpDir }), {
+      ok: true, idempotent: true,
+    });
+
+    const events = readValidJsonl(eventsPath);
+    assert.deepEqual(events.map(event => event.type), [
+      'before_damage',
+      'after_damage',
+      'run_finalized',
+    ]);
+    assert.equal(events.filter(event => event.type === 'run_finalized').length, 1);
+    assert.equal(events.at(-1).type, 'run_finalized');
   } finally {
     await removeTmpDir(tmpDir);
   }

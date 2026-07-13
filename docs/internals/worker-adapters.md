@@ -37,14 +37,16 @@ startup failures; an incomplete legacy identity fails closed instead of reusing
 another run's output. Provider child-team creation is serialized by an
 owner-record lock (`0600`, PID + process start identity). The fully written
 owner intent is published with a same-directory no-replace hard link, so no
-empty owner path is visible; malformed legacy locks fail closed. Dead-owner recovery is
-bound to the exact observed lock generation by a permanent, create-exclusive
-recovery claim before that generation can be removed. The takeover fence uses
-the same one-winner rule. Re-reading the generation after the claim prevents a
-stale observer from deleting a replacement owner, while the permanent claim
-prevents a third contender from replaying recovery for the same dead owner.
-Provider recovery claims are durable and excluded from SessionEnd's transient
-state sweep. Deterministic child team names make repeated polls idempotent.
+empty owner path is visible; malformed legacy locks fail closed. Dead-owner
+recovery is bound to the exact observed lock generation by a create-exclusive
+root claim before that generation can be removed. If that claimant dies, a
+contender may publish one no-replace successor keyed to the dead predecessor's
+token, but only after proving the predecessor stale and revalidating that the
+observed lock generation is unchanged. Each predecessor therefore elects one
+successor while a late observer of an older generation still cannot delete a
+replacement owner. Provider root and successor claims are durable and excluded
+from SessionEnd's transient state sweep. Deterministic child team names make
+repeated polls idempotent.
 
 Replacement workers inherit the root worker's `cwd`/`worktreePath` and branch,
 but set `worktreeCreated:false`. A child team therefore operates on the same
@@ -61,7 +63,13 @@ re-run an already completed task. `SessionEnd` sweeps inactive completion
 artifacts after 24 hours. A native Claude fallback claim is not reclaimed merely
 because its lease timestamp elapsed: elapsed time cannot prove that the Task is
 dead, and a second claim could duplicate work in the same worktree. Recovery
-therefore requires authenticated terminal output or explicit external proof.
+therefore requires authenticated terminal output or explicit external proof. If
+the state is already `completed` but its authenticated output record is missing
+or has a different claim token, dispatch fails closed with
+`completed-output-lost` instead of changing the state back to `pending`. A
+completion-persistence caller is different: it already holds the real terminal
+output bytes, so it repairs the output record under the existing completed claim
+without rerunning the task.
 The chain is per worker; a session-global provider circuit breaker/cooldown
 remains a separate follow-up.
 

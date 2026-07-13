@@ -34,19 +34,20 @@
  * traversal. Initialization never overwrites corrupt or future-schema bytes.
  */
 
-import {
-  closeSync,
-  constants as fsConstants,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readSync,
-  writeSync,
-} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
+import {
+  appendRegularArtifact,
+  ensureSafeDirectoryPath as ensureHardenedDirectoryPath,
+  HARDENED_FS_VIOLATION_CODE,
+  isWithinPath,
+  lstatOrMissing,
+  readRegularArtifact,
+  readRegularArtifactRange,
+  requireSafeDirectory,
+  validateRegularArtifact,
+} from './hardened-fs.mjs';
 import { bindRunFinalizationPaths } from './run-artifacts.mjs';
 import {
   acquireRunFinalizationLock,
@@ -72,7 +73,6 @@ const LOG_FILE_NAME = 'pipeline.json';
 const OUTPUTS_CAP_BYTES = 4096;
 const PIPELINE_MAX_BYTES = 1024 * 1024;
 const EVENTS_MAX_BYTES = 16 * 1024 * 1024;
-const NO_FOLLOW = fsConstants.O_NOFOLLOW || 0;
 const UNSAFE_PATH_CODE = 'AO_UNSAFE_PHASE_RUN_PATH';
 const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const SAFE_RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
@@ -155,6 +155,10 @@ function isUnsafePath(error) {
   return error?.code === UNSAFE_PATH_CODE;
 }
 
+function isHardenedFsViolation(error) {
+  return error?.code === HARDENED_FS_VIOLATION_CODE;
+}
+
 function revalidatePhaseRunContext(context) {
   try {
     return context.revalidate();
@@ -163,30 +167,13 @@ function revalidatePhaseRunContext(context) {
   }
 }
 
-function isWithinPath(root, candidate) {
-  const rel = relative(root, candidate);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-}
-
-function sameFsObject(left, right) {
-  return Boolean(left && right) && left.dev === right.dev && left.ino === right.ino;
-}
-
-function lstatOrMissing(path) {
-  try { return lstatSync(path); }
-  catch (error) {
-    if (error?.code === 'ENOENT') return null;
+function requireSafePhaseDirectory(path, label, requirePrivateMode = false) {
+  try {
+    return requireSafeDirectory(path, label, { requirePrivateMode });
+  } catch (error) {
+    if (isHardenedFsViolation(error)) throw unsafePath(error);
     throw error;
   }
-}
-
-function requireSafeDirectory(path, label, requirePrivateMode = false) {
-  const stat = lstatSync(path);
-  if (!stat.isDirectory() || stat.isSymbolicLink()
-    || (requirePrivateMode && process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700)) {
-    throw unsafePath(new Error(`${label} is unsafe`));
-  }
-  return stat;
 }
 
 function runBase(cwd, base = null) {
@@ -216,28 +203,20 @@ function trustedRootFor(cwd, base, opts = {}, { allowHeldLockAnchor = false } = 
   const matching = candidates.filter(root => isWithinPath(root, resolvedBase));
   if (matching.length === 0) throw unsafePath();
   const trustedRoot = matching.sort((left, right) => right.length - left.length)[0];
-  requireSafeDirectory(trustedRoot, 'phase run trusted root');
+  requireSafePhaseDirectory(trustedRoot, 'phase run trusted root');
   return trustedRoot;
 }
 
 function ensureSafeDirectoryPath(target, trustedRoot, label, requirePrivateMode = true) {
-  const absoluteTarget = resolve(target);
-  if (!isWithinPath(trustedRoot, absoluteTarget)) throw unsafePath();
-  const rel = relative(trustedRoot, absoluteTarget);
-  const components = rel === '' ? [] : rel.split(sep);
-  let current = trustedRoot;
-  requireSafeDirectory(current, `${label} trusted root`);
-  for (let index = 0; index < components.length; index += 1) {
-    current = join(current, components[index]);
-    try { mkdirSync(current, { mode: 0o700 }); }
-    catch (error) {
-      if (error?.code !== 'EEXIST') throw unsafePath(error);
-    }
-    requireSafeDirectory(
-      current,
-      label,
-      requirePrivateMode && index === components.length - 1,
-    );
+  try {
+    return ensureHardenedDirectoryPath(target, label, {
+      trustedRoot,
+      requirePrivateMode,
+      requirePrivateAnchor: false,
+    });
+  } catch (error) {
+    if (isHardenedFsViolation(error) || error?.syscall === 'mkdir') throw unsafePath(error);
+    throw error;
   }
 }
 
@@ -275,45 +254,18 @@ function artifactPath(context, name) {
   return join(context.dir, name);
 }
 
-function validateRegularArtifact(stat, label, maxBytes, allowEmpty = true) {
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1
-    || stat.size > maxBytes || (!allowEmpty && stat.size <= 0)
-    || (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600)) {
-    throw unsafePath(new Error(`${label} is unsafe`));
-  }
-}
-
 function readArtifactText(context, name, label, maxBytes, { allowMissing = false } = {}) {
   const path = artifactPath(context, name);
-  const before = lstatOrMissing(path);
-  if (!before) {
-    if (allowMissing) return { present: false, text: '' };
-    throw unsafePath(new Error(`${label} is missing`));
-  }
-  validateRegularArtifact(before, label, maxBytes);
-  let fd;
   try {
-    fd = openSync(path, fsConstants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
-    validateRegularArtifact(opened, label, maxBytes);
-    if (!sameFsObject(before, opened) || before.size !== opened.size) {
-      throw unsafePath(new Error(`${label} changed before read`));
-    }
-    const bytes = Buffer.alloc(opened.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
-      if (count <= 0) throw unsafePath(new Error(`${label} was truncated during read`));
-      offset += count;
-    }
-    const after = fstatSync(fd);
-    if (!sameFsObject(opened, after) || after.size !== opened.size) {
-      throw unsafePath(new Error(`${label} changed during read`));
-    }
-    revalidatePhaseRunContext(context);
-    return { present: true, text: bytes.toString('utf8') };
-  } finally {
-    if (fd !== undefined) closeSync(fd);
+    return readRegularArtifact(path, label, maxBytes, {
+      allowMissing,
+      allowEmpty: true,
+      generationPolicy: 'object-size',
+      revalidateContext: () => revalidatePhaseRunContext(context),
+    });
+  } catch (error) {
+    if (isUnsafePath(error) || isHardenedFsViolation(error)) throw unsafePath(error);
+    throw error;
   }
 }
 
@@ -324,38 +276,46 @@ function assertArtifactSafe(context, name, label, maxBytes, { allowMissing = tru
     if (allowMissing) return null;
     throw unsafePath(new Error(`${label} is missing`));
   }
-  validateRegularArtifact(stat, label, maxBytes);
+  try {
+    validateRegularArtifact(stat, label, maxBytes, { allowEmpty: true });
+  } catch (error) {
+    if (isHardenedFsViolation(error)) throw unsafePath(error);
+    throw error;
+  }
   return stat;
 }
 
-function appendArtifactText(context, name, label, text, maxBytes) {
+function appendArtifactText(context, name, label, text, maxBytes, {
+  ensureLineBoundary = false,
+  expectedStat = undefined,
+} = {}) {
   const path = artifactPath(context, name);
-  const before = assertArtifactSafe(context, name, label, maxBytes);
-  const bytes = Buffer.from(text, 'utf8');
-  let fd;
   try {
-    fd = openSync(
-      path,
-      fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | NO_FOLLOW,
-      0o600,
-    );
-    const opened = fstatSync(fd);
-    validateRegularArtifact(opened, label, maxBytes);
-    if (before && (!sameFsObject(before, opened) || before.size !== opened.size)) {
-      throw unsafePath(new Error(`${label} changed before append`));
-    }
-    if (opened.size + bytes.length > maxBytes) {
-      throw unsafePath(new Error(`${label} exceeds size bound`));
-    }
-    let offset = 0;
-    while (offset < bytes.length) {
-      const count = writeSync(fd, bytes, offset, bytes.length - offset);
-      if (count <= 0) throw unsafePath(new Error(`${label} could not be appended`));
-      offset += count;
-    }
-    revalidatePhaseRunContext(context);
-  } finally {
-    if (fd !== undefined) closeSync(fd);
+    return appendRegularArtifact(path, label, text, maxBytes, {
+      generationPolicy: 'object-size',
+      ensureLineBoundary,
+      expectedStat,
+      revalidateContext: () => revalidatePhaseRunContext(context),
+    });
+  } catch (error) {
+    if (isUnsafePath(error) || isHardenedFsViolation(error)) throw unsafePath(error);
+    throw error;
+  }
+}
+
+function readArtifactRange(context, name, label, maxBytes, appendResult) {
+  const path = artifactPath(context, name);
+  try {
+    return readRegularArtifactRange(path, label, maxBytes, {
+      ...appendResult,
+      expectedStat: appendResult.stat,
+      allowEmpty: true,
+      generationPolicy: 'object-size',
+      revalidateContext: () => revalidatePhaseRunContext(context),
+    });
+  } catch (error) {
+    if (isUnsafePath(error) || isHardenedFsViolation(error)) throw unsafePath(error);
+    throw error;
   }
 }
 
@@ -429,31 +389,61 @@ function runSummaryStatus(context) {
   }
 }
 
+function parsePipelineEventLines(text) {
+  const events = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      events.push(JSON.parse(line));
+    } catch {
+      // A torn/invalid line cannot exact-match any well-formed event. Skipping
+      // it therefore preserves the ensure* idempotency counting invariant while
+      // allowing valid records before and after the damaged line to participate.
+    }
+  }
+  return events;
+}
+
 function readPipelineEvents(context) {
   try {
-    const events = readArtifactText(
+    const file = readArtifactText(
       context, 'events.jsonl', 'pipeline events', EVENTS_MAX_BYTES, { allowMissing: true },
     );
-    return events.present ? events.text.split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+    return {
+      events: file.present ? parsePipelineEventLines(file.text) : [],
+      stat: file.stat,
+    };
   } catch (error) {
     if (isUnsafePath(error)) throw error;
     return null;
   }
 }
 
-function appendPipelineEvent(context, event) {
+function appendPipelineEvent(context, event, expectedStat) {
   try {
-    appendArtifactText(
+    return appendArtifactText(
       context,
       'events.jsonl',
       'pipeline events',
       `${JSON.stringify({ ...event, timestamp: nowIso() })}\n`,
       EVENTS_MAX_BYTES,
+      { ensureLineBoundary: true, expectedStat },
     );
-    return true;
   } catch (error) {
     if (isUnsafePath(error)) throw error;
-    return false;
+    return null;
+  }
+}
+
+function appendedPipelineEvents(context, appendResult) {
+  try {
+    const tail = readArtifactRange(
+      context, 'events.jsonl', 'pipeline events', EVENTS_MAX_BYTES, appendResult,
+    );
+    return parsePipelineEventLines(tail.text);
+  } catch (error) {
+    if (isUnsafePath(error)) throw error;
+    return null;
   }
 }
 
@@ -467,8 +457,9 @@ function assertSafeLoopGuard(context) {
 }
 
 function ensurePhaseFailedEvent(context, ledger, phaseId, failureCode) {
-  let events = readPipelineEvents(context);
-  if (!events) return false;
+  const eventFile = readPipelineEvents(context);
+  if (!eventFile) return false;
+  const { events } = eventFile;
   const exact = event => event?.type === 'pipeline_phase_failed'
     && event.phase === phaseId
     && event.detail?.orchestrator === ledger.orchestrator
@@ -476,13 +467,14 @@ function ensurePhaseFailedEvent(context, ledger, phaseId, failureCode) {
   const matches = events.filter(exact);
   if (matches.length > 1) return false;
   if (matches.length === 0) {
-    if (!appendPipelineEvent(context, {
+    const appended = appendPipelineEvent(context, {
       type: 'pipeline_phase_failed',
       phase: phaseId,
       detail: { orchestrator: ledger.orchestrator, code: failureCode },
-    })) return false;
-    events = readPipelineEvents(context);
-    if (!events || events.filter(exact).length !== 1) return false;
+    }, eventFile.stat);
+    if (!appended) return false;
+    const tail = appendedPipelineEvents(context, appended);
+    if (!tail || tail.filter(exact).length !== 1) return false;
   }
   return true;
 }
@@ -490,8 +482,9 @@ function ensurePhaseFailedEvent(context, ledger, phaseId, failureCode) {
 function ensurePhaseCompletedEvent(context, ledger, phaseId) {
   const entry = ledger.phases?.[phaseId];
   if (!entry || entry.status !== 'completed' || !Number.isInteger(entry.attempts)) return false;
-  let events = readPipelineEvents(context);
-  if (!events) return false;
+  const eventFile = readPipelineEvents(context);
+  if (!eventFile) return false;
+  const { events } = eventFile;
   const exact = event => event?.type === 'pipeline_phase_completed'
     && event.phase === phaseId
     && event.detail?.orchestrator === ledger.orchestrator
@@ -509,7 +502,7 @@ function ensurePhaseCompletedEvent(context, ledger, phaseId) {
     if ((hasLaterCompletion && !declaredRewind)
       || events.some(event => event?.type === 'run_finalized')) return false;
     const next = safeNextAfter(ledger, phaseId);
-    if (!appendPipelineEvent(context, {
+    const appended = appendPipelineEvent(context, {
       type: 'pipeline_phase_completed',
       phase: phaseId,
       detail: {
@@ -518,16 +511,18 @@ function ensurePhaseCompletedEvent(context, ledger, phaseId) {
         attempt: entry.attempts,
         ...(isPlainObject(entry.outputs) ? { outputs: entry.outputs } : {}),
       },
-    })) return false;
-    events = readPipelineEvents(context);
-    if (!events || events.filter(exact).length !== 1) return false;
+    }, eventFile.stat);
+    if (!appended) return false;
+    const tail = appendedPipelineEvents(context, appended);
+    if (!tail || tail.filter(exact).length !== 1) return false;
   }
   return true;
 }
 
 function ensurePhaseOutputsEvent(context, ledger, phaseId, outputs) {
-  let events = readPipelineEvents(context);
-  if (!events) return false;
+  const eventFile = readPipelineEvents(context);
+  if (!eventFile) return false;
+  const { events } = eventFile;
   const encoded = JSON.stringify(outputs);
   const exact = event => event?.type === 'pipeline_phase_outputs_recorded'
     && event.phase === phaseId
@@ -536,13 +531,14 @@ function ensurePhaseOutputsEvent(context, ledger, phaseId, outputs) {
   const matches = events.filter(exact);
   if (matches.length > 1) return false;
   if (matches.length === 0) {
-    if (!appendPipelineEvent(context, {
+    const appended = appendPipelineEvent(context, {
       type: 'pipeline_phase_outputs_recorded',
       phase: phaseId,
       detail: { orchestrator: ledger.orchestrator, outputs },
-    })) return false;
-    events = readPipelineEvents(context);
-    if (!events || events.filter(exact).length !== 1) return false;
+    }, eventFile.stat);
+    if (!appended) return false;
+    const tail = appendedPipelineEvents(context, appended);
+    if (!tail || tail.filter(exact).length !== 1) return false;
   }
   return true;
 }

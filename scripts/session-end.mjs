@@ -38,10 +38,10 @@ const PROTECTED_NAMES = new Set([
   'wisdom.jsonl',
 ]);
 
-// Provider fallback recovery claims are intentionally one-shot for the exact
-// stale lock generation. Deleting one by age would let a very late observer
-// replay recovery and reintroduce the ABA race the claim closes.
-const PROVIDER_RECOVERY_CLAIM = /^\.provider-(?:fallback|takeover)-[a-f0-9]{24}-recovery-[a-f0-9]{64}\.claim$/;
+// Provider fallback recovery claims form an append-only lineage for the exact
+// stale lock generation. Preserve both its root and optional successor claim:
+// deleting either could let an old observer replay recovery across sessions.
+const PROVIDER_RECOVERY_CLAIM = /^\.provider-fallback-[a-f0-9]{24}-recovery-[a-f0-9]{64}(?:-successor-[a-f0-9]{64})?\.claim$/;
 
 /**
  * Remove entries in `dir` whose mtime exceeds STALE_MS.

@@ -10,26 +10,31 @@
  */
 
 import {
-  closeSync,
-  constants as fsConstants,
   existsSync,
-  fstatSync,
-  fsyncSync,
   linkSync,
   lstatSync,
   mkdirSync,
-  openSync,
   opendirSync,
-  readSync,
   readdirSync,
   rmdirSync,
   unlinkSync,
-  writeSync,
 } from 'fs';
-import { tmpdir } from 'os';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'path';
+import { dirname, join, resolve } from 'path';
 import { randomUUID } from 'crypto';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
+import {
+  appendRegularArtifact,
+  bindSafeDirectoryPath,
+  ensureSafeDirectoryPath,
+  lstatOrMissing,
+  readRegularArtifact,
+  readRegularArtifactRange,
+  revalidateDirectoryBinding,
+  revalidateRegularArtifact,
+  sameFileGeneration,
+  sameFsObject,
+  writeExclusiveRegularArtifact,
+} from './hardened-fs.mjs';
 import { getCurrentSessionId, linkRunToSession } from './session-registry.mjs';
 import {
   acquireRunFinalizationLock,
@@ -48,7 +53,6 @@ const MAX_POINTER_BYTES = 64 * 1024;
 // the normal small-run behavior while preventing a poisoned artifact root from
 // turning a status call into an arbitrarily large response.
 const MAX_RUN_LIST_ENTRIES = 10_000;
-const NO_FOLLOW = fsConstants.O_NOFOLLOW || 0;
 const ACTIVE_POINTER_INTENT_PREFIX = '.active-run-intent-';
 const FINALIZATION_CORE_FIELDS = new Set([
   'runId',
@@ -67,113 +71,6 @@ function canonicalTimestamp(value) {
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value
     ? timestamp
     : null;
-}
-
-function sameFsObject(left, right) {
-  return Boolean(left && right)
-    && left.dev === right.dev
-    && left.ino === right.ino
-    && left.mode === right.mode;
-}
-
-function sameFileGeneration(left, right) {
-  return sameFsObject(left, right)
-    && left.size === right.size
-    && left.mtimeMs === right.mtimeMs
-    && left.ctimeMs === right.ctimeMs;
-}
-
-function requireSafeDirectory(path, label, requirePrivateMode = false) {
-  const stat = lstatSync(path);
-  if (!stat.isDirectory() || stat.isSymbolicLink()
-    || (requirePrivateMode && process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700)) {
-    throw new Error(`${label} is unsafe`);
-  }
-  return stat;
-}
-
-function isWithinPath(root, candidate) {
-  const rel = relative(root, candidate);
-  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-}
-
-function trustedAnchorFor(target, explicitRoot) {
-  const absoluteTarget = resolve(target);
-  const candidates = explicitRoot
-    ? [resolve(explicitRoot)]
-    : [resolve(process.cwd()), resolve(tmpdir())];
-  const matches = candidates.filter(root => isWithinPath(root, absoluteTarget));
-  if (matches.length === 0) throw new Error('finalization path is outside a trusted root');
-  return matches.sort((left, right) => right.length - left.length)[0];
-}
-
-function bindSafeDirectoryPath(target, label, {
-  trustedRoot,
-  requirePrivateMode = false,
-} = {}) {
-  const absoluteTarget = resolve(target);
-  const anchor = trustedAnchorFor(absoluteTarget, trustedRoot);
-  const rel = relative(anchor, absoluteTarget);
-  const components = rel === '' ? [] : rel.split(sep);
-  const chain = [];
-  let current = anchor;
-  const anchorStat = requireSafeDirectory(current, `${label} trusted root`);
-  chain.push({ path: current, stat: anchorStat, privateMode: false });
-  for (let index = 0; index < components.length; index += 1) {
-    current = join(current, components[index]);
-    const privateMode = requirePrivateMode && index === components.length - 1;
-    chain.push({
-      path: current,
-      stat: requireSafeDirectory(current, label, privateMode),
-      privateMode,
-    });
-  }
-  return { path: absoluteTarget, anchor, chain };
-}
-
-function revalidateDirectoryBinding(binding, label) {
-  for (const item of binding.chain) {
-    const current = requireSafeDirectory(item.path, label, item.privateMode);
-    if (!sameFsObject(current, item.stat)) throw new Error(`${label} ancestry changed`);
-  }
-  return true;
-}
-
-function ensureSafeDirectoryPath(target, label, {
-  trustedRoot,
-  requirePrivateMode = true,
-} = {}) {
-  const absoluteTarget = resolve(target);
-  const anchor = trustedAnchorFor(absoluteTarget, trustedRoot);
-  const rel = relative(anchor, absoluteTarget);
-  const components = rel === '' ? [] : rel.split(sep);
-  const chain = [];
-  let current = anchor;
-  chain.push({
-    path: current,
-    stat: requireSafeDirectory(
-      current,
-      `${label} trusted root`,
-      requirePrivateMode && components.length === 0,
-    ),
-    privateMode: requirePrivateMode && components.length === 0,
-  });
-  for (let index = 0; index < components.length; index += 1) {
-    current = join(current, components[index]);
-    try { mkdirSync(current, { mode: 0o700 }); }
-    catch (error) {
-      if (error?.code !== 'EEXIST') throw error;
-    }
-    const privateMode = requirePrivateMode && index === components.length - 1;
-    chain.push({
-      path: current,
-      stat: requireSafeDirectory(current, label, privateMode),
-      privateMode,
-    });
-  }
-  const binding = { path: absoluteTarget, anchor, chain };
-  revalidateDirectoryBinding(binding, label);
-  return binding;
 }
 
 /**
@@ -208,126 +105,6 @@ export function bindRunFinalizationPaths(runId, opts = {}, _policy = {}) {
   };
   revalidate();
   return Object.freeze({ base, dir, revalidate });
-}
-
-function lstatOrMissing(path) {
-  try { return lstatSync(path); }
-  catch (error) {
-    if (error?.code === 'ENOENT') return null;
-    throw error;
-  }
-}
-
-function validateRegularArtifact(stat, label, maxBytes, allowEmpty = false) {
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1
-    || stat.size > maxBytes || (!allowEmpty && stat.size <= 0)
-    || (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600)) {
-    throw new Error(`${label} is unsafe`);
-  }
-}
-
-function readRegularArtifact(path, label, maxBytes, { allowMissing = false, allowEmpty = false } = {}) {
-  const pathStat = lstatOrMissing(path);
-  if (!pathStat) {
-    if (allowMissing) return { present: false, text: '', stat: null };
-    throw new Error(`${label} is missing`);
-  }
-  validateRegularArtifact(pathStat, label, maxBytes, allowEmpty);
-  let fd;
-  try {
-    fd = openSync(path, fsConstants.O_RDONLY | NO_FOLLOW);
-    const opened = fstatSync(fd);
-    validateRegularArtifact(opened, label, maxBytes, allowEmpty);
-    if (!sameFileGeneration(pathStat, opened)) throw new Error(`${label} changed before open`);
-    const buffer = Buffer.alloc(opened.size);
-    let offset = 0;
-    while (offset < buffer.length) {
-      const count = readSync(fd, buffer, offset, buffer.length - offset, offset);
-      if (count <= 0) throw new Error(`${label} was truncated during read`);
-      offset += count;
-    }
-    const after = fstatSync(fd);
-    if (!sameFileGeneration(opened, after)) throw new Error(`${label} changed during read`);
-    return { present: true, text: buffer.toString('utf8'), stat: after };
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
-function revalidateRegularArtifact(path, expected, label, maxBytes, allowEmpty = false) {
-  const current = lstatSync(path);
-  validateRegularArtifact(current, label, maxBytes, allowEmpty);
-  if (!sameFileGeneration(current, expected)) throw new Error(`${label} changed during finalization`);
-  return current;
-}
-
-function appendRegularArtifact(path, label, content, maxBytes) {
-  const before = lstatOrMissing(path);
-  if (before) validateRegularArtifact(before, label, maxBytes, true);
-  let fd;
-  try {
-    fd = openSync(
-      path,
-      fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | NO_FOLLOW,
-      0o600,
-    );
-    const opened = fstatSync(fd);
-    validateRegularArtifact(opened, label, maxBytes, true);
-    if (before && !sameFileGeneration(before, opened)) throw new Error(`${label} changed before append`);
-    const bytes = Buffer.from(content, 'utf8');
-    if (opened.size + bytes.length > maxBytes) throw new Error(`${label} exceeds its size bound`);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const count = writeSync(fd, bytes, offset, bytes.length - offset);
-      if (count <= 0) throw new Error(`${label} could not be appended`);
-      offset += count;
-    }
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
-}
-
-function writeExclusiveRegularArtifact(path, label, content, maxBytes) {
-  const bytes = Buffer.from(content, 'utf8');
-  if (bytes.length <= 0 || bytes.length > maxBytes) throw new Error(`${label} exceeds its size bound`);
-  let fd;
-  let opened = null;
-  try {
-    fd = openSync(
-      path,
-      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | NO_FOLLOW,
-      0o600,
-    );
-    opened = fstatSync(fd);
-    validateRegularArtifact(opened, label, maxBytes, true);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const count = writeSync(fd, bytes, offset, bytes.length - offset);
-      if (count <= 0) throw new Error(`${label} could not be written`);
-      offset += count;
-    }
-    fsyncSync(fd);
-    const persisted = fstatSync(fd);
-    validateRegularArtifact(persisted, label, maxBytes);
-    if (!sameFsObject(opened, persisted) || persisted.size !== bytes.length) {
-      throw new Error(`${label} was not durable`);
-    }
-    return persisted;
-  } catch (error) {
-    if (fd !== undefined) {
-      try { closeSync(fd); } catch {}
-      fd = undefined;
-    }
-    if (opened) {
-      try {
-        const current = lstatSync(path);
-        if (!current.isSymbolicLink() && sameFsObject(opened, current)) unlinkSync(path);
-      } catch {}
-    }
-    throw error;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
-  }
 }
 
 function recoverActivePointerPublication(pointerPath) {
@@ -748,20 +525,31 @@ function clearActiveRunId(orchestrator, runId, preflight, opts = {}) {
   } catch { return false; }
 }
 
-function readRunEvents(eventsPath) {
+function readRunEventFile(eventsPath) {
   try {
     const file = readRegularArtifact(eventsPath, 'run events', MAX_EVENTS_BYTES, {
       allowMissing: true,
       allowEmpty: true,
     });
-    return file.present ? file.text.split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
+    return {
+      // Event logs are append-only audit trails. A torn record is ignored, but
+      // valid records after it remain authoritative and visible to finalizers.
+      events: file.present ? parseJsonLines(file.text, { skipInvalid: true }) : [],
+      stat: file.stat,
+    };
   } catch { return null; }
+}
+
+function readRunEvents(eventsPath) {
+  return readRunEventFile(eventsPath)?.events ?? null;
 }
 
 function ensureRunFinalizedEvent(runId, dir, summary) {
   const eventsPath = join(dir, 'events.jsonl');
-  let events = readRunEvents(eventsPath);
-  if (!events) return false;
+  const eventFile = readRunEventFile(eventsPath);
+  if (!eventFile) return false;
+  let { events } = eventFile;
+  let eofStat = eventFile.stat;
   let finalized = events.filter(event => event?.type === 'run_finalized');
   if (finalized.length === 0) {
     const event = {
@@ -774,15 +562,41 @@ function ensureRunFinalizedEvent(runId, dir, summary) {
       timestamp: new Date().toISOString(),
     };
     try {
-      appendRegularArtifact(eventsPath, 'run events', `${JSON.stringify(event)}\n`, MAX_EVENTS_BYTES);
+      const appended = appendRegularArtifact(
+        eventsPath,
+        'run events',
+        `${JSON.stringify(event)}\n`,
+        MAX_EVENTS_BYTES,
+        {
+          ensureLineBoundary: true,
+          expectedStat: eventFile.stat,
+        },
+      );
+      const tail = readRegularArtifactRange(eventsPath, 'run events', MAX_EVENTS_BYTES, {
+        ...appended,
+        expectedStat: appended.stat,
+        allowEmpty: true,
+        requireEof: true,
+      });
+      const appendedEvents = parseJsonLines(tail.text);
+      if (appendedEvents.length !== 1 || appendedEvents[0]?.type !== 'run_finalized') {
+        return false;
+      }
+      events = [...events, appendedEvents[0]];
+      eofStat = tail.stat;
     } catch {
       return false;
     }
-    events = readRunEvents(eventsPath);
-    if (!events) return false;
     finalized = events.filter(item => item?.type === 'run_finalized');
   }
   if (finalized.length !== 1 || events.at(-1) !== finalized[0]) return false;
+  try {
+    revalidateRegularArtifact(eventsPath, eofStat, 'run events', MAX_EVENTS_BYTES, {
+      allowEmpty: true,
+    });
+  } catch {
+    return false;
+  }
   const event = finalized[0];
   const timestamp = Date.parse(event.timestamp);
   return event.detail?.status === 'completed'
@@ -1042,6 +856,7 @@ export function addEvent(runId, event, opts = {}) {
       'run events',
       `${line}\n`,
       MAX_EVENTS_BYTES,
+      { ensureLineBoundary: true },
     );
   } catch {
     // fail-safe: event loss is acceptable, never throw
@@ -1279,7 +1094,7 @@ function readBoundRunArtifact(paths, fileName, label, maxBytes, options = {}) {
       artifact.stat,
       label,
       maxBytes,
-      options.allowEmpty === true,
+      { allowEmpty: options.allowEmpty === true },
     );
     paths.revalidate();
   }
@@ -1333,7 +1148,9 @@ function readRunRecord(runId, opts = {}) {
   );
   return {
     summary,
-    events: eventsArtifact.present ? parseJsonLines(eventsArtifact.text) : [],
+    events: eventsArtifact.present
+      ? parseJsonLines(eventsArtifact.text, { skipInvalid: true })
+      : [],
     verifications: verificationsArtifact.present
       ? parseJsonLines(verificationsArtifact.text, { skipInvalid: true })
       : [],
