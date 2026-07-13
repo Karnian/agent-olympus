@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -21,57 +22,25 @@ import {
   updateBaselineTask,
 } from './lib/baseline.mjs';
 import { runOrchestrator } from './lib/orchestrate.mjs';
+import {
+  beginPipelineEvidence,
+  pipelineEvidenceNotApplicable,
+  verifyPipelineEvidence,
+} from './lib/pipeline-evidence.mjs';
+import { stagePluginSnapshot } from './lib/plugin-stage.mjs';
 import { passAtK, passHatK, rollupByTrack } from './lib/score.mjs';
+import {
+  fingerprintBenchmark,
+  fingerprintPipelineProtocol,
+  validateTaskDefinition,
+} from './lib/tasks.mjs';
 
 const EVALS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(EVALS_DIR, '..');
-const VALID_TRACKS = new Set(['regression', 'capability']);
-const VALID_ORCHESTRATORS = new Set(['atlas', 'athena', 'solo']);
 let fallbackRunCounter = 0;
 
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf-8'));
-}
-
-function assertString(value, field, errors) {
-  if (typeof value !== 'string' || value.trim() === '') {
-    errors.push(`${field} must be a non-empty string`);
-  }
-}
-
-function validateTask(task) {
-  const errors = [];
-
-  if (!task || typeof task !== 'object' || Array.isArray(task)) {
-    throw new Error('task.json must contain a JSON object');
-  }
-
-  if (task.schemaVersion !== 1) errors.push('schemaVersion must be 1');
-  assertString(task.id, 'id', errors);
-  assertString(task.prompt, 'prompt', errors);
-
-  if (!VALID_TRACKS.has(task.track)) {
-    errors.push('track must be one of: regression, capability');
-  }
-  if (!VALID_ORCHESTRATORS.has(task.orchestrator)) {
-    errors.push('orchestrator must be one of: atlas, athena, solo');
-  }
-  if (task.timeoutMs !== undefined && (!Number.isInteger(task.timeoutMs) || task.timeoutMs <= 0)) {
-    errors.push('timeoutMs must be a positive integer when present');
-  }
-  if (task.k !== undefined && (!Number.isInteger(task.k) || task.k <= 0)) {
-    errors.push('k must be a positive integer when present');
-  }
-  if (task.modelTier !== undefined && (typeof task.modelTier !== 'string' || task.modelTier.trim() === '')) {
-    errors.push('modelTier must be a non-empty string when present');
-  }
-  if (task.difficulty !== undefined && typeof task.difficulty !== 'string') {
-    errors.push('difficulty must be a string when present');
-  }
-
-  if (errors.length > 0) {
-    throw new Error(`Invalid task.json: ${errors.join('; ')}`);
-  }
 }
 
 function loadTask(taskPath) {
@@ -85,7 +54,7 @@ function loadTask(taskPath) {
   if (!existsSync(seedDir)) throw new Error(`Missing seed directory: ${seedDir}`);
 
   const task = readJson(taskJsonPath);
-  validateTask(task);
+  validateTaskDefinition(task);
   return { task, taskDir, graderPath, seedDir };
 }
 
@@ -116,8 +85,16 @@ function safeRandomHex() {
   }
 }
 
+function assertSafeRunId(runId) {
+  const value = String(runId);
+  if (value === '.' || value === '..' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value)) {
+    throw new Error(`Unsafe run id: ${value}`);
+  }
+  return value;
+}
+
 function makeRunId(opts) {
-  if (opts.runId) return String(opts.runId);
+  if (opts.runId) return assertSafeRunId(opts.runId);
   const now = safeNow(opts.now);
   const prefix = now === null || now === undefined
     ? 'notime'
@@ -128,6 +105,34 @@ function makeRunId(opts) {
 function initGitIfAvailable(workdir) {
   try {
     execFileSync('git', ['init'], { cwd: workdir, stdio: 'ignore' });
+    // Harness-owned runtime state must not make Athena's committed-root
+    // worktree precondition dirty, and every trial needs a real HEAD from which
+    // isolated worker branches can be created.
+    const excludePath = path.join(workdir, '.git', 'info', 'exclude');
+    writeFileSync(excludePath, '/.ao/\n', { encoding: 'utf-8', flag: 'a' });
+    if (!existsSync(path.join(workdir, 'AGENTS.md'))) {
+      writeFileSync(path.join(workdir, 'AGENTS.md'), [
+        '# Eval Task Workspace',
+        '',
+        'Work only inside this isolated repository and follow the task prompt.',
+        'Do not inspect parent directories or external benchmark files.',
+        'Use local tests as evidence and keep changes scoped to the requested fix.',
+        '',
+      ].join('\n'));
+    }
+    execFileSync('git', ['config', 'user.name', 'Agent Olympus Eval'], { cwd: workdir, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'eval@agent-olympus.invalid'], { cwd: workdir, stdio: 'ignore' });
+    execFileSync('git', ['add', '-A'], { cwd: workdir, stdio: 'ignore' });
+    execFileSync('git', [
+      'commit', '--allow-empty', '--no-gpg-sign', '-m', 'eval: seed checkpoint',
+    ], { cwd: workdir, stdio: 'ignore' });
+    // Review routing expects origin/main, but live evals must not gain a real
+    // push target. Local remote-tracking refs provide a stable diff base while
+    // shipping preflight still sees no configured remote and skips safely.
+    execFileSync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], { cwd: workdir, stdio: 'ignore' });
+    execFileSync('git', [
+      'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main',
+    ], { cwd: workdir, stdio: 'ignore' });
   } catch {}
 }
 
@@ -174,16 +179,101 @@ async function gradeWorkdir(grade, workdir) {
   }
 }
 
-function computeDeltaVsBaseline({ baselinePath, taskId, passHat }) {
+function compareWithBaseline({
+  baselinePath,
+  taskId,
+  executionMode,
+  orchestrator,
+  benchmarkFingerprint,
+  pipelineProtocolFingerprint,
+  runK,
+  modelTier,
+  passHat,
+}) {
+  const provenanceFor = (entry) => entry ? {
+    source: entry.source,
+    runId: entry.runId,
+    measuredAt: entry.measuredAt,
+    modelTier: entry.modelTier,
+    orchestrator: entry.orchestrator,
+    benchmarkFingerprint: entry.benchmarkFingerprint,
+    pipelineProtocolFingerprint: entry.pipelineProtocolFingerprint,
+  } : null;
+  const protocolGate = (entry, evaluated, reason = null) => ({
+    evaluated,
+    passed: evaluated ? entry.pipelineProtocolFingerprint === pipelineProtocolFingerprint : null,
+    reason: evaluated && entry.pipelineProtocolFingerprint !== pipelineProtocolFingerprint
+      ? 'pipeline-protocol-mismatch'
+      : reason,
+    runFingerprint: pipelineProtocolFingerprint,
+    baselineFingerprint: entry?.pipelineProtocolFingerprint ?? null,
+  });
+  const incomparable = (reason, {
+    baselineK = null,
+    entry = null,
+    deltaVsTarget = null,
+  } = {}) => ({
+    comparable: false,
+    decisionEligible: false,
+    reason,
+    runK,
+    baselineK,
+    delta: null,
+    deltaVsTarget,
+    provenance: provenanceFor(entry),
+    protocolGate: protocolGate(entry, false, reason),
+  });
   let baseline;
   try {
     baseline = readBaseline(baselinePath);
   } catch {
-    return null;
+    return incomparable('baseline-unavailable');
+  }
+  if (!baseline) return incomparable('baseline-unavailable');
+  const entry = baseline.tasks?.[taskId];
+  if (!entry) return incomparable('task-not-in-baseline', { baselineK: baseline.k ?? null });
+  const baselineK = entry.k;
+  if (executionMode !== 'live') {
+    return incomparable('non-live-run', { baselineK, entry });
+  }
+  if (entry.orchestrator !== orchestrator) {
+    return incomparable('orchestrator-mismatch', { baselineK, entry });
+  }
+  if (entry.benchmarkFingerprint !== benchmarkFingerprint) {
+    return incomparable('benchmark-fingerprint-mismatch', { baselineK, entry });
+  }
+  if (baseline.k !== runK || baselineK !== runK) {
+    return incomparable('k-mismatch', {
+      baselineK: baselineK ?? baseline.k ?? null,
+      entry,
+    });
+  }
+  if (entry.source === 'live' && entry.modelTier !== modelTier) {
+    return incomparable('model-tier-mismatch', { baselineK, entry });
   }
   const baselineValue = baselineValueForTask(baseline, taskId);
-  if (baselineValue === null) return null;
-  return (passHat ? 1 : 0) - baselineValue;
+  if (baselineValue === null) {
+    return incomparable('baseline-verdict-unavailable', { baselineK, entry });
+  }
+  if (entry.source !== 'live') {
+    return incomparable('baseline-unmeasured', {
+      baselineK,
+      entry,
+      deltaVsTarget: (passHat ? 1 : 0) - baselineValue,
+    });
+  }
+  const gate = protocolGate(entry, true);
+  return {
+    comparable: true,
+    decisionEligible: gate.passed === true,
+    reason: null,
+    runK,
+    baselineK,
+    delta: (passHat ? 1 : 0) - baselineValue,
+    deltaVsTarget: null,
+    provenance: provenanceFor(entry),
+    protocolGate: gate,
+  };
 }
 
 function summarizeOrchestration(orchestration) {
@@ -287,6 +377,7 @@ function resolveFixture(fixture, taskDir) {
  * @param {number|Function} [opts.now] Injectable timestamp source.
  * @param {string} [opts.resultsDir] Override results root for tests.
  * @param {string} [opts.pluginDir] Plugin directory for live runs.
+ * @param {Function} [opts.spawn] Injectable child_process.spawn-compatible function.
  * @param {Function|object|string} [opts.fixture] Deterministic fixture descriptor.
  * @returns {Promise<{runId:string, runDir:string, summary:object, results:object[], exitCode:number}>}
  */
@@ -316,8 +407,11 @@ export async function runEval(taskPath, opts = {}) {
   const runId = makeRunId(opts);
   const resultsDir = path.resolve(opts.resultsDir ?? path.join(EVALS_DIR, 'results'));
   const runDir = path.join(resultsDir, runId);
-  const pluginDir = path.resolve(opts.pluginDir ?? REPO_ROOT);
+  const sourcePluginDir = path.resolve(opts.pluginDir ?? REPO_ROOT);
   const baselinePath = path.resolve(opts.baselinePath ?? path.join(EVALS_DIR, 'baseline.json'));
+  const modelTier = task.modelTier ?? 'sonnet';
+  const benchmarkFingerprint = fingerprintBenchmark(taskDir);
+  const pipelineProtocolFingerprint = fingerprintPipelineProtocol();
   const trialResults = [];
   const tempRoots = [];
 
@@ -331,16 +425,58 @@ export async function runEval(taskPath, opts = {}) {
       const { tmpRoot, workdir } = createTrialWorkdir(seedDir, trial);
       tempRoots.push(tmpRoot);
 
-      const orchestration = await runOrchestrator({
-        orchestrator: task.orchestrator,
-        prompt: task.prompt,
-        cwd: workdir,
-        timeoutMs: task.timeoutMs,
-        modelTier: task.modelTier ?? 'sonnet',
-        pluginDir,
-        fixture: resolveFixture(opts.fixture, taskDir),
-      });
+      const pipelineHandle = opts.live
+        ? beginPipelineEvidence({
+          workdir,
+          orchestrator: task.orchestrator,
+          evalRunId: runId,
+          taskId: task.id,
+          trial,
+        })
+        : null;
+      if (pipelineHandle?.required && !pipelineHandle.ready) {
+        throw new Error(`Live pipeline evidence precondition failed: ${pipelineHandle.reason}: ${pipelineHandle.detail}`);
+      }
+
+      // Every live trial gets a fresh plugin snapshot. Sharing one writable
+      // snapshot across k trials would let an earlier run contaminate a later
+      // run even though their task workdirs are isolated.
+      const stagedPlugin = opts.live ? stagePluginSnapshot(sourcePluginDir) : null;
+      let orchestration;
+      try {
+        orchestration = await runOrchestrator({
+          orchestrator: task.orchestrator,
+          prompt: task.prompt,
+          cwd: workdir,
+          timeoutMs: task.timeoutMs,
+          modelTier,
+          pluginDir: stagedPlugin?.pluginDir ?? sourcePluginDir,
+          spawn: opts.spawn,
+          fixture: resolveFixture(opts.fixture, taskDir),
+        });
+      } finally {
+        stagedPlugin?.cleanup();
+      }
+      // Freeze orchestration evidence BEFORE the grader runs. Graders execute
+      // code inside the trial workdir and must never be able to manufacture the
+      // protocol evidence that decides whether orchestration itself succeeded.
+      const pipelineEvidence = opts.live
+        ? verifyPipelineEvidence(pipelineHandle, Date.now())
+        : pipelineEvidenceNotApplicable('fixture-mode');
       const grade = await gradeWorkdir(graderModule.grade, workdir);
+      const orchestrationPassed = orchestration.status === 'completed' && orchestration.timedOut !== true;
+      const pipelinePassed = pipelineEvidence.required !== true || pipelineEvidence.pass === true;
+      const checks = [{
+        name: 'orchestrator-completed',
+        pass: orchestrationPassed,
+        detail: orchestrationPassed
+          ? 'orchestrator completed'
+          : `orchestrator status=${orchestration.status}, timedOut=${Boolean(orchestration.timedOut)}`,
+      }, ...(pipelineEvidence.required ? [{
+        name: 'pipeline-evidence',
+        pass: pipelineEvidence.pass === true,
+        detail: pipelineEvidence.detail,
+      }] : []), ...grade.checks];
 
       trialResults.push({
         schemaVersion: 1,
@@ -351,53 +487,97 @@ export async function runEval(taskPath, opts = {}) {
         taskDir,
         trial,
         orchestrator: task.orchestrator,
-        pass: grade.pass,
-        checks: grade.checks,
+        modelTier,
+        benchmarkFingerprint,
+        pipelineProtocolFingerprint,
+        pass: orchestrationPassed && pipelinePassed && grade.pass,
+        checks,
         usage: orchestration.usage,
         orchestration: summarizeOrchestration(orchestration),
+        pipelineEvidence,
       });
     }
 
     const passHat = passHatK(trialResults);
     const passAt = passAtK(trialResults);
     const tokenUsage = aggregateTokenUsage(trialResults.map((result) => result.usage));
-    const deltaVsBaseline = computeDeltaVsBaseline({
+    const pipelineEvidenceSummary = {
+      policyVersion: trialResults[0]?.pipelineEvidence?.policyVersion ?? null,
+      required: trialResults.some((result) => result.pipelineEvidence?.required === true),
+      trust: trialResults.some((result) => result.pipelineEvidence?.required === true)
+        ? 'candidate-asserted'
+        : 'not-applicable',
+      passedTrials: trialResults.filter((result) => result.pipelineEvidence?.pass === true).length,
+      totalTrials: trialResults.length,
+    };
+    const baselineComparison = compareWithBaseline({
       baselinePath,
       taskId: task.id,
+      executionMode: opts.live ? 'live' : 'fixture',
+      orchestrator: task.orchestrator,
+      benchmarkFingerprint,
+      pipelineProtocolFingerprint,
+      runK: k,
+      modelTier,
       passHat,
     });
+    const deltaVsBaseline = baselineComparison.delta;
+    const deltaVsTarget = baselineComparison.deltaVsTarget;
     const taskSummary = {
       task: task.id,
       track: task.track,
       executionMode: opts.live ? 'live' : 'fixture',
+      oracleIsolation: opts.live ? 'staged-plugin-best-effort' : 'fixture',
+      orchestrator: task.orchestrator,
+      modelTier,
+      benchmarkFingerprint,
+      pipelineProtocolFingerprint,
       k,
       passHatK: passHat,
       passAtK: passAt,
       tokenUsage,
+      pipelineEvidence: pipelineEvidenceSummary,
       deltaVsBaseline,
       delta_vs_baseline: deltaVsBaseline,
+      deltaVsTarget,
+      delta_vs_target: deltaVsTarget,
+      baselineProvenance: baselineComparison.provenance,
+      baselineComparison,
     };
     const summary = {
       schemaVersion: 1,
       runId,
       completedAt: new Date().toISOString(),
       executionMode: opts.live ? 'live' : 'fixture',
+      oracleIsolation: opts.live ? 'staged-plugin-best-effort' : 'fixture',
       task: task.id,
       track: task.track,
+      orchestrator: task.orchestrator,
+      modelTier,
+      benchmarkFingerprint,
+      pipelineProtocolFingerprint,
+      k,
       passHatK: passHat,
       passAtK: passAt,
       tokenUsage,
+      pipelineEvidence: pipelineEvidenceSummary,
       tasks: [taskSummary],
       tracks: rollupByTrack([taskSummary]),
       trials: trialResults.map((result) => ({
         trial: result.trial,
+        modelTier: result.modelTier,
         pass: result.pass,
         checks: result.checks,
         status: result.orchestration.status,
         usage: result.usage,
+        pipelineEvidence: result.pipelineEvidence,
       })),
       deltaVsBaseline,
       delta_vs_baseline: deltaVsBaseline,
+      deltaVsTarget,
+      delta_vs_target: deltaVsTarget,
+      baselineProvenance: baselineComparison.provenance,
+      baselineComparison,
     };
 
     await writeRunOutputs({ runDir, trialResults, summary });
@@ -406,6 +586,12 @@ export async function runEval(taskPath, opts = {}) {
         taskId: task.id,
         k,
         passHatK: passHat,
+        runId,
+        measuredAt: summary.completedAt,
+        modelTier,
+        orchestrator: task.orchestrator,
+        benchmarkFingerprint,
+        pipelineProtocolFingerprint,
       });
     }
     return {
@@ -413,7 +599,7 @@ export async function runEval(taskPath, opts = {}) {
       runDir,
       summary,
       results: trialResults,
-      exitCode: passHat ? 0 : 1,
+      exitCode: (task.track === 'capability' ? passAt : passHat) ? 0 : 1,
     };
   } finally {
     for (const tempRoot of tempRoots) {

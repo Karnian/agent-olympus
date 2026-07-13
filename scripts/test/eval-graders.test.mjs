@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -89,4 +89,60 @@ test('runEval refuses an implicit live run (no fixture, no --live)', async () =>
     /Refusing to run the real orchestrator implicitly/,
     'a bare run must not silently spawn a real unsupervised orchestrator',
   );
+});
+
+test('deep-merge grader rejects implementations that mutate their inputs', async () => {
+  const candidate = copySeed('fix-deep-merge');
+  try {
+    writeFileSync(path.join(candidate.workdir, 'src', 'mergeConfig.mjs'), `
+function apply(base, override) {
+  for (const [key, value] of Object.entries(override)) {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      base[key] = apply(base[key] || {}, value);
+    } else {
+      base[key] = value;
+    }
+  }
+  return base;
+}
+export function mergeConfig(base, override) {
+  apply(base, override);
+  return structuredClone(base);
+}
+`);
+    const grader = await import(new URL('../../evals/tasks/fix-deep-merge/grader.mjs', import.meta.url));
+    const result = await grader.grade(candidate.workdir);
+    assert.equal(result.checks[0].pass, true, 'control: public tests do not catch input mutation');
+    assert.equal(result.checks[1].pass, false, 'hidden invariants must reject input mutation');
+  } finally {
+    rmSync(candidate.tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('map-limit grader rejects duplicate mapper side effects', async () => {
+  const candidate = copySeed('fix-map-limit');
+  try {
+    writeFileSync(path.join(candidate.workdir, 'src', 'mapLimit.mjs'), `
+export async function mapLimit(items, limit, mapper) {
+  if (!Number.isInteger(limit) || limit < 1) throw new Error('invalid limit');
+  const results = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
+  for (let index = 0; index < items.length; index += 1) await mapper(items[index], index);
+  return results;
+}
+`);
+    const grader = await import(new URL('../../evals/tasks/fix-map-limit/grader.mjs', import.meta.url));
+    const result = await grader.grade(candidate.workdir);
+    assert.equal(result.checks[0].pass, true, 'control: public tests do not catch duplicate mapper calls');
+    assert.equal(result.checks[1].pass, false, 'hidden invariants must reject duplicate mapper calls');
+  } finally {
+    rmSync(candidate.tempRoot, { recursive: true, force: true });
+  }
 });

@@ -5,15 +5,36 @@
   "tasks": {
     "fix-failing-test": {
       "k": 3,
-      "passHatK": true
+      "passHatK": true,
+      "source": "declared-target",
+      "runId": null,
+      "measuredAt": null,
+      "modelTier": null,
+      "orchestrator": "atlas",
+      "benchmarkFingerprint": "f8d8a6ec6cfe2b4a73509c20d9497b1671a94cbefc56978297bf1421fc42dfc6",
+      "pipelineProtocolFingerprint": "c43d2395fb5fa1340cdbb9a739b24e096976a0d9d84bf57e16cc9435e2e3c2cd"
     },
     "fix-null-deref": {
       "k": 3,
-      "passHatK": true
+      "passHatK": true,
+      "source": "declared-target",
+      "runId": null,
+      "measuredAt": null,
+      "modelTier": null,
+      "orchestrator": "atlas",
+      "benchmarkFingerprint": "d97ca607a34632c14c6294c7a8b70bf40f8e7b6b1b32231ec5973f6e17642ccd",
+      "pipelineProtocolFingerprint": "c43d2395fb5fa1340cdbb9a739b24e096976a0d9d84bf57e16cc9435e2e3c2cd"
     },
     "fix-off-by-one": {
       "k": 3,
-      "passHatK": true
+      "passHatK": true,
+      "source": "declared-target",
+      "runId": null,
+      "measuredAt": null,
+      "modelTier": null,
+      "orchestrator": "atlas",
+      "benchmarkFingerprint": "1670043a1599be0ffe1a9463896b747352e00bb408443eefff14f4a230965e27",
+      "pipelineProtocolFingerprint": "c43d2395fb5fa1340cdbb9a739b24e096976a0d9d84bf57e16cc9435e2e3c2cd"
     }
   }
 }

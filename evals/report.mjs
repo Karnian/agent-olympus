@@ -1,10 +1,49 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const EVALS_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+function benchmarkMetadata(summary, trackName) {
+  const tasks = Array.isArray(summary.tasks)
+    ? summary.tasks.filter((task) => task.track === trackName)
+    : [];
+  const ks = [...new Set(
+    (tasks.length > 0 ? tasks.map((task) => task.k) : [summary.k])
+      .filter((value) => Number.isInteger(value) && value > 0),
+  )].sort((a, b) => a - b);
+  const entries = tasks.map((task) => ({
+    task: task.task,
+    orchestrator: task.orchestrator,
+    k: task.k,
+    benchmarkFingerprint: task.benchmarkFingerprint,
+  })).sort((a, b) => String(a.task).localeCompare(String(b.task)));
+  const complete = entries.length > 0 && entries.every((entry) => (
+    typeof entry.task === 'string'
+    && typeof entry.orchestrator === 'string'
+    && Number.isInteger(entry.k)
+    && /^[a-f0-9]{64}$/.test(entry.benchmarkFingerprint)
+  ));
+  const pipelineProtocolFingerprints = [...new Set(
+    tasks
+      .map((task) => task.pipelineProtocolFingerprint)
+      .filter((value) => /^[a-f0-9]{64}$/.test(value)),
+  )].sort();
+  return {
+    ks,
+    k: ks.length === 1 ? ks[0] : null,
+    benchmarkFingerprint: complete
+      ? createHash('sha256').update(JSON.stringify(entries)).digest('hex')
+      : null,
+    pipelineProtocolFingerprint: pipelineProtocolFingerprints.length === 1
+      ? pipelineProtocolFingerprints[0]
+      : null,
+    pipelineProtocolFingerprints,
+  };
+}
 
 export function buildTrend(resultsDir = path.join(EVALS_DIR, 'results'), { includeFixtures = false } = {}) {
   const series = { regression: [], capability: [] };
@@ -30,13 +69,31 @@ export function buildTrend(resultsDir = path.join(EVALS_DIR, 'results'), { inclu
             .filter((task) => task.track === track.track)
             .reduce((sum, task) => sum + (Number(task.tokenUsage?.totalTokens) || 0), 0)
           : Number(summary.tokenUsage?.totalTokens) || 0;
+        const modelTiers = [...new Set(
+          Array.isArray(summary.tasks)
+            ? summary.tasks
+              .filter((task) => task.track === track.track)
+              .map((task) => task.modelTier)
+              .filter((value) => typeof value === 'string' && value.length > 0)
+            : Array.isArray(summary.modelTiers)
+              ? summary.modelTiers
+              : typeof summary.modelTier === 'string'
+                ? [summary.modelTier]
+                : [],
+        )].sort();
+        const benchmark = benchmarkMetadata(summary, track.track);
         series[track.track].push({
-          runId: summary.runId ?? entry.name,
+          runId: typeof summary.runId === 'string' && summary.runId.length > 0
+            ? summary.runId
+            : entry.name,
           completedAt,
           total,
           passed,
           passRate: total > 0 ? passed / total : 0,
           totalTokens: trackTokenTotal,
+          modelTier: modelTiers.length === 1 ? modelTiers[0] : null,
+          modelTiers,
+          ...benchmark,
         });
       }
     } catch {

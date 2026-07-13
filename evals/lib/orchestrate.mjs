@@ -2,15 +2,13 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  classifyResultEvent,
-  parseStreamJsonEvents,
-} from '../../scripts/lib/claude-cli.mjs';
+import { classifyResultEvent } from '../../scripts/lib/claude-cli.mjs';
 
 const DEFAULT_TIMEOUT_MS = 600000;
 const SHUTDOWN_GRACE_MS = 5000;
 const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const VALID_STATUSES = new Set(['completed', 'failed', 'timeout']);
+const SAFE_MODEL_SELECTOR = /^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/;
 
 function normalizeTimeoutMs(value) {
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_TIMEOUT_MS;
@@ -21,6 +19,31 @@ function normalizeStatus(status, fallback = 'completed') {
   if (status === 'pass' || status === 'fail') return 'completed';
   if (status === 'error') return 'failed';
   return fallback;
+}
+
+function normalizeModelTier(value) {
+  const modelTier = String(value ?? 'sonnet');
+  if (!SAFE_MODEL_SELECTOR.test(modelTier)) {
+    throw new Error(`Unsafe Claude model selector: ${modelTier}`);
+  }
+  return modelTier;
+}
+
+function buildLiveEnv(cwd) {
+  const env = { ...process.env, PWD: resolve(cwd) };
+  // The live worker needs provider credentials, but inherited shell/package
+  // location hints can point straight back to the source repository that owns
+  // hidden eval oracles. Claude receives only the trial cwd + staged plugin
+  // path through its explicit argv.
+  for (const key of [
+    'OLDPWD',
+    'INIT_CWD',
+    'npm_config_local_prefix',
+    'npm_package_json',
+    'CLAUDE_PROJECT_DIR',
+    'CLAUDE_PLUGIN_ROOT',
+  ]) delete env[key];
+  return env;
 }
 
 function errorToEvent(error) {
@@ -103,7 +126,7 @@ async function runFixture({ fixture, cwd }) {
   };
 }
 
-function buildClaudeArgs({ orchestrator, prompt, pluginDir }) {
+function buildClaudeArgs({ orchestrator, prompt, pluginDir, modelTier }) {
   return [
     '-p',
     `/${orchestrator} ${prompt}`,
@@ -113,6 +136,8 @@ function buildClaudeArgs({ orchestrator, prompt, pluginDir }) {
     '--permission-mode',
     'bypassPermissions',
     '--no-session-persistence',
+    '--model',
+    modelTier,
     '--plugin-dir',
     pluginDir,
   ];
@@ -136,29 +161,73 @@ function killChild(child, signal) {
   return false;
 }
 
+function parseTerminalStream(stdout) {
+  const events = [];
+  const malformedLines = [];
+  const lines = String(stdout).split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const text = lines[index].trim();
+    if (!text) continue;
+    try {
+      const event = JSON.parse(text);
+      if (!event || typeof event !== 'object' || Array.isArray(event)) {
+        malformedLines.push(index + 1);
+      } else {
+        events.push(event);
+      }
+    } catch {
+      malformedLines.push(index + 1);
+    }
+  }
+
+  const resultEvents = events.filter((event) => event.type === 'result');
+  const explicitError = events.some((event) => event.type === 'error');
+  const assistantError = events.some((event) => event.type === 'assistant' && event.error);
+  let resultCategory = null;
+  if (malformedLines.length > 0) resultCategory = 'malformed_stream';
+  else if (explicitError) resultCategory = 'error_event';
+  else if (assistantError) resultCategory = 'assistant_error';
+  else if (resultEvents.length === 0) resultCategory = 'missing_result';
+  else if (resultEvents.length !== 1) resultCategory = 'multiple_results';
+  else if (events.at(-1) !== resultEvents[0]) resultCategory = 'result_not_terminal';
+  else if (resultEvents[0].subtype !== 'success' || resultEvents[0].is_error !== false) {
+    resultCategory = classifyResultEvent(resultEvents[0]) || 'invalid_result';
+  }
+
+  const resultEvent = resultCategory === null ? resultEvents[0] : null;
+  const finalEvent = resultCategory === null
+    ? resultEvent
+    : {
+      type: 'stream_error',
+      category: resultCategory,
+      malformedLines,
+    };
+  return { events, malformedLines, resultEvent, finalEvent, resultCategory };
+}
+
 function parseLiveResult({ stdout, stderr, timedOut, exitCode, signal, error, args, modelTier }) {
-  const parseBuffer = stdout.endsWith('\n') ? stdout : `${stdout}\n`;
-  const { events, remainder } = parseStreamJsonEvents(parseBuffer);
-  const finalEvent = [...events].reverse().find((event) => event?.type === 'result')
-    ?? events.at(-1)
-    ?? (error ? errorToEvent(error) : { type: 'process_exit', exitCode, signal });
-  const resultEvent = finalEvent?.type === 'result' ? finalEvent : null;
-  const resultCategory = classifyResultEvent(resultEvent);
-  const failed = Boolean(error || resultCategory || (!timedOut && exitCode != null && exitCode !== 0));
+  const parsed = parseTerminalStream(stdout);
+  const finalEvent = error ? errorToEvent(error) : parsed.finalEvent;
+  // Exit 0 is insufficient. A successful live run has exactly one result event,
+  // it is the last non-blank JSONL record, and it is an explicit success. Any
+  // malformed or trailing record makes the stream non-terminal and fails closed.
+  const resultCategory = error ? 'process_error' : parsed.resultCategory;
+  const abnormalExit = !timedOut && (exitCode !== 0 || signal != null);
+  const failed = Boolean(error || resultCategory || abnormalExit);
   const status = timedOut ? 'timeout' : failed ? 'failed' : 'completed';
 
   return {
     status,
     finalEvent,
-    usage: resultEvent?.usage ?? null,
+    usage: parsed.resultEvent?.usage ?? null,
     timedOut,
     raw: {
       argv: ['claude', ...args],
       modelTier,
       stdout,
       stderr,
-      events,
-      remainder,
+      events: parsed.events,
+      malformedLines: parsed.malformedLines,
       exitCode,
       signal,
       error: error ? errorToEvent(error) : null,
@@ -179,12 +248,19 @@ async function runLive({
   const effectivePluginDir = resolve(pluginDir ?? REPO_ROOT);
   const effectiveTimeoutMs = normalizeTimeoutMs(timeoutMs);
   const killGraceMs = Math.min(SHUTDOWN_GRACE_MS, effectiveTimeoutMs);
-  const args = buildClaudeArgs({ orchestrator, prompt, pluginDir: effectivePluginDir });
+  const effectiveModelTier = normalizeModelTier(modelTier);
+  const args = buildClaudeArgs({
+    orchestrator,
+    prompt,
+    pluginDir: effectivePluginDir,
+    modelTier: effectiveModelTier,
+  });
 
   let child;
   try {
     child = spawn('claude', args, {
       cwd,
+      env: buildLiveEnv(cwd),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
@@ -197,7 +273,7 @@ async function runLive({
       signal: null,
       error,
       args,
-      modelTier,
+      modelTier: effectiveModelTier,
     });
   }
 
@@ -223,7 +299,7 @@ async function runLive({
         signal,
         error,
         args,
-        modelTier,
+        modelTier: effectiveModelTier,
       }));
     };
 
@@ -261,7 +337,7 @@ async function runLive({
  * @param {string} params.prompt Prompt to pass to the orchestrator.
  * @param {string} params.cwd Trial working directory.
  * @param {number} [params.timeoutMs=600000] Timeout in milliseconds.
- * @param {string} [params.modelTier='sonnet'] Logical model tier for reporting.
+ * @param {string} [params.modelTier='sonnet'] Claude model selector, also persisted for reporting.
  * @param {string} [params.pluginDir] Plugin directory for live Claude runs.
  * @param {Function} [params.spawn] Injectable child_process.spawn-compatible function.
  * @param {Function|object|string} [params.fixture] Deterministic fixture descriptor.

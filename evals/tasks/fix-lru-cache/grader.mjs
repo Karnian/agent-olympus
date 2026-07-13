@@ -1,53 +1,59 @@
-import { execFile } from 'node:child_process';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  constructCandidate,
+  importCandidate,
+  invokeCandidateMethod,
+} from '../../lib/candidate-invoke.mjs';
+import { gradeCandidate } from '../../lib/grader-subprocess.mjs';
 
-const TEST_TIMEOUT_MS = 60_000;
+const assertEqual = assert.equal.bind(assert);
+const assertThrows = assert.throws.bind(assert);
+const SafeError = Error;
 
 function detail(error) {
   return error instanceof Error ? error.message : String(error ?? 'unknown error');
 }
 
-function runTests(workdir) {
-  return new Promise((resolve) => {
-    const env = { ...process.env, CI: '1', NO_COLOR: '1', TZ: 'UTC' };
-    delete env.NODE_TEST_CONTEXT;
-    try {
-      execFile('node', ['--test'], { cwd: workdir, env, timeout: TEST_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
-        const output = [stdout, stderr].filter(Boolean).join('\n').trim().slice(-4000);
-        resolve({ name: 'tests-pass', pass: !error, detail: error ? (output || detail(error)) : (output || 'node --test passed') });
-      });
-    } catch (error) {
-      resolve({ name: 'tests-pass', pass: false, detail: detail(error) });
-    }
-  });
-}
-
-async function hiddenCases(workdir) {
+export async function hiddenCases(workdir) {
   try {
-    const { LRUCache } = await import(pathToFileURL(path.join(workdir, 'src/LRUCache.mjs')).href);
-    const cache = new LRUCache(3);
-    cache.set('a', 1).set('b', 2).set('c', 3);
-    assert.equal(cache.get('a'), 1);
-    assert.equal(cache.get('missing'), undefined);
-    cache.set('d', 4);
-    assert.equal(cache.get('b'), undefined);
-    cache.set('c', 30).set('e', 5);
-    assert.equal(cache.get('a'), undefined);
-    assert.equal(cache.get('c'), 30);
-    assert.throws(() => new LRUCache(0), /capacity/i);
+    const { LRUCache } = await importCandidate(pathToFileURL(path.join(workdir, 'src/LRUCache.mjs')).href);
+    const cache = await constructCandidate(LRUCache, [3]);
+    await invokeCandidateMethod(cache, 'set', ['a', 1]);
+    await invokeCandidateMethod(cache, 'set', ['b', 2]);
+    await invokeCandidateMethod(cache, 'set', ['c', 3]);
+    assertEqual(await invokeCandidateMethod(cache, 'get', ['a']), 1);
+    assertEqual(await invokeCandidateMethod(cache, 'get', ['missing']), undefined);
+    await invokeCandidateMethod(cache, 'set', ['d', 4]);
+    assertEqual(await invokeCandidateMethod(cache, 'get', ['b']), undefined);
+    await invokeCandidateMethod(cache, 'set', ['c', 30]);
+    await invokeCandidateMethod(cache, 'set', ['e', 5]);
+    assertEqual(await invokeCandidateMethod(cache, 'get', ['a']), undefined);
+    assertEqual(await invokeCandidateMethod(cache, 'get', ['c']), 30);
+    await assertRejectsCandidateConstruction(LRUCache);
     return { name: 'lru-invariants', pass: true, detail: 'read/update recency, misses, eviction, and capacity validation hold' };
   } catch (error) {
     return { name: 'lru-invariants', pass: false, detail: detail(error) };
   }
 }
 
-export async function grade(workdir) {
+async function assertRejectsCandidateConstruction(LRUCache) {
   try {
-    const checks = [await runTests(workdir), await hiddenCases(workdir)];
-    return { pass: checks.every((check) => check.pass), checks };
+    await constructCandidate(LRUCache, [0]);
   } catch (error) {
-    return { pass: false, checks: [{ name: 'grader-error', pass: false, detail: detail(error) }] };
+    assertThrows(() => { throw error; }, /capacity/i);
+    return;
   }
+  throw new SafeError('LRUCache(0) did not reject invalid capacity');
+}
+
+export async function grade(workdir, options = {}) {
+  return gradeCandidate({
+    workdir,
+    graderUrl: import.meta.url,
+    hiddenExport: 'hiddenCases',
+    hiddenName: 'lru-invariants',
+    timeoutMs: options.timeoutMs,
+  });
 }

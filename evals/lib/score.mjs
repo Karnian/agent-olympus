@@ -8,6 +8,7 @@
  * @property {string} track Track name, usually "regression" or "capability".
  * @property {boolean} [pass] Whether the task/trial passed.
  * @property {boolean} [passHatK] Whether all trials for the task passed.
+ * @property {boolean} [passAtK] Whether at least one trial for the task passed.
  *
  * @typedef {object} TrackRollup
  * @property {string} track Track name.
@@ -44,9 +45,10 @@ export function passHatK(results) {
 /**
  * Count total and passed task results by track.
  *
- * For task summaries, `passHatK` is the verdict. For raw trial rows, `pass`
- * is the verdict. If both are present, `pass` wins so an explicit trial
- * failure is not masked by a summary field.
+ * Raw trial rows always use their explicit `pass` verdict. Task summaries use
+ * the metric appropriate to the track: regression is an all-trials
+ * reliability gate (`passHatK` / pass^k), while capability measures whether
+ * at least one trial succeeds (`passAtK` / pass@k).
  *
  * @param {TaskResult[]} taskResults Task summaries or trial rows.
  * @returns {TrackRollup[]}
@@ -63,7 +65,13 @@ export function rollupByTrack(taskResults) {
 
     const rollup = rollups.get(track);
     rollup.total += 1;
-    if (Boolean(result?.pass ?? result?.passHatK)) {
+    const isRawTrial = Object.hasOwn(result ?? {}, 'pass');
+    const verdict = isRawTrial
+      ? result.pass
+      : track === 'capability'
+        ? result?.passAtK
+        : result?.passHatK;
+    if (Boolean(verdict)) {
       rollup.passed += 1;
     }
   }

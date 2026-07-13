@@ -28,3 +28,14 @@ test('limits concurrency and preserves input order', async () => {
 test('rejects invalid limits', async () => {
   await assert.rejects(() => mapLimit([1], 0, async (value) => value), /limit/i);
 });
+
+test('propagates the original mapper rejection', async () => {
+  const mapperFailure = new Error('mapper exploded');
+  await assert.rejects(
+    mapLimit([0, 1, 2], 2, async (value) => {
+      if (value === 1) throw mapperFailure;
+      return value * 2;
+    }),
+    (error) => error === mapperFailure,
+  );
+});

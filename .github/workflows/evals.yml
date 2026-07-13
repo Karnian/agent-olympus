@@ -5,14 +5,14 @@ on:
   schedule:
     - cron: '17 3 * * *'
   pull_request:
-    types: [labeled]
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
 
 jobs:
   regression-fixtures:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'run-evals'
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-evals')
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

@@ -15,6 +15,14 @@ function makeSuiteRunId() {
   return `suite-${Date.now()}-${randomBytes(4).toString('hex')}`;
 }
 
+function assertSafeRunId(runId) {
+  const value = String(runId);
+  if (value === '.' || value === '..' || !/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(value)) {
+    throw new Error(`Unsafe run id: ${value}`);
+  }
+  return value;
+}
+
 export async function runSuite(opts = {}) {
   if (!opts.live && opts.fixture === undefined) {
     throw new Error('Refusing to run the real orchestrator implicitly. Pass --fixture solution|none or --live.');
@@ -27,7 +35,7 @@ export async function runSuite(opts = {}) {
   const tasks = discoverTasks(path.join(evalsDir, 'tasks'), track);
   if (tasks.length === 0) throw new Error(`No eval tasks found for track: ${track}`);
 
-  const runId = String(opts.runId ?? makeSuiteRunId());
+  const runId = assertSafeRunId(opts.runId ?? makeSuiteRunId());
   const resultsDir = path.resolve(opts.resultsDir ?? path.join(evalsDir, 'results'));
   const runDir = path.join(resultsDir, runId);
   const taskResultsDir = path.join(runDir, 'tasks');
@@ -55,15 +63,21 @@ export async function runSuite(opts = {}) {
     runId,
   })));
   const trialUsages = suiteResults.map((result) => result.usage);
+  const modelTiers = [...new Set(taskSummaries.map((task) => task.modelTier))].sort();
+  const regressionGatePassed = taskSummaries
+    .filter((task) => task.track === 'regression')
+    .every((task) => task.passHatK);
   const summary = {
     schemaVersion: 1,
     runId,
     completedAt: new Date().toISOString(),
     executionMode: opts.live ? 'live' : 'fixture',
     track,
+    modelTiers,
     taskCount: taskSummaries.length,
     passHatK: taskSummaries.every((task) => task.passHatK),
     passAtK: taskSummaries.every((task) => task.passAtK),
+    regressionGatePassed,
     tokenUsage: aggregateTokenUsage(trialUsages),
     tasks: taskSummaries,
     tracks: rollupByTrack(taskSummaries),
@@ -78,7 +92,9 @@ export async function runSuite(opts = {}) {
     summary,
     results: suiteResults,
     runs,
-    exitCode: summary.passHatK ? 0 : 1,
+    // Capability tasks measure progress and never gate the suite. Only the
+    // regression track's pass^k contract controls process failure.
+    exitCode: summary.regressionGatePassed ? 0 : 1,
   };
 }
 

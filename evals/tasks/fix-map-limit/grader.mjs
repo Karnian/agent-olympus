@@ -1,65 +1,82 @@
-import { execFile } from 'node:child_process';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import {
+  importCandidate,
+  invokeCandidate,
+  opaqueCallback,
+} from '../../lib/candidate-invoke.mjs';
+import { gradeCandidate } from '../../lib/grader-subprocess.mjs';
 
-const TEST_TIMEOUT_MS = 60_000;
+const assertDeepEqual = assert.deepEqual.bind(assert);
+const assertOk = assert.ok.bind(assert);
+const assertRejects = assert.rejects.bind(assert);
+const SafeSet = Set;
+const SafePromise = Promise;
+const safePromiseResolve = Promise.resolve.bind(Promise);
+const safeSetImmediate = setImmediate;
+const safeMathMax = Math.max.bind(Math);
+const safeArrayPush = Function.call.bind(Array.prototype.push);
+const safeArraySlice = Function.call.bind(Array.prototype.slice);
+const safeString = String;
 
 function detail(error) {
-  return error instanceof Error ? error.message : String(error ?? 'unknown error');
+  return error instanceof Error ? error.message : safeString(error ?? 'unknown error');
 }
 
-function runTests(workdir) {
-  return new Promise((resolve) => {
-    const env = { ...process.env, CI: '1', NO_COLOR: '1', TZ: 'UTC' };
-    delete env.NODE_TEST_CONTEXT;
-    try {
-      execFile('node', ['--test'], { cwd: workdir, env, timeout: TEST_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
-        const output = [stdout, stderr].filter(Boolean).join('\n').trim().slice(-4000);
-        resolve({ name: 'tests-pass', pass: !error, detail: error ? (output || detail(error)) : (output || 'node --test passed') });
-      });
-    } catch (error) {
-      resolve({ name: 'tests-pass', pass: false, detail: detail(error) });
-    }
-  });
-}
-
-async function hiddenCases(workdir) {
+export async function hiddenCases(workdir) {
   try {
-    const { mapLimit } = await import(pathToFileURL(path.join(workdir, 'src/mapLimit.mjs')).href);
+    const { mapLimit } = await importCandidate(pathToFileURL(path.join(workdir, 'src/mapLimit.mjs')).href);
     let active = 0;
     let peak = 0;
     const seenIndexes = [];
     let release;
-    const gate = new Promise((resolve) => { release = resolve; });
-    const pending = mapLimit([4, 3, 2, 1, 0], 3, async (value, index) => {
+    const gate = new SafePromise((resolve) => { release = resolve; });
+    const mapper = opaqueCallback(async (value, index) => {
       active += 1;
-      peak = Math.max(peak, active);
-      seenIndexes.push(index);
+      peak = safeMathMax(peak, active);
+      safeArrayPush(seenIndexes, index);
       await gate;
       active -= 1;
       return `${index}:${value}`;
     });
-    await Promise.resolve();
-    const initiallySeenIndexes = [...seenIndexes];
+    const pending = invokeCandidate(mapLimit, [[4, 3, 2, 1, 0], 3, mapper]);
+    await new SafePromise((resolve) => safeSetImmediate(resolve));
+    const initiallySeenIndexes = safeArraySlice(seenIndexes);
     release();
     const values = await pending;
-    assert.deepEqual(initiallySeenIndexes, [0, 1, 2]);
-    assert.ok(peak <= 3 && peak > 1);
-    assert.deepEqual(values, ['0:4', '1:3', '2:2', '3:1', '4:0']);
-    assert.deepEqual(new Set(seenIndexes).size, 5);
-    assert.deepEqual(await mapLimit([], 2, async () => 'never'), []);
-    return { name: 'map-limit-invariants', pass: true, detail: 'bounded parallelism, ordering, indexes, and empty input hold' };
+    assertDeepEqual(initiallySeenIndexes, [0, 1, 2]);
+    assertOk(peak <= 3 && peak > 1);
+    assertDeepEqual(values, ['0:4', '1:3', '2:2', '3:1', '4:0']);
+    assertDeepEqual(seenIndexes, [0, 1, 2, 3, 4]);
+    assertDeepEqual(new SafeSet(seenIndexes).size, 5);
+    assertDeepEqual(await invokeCandidate(mapLimit, [[], 2, async () => 'never']), []);
+
+    const mapperFailure = { code: 'mapper-failed' };
+    await assertRejects(
+      invokeCandidate(mapLimit, [[0, 1, 2], 2, opaqueCallback(async (value) => {
+        if (value === 1) throw mapperFailure;
+        await safePromiseResolve();
+        return value;
+      })]),
+      (error) => error === mapperFailure,
+    );
+    return {
+      name: 'map-limit-invariants',
+      pass: true,
+      detail: 'bounded parallelism, ordering, indexes, empty input, and mapper rejection hold',
+    };
   } catch (error) {
     return { name: 'map-limit-invariants', pass: false, detail: detail(error) };
   }
 }
 
-export async function grade(workdir) {
-  try {
-    const checks = [await runTests(workdir), await hiddenCases(workdir)];
-    return { pass: checks.every((check) => check.pass), checks };
-  } catch (error) {
-    return { pass: false, checks: [{ name: 'grader-error', pass: false, detail: detail(error) }] };
-  }
+export async function grade(workdir, options = {}) {
+  return gradeCandidate({
+    workdir,
+    graderUrl: import.meta.url,
+    hiddenExport: 'hiddenCases',
+    hiddenName: 'map-limit-invariants',
+    timeoutMs: options.timeoutMs,
+  });
 }

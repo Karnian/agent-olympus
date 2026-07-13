@@ -29,7 +29,14 @@
         "additionalProperties": false,
         "required": [
           "k",
-          "passHatK"
+          "passHatK",
+          "source",
+          "runId",
+          "measuredAt",
+          "modelTier",
+          "orchestrator",
+          "benchmarkFingerprint",
+          "pipelineProtocolFingerprint"
         ],
         "properties": {
           "k": {
@@ -38,6 +45,45 @@
           },
           "passHatK": {
             "const": true
+          },
+          "source": {
+            "enum": [
+              "declared-target",
+              "live"
+            ]
+          },
+          "runId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "measuredAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modelTier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "orchestrator": {
+            "enum": [
+              "atlas",
+              "athena",
+              "solo"
+            ]
+          },
+          "benchmarkFingerprint": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "pipelineProtocolFingerprint": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
           }
         }
       }
