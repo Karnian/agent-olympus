@@ -13,6 +13,8 @@ import {
   validateAutonomyConfig,
   loadAutonomyConfig,
   resolveShipMode,
+  taskExplicitlyForbidsShipping,
+  resolveRunShipMode,
 } from '../lib/autonomy.mjs';
 
 // ---------------------------------------------------------------------------
@@ -142,6 +144,160 @@ test('resolveShipMode: malformed legacy values and invalid present mode fail saf
   assert.equal(resolveShipMode({ ship: { autoPush: 'yes' } }), 'ask');
   assert.equal(resolveShipMode({ ship: { mode: 'invalid', autoPush: true } }), 'ask');
   assert.equal(resolveShipMode(null), 'ask');
+});
+
+test('taskExplicitlyForbidsShipping: recognizes explicit English and Korean directives', () => {
+  const directives = [
+    '--no-ship refactor the adapter',
+    'Do not push these changes.',
+    "Don't ship this change.",
+    'Don’t ship this change.',
+    'Never ship this change.',
+    "Don't create a PR; I will test locally.",
+    'No PR, please.',
+    'No pull request please.',
+    'No pull requests, please.',
+    'Please, no PR.',
+    'Implement the fix first.\nNo PR, please.',
+    'Do not push tags or the current branch.',
+    'Do not push code.',
+    'Do not push to GitHub.',
+    'Do not publish this release.',
+    "Please don't push this.",
+    "Don't push it.",
+    "Don't push until I say so.",
+    "Don't push it until I say so.",
+    "Don't push it to origin.",
+    "Don't open any PR.",
+    'I will push the current branch myself.',
+    "I'll handle the push myself.",
+    "I'll handle pushing.",
+    'I will take care of the pull request.',
+    "I'll update the PR myself.",
+    "Don't push it upstream.",
+    "I'll push and open the PR myself.",
+    'I’ll push and open the PR myself.',
+    "I'll open the pull request myself after verification.",
+    'No push, no PR — the user will open one themselves.',
+    'Keep the branch local and unpublished.',
+    '푸시하지 마세요. 제가 확인할게요.',
+    '푸시는 하지 말아 주세요.',
+    'PR을 올리지 마. 사용자가 직접 처리한다.',
+    'PR 만들지 말고 커밋까지만 해줘.',
+    'PR 수정하지 마세요.',
+    'PR을 수정하지 말아주세요.',
+    'PR 업데이트는 하지 말아 주세요.',
+    'PR 수정은 하지 말고 기존 상태로 둬.',
+    '내가 직접 푸시할게.',
+    '내가 푸시할 거야.',
+    '푸시는 내가 할게.',
+    '푸시하면 안 돼.',
+    '푸시는 내가 알아서 할게.',
+    '푸시는 내가 처리할게.',
+    '푸시는 내가 할 거야.',
+    '내가 알아서 푸시할게.',
+    'PR은 내가 할게.',
+    'PR은 내가 올릴 거야.',
+    'PR은 내가 만들 거야.',
+    'PR은 내가 처리할 거야.',
+    'PR은 내가 올리겠습니다.',
+    'PR은 제가 처리하겠습니다.',
+    'PR 생성은 하지 마.',
+    'PR은 사용자가 직접 올릴 예정입니다.',
+    'pr 한번에 올릴꺼니까 같은 브랜치에서 진행해.',
+  ];
+
+  for (const directive of directives) {
+    assert.equal(taskExplicitlyForbidsShipping(directive), true, directive);
+  }
+});
+
+test('taskExplicitlyForbidsShipping: ignores discussion that is not a no-ship directive', () => {
+  const ordinaryTasks = [
+    'Please push the branch and open a PR.',
+    'Please ship this change.',
+    'I want you to ship this change.',
+    'I want you to open a PR for this change.',
+    'Implement the shipping feature for release automation.',
+    'Document how to ship changes and open pull requests.',
+    'Add a button that lets users push and open PRs.',
+    'Review the push notification implementation.',
+    'I will review the push notification implementation.',
+    'Document how users can open pull requests.',
+    'I want you to push the branch and open a PR.',
+    'I want to create a PR for this feature.',
+    'No PR exists yet; please push this branch and open one.',
+    'Implement offline mode: do not push notifications while offline.',
+    'Do not publish telemetry events before consent.',
+    'Do not push-notifications while the device is offline.',
+    'I will push notifications after reconnecting.',
+    'I will publish telemetry events after consent.',
+    'Do not push code into the array.',
+    'Do not push code to the array.',
+    'Do not push the current branch selector into global state.',
+    'Do not push the branch metadata into application state.',
+    "Set branch metadata state to 'don't push this branch'.",
+    'Do not publish this release event before consent.',
+    '“푸시하지 마세요”라는 경고 문구를 추가해줘.',
+    '‘푸시하지 마세요’라는 경고 문구를 추가해줘.',
+    "'푸시하지 마세요'라는 경고 문구를 추가해줘.",
+    '“PR은 사용자가 직접 올릴 예정입니다”라는 안내 문구를 추가해줘.',
+    'Implement this UI copy exactly:\nNo PR, please.\nIt is informational, not an instruction.',
+    'Example:\nDon\'t push this.\nThe example must remain documentation only.',
+    'Examples:\nNo PR, please.\nThis is documentation.',
+    "Example:\nDon't push this.\nNo PR, please.",
+    "Change the warning message to: Don't push this.",
+    '푸시 실패 원인을 고쳐 주세요.',
+    '내가 푸시 실패 원인을 분석할게.',
+    'PR 올릴 기능을 만들어 주세요.',
+    '푸시 기능을 사용자가 직접 실행할 수 있게 만들어 주세요.',
+    '사용자가 직접 푸시할 수 있는 기능을 만들어 주세요.',
+    'PR을 올릴 예정인지 확인하는 기능을 만들어 주세요.',
+    'PR은 사용자가 직접 올릴 예정인지 확인해 주세요.',
+    '',
+    null,
+  ];
+
+  for (const task of ordinaryTasks) {
+    assert.equal(taskExplicitlyForbidsShipping(task), false, String(task));
+  }
+});
+
+test('resolveRunShipMode: original task no-ship overrides persistent auto mode', () => {
+  assert.deepEqual(
+    resolveRunShipMode({ ship: { mode: 'auto' } }, 'Do not push or create a PR.'),
+    {
+      configuredMode: 'auto',
+      taskForbidsShipping: true,
+      effectiveMode: 'never',
+    },
+  );
+});
+
+test('resolveRunShipMode: preserves configured mode without an explicit task override', () => {
+  assert.deepEqual(
+    resolveRunShipMode({ ship: { mode: 'auto' } }, 'Implement and verify the fix.'),
+    {
+      configuredMode: 'auto',
+      taskForbidsShipping: false,
+      effectiveMode: 'auto',
+    },
+  );
+  assert.equal(resolveRunShipMode(null, null).effectiveMode, 'ask');
+});
+
+test('taskExplicitlyForbidsShipping: message boundaries prevent example masking from hiding a later follow-up', () => {
+  assert.equal(taskExplicitlyForbidsShipping([
+    'Document this example:',
+    "Don't push this.",
+  ]), true);
+  assert.equal(taskExplicitlyForbidsShipping([
+    'Implement this UI copy exactly:\nNo PR, please.\nIt is informational.',
+    'Continue the implementation.',
+  ]), false);
+  assert.equal(taskExplicitlyForbidsShipping(
+    "Important message:\nDon't push this.",
+  ), true);
 });
 
 test('validateAutonomyConfig: rejects invalid ship.mode and returns defaults', () => {

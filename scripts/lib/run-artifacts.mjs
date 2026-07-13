@@ -3,6 +3,7 @@
  *
  * Each run produces:
  * - events.jsonl — timeline of orchestration events (append-only)
+ * - task-updates.json + task-updates.anchor.json — strict user follow-up ledger
  * - summary.json — final execution metadata (written at completion)
  * - verification.json — per-story verification results
  *
@@ -20,7 +21,7 @@ import {
   unlinkSync,
 } from 'fs';
 import { dirname, join, resolve } from 'path';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import {
   appendRegularArtifact,
@@ -48,6 +49,8 @@ const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const ORCHESTRATOR_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const MAX_SUMMARY_BYTES = 256 * 1024;
 const MAX_EVENTS_BYTES = 16 * 1024 * 1024;
+const MAX_TASK_UPDATES_BYTES = 1024 * 1024;
+const MAX_TASK_UPDATES = 1000;
 const MAX_POINTER_BYTES = 64 * 1024;
 // Listing is an audit convenience, not an unbounded filesystem dump.  Keep
 // the normal small-run behavior while preventing a poisoned artifact root from
@@ -862,6 +865,272 @@ export function addEvent(runId, event, opts = {}) {
     // fail-safe: event loss is acceptable, never throw
   } finally {
     releaseRunningRunMutation(mutation);
+  }
+}
+
+function validateTaskUpdateLedger(value, summary) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || value.schemaVersion !== 1
+    || value.runId !== summary?.runId
+    || value.orchestrator !== summary?.orchestrator
+    || !Array.isArray(value.updates)
+    || value.updates.length === 0
+    || value.updates.length > MAX_TASK_UPDATES) {
+    return false;
+  }
+  return value.updates.every((update, index) => (
+    update
+    && typeof update === 'object'
+    && !Array.isArray(update)
+    && Object.keys(update).length === 3
+    && update.sequence === index + 1
+    && typeof update.task === 'string'
+    && update.task.trim().length > 0
+    && Buffer.byteLength(update.task, 'utf8') <= 64 * 1024
+    && canonicalTimestamp(update.timestamp) !== null
+  ));
+}
+
+function taskUpdateLedgerHash(ledger) {
+  return createHash('sha256').update(JSON.stringify(ledger)).digest('hex');
+}
+
+function validateTaskUpdateAnchor(value, summary, ledger) {
+  return value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.keys(value).length === 5
+    && value.schemaVersion === 1
+    && value.runId === summary?.runId
+    && value.orchestrator === summary?.orchestrator
+    && value.sequence === ledger.updates.length
+    && typeof value.ledgerHash === 'string'
+    && /^[a-f0-9]{64}$/.test(value.ledgerHash)
+    && value.ledgerHash === taskUpdateLedgerHash(ledger);
+}
+
+function buildTaskUpdateAnchor(summary, ledger) {
+  return {
+    schemaVersion: 1,
+    runId: summary.runId,
+    orchestrator: summary.orchestrator,
+    sequence: ledger.updates.length,
+    ledgerHash: taskUpdateLedgerHash(ledger),
+  };
+}
+
+function recoverPendingTaskUpdateAnchor(paths, summary, ledger, anchor) {
+  const prefixLedger = {
+    ...ledger,
+    updates: ledger.updates.slice(0, -1),
+  };
+  const isRecoverableFirstAppend = anchor === null
+    && ledger.updates.length === 1
+    && ledger.updates[0].task === summary.task;
+  const isRecoverableLaterAppend = anchor !== null
+    && ledger.updates.length > 1
+    && validateTaskUpdateAnchor(anchor, summary, prefixLedger);
+  if (!isRecoverableFirstAppend && !isRecoverableLaterAppend) return false;
+
+  paths.revalidate();
+  atomicWriteFileSync(
+    join(paths.dir, 'task-updates.anchor.json'),
+    JSON.stringify(buildTaskUpdateAnchor(summary, ledger), null, 2),
+    { mode: 0o600, durable: true },
+  );
+  paths.revalidate();
+  const repairedArtifact = readBoundRunArtifact(
+    paths,
+    'task-updates.anchor.json',
+    'run task updates anchor',
+    MAX_POINTER_BYTES,
+  );
+  let repaired;
+  try { repaired = JSON.parse(repairedArtifact.text); }
+  catch { return false; }
+  return validateTaskUpdateAnchor(repaired, summary, ledger);
+}
+
+function readTaskUpdateLedger(paths, summary, {
+  allowMissing = false,
+  recoverPendingAppend = false,
+} = {}) {
+  const artifact = readBoundRunArtifact(
+    paths,
+    'task-updates.json',
+    'run task updates',
+    MAX_TASK_UPDATES_BYTES,
+    { allowMissing: true },
+  );
+  const anchorArtifact = readBoundRunArtifact(
+    paths,
+    'task-updates.anchor.json',
+    'run task updates anchor',
+    MAX_POINTER_BYTES,
+    { allowMissing: true },
+  );
+  if (!artifact.present && !anchorArtifact.present && allowMissing) return null;
+  if (!artifact.present) throw new Error('run task updates ledger is missing');
+  let ledger;
+  try { ledger = JSON.parse(artifact.text); }
+  catch { throw new Error('run task updates are invalid JSON'); }
+  if (!validateTaskUpdateLedger(ledger, summary)) {
+    throw new Error('run task updates are malformed');
+  }
+  let anchor = null;
+  if (anchorArtifact.present) {
+    try { anchor = JSON.parse(anchorArtifact.text); }
+    catch { throw new Error('run task updates anchor is invalid JSON'); }
+  }
+  if (!validateTaskUpdateAnchor(anchor, summary, ledger)) {
+    if (recoverPendingAppend
+      && recoverPendingTaskUpdateAnchor(paths, summary, ledger, anchor)) {
+      return ledger;
+    }
+    if (!anchorArtifact.present) {
+      throw new Error('run task updates anchor is missing');
+    }
+    throw new Error('run task updates rollback or anchor mismatch detected');
+  }
+  return ledger;
+}
+
+/**
+ * Atomically append one user-authored task update to a dedicated strict
+ * ledger. Shipping policy reads this file instead of the best-effort event
+ * stream, whose audit-oriented parser intentionally skips torn JSONL records.
+ *
+ * `allowCreate` must be true only on the same invocation that created the run.
+ * A missing ledger on resume fails closed so lost history cannot silently
+ * re-enable release side effects.
+ *
+ * @param {string} runId
+ * @param {string} task
+ * @param {object} [opts]
+ * @param {string} [opts.base]
+ * @param {string} [opts.trustedRoot]
+ * @param {boolean} [opts.allowCreate=false]
+ * @returns {{ok:boolean,updates?:object[],reason?:string}}
+ */
+export function appendUserTaskUpdate(runId, task, opts = {}) {
+  let mutation = null;
+  try {
+    if (typeof task !== 'string' || !task.trim()
+      || Buffer.byteLength(task, 'utf8') > 64 * 1024) {
+      return { ok: false, reason: 'invalid-task-update' };
+    }
+    mutation = acquireRunningRunMutation(runId, opts);
+    const paths = {
+      dir: mutation.dir,
+      revalidate: () => {
+        revalidateRunningRunMutation(mutation);
+        return true;
+      },
+    };
+    const existing = readTaskUpdateLedger(paths, mutation.summary, {
+      allowMissing: opts.allowCreate === true,
+      recoverPendingAppend: true,
+    });
+    if (!existing && opts.allowCreate !== true) {
+      return { ok: false, reason: 'task-update-ledger-missing' };
+    }
+    const updates = existing?.updates ?? [];
+    if (updates.length >= MAX_TASK_UPDATES) {
+      return { ok: false, reason: 'task-update-limit-reached' };
+    }
+    const next = {
+      sequence: updates.length + 1,
+      task,
+      timestamp: new Date().toISOString(),
+    };
+    const ledger = {
+      schemaVersion: 1,
+      runId,
+      orchestrator: mutation.summary.orchestrator,
+      updates: [...updates, next],
+    };
+    const payload = JSON.stringify(ledger, null, 2);
+    if (Buffer.byteLength(payload, 'utf8') > MAX_TASK_UPDATES_BYTES) {
+      return { ok: false, reason: 'task-update-ledger-too-large' };
+    }
+    const anchor = buildTaskUpdateAnchor(mutation.summary, ledger);
+    revalidateRunningRunMutation(mutation);
+    atomicWriteFileSync(join(mutation.dir, 'task-updates.json'), payload, {
+      mode: 0o600,
+      durable: true,
+    });
+    revalidateRunningRunMutation(mutation);
+    atomicWriteFileSync(
+      join(mutation.dir, 'task-updates.anchor.json'),
+      JSON.stringify(anchor, null, 2),
+      { mode: 0o600, durable: true },
+    );
+    revalidateRunningRunMutation(mutation);
+    const persisted = readTaskUpdateLedger(paths, mutation.summary);
+    if (!persisted
+      || persisted.updates.length !== updates.length + 1
+      || persisted.updates.at(-1)?.sequence !== next.sequence
+      || persisted.updates.at(-1)?.task !== task) {
+      return { ok: false, reason: 'task-update-verification-failed' };
+    }
+
+    // Keep the general event stream useful for diagnostics, but never rely on
+    // it for release policy. A torn audit append cannot erase the strict ledger.
+    try {
+      appendRegularArtifact(
+        join(mutation.dir, 'events.jsonl'),
+        'run events',
+        `${JSON.stringify({
+          phase: 'run',
+          type: 'user_task_update',
+          detail: { sequence: next.sequence, task },
+          timestamp: next.timestamp,
+        })}\n`,
+        MAX_EVENTS_BYTES,
+        {
+          ensureLineBoundary: true,
+          revalidateContext: paths.revalidate,
+        },
+      );
+    } catch {}
+    return { ok: true, updates: persisted.updates };
+  } catch (error) {
+    return { ok: false, reason: error?.message || 'task-update-append-failed' };
+  } finally {
+    releaseRunningRunMutation(mutation);
+  }
+}
+
+/**
+ * Strictly read the atomic user-task ledger used by shipping policy.
+ * Missing, linked, malformed, oversized, or identity-mismatched data fails
+ * closed instead of being projected to an empty history.
+ *
+ * @param {string} runId
+ * @param {object} [opts]
+ * @returns {{ok:boolean,updates:object[],reason?:string}}
+ */
+export function getUserTaskUpdates(runId, opts = {}) {
+  try {
+    const paths = bindRunReadPaths(runId, opts);
+    const summaryArtifact = readBoundRunArtifact(
+      paths,
+      'summary.json',
+      'run summary',
+      MAX_SUMMARY_BYTES,
+    );
+    const summary = JSON.parse(summaryArtifact.text);
+    if (!validateRunSummaryIdentity(summary, runId)) {
+      return { ok: false, updates: [], reason: 'run-summary-invalid' };
+    }
+    const ledger = readTaskUpdateLedger(paths, summary);
+    return { ok: true, updates: ledger.updates };
+  } catch (error) {
+    return {
+      ok: false,
+      updates: [],
+      reason: error?.message || 'task-update-read-failed',
+    };
   }
 }
 

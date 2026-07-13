@@ -25,11 +25,13 @@ import {
   createRun as createRunArtifact,
   discoverActiveRun,
   addEvent,
+  appendUserTaskUpdate,
   addVerification,
   finalizeRun,
   getActiveRunId,
   listRuns,
   getRun,
+  getUserTaskUpdates,
   replayEvents,
   verifyStory,
   getRunVerificationSummary,
@@ -465,6 +467,146 @@ test('addEvent repairs a missing LF and getRun preserves valid records after dam
       'before_damage',
       'after_damage',
     ]);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('user task updates: strict atomic ledger round-trips ordered follow-ups', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId, runDir } = createRun('atlas', 'original task', { base: tmpDir });
+    const first = appendUserTaskUpdate(runId, 'original task', {
+      base: tmpDir,
+      allowCreate: true,
+    });
+    assert.equal(first.ok, true);
+    const second = appendUserTaskUpdate(runId, 'do not push this', { base: tmpDir });
+    assert.equal(second.ok, true);
+
+    const strict = getUserTaskUpdates(runId, { base: tmpDir });
+    assert.equal(strict.ok, true);
+    assert.deepEqual(strict.updates.map(update => [update.sequence, update.task]), [
+      [1, 'original task'],
+      [2, 'do not push this'],
+    ]);
+    assert.equal(readJson(path.join(runDir, 'task-updates.json')).schemaVersion, 1);
+    assert.deepEqual(
+      readValidJsonl(path.join(runDir, 'events.jsonl'))
+        .filter(event => event.type === 'user_task_update')
+        .map(event => event.detail.sequence),
+      [1, 2],
+    );
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('user task updates: a missing resume ledger fails closed', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId } = createRun('atlas', 'task', { base: tmpDir });
+    assert.deepEqual(getUserTaskUpdates(runId, { base: tmpDir }).ok, false);
+    const resumed = appendUserTaskUpdate(runId, 'later constraint', { base: tmpDir });
+    assert.equal(resumed.ok, false);
+    assert.match(resumed.reason, /missing/i);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('user task updates: malformed or torn history is never skipped or overwritten', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId, runDir } = createRun('athena', 'task', { base: tmpDir });
+    assert.equal(appendUserTaskUpdate(runId, 'task', {
+      base: tmpDir,
+      allowCreate: true,
+    }).ok, true);
+    const ledgerPath = path.join(runDir, 'task-updates.json');
+    writeFileSync(ledgerPath, '{"schemaVersion":1,"updates":[', { mode: 0o600 });
+
+    assert.equal(getUserTaskUpdates(runId, { base: tmpDir }).ok, false);
+    const append = appendUserTaskUpdate(runId, 'do not ship', { base: tmpDir });
+    assert.equal(append.ok, false);
+    assert.equal(readFileSync(ledgerPath, 'utf8'), '{"schemaVersion":1,"updates":[');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('user task updates: damaged audit JSONL cannot erase strict policy history', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId, runDir } = createRun('atlas', 'task', { base: tmpDir });
+    assert.equal(appendUserTaskUpdate(runId, 'task', {
+      base: tmpDir,
+      allowCreate: true,
+    }).ok, true);
+    writeFileSync(
+      path.join(runDir, 'events.jsonl'),
+      '{"type":"torn-user_task_update"',
+      { mode: 0o600 },
+    );
+    assert.equal(appendUserTaskUpdate(runId, 'never push', { base: tmpDir }).ok, true);
+    const strict = getUserTaskUpdates(runId, { base: tmpDir });
+    assert.equal(strict.ok, true);
+    assert.deepEqual(strict.updates.map(update => update.task), ['task', 'never push']);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('user task updates: a valid older ledger prefix cannot roll back a no-ship follow-up', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId, runDir } = createRun('atlas', 'task', { base: tmpDir });
+    assert.equal(appendUserTaskUpdate(runId, 'task', {
+      base: tmpDir,
+      allowCreate: true,
+    }).ok, true);
+    const ledgerPath = path.join(runDir, 'task-updates.json');
+    const oldValidPrefix = readFileSync(ledgerPath, 'utf8');
+
+    assert.equal(appendUserTaskUpdate(runId, 'do not push this', { base: tmpDir }).ok, true);
+    writeFileSync(ledgerPath, oldValidPrefix, { mode: 0o600 });
+
+    const strict = getUserTaskUpdates(runId, { base: tmpDir });
+    assert.equal(strict.ok, false);
+    assert.match(strict.reason, /rollback|anchor/i);
+    const resumed = appendUserTaskUpdate(runId, 'continue', { base: tmpDir });
+    assert.equal(resumed.ok, false);
+    assert.match(resumed.reason, /rollback|anchor/i);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('user task updates: a crash between ledger and anchor publication recovers one proven append', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId, runDir } = createRun('atlas', 'task', { base: tmpDir });
+    assert.equal(appendUserTaskUpdate(runId, 'task', {
+      base: tmpDir,
+      allowCreate: true,
+    }).ok, true);
+    const anchorPath = path.join(runDir, 'task-updates.anchor.json');
+    const priorAnchor = readFileSync(anchorPath, 'utf8');
+    assert.equal(appendUserTaskUpdate(runId, 'do not push this', { base: tmpDir }).ok, true);
+
+    // Simulate a crash after the durable ledger rename but before the matching
+    // anchor rename became visible.
+    writeFileSync(anchorPath, priorAnchor, { mode: 0o600 });
+    assert.equal(getUserTaskUpdates(runId, { base: tmpDir }).ok, false);
+
+    const resumed = appendUserTaskUpdate(runId, 'continue locally', { base: tmpDir });
+    assert.equal(resumed.ok, true);
+    assert.deepEqual(resumed.updates.map(update => update.task), [
+      'task',
+      'do not push this',
+      'continue locally',
+    ]);
+    assert.equal(getUserTaskUpdates(runId, { base: tmpDir }).ok, true);
   } finally {
     await removeTmpDir(tmpDir);
   }

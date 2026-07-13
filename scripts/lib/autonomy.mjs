@@ -492,6 +492,142 @@ export function resolveShipMode(config) {
   }
 }
 
+const META_COPY_MARKER = /\b(?:copy|example|label|literal|message|metadata|notice|phrase|state|string|text|tooltip|warning)\b|(?:문구|카피|메시지|텍스트|경고|안내|예시)/i;
+const META_BLOCK_INTRO = /(?:\b(?:copy|examples?|label|literal|notice|phrase|string|tooltip|warning)\b|(?:문구|카피|예시|안내\s*문구|경고\s*문구))[^\n]*[:：]\s*$/i;
+const META_INLINE_COPY_INTRO = /\b(?:add|change|display|render|replace|set|show|update|use|write)\b[^\n:]{0,80}\b(?:copy|label|literal|notice|phrase|string|text|tooltip|warning\s+(?:copy|message|text))\b[^\n:]*[:：]\s*/i;
+const META_EXAMPLE_DIRECTIVE = /(?:--no-ship|\b(?:do\s+not|don['’]t|never)\s+(?:ship|push|publish|create|open|update)|^\s*no\s+(?:push|prs?|pull\s+requests?)\b|(?:푸시|PR|풀\s*리퀘스트)[^\n]{0,24}(?:마(?:세요)?|말|안\s*(?:해|돼|되)))/i;
+const QUOTED_TEXT = /"[^"\n]*"|'[^'\n]*'|“[^”\n]*”|‘[^’\n]*’|`[^`\n]*`|「[^」\n]*」/g;
+
+/**
+ * Mask quoted UI copy and the first payload line of an explicitly introduced
+ * example block. The durable task brief is newline-joined, so a genuine
+ * follow-up such as `No PR, please.` must otherwise remain visible.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function maskNoShipMetaExamples(text) {
+  const lines = text.split('\n');
+  let maskNextExampleLine = false;
+  let maskExampleFence = false;
+
+  return lines.map(line => {
+    if (maskExampleFence) {
+      if (/^\s*```/.test(line)) maskExampleFence = false;
+      return '';
+    }
+    if (maskNextExampleLine) {
+      if (!line.trim()) return '';
+      if (/^\s*```/.test(line)) maskExampleFence = true;
+      maskNextExampleLine = META_EXAMPLE_DIRECTIVE.test(line);
+      return '';
+    }
+
+    const masksQuotedCopy = META_COPY_MARKER.test(line) && QUOTED_TEXT.test(line);
+    QUOTED_TEXT.lastIndex = 0;
+    const maskedLine = masksQuotedCopy ? line.replace(QUOTED_TEXT, '') : line;
+    QUOTED_TEXT.lastIndex = 0;
+    if (META_INLINE_COPY_INTRO.test(maskedLine)) {
+      return maskedLine.replace(/([:：])[^:：]*$/, '$1');
+    }
+    if (META_BLOCK_INTRO.test(maskedLine)) maskNextExampleLine = true;
+    return maskedLine;
+  }).join('\n');
+}
+
+const EXPLICIT_NO_SHIP_PATTERNS = [
+  /(?:^|\s)--no-ship(?:\s|$)/i,
+  /\b(?:do\s+not|don['’]t|never)\s+(?:automatically\s+)?ship\b/i,
+  // Push/publish are overloaded product verbs (push notifications, publish
+  // telemetry). Treat them as shipping only when the directive is standalone
+  // or names a repository/release artifact.
+  /\b(?:do\s+not|don['’]t|never)\s+(?:automatically\s+)?(?:push|publish)\s*(?=$|[,;.?!\u2014]|-(?:\s|$)|\bplease\b)/im,
+  /\b(?:do\s+not|don['’]t|never)\s+(?:automatically\s+)?(?:push|publish)\s+(?:anything|yet|later|for\s+now)\b/i,
+  /\b(?:do\s+not|don['’]t|never)\s+(?:automatically\s+)?push\s+(?:this|that|it)(?:\s+(?:until\b[^\n.!?]*|yet\b|for\s+now\b|(?:to\s+)?(?:origin|upstream|(?:the\s+)?remote|github|gitlab|bitbucket)\b))?\s*(?=$|[,;.?!\u2014])/im,
+  /\b(?:do\s+not|don['’]t|never)\s+(?:automatically\s+)?push\s+(?:until|before)\b/i,
+  /\b(?:do\s+not|don['’]t|never)\s+(?:automatically\s+)?push\s+(?:(?:this|that|these|those|the|my|our|your|any|a|an)\s+)?(?:(?:current|working|feature)\s+)?(?:changes?|commits?|code|branch(?:es)?|tags?|refs?|head|repositor(?:y|ies)|repos?)\b(?!\s+(?:selector|object|value|identifier|name|label|field|key|event|metadata|into|onto)\b|\s+to\s+(?:the\s+)?(?:array|stack|queue|list|state|store|collection|buffer)\b)/i,
+  /\b(?:do\s+not|don['’]t|never)\s+(?:automatically\s+)?push\s+to\s+(?:origin|upstream|(?:the\s+)?remote|github|gitlab|bitbucket)\b/i,
+  /\b(?:do\s+not|don['’]t|never)\s+(?:automatically\s+)?publish\s+(?:(?:this|that|these|those|the|my|our|your|any|a|an)\s+)?(?:changes?|packages?|releases?|artifacts?|builds?|branch(?:es)?|repositor(?:y|ies)|repos?)\b(?!\s+(?:selector|object|value|identifier|name|label|field|key|event|notification|message|record|into|onto)\b)/i,
+  /\b(?:do\s+not|don['’]t|never)\s+(?:automatically\s+)?push\b[^\n]{0,40}\b(?:create|open|raise|submit|update|edit|modify)\s+(?:(?:a|the)\s+)?(?:pr|pull\s+request)\b/i,
+  /\b(?:do\s+not|don['’]t|never)\s+(?:create|make|open|raise|submit|update|edit|modify)\s+(?:(?:a|an|any|the)\s+)?(?:prs?|pull\s+requests?)\b/i,
+  // Standalone "no push" is a directive; prose such as "no push notification"
+  // and "No PR exists yet" is not. Bare no-PR wording is accepted only when
+  // the entire sentence is the directive.
+  /\bno\s+(?:automatic\s+)?push(?:ing)?\s*(?=$|[,;.!\u2014]|-(?:\s|$)|\bplease\b)/im,
+  /^\s*(?:please\s*,\s*)?no\s+(?:prs?|pull\s+requests?)(?:\s*,?\s*please)?\s*[.!?]*\s*$/im,
+  /\b(?:i(?:\s+(?:will|shall)|['’]ll)|(?:the\s+user|user)\s+(?:will|shall))\s+(?:manually\s+)?(?:push|publish)\s*(?=$|[,;.?!\u2014]|-(?:\s|$)|\b(?:it\s+)?(?:myself|ourselves|themselves)\b)/im,
+  /\b(?:i(?:\s+(?:will|shall)|['’]ll)|(?:the\s+user|user)\s+(?:will|shall))\s+(?:manually\s+)?(?:push|publish)\s+(?:anything|later|after\s+(?:verification|review|testing))\b/i,
+  /\b(?:i(?:\s+(?:will|shall)|['’]ll)|(?:the\s+user|user)\s+(?:will|shall))\s+(?:manually\s+)?push\s+(?:(?:this|that|these|those|the|my|our|your|any|a|an)\s+)?(?:(?:current|working|feature)\s+)?(?:changes?|commits?|code|branch(?:es)?|tags?|refs?|head|repositor(?:y|ies)|repos?)\b(?!\s+(?:selector|object|value|identifier|name|label|field|key|event|into|onto)\b|\s+to\s+(?:the\s+)?(?:array|stack|queue|list|state|store|collection|buffer)\b)/i,
+  /\b(?:i(?:\s+(?:will|shall)|['’]ll)|(?:the\s+user|user)\s+(?:will|shall))\s+(?:manually\s+)?push\s+to\s+(?:origin|upstream|(?:the\s+)?remote|github|gitlab|bitbucket)\b/i,
+  /\b(?:i(?:\s+(?:will|shall)|['’]ll)|(?:the\s+user|user)\s+(?:will|shall))\s+(?:manually\s+)?publish\s+(?:(?:this|that|these|those|the|my|our|your|any|a|an)\s+)?(?:changes?|packages?|releases?|artifacts?|builds?|branch(?:es)?|repositor(?:y|ies)|repos?)\b(?!\s+(?:selector|object|value|identifier|name|label|field|key|event|notification|message|record|into|onto)\b)/i,
+  /\b(?:i(?:\s+(?:will|shall)|['’]ll)|(?:the\s+user|user)\s+(?:will|shall))\b[^\n]{0,80}\b(?:open|create|raise|submit|update|edit|modify)\s+(?:(?:a|the)\s+)?(?:single\s+)?(?:pr|pull\s+request)\b/i,
+  /\b(?:i(?:\s+(?:will|shall)|['’]ll)|(?:the\s+user|user)\s+(?:will|shall))\s+(?:(?:will\s+)?(?:personally\s+)?(?:handle|manage)\s+(?:the\s+)?|(?:take\s+care\s+of)\s+(?:the\s+)?)(?:push|pushing|publishing|pr|pull\s+request)\b(?:\s+(?:personally|myself|themselves))?/i,
+  /\b(?:leave|keep)\b[^\n]{0,40}\b(?:local|unpublished|unpushed)\b/i,
+  /(?:푸시|push)\s*(?:(?:를|을|은|는)\s*)?(?:하지\s*(?:마(?:세요)?|말(?:아(?:\s*주세요)?|라고|라|고|자)?|않(?:아|을))|안\s*(?:해|할)|금지)/i,
+  /(?:푸시|push)\s*(?:(?:를|을|은|는)\s*)?(?:하?면|할\s*경우)\s*안\s*(?:돼|되|됩니다|된다|됨)/i,
+  /(?:PR|풀\s*리퀘스트)\s*(?:(?:을|를|은|는)\s*)?(?:(?:만들|생성하|작성하|열|올리|수정하|업데이트하|갱신하)지\s*(?:마(?:세요)?|말(?:아(?:\s*주세요)?|라고|라|고|자)?))/i,
+  /(?:PR|풀\s*리퀘스트)\s*(?:(?:을|를|은|는)\s*)?(?:생성|작성|수정|업데이트|갱신)\s*(?:은|는)?\s*하지\s*(?:마(?:세요)?|말(?:아(?:\s*주세요)?|라고|라|고|자)?)/i,
+  /(?:PR|풀\s*리퀘스트)\s*(?:(?:을|를|은|는)\s*)?(?:올리|만들|생성하|작성하|열)면\s*안\s*(?:돼|되|됩니다|된다|됨)/i,
+  /(?:PR|풀\s*리퀘스트)\s*(?:(?:을|를|은|는)\s*)?(?:수정|업데이트|갱신)\s*(?:은|는)?\s*하지\s*(?:마(?:세요)?|말(?:아(?:\s*주세요)?|라고|라|고|자)?)/i,
+  /(?:내가|제가|사용자(?:가|는)?)\s*(?:(?:직접|알아서|나중에)\s*)*(?:푸시|push)\s*(?:(?:를|을|은|는)\s*)?(?:할게(?:요)?|하겠(?:습니다|다)?|할\s*예정(?:입니다|이다|이에요|임)|할\s*(?:거|꺼|것)\s*(?:야|예요|에요|입니다|이다))/i,
+  /(?:푸시|push)\s*(?:(?:를|을|은|는)\s*)?(?:내가|제가|사용자(?:가|는)?)\s*(?:(?:직접|알아서|나중에)\s*)*(?:할게(?:요)?|하겠(?:습니다|다)?|할\s*예정(?:입니다|이다|이에요|임)|할\s*(?:거|꺼|것)\s*(?:야|예요|에요|입니다|이다))/i,
+  /(?:푸시|push)\s*(?:(?:를|을|은|는)\s*)?(?:내가|제가|사용자(?:가|는)?)\s*(?:(?:직접|알아서|나중에)\s*)*처리\s*(?:할게(?:요)?|하겠(?:습니다|다)?|할\s*예정(?:입니다|이다|이에요|임)|할\s*(?:거|꺼|것)\s*(?:야|예요|에요|입니다|이다))/i,
+  /(?:내가|제가|사용자(?:가|는)?)\s*(?:(?:직접|알아서|나중에)\s*)*(?:PR|풀\s*리퀘스트)\s*(?:(?:을|를|은|는)\s*)?(?:(?:올릴|열|만들|생성하|작성하)(?:게(?:요)?|겠(?:습니다|다)?|\s*예정(?:입니다|이다|이에요|임)|\s*(?:거|꺼|것)\s*(?:야|예요|에요|입니다|이다))|(?:올리|열|만들|생성하|작성하)겠(?:습니다|다)|(?:처리\s*)?할게(?:요)?)/i,
+  /(?:PR|풀\s*리퀘스트)\s*(?:(?:을|를|은|는)\s*)?(?:내가|제가|사용자(?:가|는)?)\s*(?:(?:직접|알아서|나중에)\s*)*(?:(?:올릴|열|만들|생성하|작성하)(?:게(?:요)?|겠(?:습니다|다)?|\s*예정(?:입니다|이다|이에요|임)|\s*(?:거|꺼|것)\s*(?:야|예요|에요|입니다|이다))|(?:올리|열|만들|생성하|작성하)겠(?:습니다|다)|(?:처리\s*)?할게(?:요)?)/i,
+  /(?:PR|풀\s*리퀘스트)\s*(?:(?:을|를|은|는)\s*)?(?:내가|제가|사용자(?:가|는)?)\s*(?:(?:직접|알아서|나중에)\s*)*처리\s*(?:할게(?:요)?|하겠(?:습니다|다)?|할\s*예정(?:입니다|이다|이에요|임)|할\s*(?:거|꺼|것)\s*(?:야|예요|에요|입니다|이다))/i,
+  // Korean first-person intent can omit the subject. Require a commitment or
+  // causal ending, never the broad "올릴 예정" fragment used in feature prose.
+  /(?:PR|풀\s*리퀘스트)\s*(?:(?:을|를|은|는)\s*)?[^\n]{0,16}(?:한\s*번에\s*)?올릴\s*(?:(?:거|꺼)\s*(?:니까|라서)|테니|게(?:요)?)(?=$|[\s,.;!?])/i,
+];
+
+/**
+ * Detect an explicit, user-authored instruction that this run must not push or
+ * create/update a pull request. Callers must pass the original task plus every
+ * durable user follow-up stored in the run artifact, not a model summary.
+ *
+ * The matcher intentionally recognizes only direct imperatives or statements
+ * that the user will perform shipping. Ambiguous discussion about Git/PRs does
+ * not override the configured policy.
+ *
+ * @param {unknown} originalTask
+ * @returns {boolean}
+ */
+export function taskExplicitlyForbidsShipping(originalTask) {
+  try {
+    const messages = Array.isArray(originalTask) ? originalTask : [originalTask];
+    if (messages.length === 0
+      || messages.some(message => typeof message !== 'string')) {
+      return false;
+    }
+    return messages.some(message => {
+      if (!message.trim()) return false;
+      const actionableText = maskNoShipMetaExamples(message.normalize('NFKC'));
+      return EXPLICIT_NO_SHIP_PATTERNS.some(pattern => pattern.test(actionableText));
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the per-run ship policy from persisted config and the durable task
+ * brief (original request plus follow-ups). A no-ship directive always wins
+ * over legacy or explicit auto mode.
+ *
+ * @param {unknown} config
+ * @param {unknown} originalTask
+ * @returns {{ configuredMode: 'never'|'ask'|'auto', taskForbidsShipping: boolean, effectiveMode: 'never'|'ask'|'auto' }}
+ */
+export function resolveRunShipMode(config, originalTask) {
+  const configuredMode = resolveShipMode(config);
+  const taskForbidsShipping = taskExplicitlyForbidsShipping(originalTask);
+  return {
+    configuredMode,
+    taskForbidsShipping,
+    effectiveMode: taskForbidsShipping ? 'never' : configuredMode,
+  };
+}
+
 /**
  * Deep-merge source object into target. Only plain objects are recursed into;
  * arrays and primitives from source overwrite those in target.

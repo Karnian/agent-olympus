@@ -48,15 +48,70 @@ import {
   recordPhaseError, completePhase, skipPhase, reopenPhase, getPipelineState,
   isComplete,
 } from './scripts/lib/phase-runner.mjs';
-import { createRun, finalizeRun, getActiveRunId } from './scripts/lib/run-artifacts.mjs';
+import {
+  addEvent, appendUserTaskUpdate, createRun, finalizeRun, getActiveRunId,
+  getRun, getUserTaskUpdates,
+} from './scripts/lib/run-artifacts.mjs';
+import { loadAutonomyConfig, resolveRunShipMode } from './scripts/lib/autonomy.mjs';
+const currentAtlasRequest = <user_request>;
+if (typeof currentAtlasRequest !== 'string' || !currentAtlasRequest.trim()) {
+  throw new Error('Atlas current user request is unavailable; stop before creating or resuming a run');
+}
 const activeAtlasRunId = getActiveRunId('atlas');
-const createdAtlasRun = activeAtlasRunId ? null : createRun('atlas', <user_request>);
+const createdAtlasRun = activeAtlasRunId ? null : createRun('atlas', currentAtlasRequest);
 if (createdAtlasRun && !createdAtlasRun.ok) {
   throw new Error(`Atlas run creation failed: ${createdAtlasRun.reason}; preserve state and stop`);
 }
 // runId is the exact active/created id — the SAME one passed to
 // addVerification() / checkVerificationGate().
 const runId = activeAtlasRunId || createdAtlasRun.runId;
+// Every invocation, including a follow-up that resumes an active run, must
+// atomically append the current user-authored constraint to the strict task
+// ledger before the pipeline can continue. The best-effort event JSONL remains
+// audit-only and is never a shipping-policy source.
+const appendedTaskUpdate = appendUserTaskUpdate(runId, currentAtlasRequest, {
+  allowCreate: createdAtlasRun !== null,
+});
+if (!appendedTaskUpdate.ok
+  || appendedTaskUpdate.updates?.at(-1)?.task !== currentAtlasRequest) {
+  throw new Error('Atlas current user request was not durably appended; preserve the run and stop');
+}
+const readDurableTaskBrief = action => {
+  const runRecord = getRun(runId);
+  const strictUpdates = getUserTaskUpdates(runId);
+  if (runRecord.summary?.runId !== runId
+    || runRecord.summary?.orchestrator !== 'atlas'
+    || typeof runRecord.summary?.task !== 'string'
+    || !runRecord.summary.task.trim()
+    || strictUpdates.ok !== true
+    || strictUpdates.updates.length < 1
+    || strictUpdates.updates.some((update, index) => (
+      update?.sequence !== index + 1
+      || typeof update?.task !== 'string'
+      || !update.task.trim()
+    ))) {
+    throw new Error(`Atlas durable task provenance is unavailable before ${action}; stop outward actions`);
+  }
+  return [
+    runRecord.summary.task,
+    ...strictUpdates.updates.map(update => update.task),
+  ];
+};
+let config;
+let configuredShipMode;
+let taskForbidsShipping;
+let shipMode;
+let noShip;
+const refreshRunShipPolicy = action => {
+  config = loadAutonomyConfig(process.cwd());
+  const resolved = resolveRunShipMode(config, readDurableTaskBrief(action));
+  configuredShipMode = resolved.configuredMode;
+  taskForbidsShipping = resolved.taskForbidsShipping;
+  shipMode = resolved.effectiveMode;
+  noShip = shipMode === 'never';
+  return { configuredShipMode, taskForbidsShipping, shipMode, noShip };
+};
+refreshRunShipPolicy('pipeline resume');
 const pipelineInit = initPipeline(runId, 'atlas');
 if (!pipelineInit.ok || pipelineInit.degraded) {
   throw new Error('Atlas pipeline ledger is unavailable or corrupt; preserve all artifacts and stop');
@@ -1188,17 +1243,14 @@ to bypass the router entirely and always run the full reviewer set.
 **Phase entry (runner):** `enterPhase(runId, 'finalize')` — covers 5b (slop+commit), 5c (changelog), 5d (exec-plan). After 5d, `await completePhase(runId, 'finalize')`.
 
 Resolve the release policy before invoking any helper that can offer or perform
-shipping. Explicit shipping constraints in the original task brief always take
-precedence over `.ao/autonomy.json`, including `ship.mode: "auto"`.
+shipping. Explicit shipping constraints in the original task brief or any
+durably appended user follow-up always take precedence over
+`.ao/autonomy.json`, including `ship.mode: "auto"`.
 
 ```javascript
-import { loadAutonomyConfig, resolveShipMode } from './scripts/lib/autonomy.mjs';
-
-const config = loadAutonomyConfig(cwd);
-const taskForbidsShipping = <true only when the original task explicitly forbids push or PR>;
-const configuredShipMode = resolveShipMode(config);
-const shipMode = taskForbidsShipping ? 'never' : configuredShipMode;
-const noShip = shipMode === 'never';
+// This helper is initialized in the resume-aware runner setup on every skill
+// invocation, even when finalize was already completed in an earlier process.
+refreshRunShipPolicy('finalize release policy');
 ```
 
 The orchestrator model answering its own y/n prompt is not user approval. In
@@ -1255,22 +1307,221 @@ Include this file in the commit.
 ### Phase 6 — SHIP (PR Creation + Issue Linking)
 
 Resolve approval without allowing the orchestrator to approve its own prompt.
-In unattended/headless `ask` mode, optionally send the blocked notification,
-halt shipping without a push, terminally skip ship/CI, and proceed safely to
-COMPLETION. The notification is gated by `config.notify.onBlocked`:
+Approval is valid only when the structured `AskUserQuestion` result records the
+exact approval option and that approval is then durably re-read from this run's
+artifact log. Bind both the first durable `ship_intent` and approval to the
+current branch, base, HEAD, and repository identity so a later commit, retarget,
+or remote swap invalidates recovery. In unattended/headless `ask` mode,
+optionally send the blocked notification, halt shipping without a push,
+terminally skip ship/CI, and proceed safely to COMPLETION. The notification is
+gated by `config.notify.onBlocked`:
 
 ```javascript
 import { execFileSync } from 'node:child_process';
-import { preflightCheck } from './scripts/lib/pr-create.mjs';
+import {
+  buildPRBody,
+  createPR,
+  detectBaseBranch,
+  detectRepositoryIdentity,
+  extractIssueRefs,
+  findExistingPR,
+  preflightCheck,
+  repositoryIdentitiesEqual,
+  updateExistingPR,
+} from './scripts/lib/pr-create.mjs';
 
-const hasInteractiveUserChannel = <true only when an actual human can answer now>;
-let userApprovedPush = false;
-let pushPerformed = false;
-let createdPrUrl = null;
+// Runs on every invocation even when finalize is already terminal, so a new
+// durable follow-up can revoke auto shipping before Phase 6 resumes.
+refreshRunShipPolicy('ship phase entry');
+const persistedShipPhase = getPipelineState(runId).phases.ship;
+const persistedShipOutputs = persistedShipPhase?.outputs;
+const shipAlreadyTerminal = ['completed', 'skipped'].includes(persistedShipPhase?.status);
+const shipRecoveryInProgress = persistedShipPhase?.status === 'in_progress';
+let pushPerformed = persistedShipOutputs?.pushPerformed === true;
+let createdPrUrl = typeof persistedShipOutputs?.createdPrUrl === 'string'
+  ? persistedShipOutputs.createdPrUrl
+  : null;
+const restoredBaseBranch = typeof persistedShipOutputs?.baseBranch === 'string'
+  ? persistedShipOutputs.baseBranch
+  : null;
+const restoredShipBranchName = typeof persistedShipOutputs?.branchName === 'string'
+  ? persistedShipOutputs.branchName
+  : null;
+const restoredHeadCommit = typeof persistedShipOutputs?.headCommit === 'string'
+  ? persistedShipOutputs.headCommit
+  : null;
+const restoredRepoIdentity = typeof persistedShipOutputs?.repoOriginUrl === 'string'
+  && typeof persistedShipOutputs?.repoPushUrl === 'string'
+  && typeof persistedShipOutputs?.repoRepository === 'string'
+  && typeof persistedShipOutputs?.repoDefaultBranch === 'string'
+  ? {
+      originUrl: persistedShipOutputs.repoOriginUrl,
+      pushUrl: persistedShipOutputs.repoPushUrl,
+      repository: persistedShipOutputs.repoRepository,
+      defaultBranch: persistedShipOutputs.repoDefaultBranch,
+    }
+  : null;
+if (persistedShipPhase?.status === 'completed'
+  && (!pushPerformed || !createdPrUrl?.trim()
+    || !restoredBaseBranch?.trim() || !restoredShipBranchName?.trim()
+    || !restoredHeadCommit?.trim() || !restoredRepoIdentity)) {
+  throw new Error('Atlas completed ship phase lacks a durable push/PR/base/branch/HEAD/repository outcome; stop recovery');
+}
+let observedBranchName = '';
+let observedHeadCommit = '';
+try {
+  observedBranchName = execFileSync('git', ['branch', '--show-current'], { cwd, encoding: 'utf8' }).trim();
+  observedHeadCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
+} catch { /* the cached preflight below rejects an unusable repository */ }
+const observedBaseBranch = detectBaseBranch(cwd, config.ship.baseBranch);
 
-if (shipMode === 'ask' && hasInteractiveUserChannel) {
-  userApprovedPush = <true only after the actual human answers yes>;
-} else if (shipMode === 'ask') {
+// Detect the base first and make exactly one cached preflight decision. This
+// is read-only; no push, PR mutation, or CI action is permitted yet.
+const preflight = shipAlreadyTerminal || noShip
+  ? { ok: true, errors: [] }
+  : preflightCheck({ cwd, baseBranch: observedBaseBranch });
+
+// The first durable intent owns the outward-action identity for the lifetime
+// of this nonterminal ship attempt. Never replace it with a newer checkout.
+const shipIntentEvents = getRun(runId).events.filter(event => (
+  event?.phase === 'ship' && event?.type === 'ship_intent'
+));
+if (shipIntentEvents.length > 1) {
+  throw new Error('Atlas found multiple ship intents; stop rather than choosing a replacement');
+}
+let durableShipIntent = shipIntentEvents[0] ?? null;
+const matchesObservedShipIdentity = detail => (
+  detail?.branchName === observedBranchName
+  && detail?.baseBranch === observedBaseBranch
+  && detail?.headCommit === observedHeadCommit
+  && repositoryIdentitiesEqual(detail?.repoIdentity, preflight.repoIdentity)
+);
+const recoveringDurableIntent = !shipAlreadyTerminal
+  && (durableShipIntent !== null || shipRecoveryInProgress);
+if (recoveringDurableIntent
+  && (!durableShipIntent || preflight.ok !== true
+    || !matchesObservedShipIdentity(durableShipIntent.detail))) {
+  throw new Error('Atlas current checkout/HEAD/base/repository does not match the durable ship intent; stop recovery');
+}
+if (!shipAlreadyTerminal && !noShip && preflight.ok === true && !durableShipIntent) {
+  const intentRepoIdentity = detectRepositoryIdentity(cwd);
+  if (!repositoryIdentitiesEqual(intentRepoIdentity, preflight.repoIdentity)) {
+    throw new Error('Atlas repository changed after preflight; stop before recording ship intent');
+  }
+  const proposedShipIntent = {
+    branchName: observedBranchName,
+    baseBranch: observedBaseBranch,
+    headCommit: observedHeadCommit,
+    repoIdentity: preflight.repoIdentity,
+  };
+  addEvent(runId, {
+    phase: 'ship',
+    type: 'ship_intent',
+    detail: proposedShipIntent,
+  });
+  const durableIntentEvents = getRun(runId).events.filter(event => (
+    event?.phase === 'ship' && event?.type === 'ship_intent'
+  ));
+  if (durableIntentEvents.length !== 1
+    || !matchesObservedShipIdentity(durableIntentEvents[0]?.detail)) {
+    throw new Error('Atlas ship intent was not durably recorded exactly once; stop before approval');
+  }
+  durableShipIntent = durableIntentEvents[0];
+}
+const branchName = shipAlreadyTerminal
+  ? (restoredShipBranchName ?? observedBranchName)
+  : (durableShipIntent?.detail?.branchName ?? observedBranchName);
+const baseBranch = shipAlreadyTerminal
+  ? (restoredBaseBranch ?? observedBaseBranch)
+  : (durableShipIntent?.detail?.baseBranch ?? observedBaseBranch);
+const headCommit = shipAlreadyTerminal
+  ? (restoredHeadCommit ?? observedHeadCommit)
+  : (durableShipIntent?.detail?.headCommit ?? observedHeadCommit);
+const repoIdentity = shipAlreadyTerminal
+  ? restoredRepoIdentity
+  : (durableShipIntent?.detail?.repoIdentity ?? preflight.repoIdentity ?? null);
+const requirePinnedRepository = action => {
+  const currentRepoIdentity = detectRepositoryIdentity(cwd);
+  if (!repositoryIdentitiesEqual(currentRepoIdentity, repoIdentity)) {
+    throw new Error(`Atlas repository identity changed before ${action}; stop outward actions`);
+  }
+};
+const approvalQuestion = `Push ${branchName}@${headCommit} in ${repoIdentity?.repository} and create/update a PR targeting ${baseBranch}?`;
+const matchesCurrentHumanApproval = event => (
+  event?.phase === 'ship'
+  && event?.type === 'human_ship_approval'
+  && event?.detail?.source === 'AskUserQuestion'
+  && event?.detail?.decision === 'approved'
+  && event?.detail?.branchName === branchName
+  && event?.detail?.baseBranch === baseBranch
+  && event?.detail?.headCommit === headCommit
+  && repositoryIdentitiesEqual(event?.detail?.repoIdentity, repoIdentity)
+);
+let durableHumanApproval = getRun(runId).events.some(matchesCurrentHumanApproval);
+const requireShippingNotRevoked = action => {
+  const currentPolicy = refreshRunShipPolicy(action);
+  if (currentPolicy.noShip) {
+    throw new Error(`Atlas shipping was revoked before ${action}; stop outward actions`);
+  }
+  return currentPolicy;
+};
+const requireCurrentShippingAuthorization = action => {
+  const currentPolicy = requireShippingNotRevoked(action);
+  durableHumanApproval = getRun(runId).events.some(matchesCurrentHumanApproval);
+  if (currentPolicy.shipMode === 'ask' && !durableHumanApproval) {
+    throw new Error(`Atlas shipping now requires fresh human approval before ${action}`);
+  }
+  if (!['auto', 'ask'].includes(currentPolicy.shipMode)) {
+    throw new Error(`Atlas shipping policy is invalid before ${action}`);
+  }
+  requirePinnedRepository(action);
+};
+
+if (!shipAlreadyTerminal && shipMode === 'ask' && preflight.ok && !durableHumanApproval
+  && typeof AskUserQuestion === 'function') {
+  requireShippingNotRevoked('shipping approval');
+  requirePinnedRepository('shipping approval');
+  const approvalResponse = await AskUserQuestion({
+    questions: [{
+      question: approvalQuestion,
+      header: 'Ship branch',
+      multiSelect: false,
+      options: [
+        {
+          label: 'Approve shipping',
+          description: `Push ${branchName}@${headCommit} and create or update the ${baseBranch} PR.`,
+        },
+        {
+          label: 'Keep branch local',
+          description: 'Do not push or mutate a pull request.',
+        },
+      ],
+    }],
+  });
+  const selectedAnswer = approvalResponse?.answers?.[approvalQuestion];
+  const humanResolved = approvalResponse
+    && !Object.prototype.hasOwnProperty.call(approvalResponse, 'afkTimeoutMs');
+  if (humanResolved && selectedAnswer === 'Approve shipping') {
+    requirePinnedRepository('shipping approval recording');
+    // This is the sole write site for approval provenance. The orchestrator
+    // must never call addEvent to synthesize approval without this exact result.
+    addEvent(runId, {
+      phase: 'ship',
+      type: 'human_ship_approval',
+      detail: {
+        source: 'AskUserQuestion',
+        decision: 'approved',
+        branchName,
+        baseBranch,
+        headCommit,
+        repoIdentity,
+      },
+    });
+    durableHumanApproval = getRun(runId).events.some(matchesCurrentHumanApproval);
+  }
+}
+
+if (!shipAlreadyTerminal && shipMode === 'ask' && !durableHumanApproval) {
   if (config.notify.onBlocked) {
     // node scripts/notify-cli.mjs --event blocked --orchestrator atlas --body "branch ready to ship: <branchName>"
     try {
@@ -1283,57 +1534,180 @@ if (shipMode === 'ask' && hasInteractiveUserChannel) {
 }
 
 const shippingApproved = shipMode === 'auto'
-  || (shipMode === 'ask' && userApprovedPush === true);
-const preflight = shippingApproved
-  ? preflightCheck()
-  : { ok: true, errors: [] };
+  || (shipMode === 'ask' && durableHumanApproval === true);
 const shippingApplicable = preflight.ok && shippingApproved;
 // `user-declined` is the runner's allowlisted no-approval bucket; it also
 // covers headless ask where no human approval channel existed.
 const shipSkipReason = noShip
   ? 'not-applicable'
   : (!preflight.ok ? 'preflight-unavailable' : 'user-declined');
-const shipGate = shippingApplicable
+if (shipRecoveryInProgress && !shippingApplicable) {
+  throw new Error('Atlas in-progress ship recovery lost approval/preflight/policy; leave it nonterminal');
+}
+const shipGate = shipAlreadyTerminal
   ? enterPhase(runId, 'ship')
-  : skipPhase(runId, 'ship', shipSkipReason);
+  : (shippingApplicable
+    ? enterPhase(runId, 'ship')
+    : skipPhase(runId, 'ship', shipSkipReason));
+const shipCanAct = shippingApplicable
+  && shipGate.proceed === true
+  && shipGate.degraded === false;
+if (shipGate.status === 'failed') {
+  throw new Error('Atlas ship phase is terminally failed; do not continue to CI/completion');
+}
+if (shipAlreadyTerminal && (shipGate.skip !== true || shipGate.degraded === true)) {
+  throw new Error('Atlas terminal ship outcome could not be restored; stop before CI/completion');
+}
+if (shippingApplicable && shipGate.skip !== true && !shipCanAct) {
+  throw new Error('Atlas ship phase transition was denied or degraded; stop before push/PR');
+}
+if (!shipAlreadyTerminal && !shippingApplicable
+  && (shipGate.ok !== true || shipGate.degraded === true)) {
+  throw new Error('Atlas ship skip was not durable; stop before completion');
+}
 ```
 
 For `shipMode === 'never'`, report exactly:
 `branch ready: <branchName> — push/PR은 사용자가 직접`.
-If preflight fails (no gh, no remote, on main branch), report its errors and do
-not push. Verification and PR creation below run only when
-`shippingApplicable && !shipGate.skip`.
+If preflight fails (no gh, no remote, unavailable GitHub default-branch
+metadata, detached HEAD, or a base branch), report
+its errors and do not push. Verification, push, PR mutation, and phase
+completion below run only inside `if (shipCanAct)`. A gate denial or any
+`degraded:true` result is fail-closed and never authorizes an outward action.
 
 #### Verification Gate (MANDATORY — blocks PR creation) <!-- AO-CONTRACT:verification-gate -->
 Before any shipping activity, check that ALL stories have verification records:
 ```javascript
 import { checkVerificationGate } from './scripts/lib/run-artifacts.mjs';
-const storyIds = prd.userStories.map(s => s.id);
-const gate = checkVerificationGate(runId, storyIds);
+if (shipCanAct) {
+  const storyIds = prd.userStories.map(s => s.id);
+  let verificationGate = checkVerificationGate(runId, storyIds);
 
-if (!gate.gatePass) {
-  // Stories without verification records — MUST attempt xval for each
-  for (const missingId of gate.missing) {
-    // 1. First attempt: try Codex cross-validation (same as Phase 3 step 4)
-    // 2. If Codex unavailable, record explicit skip:
-    addVerification(runId, {
-      story_id: missingId,
-      verdict: 'skip',
-      evidence: 'codex unavailable: verification gate catch-up',
-      verifiedBy: 'atlas'
+  if (!verificationGate.gatePass) {
+    // Stories without verification records — MUST attempt xval for each.
+    for (const missingId of verificationGate.missing) {
+      // 1. First attempt: try Codex cross-validation (same as Phase 3 step 4).
+      // 2. If Codex unavailable, record explicit skip.
+      addVerification(runId, {
+        story_id: missingId,
+        verdict: 'skip',
+        evidence: 'codex unavailable: verification gate catch-up',
+        verifiedBy: 'atlas',
+      });
+    }
+    verificationGate = checkVerificationGate(runId, storyIds);
+  }
+  if (!verificationGate.gatePass) {
+    throw new Error(
+      `Atlas verification gate failed for: ${verificationGate.missing.join(', ')}; leave ship nonterminal`,
+    );
+  }
+  if (verificationGate.skipped.length > 0) {
+    console.log(`[Atlas] ${verificationGate.skipped.length} stories had Codex xval skipped — results included in PR body`);
+  }
+
+  // Prepare the final base, body, issue links, and existing-PR decision before
+  // push. This keeps both the create and update branches on identical content.
+  let diffStat = '';
+  try {
+    diffStat = execFileSync(
+      'git',
+      ['diff', '--stat', `origin/${baseBranch}...HEAD`],
+      { cwd, encoding: 'utf8' },
+    ).trim();
+  } catch { /* PR body keeps the safe no-diff fallback */ }
+  const body = buildPRBody({ prd, diffStat, verifyResults });
+  const issues = extractIssueRefs(commitMessages + branchName);
+  const linkedBody = body + (issues.length
+    ? '\n\nCloses ' + issues.map(issue => `#${issue}`).join(', ')
+    : '');
+  requireCurrentShippingAuthorization('existing-PR lookup');
+  requirePinnedRepository('existing-PR lookup');
+  const existing = findExistingPR(branchName, {
+    cwd,
+    baseBranch,
+    repository: repoIdentity.repository,
+  });
+  if (existing.ok !== true) {
+    throw new Error(`Atlas existing-PR lookup failed: ${existing.error}; stop to avoid a duplicate PR`);
+  }
+
+  // Close the approval/gate TOCTOU window immediately before the outward write.
+  // A changed branch or commit requires a fresh pass through approval/preflight.
+  const pushBranchName = execFileSync(
+    'git', ['branch', '--show-current'], { cwd, encoding: 'utf8' },
+  ).trim();
+  const pushHeadCommit = execFileSync(
+    'git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' },
+  ).trim();
+  if (pushBranchName !== branchName || pushHeadCommit !== headCommit) {
+    throw new Error('Atlas branch/HEAD changed after approval; stop before push and request fresh approval');
+  }
+  requireCurrentShippingAuthorization('push');
+  requirePinnedRepository('push');
+  execFileSync('git', [
+    'push', repoIdentity.pushUrl, `${headCommit}:refs/heads/${branchName}`,
+  ], { cwd, stdio: 'inherit' });
+  pushPerformed = true;
+
+  if (existing.found) {
+    requireCurrentShippingAuthorization('PR update');
+    requirePinnedRepository('PR update');
+    const updated = updateExistingPR({
+      prNumber: existing.prNumber,
+      title: prd.projectName,
+      body: linkedBody,
+      baseBranch,
+      cwd,
+      labels: config.ship.labels,
+      repository: repoIdentity.repository,
     });
+    if (updated.ok !== true
+      || typeof existing.prUrl !== 'string'
+      || !existing.prUrl.trim()) {
+      throw new Error(`Atlas PR update failed: ${updated.error ?? 'missing PR URL'}; leave ship nonterminal`);
+    }
+    createdPrUrl = existing.prUrl;
+  } else {
+    requireCurrentShippingAuthorization('PR creation');
+    requirePinnedRepository('PR creation');
+    const created = createPR({
+      title: prd.projectName,
+      body: linkedBody,
+      draft: config.ship.draftPR,
+      headBranch: branchName,
+      baseBranch,
+      cwd,
+      labels: config.ship.labels,
+      repository: repoIdentity.repository,
+    });
+    if (created.ok !== true
+      || typeof created.prUrl !== 'string'
+      || !created.prUrl.trim()) {
+      throw new Error(`Atlas PR creation failed: ${created.error ?? 'missing PR URL'}; leave ship nonterminal`);
+    }
+    createdPrUrl = created.prUrl;
   }
-  // Re-check — if STILL failing, STOP (addVerification may have silently failed)
-  const recheck = checkVerificationGate(runId, storyIds);
-  if (!recheck.gatePass) {
-    console.error(`[Atlas] VERIFICATION GATE FAILED — ${recheck.missing.length} stories still lack records: ${recheck.missing.join(', ')}`);
-    console.error(`[Atlas] Cannot create PR until all stories have verification records.`);
-    // STOP — do not proceed to PR creation
-  }
-}
 
-if (gate.skipped.length > 0) {
-  console.log(`[Atlas] ${gate.skipped.length} stories had Codex xval skipped — results included in PR body`);
+  const shipOutputs = {
+    pushPerformed,
+    createdPrUrl,
+    branchName,
+    baseBranch,
+    headCommit,
+    // completePhase() deliberately preserves scalar outputs only. Flatten the
+    // repository identity so a completed ship can be recovered after a crash.
+    repoOriginUrl: repoIdentity.originUrl,
+    repoPushUrl: repoIdentity.pushUrl,
+    repoRepository: repoIdentity.repository,
+    repoDefaultBranch: repoIdentity.defaultBranch,
+  };
+  const shipCompletion = await completePhase(runId, 'ship', shipOutputs, {
+    checkpointData: { runId, ...shipOutputs },
+  });
+  if (!shipCompletion.ok || shipCompletion.degraded) {
+    throw new Error('Atlas ship outcome was not durably checkpointed; preserve the run for recovery');
+  }
 }
 ```
 
@@ -1345,57 +1719,26 @@ terminally skipped with `preflight-unavailable`, so report its errors and
 continue to COMPLETION.
 
 #### Push & Create PR
-If `shippingApplicable && !shipGate.skip`, push once and then reuse an existing
-PR or create a new draft. The push is common to both PR branches:
-
-```javascript
-import { execFileSync } from 'node:child_process';
-import {
-  buildPRBody,
-  createPR,
-  detectBaseBranch,
-  extractIssueRefs,
-  findExistingPR,
-} from './scripts/lib/pr-create.mjs';
-
-execFileSync('git', ['push', '-u', 'origin', 'HEAD'], { cwd, stdio: 'inherit' });
-pushPerformed = true;
-
-const existing = findExistingPR(branchName);
-if (existing.found) {
-  createdPrUrl = existing.prUrl ?? null;
-} else {
-  const baseBranch = detectBaseBranch(cwd, config.ship.baseBranch);
-  let diffStat = '';
-  try {
-    diffStat = execFileSync(
-      'git',
-      ['diff', '--stat', `origin/${baseBranch}...HEAD`],
-      { cwd, encoding: 'utf8' },
-    ).trim();
-  } catch { /* PR body keeps the safe no-diff fallback */ }
-  const body = buildPRBody({ prd, diffStat, verifyResults });
-  const issues = extractIssueRefs(commitMessages + branchName);
-  const created = createPR({
-    title: prd.projectName,
-    body: body + (issues.length ? '\n\nCloses ' + issues.map(i => '#'+i).join(', ') : ''),
-    draft: config.ship.draftPR,
-    baseBranch,
-    cwd,
-  });
-  createdPrUrl = created.ok ? created.prUrl : null;
-}
-```
+The guarded block above prepares the base and complete linked PR body before
+push. When `findExistingPR(branchName, { cwd, baseBranch, repository })` returns a PR, call
+`updateExistingPR` even when its base already matches so title, body, issue
+links, base, and labels cannot remain stale. Create a PR only when no open PR
+exists for the head branch and the lookup itself succeeded. A lookup/tool/JSON
+failure is not equivalent to "no PR" and stops before push or create.
 
 Report `createdPrUrl` to the user when present.
 
-In `ask` mode, ask `"Push and create PR? [y/n]"` only through an actual
-interactive user channel. A decline and a headless/unattended run both leave
-`pushPerformed === false`.
+In `ask` mode, use only the structured `AskUserQuestion` call above. A decline,
+free-form response, AFK auto-resolution, unavailable tool, and headless run all
+leave `durableHumanApproval === false` and `pushPerformed === false`.
 
-When shipping was applicable and the verification gate plus PR operation
-reached a durable terminal result, call `await completePhase(runId, 'ship')`.
-A blocked verification gate leaves the entered phase nonterminal for recovery.
+`completePhase` persists `{ pushPerformed, createdPrUrl, branchName, baseBranch,
+headCommit }` plus the four scalar repository-identity fields in both the ship
+ledger outputs and checkpoint. On resume the identity object is reconstructed
+before CI and completion reporting. A blocked
+verification gate leaves the entered phase nonterminal for recovery. A terminal
+skipped phase reports `restoredShipBranchName ?? observedBranchName`, never a
+synthetic empty branch name.
 
 ### Phase 6b — CI WATCH (Monitor + Auto-Fix) <!-- AO-CONTRACT:ci-watch -->
 
@@ -1407,18 +1750,514 @@ bounded by `loopTick(runId, 'ci')` (cap 2 = CI_CAP); on exit,
 `await completePhase(runId, 'ci')`.
 
 ```javascript
-const ciApplicable = Boolean(pushPerformed && createdPrUrl && config.ci.watchEnabled);
-const ciGate = ciApplicable
+import { getFailedLogs, watchCI } from './scripts/lib/ci-watch.mjs';
+
+refreshRunShipPolicy('CI phase entry');
+const ciApplicable = Boolean(!noShip && pushPerformed && createdPrUrl && config.ci.watchEnabled);
+const persistedCIStatus = getPipelineState(runId).phases.ci?.status;
+const ciAlreadyTerminal = ['completed', 'skipped'].includes(persistedCIStatus);
+const ciRecoveryInProgress = persistedCIStatus === 'in_progress';
+if (ciRecoveryInProgress && !ciApplicable) {
+  throw new Error('Atlas in-progress CI recovery became inapplicable; preserve it instead of skipping');
+}
+const ciGate = ciAlreadyTerminal
   ? enterPhase(runId, 'ci')
-  : skipPhase(runId, 'ci', pushPerformed && createdPrUrl ? 'watch-disabled' : 'no-pr');
+  : (ciApplicable
+    ? enterPhase(runId, 'ci')
+    : skipPhase(runId, 'ci', pushPerformed && createdPrUrl ? 'watch-disabled' : 'no-pr'));
+const ciCanAct = ciApplicable
+  && ciGate.proceed === true
+  && ciGate.degraded === false;
+if (ciGate.status === 'failed') {
+  throw new Error('Atlas CI phase is terminally failed; do not continue to completion');
+}
+if (ciAlreadyTerminal && (ciGate.skip !== true || ciGate.degraded === true)) {
+  throw new Error('Atlas terminal CI outcome could not be restored; stop before completion');
+}
+if (ciApplicable && ciGate.skip !== true && !ciCanAct) {
+  throw new Error('Atlas CI phase transition was denied or degraded; stop before polling/fixing/pushing');
+}
+if (!ciAlreadyTerminal && !ciApplicable
+  && (ciGate.ok !== true || ciGate.degraded === true)) {
+  throw new Error('Atlas CI skip was not durable; stop before completion');
+}
+
+const matchesCITarget = event => (
+  event?.phase === 'ci'
+  && event?.type === 'ci_head_target'
+  && event?.detail?.branchName === branchName
+  && event?.detail?.baseBranch === baseBranch
+  && typeof event?.detail?.headCommit === 'string'
+  && /^[0-9a-f]{40}$/.test(event.detail.headCommit)
+  && repositoryIdentitiesEqual(event?.detail?.repoIdentity, repoIdentity)
+);
+let ciTargetEvents = getRun(runId).events.filter(event => (
+  event?.phase === 'ci' && event?.type === 'ci_head_target'
+));
+if (ciTargetEvents.some(event => !matchesCITarget(event))) {
+  throw new Error('Atlas durable CI target history is malformed or belongs to another ship identity');
+}
+let expectedCIHeadCommit = ciTargetEvents.at(-1)?.detail?.headCommit ?? headCommit;
+const ciPollCycles = Math.max(
+  1,
+  Math.ceil(config.ci.timeoutMs / config.ci.pollIntervalMs),
+);
+if (ciCanAct && ciTargetEvents.length === 0) {
+  requirePinnedRepository('CI target recording');
+  addEvent(runId, {
+    phase: 'ci',
+    type: 'ci_head_target',
+    detail: { branchName, baseBranch, headCommit, repoIdentity },
+  });
+  ciTargetEvents = getRun(runId).events.filter(event => (
+    event?.phase === 'ci' && event?.type === 'ci_head_target'
+  ));
+  if (ciTargetEvents.length !== 1 || !matchesCITarget(ciTargetEvents[0])) {
+    throw new Error('Atlas initial CI target was not durably recorded; stop before polling');
+  }
+  expectedCIHeadCommit = ciTargetEvents[0].detail.headCommit;
+}
 ```
 
-If an actual push completed, a PR URL exists, and `config.ci.watchEnabled` is true:
+Only when `ciCanAct` is true may Atlas poll a provider, notify about CI, launch a
+fixer, commit, or push. At the top of every poll/fix cycle, require both fields
+from the durable runner tick:
+
+```javascript
+if (ciCanAct) {
+  const readCurrentCIState = () => ({
+    branchName: execFileSync(
+      'git', ['branch', '--show-current'], { cwd, encoding: 'utf8' },
+    ).trim(),
+    headCommit: execFileSync(
+      'git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' },
+    ).trim(),
+  });
+  const assertCurrentCITarget = action => {
+    const current = readCurrentCIState();
+    if (current.branchName !== branchName || current.headCommit !== expectedCIHeadCommit) {
+      throw new Error(`Atlas branch/HEAD changed before ${action}; stop CI recovery`);
+    }
+  };
+  const isDescendantCommit = (ancestor, candidate) => {
+    try {
+      execFileSync(
+        'git', ['merge-base', '--is-ancestor', ancestor, candidate],
+        { cwd, stdio: 'ignore' },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const readRemoteCIHead = () => {
+    requirePinnedRepository('CI remote-ref verification');
+    const output = execFileSync(
+      'git', ['ls-remote', repoIdentity.pushUrl, `refs/heads/${branchName}`],
+      { cwd, encoding: 'utf8' },
+    ).trim();
+    const rows = output.split(/\r?\n/).filter(Boolean);
+    if (rows.length !== 1) {
+      throw new Error('Atlas shipped remote branch is missing or ambiguous');
+    }
+    const [remoteHead, remoteRef, ...extra] = rows[0].split(/\s+/);
+    if (extra.length || remoteRef !== `refs/heads/${branchName}`
+      || !/^[0-9a-f]{40}$/.test(remoteHead)) {
+      throw new Error('Atlas shipped remote branch response is malformed');
+    }
+    return remoteHead;
+  };
+  const assertRemoteCITarget = action => {
+    const remoteHead = readRemoteCIHead();
+    if (remoteHead !== expectedCIHeadCommit) {
+      throw new Error(`Atlas remote branch changed before ${action}; stop CI recovery`);
+    }
+  };
+  const requireCurrentCIPolicy = action => {
+    const currentPolicy = refreshRunShipPolicy(action);
+    if (currentPolicy.noShip) {
+      throw new Error(`Atlas shipping was revoked before ${action}; stop CI side effects`);
+    }
+    return currentPolicy;
+  };
+  const matchesCIFixStarted = event => (
+    event?.phase === 'ci'
+    && event?.type === 'ci_fix_started'
+    && event?.detail?.branchName === branchName
+    && event?.detail?.baseBranch === baseBranch
+    && event?.detail?.sourceHeadCommit === expectedCIHeadCommit
+    && /^[1-9]\d*$/.test(event?.detail?.failureRunId ?? '')
+    && Number.isSafeInteger(event?.detail?.fixAttempt)
+    && event.detail.fixAttempt > 0
+    && repositoryIdentitiesEqual(event?.detail?.repoIdentity, repoIdentity)
+  );
+  const matchesCIFixCandidate = event => (
+    event?.phase === 'ci'
+    && event?.type === 'ci_fix_candidate'
+    && event?.detail?.branchName === branchName
+    && event?.detail?.baseBranch === baseBranch
+    && event?.detail?.sourceHeadCommit === expectedCIHeadCommit
+    && typeof event?.detail?.candidateHeadCommit === 'string'
+    && /^[0-9a-f]{40}$/.test(event.detail.candidateHeadCommit)
+    && event.detail.candidateHeadCommit !== expectedCIHeadCommit
+    && /^[1-9]\d*$/.test(event?.detail?.failureRunId ?? '')
+    && Number.isSafeInteger(event?.detail?.fixAttempt)
+    && event.detail.fixAttempt > 0
+    && ['live', 'local-drift'].includes(event?.detail?.recoveryMode)
+    && repositoryIdentitiesEqual(event?.detail?.repoIdentity, repoIdentity)
+  );
+  const findLinkedCIFixStart = candidate => {
+    if (!matchesCIFixCandidate(candidate)) return null;
+    const events = getRun(runId).events;
+    const candidateIndexes = events.flatMap((event, index) => (
+      matchesCIFixCandidate(event)
+      && event.detail.candidateHeadCommit === candidate.detail.candidateHeadCommit
+      && event.detail.failureRunId === candidate.detail.failureRunId
+      && event.detail.fixAttempt === candidate.detail.fixAttempt
+        ? [index]
+        : []
+    ));
+    const startIndexes = events.flatMap((event, index) => (
+      matchesCIFixStarted(event)
+      && event.detail.failureRunId === candidate.detail.failureRunId
+      && event.detail.fixAttempt === candidate.detail.fixAttempt
+        ? [index]
+        : []
+    ));
+    if (candidateIndexes.length !== 1 || startIndexes.length !== 1
+      || startIndexes[0] >= candidateIndexes[0]) {
+      return null;
+    }
+    return events[startIndexes[0]];
+  };
+  const recordCIFixCandidate = (candidateHeadCommit, startedEvent, recoveryMode = 'live') => {
+    if (!matchesCIFixStarted(startedEvent)
+      || !['live', 'local-drift'].includes(recoveryMode)) {
+      throw new Error('Atlas CI fix candidate lacks an exact durable start transition');
+    }
+    if (!isDescendantCommit(expectedCIHeadCommit, candidateHeadCommit)) {
+      throw new Error('Atlas CI fix candidate is not a descendant of the confirmed CI target');
+    }
+    const { failureRunId, fixAttempt } = startedEvent.detail;
+    const before = getRun(runId).events.filter(event => (
+      event?.phase === 'ci' && event?.type === 'ci_fix_candidate'
+    )).length;
+    addEvent(runId, {
+      phase: 'ci',
+      type: 'ci_fix_candidate',
+      detail: {
+        branchName,
+        baseBranch,
+        sourceHeadCommit: expectedCIHeadCommit,
+        candidateHeadCommit,
+        failureRunId,
+        fixAttempt,
+        recoveryMode,
+        repoIdentity,
+      },
+    });
+    const candidates = getRun(runId).events.filter(event => (
+      event?.phase === 'ci' && event?.type === 'ci_fix_candidate'
+    ));
+    const candidate = candidates[before];
+    if (candidates.length !== before + 1
+      || !matchesCIFixCandidate(candidate)
+      || !findLinkedCIFixStart(candidate)) {
+      throw new Error('Atlas CI fix candidate was not durably recorded; stop before approval/push');
+    }
+    return candidate;
+  };
+  const confirmCITarget = candidateHeadCommit => {
+    const targetCountBefore = getRun(runId).events.filter(event => (
+      event?.phase === 'ci' && event?.type === 'ci_head_target'
+    )).length;
+    addEvent(runId, {
+      phase: 'ci',
+      type: 'ci_head_target',
+      detail: {
+        branchName,
+        baseBranch,
+        headCommit: candidateHeadCommit,
+        repoIdentity,
+      },
+    });
+    const updatedTargets = getRun(runId).events.filter(event => (
+      event?.phase === 'ci' && event?.type === 'ci_head_target'
+    ));
+    const appendedTarget = updatedTargets[targetCountBefore];
+    if (updatedTargets.length !== targetCountBefore + 1 || !matchesCITarget(appendedTarget)) {
+      throw new Error('Atlas confirmed CI fix target was not durably recorded; stop recovery');
+    }
+  };
+  const pushOrConfirmCIFix = async candidate => {
+    const linkedStart = findLinkedCIFixStart(candidate);
+    if (!matchesCIFixCandidate(candidate)
+      || !linkedStart
+      || !isDescendantCommit(
+        candidate.detail.sourceHeadCommit,
+        candidate.detail.candidateHeadCommit,
+      )) {
+      throw new Error('Atlas CI fix candidate provenance is invalid');
+    }
+    const {
+      sourceHeadCommit, candidateHeadCommit, failureRunId, fixAttempt, recoveryMode,
+    } = candidate.detail;
+    const current = readCurrentCIState();
+    if (current.branchName !== branchName || current.headCommit !== candidateHeadCommit) {
+      throw new Error('Atlas CI fix checkout no longer matches the durable candidate');
+    }
+    requireCurrentCIPolicy('CI fix approval');
+    requirePinnedRepository('CI approval');
+    const ciApprovalQuestion = `Push CI fix ${branchName}@${candidateHeadCommit} in ${repoIdentity.repository} to ${baseBranch}?`;
+    const matchesCIFixApproval = event => (
+      event?.phase === 'ci'
+      && event?.type === 'human_ship_approval'
+      && event?.detail?.source === 'AskUserQuestion'
+      && event?.detail?.decision === 'approved'
+      && event?.detail?.action === 'ci_fix_push'
+      && event?.detail?.branchName === branchName
+      && event?.detail?.baseBranch === baseBranch
+      && event?.detail?.headCommit === candidateHeadCommit
+      && event?.detail?.sourceHeadCommit === sourceHeadCommit
+      && event?.detail?.failureRunId === failureRunId
+      && event?.detail?.fixAttempt === fixAttempt
+      && event?.detail?.recovered === (recoveryMode === 'local-drift')
+      && repositoryIdentitiesEqual(event?.detail?.repoIdentity, repoIdentity)
+    );
+    const requiresHumanCIFixApproval = shipMode === 'ask' || recoveryMode === 'local-drift';
+    let ciFixApproved = shipMode === 'auto' && !requiresHumanCIFixApproval;
+    if (requiresHumanCIFixApproval) {
+      let durableCIFixApproval = getRun(runId).events.some(matchesCIFixApproval);
+      if (!durableCIFixApproval && typeof AskUserQuestion === 'function') {
+        const ciApprovalResponse = await AskUserQuestion({
+          questions: [{
+            question: ciApprovalQuestion,
+            header: 'CI fix push',
+            multiSelect: false,
+            options: [
+              {
+                label: 'Approve CI push',
+                description: `Push CI fix ${branchName}@${candidateHeadCommit}.`,
+              },
+              {
+                label: 'Keep fix local',
+                description: 'Do not push the CI fix commit.',
+              },
+            ],
+          }],
+        });
+        const selectedCIAnswer = ciApprovalResponse?.answers?.[ciApprovalQuestion];
+        const humanResolvedCI = ciApprovalResponse
+          && !Object.prototype.hasOwnProperty.call(ciApprovalResponse, 'afkTimeoutMs');
+        if (humanResolvedCI && selectedCIAnswer === 'Approve CI push') {
+          requirePinnedRepository('CI approval recording');
+          addEvent(runId, {
+            phase: 'ci',
+            type: 'human_ship_approval',
+            detail: {
+              source: 'AskUserQuestion',
+              decision: 'approved',
+              action: 'ci_fix_push',
+              branchName,
+              baseBranch,
+              headCommit: candidateHeadCommit,
+              sourceHeadCommit,
+              failureRunId,
+              fixAttempt,
+              recovered: recoveryMode === 'local-drift',
+              repoIdentity,
+            },
+          });
+          durableCIFixApproval = getRun(runId).events.some(matchesCIFixApproval);
+        }
+      }
+      ciFixApproved = durableCIFixApproval;
+    }
+    if (!ciFixApproved) {
+      throw new Error('Atlas CI fix push lacks verified human approval; keep the fix local');
+    }
+
+    requireCurrentCIPolicy('CI fix remote reconciliation');
+    const remoteHead = readRemoteCIHead();
+    if (remoteHead === sourceHeadCommit) {
+      requirePinnedRepository('CI push');
+      execFileSync('git', [
+        'push', repoIdentity.pushUrl,
+        `${candidateHeadCommit}:refs/heads/${branchName}`,
+      ], { cwd, stdio: 'inherit' });
+    } else if (remoteHead !== candidateHeadCommit) {
+      throw new Error('Atlas remote branch changed outside the durable CI fix transition');
+    }
+    if (readRemoteCIHead() !== candidateHeadCommit) {
+      throw new Error('Atlas CI fix push could not be confirmed on the pinned remote');
+    }
+    confirmCITarget(candidateHeadCommit);
+    return candidateHeadCommit;
+  };
+  const recoverPendingCIFix = async () => {
+    const events = getRun(runId).events;
+    let lastTargetIndex = -1;
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      if (events[index]?.phase === 'ci' && events[index]?.type === 'ci_head_target') {
+        lastTargetIndex = index;
+        break;
+      }
+    }
+    const pendingEvents = events.slice(lastTargetIndex + 1);
+    const starts = pendingEvents.filter(event => event?.type === 'ci_fix_started');
+    const candidates = pendingEvents.filter(event => event?.type === 'ci_fix_candidate');
+    if (starts.some(event => !matchesCIFixStarted(event))
+      || candidates.some(event => !matchesCIFixCandidate(event))
+      || candidates.some(candidate => !findLinkedCIFixStart(candidate))
+      || candidates.length > 1) {
+      throw new Error('Atlas pending CI fix history is malformed or ambiguous');
+    }
+    const current = readCurrentCIState();
+    if (candidates.length === 1) {
+      return pushOrConfirmCIFix(candidates[0]);
+    }
+    if (starts.length > 0 && current.branchName === branchName
+      && current.headCommit !== expectedCIHeadCommit) {
+      const candidate = recordCIFixCandidate(current.headCommit, starts.at(-1), 'local-drift');
+      return pushOrConfirmCIFix(candidate);
+    }
+    if (current.branchName !== branchName || current.headCommit !== expectedCIHeadCommit) {
+      throw new Error('Atlas local CI state drifted without a durable fix-start record');
+    }
+    return expectedCIHeadCommit;
+  };
+  expectedCIHeadCommit = await recoverPendingCIFix();
+
+  for (;;) {
+    const ciTick = loopTick(runId, 'ci');
+    const ciTickCanAct = ciTick.allowed === true && ciTick.degraded === false;
+    if (!ciTickCanAct) {
+      throw new Error('Atlas CI loop tick was denied or degraded; stop before all CI side effects');
+    }
+    const pushCIFix = async () => {
+      if (!ciCanAct || !ciTickCanAct) {
+        throw new Error('Atlas CI fix push escaped its phase/tick gate');
+      }
+      const ciFixBranchName = execFileSync(
+        'git', ['branch', '--show-current'], { cwd, encoding: 'utf8' },
+      ).trim();
+      const ciFixHeadCommit = execFileSync(
+        'git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' },
+      ).trim();
+      if (ciFixBranchName !== branchName) {
+        throw new Error(`Atlas CI fix checkout ${ciFixBranchName} is not shipped branch ${branchName}`);
+      }
+      if (ciFixHeadCommit === expectedCIHeadCommit) {
+        throw new Error('Atlas CI fixer did not produce a new commit');
+      }
+      const started = getRun(runId).events.filter(matchesCIFixStarted).at(-1);
+      if (!started) {
+        throw new Error('Atlas CI fix candidate lacks a durable fix-start record');
+      }
+      const candidate = recordCIFixCandidate(
+        ciFixHeadCommit,
+        started,
+        'live',
+      );
+      return pushOrConfirmCIFix(candidate);
+    };
+    requireCurrentCIPolicy('CI polling');
+    requirePinnedRepository('CI polling');
+    assertCurrentCITarget('CI polling');
+    assertRemoteCITarget('CI polling');
+    const ciResult = await watchCI({
+      cwd,
+      repository: repoIdentity.repository,
+      branch: branchName,
+      expectedHeadSha: expectedCIHeadCommit,
+      maxCycles: ciPollCycles,
+      pollIntervalMs: config.ci.pollIntervalMs,
+    });
+    requireCurrentCIPolicy('CI poll result');
+    requirePinnedRepository('CI poll result');
+    assertCurrentCITarget('CI poll result');
+    assertRemoteCITarget('CI poll result');
+    if (ciResult.conclusion === 'invalid-input') {
+      throw new Error('Atlas CI watcher rejected its pinned repository/commit inputs');
+    }
+    if (ciResult.status === 'passed') break;
+    if (ciResult.status === 'failed') {
+      requirePinnedRepository('CI failed-log fetch');
+      assertCurrentCITarget('CI failed-log fetch');
+      assertRemoteCITarget('CI failed-log fetch');
+      const failedLogs = getFailedLogs({
+        cwd,
+        repository: repoIdentity.repository,
+        runId: ciResult.runId,
+      });
+      if (!failedLogs) {
+        throw new Error('Atlas could not read failed logs from the pinned CI run');
+      }
+      requirePinnedRepository('CI fixer launch');
+      assertCurrentCITarget('CI fixer launch');
+      assertRemoteCITarget('CI fixer launch');
+      const startedCountBefore = getRun(runId).events.filter(event => (
+        event?.phase === 'ci' && event?.type === 'ci_fix_started'
+      )).length;
+      addEvent(runId, {
+        phase: 'ci',
+        type: 'ci_fix_started',
+        detail: {
+          branchName,
+          baseBranch,
+          sourceHeadCommit: expectedCIHeadCommit,
+          failureRunId: ciResult.runId,
+          fixAttempt: startedCountBefore + 1,
+          repoIdentity,
+        },
+      });
+      const startedEvents = getRun(runId).events.filter(event => (
+        event?.phase === 'ci' && event?.type === 'ci_fix_started'
+      ));
+      const appendedStart = startedEvents[startedCountBefore];
+      if (startedEvents.length !== startedCountBefore + 1
+        || !matchesCIFixStarted(appendedStart)) {
+        throw new Error('Atlas CI fix start was not durably recorded; stop before launching the fixer');
+      }
+      // Run the documented debugger → local verify → commit workflow below
+      // with failedLogs. pushCIFix() then records the candidate before any
+      // approval/push and reconciles the exact remote ref idempotently.
+      expectedCIHeadCommit = await pushCIFix();
+      continue;
+    }
+    // Timeout or an explicitly reported provider skip is reported to the user.
+    break;
+  }
+  requireCurrentCIPolicy('CI completion');
+  requirePinnedRepository('CI completion');
+  assertCurrentCITarget('CI completion');
+  assertRemoteCITarget('CI completion');
+  const ciCompletion = await completePhase(runId, 'ci', undefined, {
+    checkpointData: {
+      runId,
+      pushPerformed,
+      createdPrUrl,
+      branchName,
+      baseBranch,
+      headCommit,
+      ciHeadCommit: expectedCIHeadCommit,
+      repoIdentity,
+    },
+  });
+  if (!ciCompletion.ok || ciCompletion.degraded) {
+    throw new Error('Atlas CI result was not durably recorded; preserve the run for recovery');
+  }
+}
+```
+
+The guarded watch/fix behavior is:
 
 ```
 ┌─→ Poll CI status:
 │     node -e "import('./scripts/lib/ci-watch.mjs').then(m =>
-│       m.watchCI({ branch, maxCycles: 1, pollIntervalMs: config.ci.pollIntervalMs })
+│       m.watchCI({ cwd, repository: repoIdentity.repository, branch: branchName,
+│         expectedHeadSha: expectedCIHeadCommit, maxCycles: ciPollCycles,
+│         pollIntervalMs: config.ci.pollIntervalMs })
 │       .then(r => console.log(JSON.stringify(r))))"
 │
 │   ├─ status: 'passed' →
@@ -1428,7 +2267,7 @@ If an actual push completed, a PR URL exists, and `config.ci.watchEnabled` is tr
 │   ├─ status: 'failed' →
 │   │   1. Notify: node scripts/notify-cli.mjs --event ci_failed --orchestrator atlas --body "CI failed"
 │   │   2. Fetch logs:
-│   │      node -e "import('./scripts/lib/ci-watch.mjs').then(m => console.log(m.getFailedLogs('<runId>')))"
+│   │      getFailedLogs({ cwd, repository: repoIdentity.repository, runId: ciResult.runId })
 │   │   3. Diagnose and fix (same escalation chain as Phase 4):
 │   │      Task(subagent_type="agent-olympus:debugger", model="sonnet",
 │   │        prompt="CI failed after PR push. Fix the issue.
@@ -1436,13 +2275,14 @@ If an actual push completed, a PR URL exists, and `config.ci.watchEnabled` is tr
 │   │        Previous learnings: <formatWisdomForPrompt(queryWisdom(null,10))>")
 │   │   4. If debugger fails → Skill(skill="agent-olympus:systematic-debug")
 │   │   5. If systematic-debug fails → Skill(skill="agent-olympus:trace")
-│   │   6. After fix: re-run local verify (build + test), then:
-│   │      git add -A && git commit -m "fix: resolve CI failure" && git push
+│   │   6. After fix: re-run local verify (build + test), commit locally, then:
+│   │      expectedCIHeadCommit = await pushCIFix()
+│   │      # ask mode requires fresh approval; the pushed HEAD is durably recorded
 │   │   7. Re-poll CI (back to top of loop)
 │   │
 │   └─ status: 'timeout' | 'skipped' → report to user, proceed
 │
-└── Loop, bounded by loopTick(runId, 'ci') (cap 2 = CI_CAP) — !allowed ⇒ stop polling, report to user
+└── Loop, bounded by loopTick(runId, 'ci') (cap 2 = CI_CAP) — denied or degraded ⇒ stop before side effects
 ```
 
 If CI passes → DONE. If CI fails after max cycles → escalate to user with failure logs.
@@ -1482,14 +2322,16 @@ Clean up:
 Notify user of the actual completion outcome. Never claim a PR exists on a
 no-ship, declined, headless, preflight-failed, or PR-failed path:
 
+A PR lookup/update/create failure after a successful push is **not** a
+completion path: report that the branch was pushed, retain the nonterminal ship
+phase, and retry safely on resume. Do not send an `--event complete`
+notification until a PR URL is durably recorded.
+
 ```bash
 # When createdPrUrl exists:
 node scripts/notify-cli.mjs --event complete --orchestrator atlas --body "N/N stories passed. PR: <url>"
 
-# When pushPerformed is true but PR creation failed:
-node scripts/notify-cli.mjs --event complete --orchestrator atlas --body "N/N stories passed. Branch pushed; PR creation failed — create the PR manually."
-
-# Otherwise (no push):
+# Otherwise (a terminal no-push ship outcome):
 node scripts/notify-cli.mjs --event complete --orchestrator atlas --body "N/N stories passed. branch ready: <branchName> — push/PR은 사용자가 직접"
 ```
 
@@ -1499,8 +2341,7 @@ Report to user:
 - Files changed with descriptions
 - Key decisions made
 - All verification results
-- Shipping outcome: the PR URL when one exists; a pushed-branch/PR-failure
-  warning when applicable; otherwise exactly
+- Shipping outcome: the PR URL when one exists; otherwise exactly
   `branch ready: <branchName> — push/PR은 사용자가 직접`.
 
 ## Model_Selection
