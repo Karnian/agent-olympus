@@ -126,39 +126,159 @@ function managedIdentityName(name, role) {
 }
 
 /**
+ * Check whether an exact local branch ref exists.
+ * Unexpected git failures are surfaced so callers fail closed.
+ *
+ * @param {string} cwd
+ * @param {string} branchName
+ * @returns {boolean}
+ */
+function localBranchExists(cwd, branchName) {
+  try {
+    execFileSync(
+      'git',
+      ['-C', cwd, 'show-ref', '--verify', '--quiet', `refs/heads/${branchName}`],
+      { stdio: 'pipe' },
+    );
+    return true;
+  } catch (err) {
+    if (err?.status === 1) return false;
+    throw err;
+  }
+}
+
+/**
+ * Check whether a branch is fully reachable from the current HEAD.
+ * A status other than the documented 0/1 result is an unsafe probe failure.
+ *
+ * @param {string} cwd
+ * @param {string} branchName
+ * @returns {boolean}
+ */
+function branchIsAncestorOfHead(cwd, branchName) {
+  try {
+    execFileSync(
+      'git',
+      ['-C', cwd, 'merge-base', '--is-ancestor', branchName, 'HEAD'],
+      { stdio: 'pipe' },
+    );
+    return true;
+  } catch (err) {
+    if (err?.status === 1) return false;
+    throw err;
+  }
+}
+
+/**
+ * Pick a local branch name that preserves an unmerged worker branch.
+ *
+ * @param {string} cwd
+ * @param {string} branchName
+ * @returns {string}
+ */
+function nextPreservedBranchName(cwd, branchName) {
+  const base = `${branchName}-orphan-${Math.floor(Date.now() / 1000)}`;
+  let candidate = base;
+  let suffix = 1;
+  while (localBranchExists(cwd, candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+}
+
+/**
  * Create a git worktree for an Athena worker.
  * Worktree path: .ao/worktrees/<teamSlug>/<workerName>/
  * Branch name:   ao-worker-<teamSlug>-<workerName>
  *
+ * Collision semantics:
+ *   - `onExisting: 'fail'` returns the intended colliding path/ref without
+ *     mutating either artifact.
+ *   - `onExisting: 'replace'` keeps the legacy replacement behavior, but
+ *     preserves branches not reachable from HEAD under an orphan name.
+ *   - Other operational failures retain the legacy `cwd` fallback path.
+ *
  * @param {string} cwd        - Project root (absolute path)
  * @param {string} teamName   - Athena team slug
  * @param {string} workerName - Worker name
- * @returns {{ worktreePath: string, branchName: string, created: boolean }}
+ * @param {{ onExisting?: 'replace'|'fail' }} [opts] - Existing-artifact policy
+ * @returns {{
+ *   worktreePath: string,
+ *   branchName: string,
+ *   created: boolean,
+ *   error?: string,
+ *   preservedBranch?: string,
+ * }}
  */
-export function createWorkerWorktree(cwd, teamName, workerName) {
+export function createWorkerWorktree(cwd, teamName, workerName, opts = {}) {
+  let branchName = 'ao-worker-unavailable';
+  let worktreePath = cwd;
+  let preservedBranch;
+
   try {
     const slug = managedIdentityName(teamName, 'team');
     const worker = managedIdentityName(workerName, 'worker');
-    const branchName = `ao-worker-${slug}-${worker}`;
-    const worktreePath = join(cwd, WORKTREE_BASE, slug, worker);
+    branchName = `ao-worker-${slug}-${worker}`;
+    worktreePath = join(cwd, WORKTREE_BASE, slug, worker);
 
-    // Ensure parent directory exists with restricted permissions
+    const onExisting = opts?.onExisting ?? 'replace';
+    if (onExisting !== 'replace' && onExisting !== 'fail') {
+      throw new Error(`Unsupported onExisting mode: ${onExisting}`);
+    }
+
+    const worktreeExists = existsSync(worktreePath);
+    const branchExists = localBranchExists(cwd, branchName);
+
+    if (onExisting === 'fail' && (worktreeExists || branchExists)) {
+      const collisions = [];
+      if (worktreeExists) collisions.push(`worktree path ${worktreePath}`);
+      if (branchExists) collisions.push(`branch ${branchName}`);
+      return {
+        worktreePath,
+        branchName,
+        created: false,
+        error: `Refusing to replace existing ${collisions.join(' and ')}`,
+      };
+    }
+
+    const branchWasAncestor = branchExists
+      ? branchIsAncestorOfHead(cwd, branchName)
+      : false;
+
+    // Ensure parent directory exists with restricted permissions before any
+    // branch rename or stale-worktree removal can mutate existing state.
     mkdirSync(join(cwd, WORKTREE_BASE, slug), { recursive: true, mode: 0o700 });
 
     // Remove stale worktree if it exists (e.g. from a previous cancelled run)
-    if (existsSync(worktreePath)) {
+    if (worktreeExists) {
       try {
         execFileSync('git', ['-C', cwd, 'worktree', 'remove', worktreePath, '--force'], { stdio: 'pipe' });
       } catch {
         try { rmSync(worktreePath, { recursive: true, force: true }); } catch {}
+        try { execFileSync('git', ['-C', cwd, 'worktree', 'prune'], { stdio: 'pipe' }); } catch {}
+      }
+      if (existsSync(worktreePath)) {
+        throw new Error(`Worktree path still exists after replacement cleanup: ${worktreePath}`);
       }
     }
 
-    // Delete branch if it already exists from a previous run
-    try {
-      execFileSync('git', ['-C', cwd, 'branch', '-D', branchName], { stdio: 'pipe' });
-    } catch {
-      // Branch does not exist — that is fine
+    // Once the linked worktree is gone, rename its unmerged branch for
+    // preservation. This works on Git versions that cannot rename a branch
+    // while it is checked out in another worktree.
+    if (branchExists && !branchWasAncestor) {
+      preservedBranch = nextPreservedBranchName(cwd, branchName);
+      execFileSync(
+        'git',
+        ['-C', cwd, 'branch', '-m', branchName, preservedBranch],
+        { stdio: 'pipe' },
+      );
+    }
+
+    // Delete only a branch that Git still considers fully merged into HEAD.
+    // `-d` closes the probe-to-delete race by refusing a newly advanced ref.
+    if (branchExists && branchWasAncestor) {
+      execFileSync('git', ['-C', cwd, 'branch', '-d', branchName], { stdio: 'pipe' });
     }
 
     // Create the worktree on a new branch based on HEAD
@@ -167,16 +287,18 @@ export function createWorkerWorktree(cwd, teamName, workerName) {
     // Register in persistent registry for orphan tracking
     registerWorktree(cwd, teamName, workerName, worktreePath, branchName);
 
-    return { worktreePath, branchName, created: true };
+    const result = { worktreePath, branchName, created: true };
+    if (preservedBranch) result.preservedBranch = preservedBranch;
+    return result;
   } catch (err) {
-    const slug = managedIdentityName(teamName, 'team');
-    const worker = managedIdentityName(workerName, 'worker');
-    return {
+    const result = {
       worktreePath: cwd,
-      branchName: `ao-worker-${slug}-${worker}`,
+      branchName,
       created: false,
       error: err?.message,
     };
+    if (preservedBranch) result.preservedBranch = preservedBranch;
+    return result;
   }
 }
 
@@ -194,6 +316,8 @@ export function createWorkerWorktree(cwd, teamName, workerName) {
  *     `worktreeCreated` is `false`. Consumers MUST check `worktreeCreated`
  *     if they need to distinguish a real isolated worktree from the
  *     fallback shared directory — this is a first-class field.
+ *   - With the default replacement policy, branches not reachable from HEAD
+ *     are renamed with an `-orphan-<timestamp>` suffix instead of deleted.
  *   - Errors are never thrown; each worker's entry is self-contained.
  *
  * @param {string} teamName
