@@ -48,8 +48,23 @@ test('detectCodexError: undefined → { failed: false }', () => {
 });
 
 // ---------------------------------------------------------------------------
-// detectCodexError — auth_failed
+// detectCodexError — mcp_auth / auth_failed
 // ---------------------------------------------------------------------------
+
+test('detectCodexError: rmcp AuthorizationRequired → mcp_auth', () => {
+  const result = detectCodexError(
+    'ERROR rmcp::transport::worker: worker quit with fatal: ' +
+    'Transport channel closed, when Auth(AuthorizationRequired)',
+  );
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'mcp_auth');
+});
+
+test('detectCodexError: "authorization required" → mcp_auth', () => {
+  const result = detectCodexError('MCP authorization required; please sign in');
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'mcp_auth');
+});
 
 test('detectCodexError: "authentication failed" → auth_failed', () => {
   const result = detectCodexError('Error: authentication failed for the provided token');

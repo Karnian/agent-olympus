@@ -877,7 +877,7 @@ const providerTeamsToShutdown = new Set(); // initialize once before the monitor
 // For codex-appserver: failures detected via structured CodexErrorInfo + mapAppServerErrorCode()
 // For codex-exec: failures detected via item.status="failed" + mapJsonlErrorToCategory()
 // For tmux: failures detected via detectCodexError(paneOutput) regex patterns
-// Error categories: auth_failed, rate_limited, not_installed, network, crash, context_exceeded, timeout, unknown
+// Error categories: mcp_auth, auth_failed, rate_limited, not_installed, network, crash, context_exceeded, timeout, unknown
 
 const status = monitorTeam(teamSlug);
 const results = status ? collectResults(teamSlug) : {};
@@ -936,7 +936,7 @@ if (status?.workers.every((worker) => worker.status === 'completed')) {
 ```
 
 Rules:
-- If a failed worker reports `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT manually retry that provider; let the failover chain select the next provider.
+- If a failed worker reports `'mcp_auth'`, `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT manually retry that provider; let the failover chain select the next provider.
 - Crash/timeout/network retries are OWNED by the failover chain: `planProviderFailover` already retries the same provider once (crash, or first unavailable attempt) before switching. Do NOT manually respawn the failed provider yourself — that would double the retry.
 - `reassignProvider()` handles adapter-specific cleanup and records the reason; `dispatchProviderFallback()` retries one unavailable execution, then follows Codex → Gemini → Claude while preserving the worker prompt/task fields.
 - A provider replacement always uses a deterministic distinct child team name. Re-polling reuses it instead of spawning duplicates; reusing `teamSlug` would overwrite the parent team state.

@@ -60,21 +60,22 @@ export function parseJSONLEvents(buffer) {
 
 /**
  * Classify a Codex error into one of the standard error categories.
- * Maps stderr / output text to: auth_failed, rate_limited, not_installed,
- * network, crash, or unknown.
+ * Maps stderr / output text to: mcp_auth, auth_failed, rate_limited,
+ * not_installed, network, crash, timeout, or unknown.
  *
  * @param {string|null|undefined} errorText
  * @returns {string}
  */
 /**
- * Full error category set (7 categories):
- * - auth_failed, rate_limited, not_installed, network, crash (original 5)
+ * Full error category set (8 categories):
+ * - mcp_auth, auth_failed, rate_limited, not_installed, network, crash
  * - timeout, unknown (new in G#5a)
  */
 export function mapJsonlErrorToCategory(errorText) {
   if (!errorText) return 'unknown';
   const text = String(errorText);
 
+  if (/rmcp::transport|Auth\(AuthorizationRequired\)|authorization\s*required/i.test(text)) return 'mcp_auth';
   if (/authentication|unauthorized|invalid.*api.*key|API key/i.test(text)) return 'auth_failed';
   if (/rate.?limit|429|quota.*exceeded|too many requests/i.test(text)) return 'rate_limited';
   if (/command not found|ENOENT|codex:.*not found/i.test(text)) return 'not_installed';

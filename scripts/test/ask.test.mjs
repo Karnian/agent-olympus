@@ -426,6 +426,28 @@ test('buildSpawnOpts(codex-exec) does NOT set credential opts (credential resolv
   assert.equal(opts.credential, undefined);
 }));
 
+test('buildSpawnOpts(codex-exec): --no-mcp appends the Codex config override', withTempCwd(async () => {
+  const opts = buildSpawnOpts('codex-exec', { noMcp: true });
+  assert.deepEqual(opts.configOverrides, ['mcp_servers={}']);
+}));
+
+test('buildSpawnOpts(gemini-exec): --no-mcp does not add a Codex config override', withTempCwd(async () => {
+  const opts = buildSpawnOpts('gemini-exec', { noMcp: true });
+  assert.equal(opts.configOverrides, undefined);
+}));
+
+test('runOnce: --no-mcp preserves existing config overrides and appends last', withTempCwd(async (cwd) => {
+  const { adapter, calls } = makeFakeAdapter({
+    collectResult: { status: 'completed', output: 'ok' },
+  });
+  await runOnce('codex-exec', 'test', {
+    adapter,
+    opts: { cwd, configOverrides: ['existing=1'] },
+    noMcp: true,
+  });
+  assert.deepEqual(calls.spawnOpts[0].configOverrides, ['existing=1', 'mcp_servers={}']);
+}));
+
 test('AC-9: buildSpawnOpts(codex-exec) does NOT set approvalMode (codex uses sandbox axis)', withTempCwd(async (cwd) => {
   const opts = buildSpawnOpts('codex-exec');
   // macOS symlinks /var → /private/var; process.cwd() returns realpath, so

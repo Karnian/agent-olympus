@@ -81,6 +81,7 @@ function quickHash(str) {
  * @type {Array<{ pattern: RegExp, reason: string }>}
  */
 const CODEX_ERROR_PATTERNS = [
+  { pattern: /rmcp::transport|Auth\(AuthorizationRequired\)|authorization\s*required/i, reason: 'mcp_auth' },
   { pattern: /authentication|unauthorized|invalid.*api.*key|API key/i, reason: 'auth_failed' },
   { pattern: /rate.?limit|429|quota.*exceeded|too many requests/i, reason: 'rate_limited' },
   { pattern: /command not found|ENOENT|codex:.*not found|No such file or directory|not found in PATH/i, reason: 'not_installed' },

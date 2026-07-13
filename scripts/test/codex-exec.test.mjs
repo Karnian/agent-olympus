@@ -400,6 +400,17 @@ test('parseJSONLEvents: empty string returns empty events and empty remainder', 
 
 // ─── mapJsonlErrorToCategory ──────────────────────────────────────────────────
 
+test('mapJsonlErrorToCategory: rmcp AuthorizationRequired → mcp_auth', () => {
+  const actual =
+    '2026-07-11T19:06:44.606416Z ERROR rmcp::transport::worker: worker quit with fatal: ' +
+    'Transport channel closed, when Auth(AuthorizationRequired)';
+  assert.equal(mapJsonlErrorToCategory(actual), 'mcp_auth');
+});
+
+test('mapJsonlErrorToCategory: "authorization required" → mcp_auth', () => {
+  assert.equal(mapJsonlErrorToCategory('MCP server says authorization required'), 'mcp_auth');
+});
+
 test('mapJsonlErrorToCategory: "authentication failed" → auth_failed', () => {
   assert.equal(mapJsonlErrorToCategory('authentication failed for token'), 'auth_failed');
 });
@@ -1010,8 +1021,9 @@ test('mapJsonlErrorToCategory: "timed out" → timeout', () => {
   assert.equal(mapJsonlErrorToCategory('request timed out waiting for response'), 'timeout');
 });
 
-test('mapJsonlErrorToCategory: all 7 categories exist', () => {
+test('mapJsonlErrorToCategory: all 8 categories exist', () => {
   const categories = new Set([
+    mapJsonlErrorToCategory('Auth(AuthorizationRequired)'),
     mapJsonlErrorToCategory('authentication failed'),
     mapJsonlErrorToCategory('rate limit exceeded'),
     mapJsonlErrorToCategory('command not found'),
@@ -1020,7 +1032,16 @@ test('mapJsonlErrorToCategory: all 7 categories exist', () => {
     mapJsonlErrorToCategory('operation timeout'),
     mapJsonlErrorToCategory('something else entirely'),
   ]);
-  assert.deepEqual(categories, new Set(['auth_failed', 'rate_limited', 'not_installed', 'network', 'crash', 'timeout', 'unknown']));
+  assert.deepEqual(categories, new Set([
+    'mcp_auth',
+    'auth_failed',
+    'rate_limited',
+    'not_installed',
+    'network',
+    'crash',
+    'timeout',
+    'unknown',
+  ]));
 });
 
 // ─── export surface ───────────────────────────────────────────────────────────

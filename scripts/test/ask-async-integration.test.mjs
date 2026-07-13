@@ -126,6 +126,49 @@ function makeFakeRunnerSpawner(customPid = 55001) {
   return { spawner, invocations };
 }
 
+test('sync codex --no-mcp appends the override and emits no ignored warning', async () => {
+  const { adapter, calls } = makeFakeAdapter({ output: 'codex response' });
+  ask._inject({
+    adapter,
+    capabilities: { hasCodexExecJson: true, hasGeminiCli: true },
+    stdinReader: () => 'test prompt',
+    buildSpawnOpts: () => ({
+      cwd: tmp,
+      level: 'full-auto',
+      configOverrides: ['existing=1'],
+    }),
+    stdoutWrite: (s) => { stdoutCap.push(s); return true; },
+    stderrWrite: (s) => { stderrCap.push(s); return true; },
+    exitFn: (code) => { lastExit = code; throw new ExitSignal(code); },
+  });
+
+  await runMain(['codex', '--no-mcp']);
+
+  assert.equal(lastExit, 0);
+  assert.deepEqual(calls.spawnOpts[0].configOverrides, ['existing=1', 'mcp_servers={}']);
+  assert.equal(stderrCap.join('').includes('--no-mcp only applies to codex'), false);
+});
+
+test('sync gemini --no-mcp is ignored with exactly one warning', async () => {
+  const { adapter, calls } = makeFakeAdapter({ output: 'gemini response' });
+  ask._inject({
+    adapter,
+    capabilities: { hasCodexExecJson: true, hasGeminiCli: true },
+    stdinReader: () => 'test prompt',
+    buildSpawnOpts: () => ({ cwd: tmp, approvalMode: 'default' }),
+    stdoutWrite: (s) => { stdoutCap.push(s); return true; },
+    stderrWrite: (s) => { stderrCap.push(s); return true; },
+    exitFn: (code) => { lastExit = code; throw new ExitSignal(code); },
+  });
+
+  await runMain(['gemini', '--no-mcp']);
+
+  assert.equal(lastExit, 0);
+  assert.equal(calls.spawnOpts[0].configOverrides, undefined);
+  const warning = '[ask] --no-mcp only applies to codex; ignored\n';
+  assert.equal(stderrCap.join('').split(warning).length - 1, 1);
+});
+
 // ═══ async launch path ═══════════════════════════════════════════════════
 
 test('async codex: writes metadata + prompt sidecar + spawns runner + prints handoff', async () => {
@@ -166,7 +209,40 @@ test('async codex: writes metadata + prompt sidecar + spawns runner + prints han
   assert.equal(parsed.runnerPid, 55001);
 });
 
-test('async with no adapters available → exit 2 + no files written', async () => {
+test('async codex --no-mcp persists the flag and restores the override in detached runner', async () => {
+  const { spawner, invocations } = makeFakeRunnerSpawner();
+  ask._inject({
+    runJobSpawner: spawner,
+    buildSpawnOpts: () => ({ cwd: tmp, level: 'full-auto' }),
+    capabilities: { hasCodexExecJson: true, hasGeminiCli: true },
+    stdinReader: () => 'persisted prompt',
+    stdoutWrite: (s) => { stdoutCap.push(s); return true; },
+    stderrWrite: (s) => { stderrCap.push(s); return true; },
+    exitFn: (code) => { lastExit = code; throw new ExitSignal(code); },
+  });
+
+  await runMain(['async', 'codex', '--no-mcp']);
+  const jobId = invocations[0].args[2];
+  assert.equal(askJobs.readMetadata(jobId).noMcp, true);
+
+  const { adapter, calls } = makeFakeAdapter({ output: 'runner response' });
+  resetCaptures();
+  ask._inject({
+    adapter,
+    buildSpawnOpts: () => ({ cwd: tmp, level: 'full-auto' }),
+    stdoutWrite: (s) => { stdoutCap.push(s); return true; },
+    stderrWrite: (s) => { stderrCap.push(s); return true; },
+    exitFn: (code) => { lastExit = code; throw new ExitSignal(code); },
+  });
+
+  await runMain(['_run-job', jobId]);
+
+  assert.equal(lastExit, 0);
+  assert.deepEqual(calls.spawnOpts[0].configOverrides, ['mcp_servers={}']);
+  assert.equal(askJobs.readMetadata(jobId).noMcp, true);
+});
+
+test('async --no-mcp with no adapters falls back to Claude with one ignored warning', async () => {
   ask._inject({
     capabilities: { hasCodexExecJson: false, hasGeminiCli: false, hasTmux: false },
     stdinReader: () => 'hi',
@@ -174,9 +250,11 @@ test('async with no adapters available → exit 2 + no files written', async () 
     stderrWrite: (s) => { stderrCap.push(s); return true; },
     exitFn: (code) => { lastExit = code; throw new ExitSignal(code); },
   });
-  await runMain(['async', 'codex']);
+  await runMain(['async', 'codex', '--no-mcp']);
   assert.equal(lastExit, 2);
   assert.equal(askJobs.listJobs().length, 0);
+  const warning = '[ask] --no-mcp only applies to codex; ignored\n';
+  assert.equal(stderrCap.join('').split(warning).length - 1, 1);
 });
 
 test('async auto on demoted codex with gemini available → re-picks gemini', async () => {
@@ -367,6 +445,64 @@ test('run-job: adapter.collect returns error → metadata=failed with category',
   const sentinel = askJobs.jsonlFindRunnerSentinel(meta.artifactJsonlPath);
   assert.equal(sentinel.status, 'failed');
   assert.equal(sentinel.category, 'auth_failed');
+});
+
+test('run-job: mcp_auth prepends an actionable hint in metadata, sentinel, and status', async () => {
+  const jobId = 'ask-codex-mcp-auth';
+  const meta = {
+    model: 'codex',
+    adapterName: 'codex-exec',
+    runnerPid: process.pid,
+    adapterPid: null,
+    startedAt: new Date().toISOString(),
+    lastActivityAt: new Date().toISOString(),
+    status: 'running',
+    promptHash: 'abc',
+    promptBytes: 4,
+    artifactJsonlPath: askJobs.artifactJsonlPath(jobId),
+    artifactMdPath: askJobs.artifactMdPath(jobId),
+  };
+  askJobs.ensureJobDirs();
+  askJobs.writeMetadata(jobId, meta);
+  askJobs.writePromptFile(jobId, 'ping');
+
+  const rawMessage =
+    'ERROR rmcp::transport::worker: Transport channel closed, when ' +
+    'Auth(AuthorizationRequired)';
+  const { adapter } = makeFakeAdapter({
+    error: { category: 'mcp_auth', message: rawMessage },
+  });
+  ask._inject({
+    adapter,
+    buildSpawnOpts: () => ({ cwd: tmp, level: 'full-auto' }),
+    stdoutWrite: (s) => { stdoutCap.push(s); return true; },
+    stderrWrite: (s) => { stderrCap.push(s); return true; },
+    exitFn: (code) => { lastExit = code; throw new ExitSignal(code); },
+  });
+
+  await runMain(['_run-job', jobId]);
+
+  const finalMeta = askJobs.readMetadata(jobId);
+  assert.equal(finalMeta.status, 'failed');
+  assert.equal(finalMeta.errorCategory, 'mcp_auth');
+  assert.match(finalMeta.errorMessage, /^\[hint\]/);
+  assert.match(finalMeta.errorMessage, /~\/.codex\/config\.toml/);
+  assert.match(finalMeta.errorMessage, /failed authentication/);
+  assert.match(finalMeta.errorMessage, /re-login/);
+  assert.match(finalMeta.errorMessage, /ask --no-mcp/);
+  assert.match(finalMeta.errorMessage, /rmcp::transport/);
+
+  const sentinel = askJobs.jsonlFindRunnerSentinel(meta.artifactJsonlPath);
+  assert.equal(sentinel.category, 'mcp_auth');
+  assert.equal(sentinel.message, finalMeta.errorMessage);
+
+  resetCaptures();
+  await runMain(['status', jobId]);
+  const status = JSON.parse(stdoutCap.join('').trim());
+  assert.equal(status.errorCategory, 'mcp_auth');
+  assert.match(status.errorMessage, /^\[hint\]/);
+  assert.match(status.errorMessage, /re-login/);
+  assert.match(status.errorMessage, /ask --no-mcp/);
 });
 
 // ═══ status ═══════════════════════════════════════════════════════════════
@@ -824,6 +960,7 @@ test('runner tee: maybeFlushMetadata is called and lastActivityAt advances', asy
 test('dispatcher: empty argv → exit 3', async () => {
   await runMain([]);
   assert.equal(lastExit, 3);
+  assert.match(stderrCap.join(''), /--no-mcp: disable configured MCP servers for Codex/);
 });
 
 test('dispatcher: unknown subcommand → exit 3', async () => {

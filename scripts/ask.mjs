@@ -5,7 +5,7 @@
  * Two modes on a single entry point:
  *
  * 1. **Legacy sync path** (v1.0.3 contract preserved byte-identical):
- *      echo "<prompt>" | node scripts/ask.mjs <codex|gemini|auto>
+ *      echo "<prompt>" | node scripts/ask.mjs <codex|gemini|auto> [--no-mcp]
  *    → spawn adapter, await collect (120s timeout), print to stdout, exit.
  *    Writes `.ao/artifacts/ask/<model>-<timestamp>.md`.
  *
@@ -17,7 +17,7 @@
  *
  * 2. **Job-based async path** (v1.0.4, see docs/plans/ask-job-based/spec.md
  *    rev 4 APPROVED):
- *      echo "<prompt>" | node scripts/ask.mjs async <model>
+ *      echo "<prompt>" | node scripts/ask.mjs async <model> [--no-mcp]
  *      node scripts/ask.mjs status <jobId>
  *      node scripts/ask.mjs collect <jobId> [--wait] [--timeout Ns]
  *      node scripts/ask.mjs cancel <jobId>
@@ -74,6 +74,10 @@ const COLLECT_TIMEOUT_MS = 120_000;       // Sync path only
 const RUNNER_COLLECT_TIMEOUT_MS = 86_400_000; // Runner: 24h (spec §4.3 step 11)
 const ARTIFACT_DIR = '.ao/artifacts/ask';
 const VALID_MODELS = ['codex', 'gemini', 'auto'];
+const NO_MCP_CONFIG_OVERRIDE = 'mcp_servers={}';
+const MCP_AUTH_HINT =
+  '[hint] an MCP server configured in ~/.codex/config.toml failed authentication — ' +
+  're-login to that server, or retry with `ask --no-mcp`.';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Test injection seams
@@ -207,6 +211,22 @@ async function loadAdapter(adapterName) {
   throw new Error(`Unknown adapter: ${adapterName}`);
 }
 
+function applyNoMcpConfigOverride(opts, adapterName, noMcp) {
+  const base = opts && typeof opts === 'object' ? opts : {};
+  if (!noMcp || adapterName !== 'codex-exec') return base;
+  const existing = Array.isArray(base.configOverrides) ? base.configOverrides : [];
+  return {
+    ...base,
+    configOverrides: [...existing, NO_MCP_CONFIG_OVERRIDE],
+  };
+}
+
+function warnNoMcpIgnored(noMcp, adapterName) {
+  if (noMcp && adapterName !== 'codex-exec') {
+    _writeStderr('[ask] --no-mcp only applies to codex; ignored\n');
+  }
+}
+
 /**
  * Build adapter-specific spawn options (codex level, gemini approvalMode).
  *
@@ -231,9 +251,15 @@ async function loadAdapter(adapterName) {
  * actually doing so would confuse the orchestrator).
  *
  * Exported for tests.
+ * @param {string} adapterName
+ * @param {{noMcp?: boolean}} [requestOpts]
+ * @returns {object}
  */
-export function buildSpawnOpts(adapterName) {
-  if (_injected.buildSpawnOpts) return _injected.buildSpawnOpts(adapterName);
+export function buildSpawnOpts(adapterName, { noMcp = false } = {}) {
+  if (_injected.buildSpawnOpts) {
+    const injectedOpts = _injected.buildSpawnOpts(adapterName, { noMcp });
+    return applyNoMcpConfigOverride(injectedOpts, adapterName, noMcp);
+  }
   const opts = { cwd: process.cwd() };
   if (adapterName === 'codex-exec') {
     try {
@@ -293,7 +319,7 @@ export function buildSpawnOpts(adapterName) {
       };
     } catch { /* fall through */ }
   }
-  return opts;
+  return applyNoMcpConfigOverride(opts, adapterName, noMcp);
 }
 
 function modelLabel(adapterName) {
@@ -318,7 +344,10 @@ function modelLabel(adapterName) {
  */
 export async function runOnce(adapterName, prompt, _testInject = {}) {
   const adapter = _testInject.adapter || _injected.adapter || (await loadAdapter(adapterName));
-  const opts = _testInject.opts || buildSpawnOpts(adapterName);
+  const noMcp = _testInject.noMcp === true;
+  const opts = _testInject.opts
+    ? applyNoMcpConfigOverride(_testInject.opts, adapterName, noMcp)
+    : buildSpawnOpts(adapterName, { noMcp });
   const label = modelLabel(adapterName);
   const path = syncArtifactPath(label);
 
@@ -437,8 +466,9 @@ function printUsage(reason) {
   _writeStderr(
     `[ask] Usage error: ${reason}\n` +
     `[ask] Usage:\n` +
-    `[ask]   echo "<prompt>" | node scripts/ask.mjs <codex|gemini|auto>\n` +
-    `[ask]   echo "<prompt>" | node scripts/ask.mjs async <codex|gemini|auto>\n` +
+    `[ask]   echo "<prompt>" | node scripts/ask.mjs <codex|gemini|auto> [--no-mcp]\n` +
+    `[ask]   echo "<prompt>" | node scripts/ask.mjs async <codex|gemini|auto> [--no-mcp]\n` +
+    `[ask]   --no-mcp: disable configured MCP servers for Codex; ignored for Gemini/Claude.\n` +
     `[ask]   node scripts/ask.mjs status <jobId>\n` +
     `[ask]   node scripts/ask.mjs collect <jobId> [--wait] [--timeout Ns]\n` +
     `[ask]   node scripts/ask.mjs cancel <jobId>\n` +
@@ -450,7 +480,7 @@ function printUsage(reason) {
  * Legacy sync path. Byte-identical behavior to v1.0.3.
  * Preserved entry point for all existing callers (Atlas, Athena, external).
  */
-async function runSyncPath(model) {
+async function runSyncPath(model, noMcp = false) {
   let prompt;
   try {
     prompt = (await readStdinAll()).trim();
@@ -467,11 +497,13 @@ async function runSyncPath(model) {
 
   let adapterName = pickAskAdapter(model, caps);
   if (adapterName === 'none') {
+    warnNoMcpIgnored(noMcp, 'claude');
     printUnavailable(model);
     return _exit(2);
   }
 
-  let result = await runOnce(adapterName, prompt);
+  warnNoMcpIgnored(noMcp, adapterName);
+  let result = await runOnce(adapterName, prompt, { noMcp });
 
   if (result.demoted) {
     // Demotion is now reserved for paths that explicitly opt out of read-only
@@ -481,8 +513,10 @@ async function runSyncPath(model) {
     if (model === 'auto' && adapterName === 'codex-exec' && caps.hasGeminiCli) {
       _writeStderr(`[ask] codex unavailable (${result.error}); falling back to gemini-exec\n`);
       adapterName = 'gemini-exec';
-      result = await runOnce(adapterName, prompt);
+      warnNoMcpIgnored(noMcp, adapterName);
+      result = await runOnce(adapterName, prompt, { noMcp });
     } else {
+      if (adapterName === 'codex-exec') warnNoMcpIgnored(noMcp, 'claude');
       _writeStderr(`[ask] codex unavailable: ${result.error}\n`);
       return _exit(2);
     }
@@ -522,7 +556,7 @@ async function runSyncPath(model) {
 // ASYNC LAUNCH PATH (spec §4.2)
 // ═══════════════════════════════════════════════════════════════════════════
 
-async function runAsyncLaunch(model) {
+async function runAsyncLaunch(model, noMcp = false) {
   let prompt;
   try {
     prompt = (await readStdinAll()).trim();
@@ -539,6 +573,7 @@ async function runAsyncLaunch(model) {
 
   let adapterName = pickAskAdapter(model, caps);
   if (adapterName === 'none') {
+    warnNoMcpIgnored(noMcp, 'claude');
     printUnavailable(model);
     return _exit(2);
   }
@@ -547,21 +582,24 @@ async function runAsyncLaunch(model) {
   // Codex now uses read-only fallback (issue #67/#68/#69) instead of
   // demoting at /ask, so `_demoted` is rare; it remains for paths where the
   // adapter genuinely cannot run (e.g. gemini auth missing).
-  let opts = buildSpawnOpts(adapterName);
+  let opts = buildSpawnOpts(adapterName, { noMcp });
   if (opts._demoted) {
     if (model === 'auto' && adapterName === 'codex-exec' && caps.hasGeminiCli) {
       _writeStderr(`[ask] codex unavailable (${opts._demotionReason}); falling back to gemini-exec\n`);
       adapterName = 'gemini-exec';
-      opts = buildSpawnOpts(adapterName);
+      opts = buildSpawnOpts(adapterName, { noMcp });
       if (opts._demoted) {
+        warnNoMcpIgnored(noMcp, 'claude');
         _writeStderr(`[ask] gemini also unavailable: ${opts._demotionReason}\n`);
         return _exit(2);
       }
     } else {
+      warnNoMcpIgnored(noMcp, 'claude');
       _writeStderr(`[ask] ${modelLabel(adapterName)} unavailable: ${opts._demotionReason}\n`);
       return _exit(2);
     }
   }
+  warnNoMcpIgnored(noMcp, adapterName);
   // If we landed on the read-only fallback, surface it to the user before
   // the runner detaches — async callers won't see the per-run readonly
   // explanation otherwise.
@@ -598,6 +636,7 @@ async function runAsyncLaunch(model) {
     jobId,
     model,
     adapterName,
+    noMcp: noMcp === true,
     runnerPid: runner.pid || 0,
     adapterPid: null,
     startedAt,
@@ -667,7 +706,7 @@ async function runJob(jobId) {
   askJobs.ensureJobDirs(process.cwd());
 
   // Step 4: resolve opts (may demote).
-  const opts = buildSpawnOpts(meta.adapterName);
+  const opts = buildSpawnOpts(meta.adapterName, { noMcp: meta.noMcp === true });
   if (opts._demoted) {
     // Step 5 demoted branch: sentinel first, then metadata flip.
     askJobs.writeRunnerSentinel(meta.artifactJsonlPath, {
@@ -785,6 +824,10 @@ async function runJob(jobId) {
     if (finalizing) return;
     finalizing = true;
 
+    const terminalMessage = category === 'mcp_auth'
+      ? `${MCP_AUTH_HINT}\n${message || 'adapter error'}`
+      : message;
+
     try { await adapter.shutdown(handle); } catch { /* best-effort */ }
 
     // Drain the tee stream BEFORE writing the sentinel. process.exit does
@@ -806,7 +849,7 @@ async function runJob(jobId) {
     askJobs.writeRunnerSentinel(meta.artifactJsonlPath, {
       reason,
       category,
-      message,
+      message: terminalMessage,
       text: handle._output || '',
     });
 
@@ -817,7 +860,7 @@ async function runJob(jobId) {
       endedAt: _clock().toISOString(),
     };
     if (category) terminalMeta.errorCategory = category;
-    if (message) terminalMeta.errorMessage = message;
+    if (terminalMessage) terminalMeta.errorMessage = terminalMessage;
     if (reason === 'completed') terminalMeta.exitCode = 0;
     else if (reason === 'failed') terminalMeta.exitCode = 1;
     else if (reason === 'cancelled') terminalMeta.exitCode = 1;
@@ -1033,9 +1076,9 @@ export async function main(argv = process.argv) {
 
   switch (desc.command) {
     case 'sync':
-      return runSyncPath(desc.model);
+      return runSyncPath(desc.model, desc.noMcp);
     case 'async':
-      return runAsyncLaunch(desc.model);
+      return runAsyncLaunch(desc.model, desc.noMcp);
     case 'status':
       return runStatus(desc.jobId);
     case 'collect':

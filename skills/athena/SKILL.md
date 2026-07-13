@@ -1007,7 +1007,7 @@ if (phase3AdapterRunId !== 'none' && status?.runId !== phase3AdapterRunId) {
 }
 for (const w of status?.workers || []) {
   // w.status: 'running' | 'completed' | 'failed'
-  // w.errorReason / w.errorMessage: set for failures (auth_failed/rate_limited/crash/timeout/…)
+  // w.errorReason / w.errorMessage: set for failures (mcp_auth/auth_failed/rate_limited/crash/timeout/…)
   // w.lastOutput: latest snapshot output tail
 }
 const results = status ? collectResults(phase3TeamSlug) : {};  // durable supervisor output
@@ -1101,7 +1101,7 @@ if (errorCheck.failed) {
 ```
 
 Rules:
-- If `errorCheck.reason` is `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again for any worker in this session.
+- If `errorCheck.reason` is `'mcp_auth'`, `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT retry Codex for that error type again for any worker in this session.
 - Crash/timeout/network retries are OWNED by the failover chain: `planProviderFailover` already retries the same provider once before switching. Do NOT manually respawn the failed provider yourself — that would double the retry.
 - Always call `await reassignProvider()` before dispatching the replacement — it handles cleanup and wisdom recording in one step.
 - Never reuse the parent `teamName` for a provider replacement; `dispatchProviderFallback()` creates a distinct child team so parent state is not overwritten.

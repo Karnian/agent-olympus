@@ -533,6 +533,7 @@ tmux kill-session -t "atlas-codex-1"
 
 | 실패 유형 | 패턴 | 재시도 정책 |
 |-----------|------|-----------|
+| `mcp_auth` | rmcp::transport, Auth(AuthorizationRequired), authorization required | 세션 내 Codex 사용 중단 |
 | `auth_failed` | authentication, unauthorized, invalid api key | 세션 내 Codex 사용 중단 |
 | `rate_limited` | rate limit, 429, quota exceeded | 세션 내 Codex 사용 중단 |
 | `not_installed` | command not found, ENOENT | 세션 내 Codex 사용 중단 |
@@ -652,6 +653,7 @@ JSONC 형식(주석 허용)으로, 의도 카테고리별 라우팅을 사용자
 ### RF-008: Codex 실패 감지 및 자동 폴백 [✅ 테스트 있음]
 **As a** 오케스트레이터, **I want to** Codex 워커가 실패하면 자동으로 Claude로 전환하고 싶다, **so that** 외부 모델 장애가 전체 파이프라인을 중단시키지 않는다.
 **Acceptance Criteria:**
+- GIVEN Codex MCP 서버가 "authorization required" 오류를 반환하면 WHEN detectCodexError()가 감지하면 THEN mcp_auth로 분류하고 세션 내 Codex 사용 중단
 - GIVEN Codex가 "unauthorized" 오류를 반환하면 WHEN detectCodexError()가 감지하면 THEN auth_failed로 분류하고 세션 내 Codex 사용 중단
 - GIVEN Codex가 crash하면 WHEN 1회 재시도 후 재실패하면 THEN Claude executor로 자동 전환
 **Source:** `scripts/lib/worker-spawn.mjs`

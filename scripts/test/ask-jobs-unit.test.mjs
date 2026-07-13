@@ -86,6 +86,7 @@ test('writeMetadata/readMetadata: round-trip preserves fields + schemaVersion', 
   const meta = {
     model: 'codex',
     adapterName: 'codex-exec',
+    noMcp: true,
     runnerPid: 42,
     adapterPid: null,
     startedAt: '2026-04-09T12:00:00.000Z',
@@ -100,6 +101,7 @@ test('writeMetadata/readMetadata: round-trip preserves fields + schemaVersion', 
   assert.ok(read);
   assert.equal(read.schemaVersion, 1);
   assert.equal(read.model, 'codex');
+  assert.equal(read.noMcp, true);
   assert.equal(read.runnerPid, 42);
   assert.equal(read.jobId, 'ask-codex-x');
 });
@@ -373,12 +375,40 @@ test('parseAskArgs: [..., codex] → sync codex', () => {
   const d = askJobs.parseAskArgs(['node', '/abs/scripts/ask.mjs', 'codex']);
   assert.equal(d.command, 'sync');
   assert.equal(d.model, 'codex');
+  assert.equal(d.noMcp, false);
+});
+
+test('parseAskArgs: [..., codex, --no-mcp] → sync codex without MCP servers', () => {
+  const d = askJobs.parseAskArgs(['node', '/abs/scripts/ask.mjs', 'codex', '--no-mcp']);
+  assert.deepEqual(d, { command: 'sync', model: 'codex', noMcp: true });
+});
+
+test('parseAskArgs: sync rejects unknown flags', () => {
+  const d = askJobs.parseAskArgs(['node', '/abs/scripts/ask.mjs', 'codex', '--wat']);
+  assert.equal(d.command, 'error');
+  assert.match(d.reason, /unknown sync flag/);
 });
 
 test('parseAskArgs: [..., async, codex] → async', () => {
   const d = askJobs.parseAskArgs(['node', '/abs/scripts/ask.mjs', 'async', 'codex']);
   assert.equal(d.command, 'async');
   assert.equal(d.model, 'codex');
+  assert.equal(d.noMcp, false);
+});
+
+test('parseAskArgs: [..., async, codex, --no-mcp] → async codex without MCP servers', () => {
+  const d = askJobs.parseAskArgs([
+    'node', '/abs/scripts/ask.mjs', 'async', 'codex', '--no-mcp',
+  ]);
+  assert.deepEqual(d, { command: 'async', model: 'codex', noMcp: true });
+});
+
+test('parseAskArgs: async rejects unknown flags', () => {
+  const d = askJobs.parseAskArgs([
+    'node', '/abs/scripts/ask.mjs', 'async', 'codex', '--wat',
+  ]);
+  assert.equal(d.command, 'error');
+  assert.match(d.reason, /unknown async flag/);
 });
 
 test('parseAskArgs: [..., async] (missing model) → error', () => {
