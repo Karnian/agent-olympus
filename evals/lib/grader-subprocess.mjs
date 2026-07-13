@@ -113,7 +113,7 @@ function boundedTimeout(value) {
     : DEFAULT_GRADER_TIMEOUT_MS;
 }
 
-function permissionArgs(workdir, extraReadPaths = []) {
+function permissionArgs(workdir, entryPoint, extraReadPaths = []) {
   const flags = process.allowedNodeEnvironmentFlags;
   const permissionFlag = flags?.has('--permission')
     ? '--permission'
@@ -127,6 +127,10 @@ function permissionArgs(workdir, extraReadPaths = []) {
     permissionFlag,
     `--allow-fs-read=${workdir}`,
     `--allow-fs-read=${CANDIDATE_INVOKE}`,
+    // Node 20 applies the permission model to the main ESM entry point too.
+    // Grant only that runner file, not evals/lib, so adjacent grader helpers
+    // and source task oracles remain outside the child process read boundary.
+    `--allow-fs-read=${entryPoint}`,
     ...extraReadPaths.map((value) => `--allow-fs-read=${value}`),
     `--allow-fs-write=${workdir}`,
   ];
@@ -204,7 +208,7 @@ export function runPublicTests(workdir, options = {}) {
       const canonicalWorkdir = realpathSync(workdir);
       execFileBounded(
         process.execPath,
-        [...permissionArgs(canonicalWorkdir), PUBLIC_TEST_RUNNER, canonicalWorkdir],
+        [...permissionArgs(canonicalWorkdir, PUBLIC_TEST_RUNNER), PUBLIC_TEST_RUNNER, canonicalWorkdir],
         {
           cwd: canonicalWorkdir,
           env: stableEnv(),
@@ -267,7 +271,7 @@ export function runIsolatedCheck({ workdir, graderUrl, exportName, name, timeout
       const resultMarker = `${RESULT_MARKER}${nonce}:`;
       execFileBounded(
         process.execPath,
-        [...permissionArgs(canonicalWorkdir, stagedGrader.readPaths), CHILD_RUNNER],
+        [...permissionArgs(canonicalWorkdir, CHILD_RUNNER, stagedGrader.readPaths), CHILD_RUNNER],
         {
           cwd: canonicalWorkdir,
           env: stableEnv(),

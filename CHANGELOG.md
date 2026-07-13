@@ -19,6 +19,7 @@ loop. The zero-dependency Node suite is **2719/2719 green across 108 test files*
 - **Cross-platform test entrypoint** — `npm test` now uses `scripts/run-tests.mjs`, avoiding shell-dependent glob semantics while retaining the same `node:test` suite.
 
 ### Fixed
+- Node 20 hermetic eval children now receive file-scoped read grants for their exact ESM entry points. Orchestrator timeout timers remain referenced until completion, and a never-settling hidden candidate stays inside the supervisor boundary until the configured timeout instead of exiting without a result.
 - A torn `events.jsonl` record can no longer permanently prevent `completePhase()` or `failPhase()` from reaching a terminal state, including when later valid events were appended after the damaged record.
 - A Claude fallback recorded as completed but missing authenticated output now fails closed with `completed-output-lost` instead of silently flipping back to pending and repeating already committed work. Completion persistence may repair the record only because it already holds the terminal output bytes.
 - A recovery process that dies after claiming a stale finalization/provider lock no longer poisons that lock generation forever; stale-owner takeover remains fenced against PID reuse and ABA replacement.

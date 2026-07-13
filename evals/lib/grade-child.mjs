@@ -12,6 +12,8 @@ const safeBoolean = Boolean;
 const safeCreate = Object.create.bind(Object);
 const safeWrite = writeSync.bind(null, 1);
 const safeExit = process.exit.bind(process);
+const safeSetInterval = setInterval;
+const safeClearInterval = clearInterval;
 
 function isWithin(root, candidate) {
   const relative = path.relative(root, candidate);
@@ -158,6 +160,16 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`${detail(error)}\n`, () => process.exit(1));
-});
+// A pending Promise alone does not keep Node 20 alive. Hold a private handle
+// so a candidate that never settles remains inside the supervisor's fixed
+// timeout boundary instead of exiting early without an authenticated result.
+const keepAliveTimer = safeSetInterval(() => {}, 60_000);
+main().then(
+  () => safeClearInterval(keepAliveTimer),
+  (error) => {
+    process.stderr.write(`${detail(error)}\n`, () => {
+      safeClearInterval(keepAliveTimer);
+      process.exit(1);
+    });
+  },
+);

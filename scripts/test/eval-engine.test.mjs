@@ -370,6 +370,27 @@ test('runOrchestrator timeout sends SIGTERM then SIGKILL and returns timeout', a
     assert.equal(result.status, 'timeout');
     assert.equal(result.timedOut, true);
     assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+
+    const synchronousSignals = [];
+    const synchronousResult = await runOrchestrator({
+      orchestrator: 'atlas',
+      prompt: 'close during terminate',
+      cwd,
+      timeoutMs: 5,
+      spawn: () => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.kill = (signal) => {
+          synchronousSignals.push(signal);
+          child.emit('close', null, signal);
+          return true;
+        };
+        return child;
+      },
+    });
+    assert.equal(synchronousResult.status, 'timeout');
+    assert.deepEqual(synchronousSignals, ['SIGTERM']);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

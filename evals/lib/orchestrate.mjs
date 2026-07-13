@@ -315,13 +315,17 @@ async function runLive({
     timeoutTimer = setTimeout(() => {
       timedOut = true;
       killChild(child, 'SIGTERM');
+      // An injected child may emit close synchronously from kill(). Do not
+      // publish a referenced escalation timer after finish() has settled.
+      if (settled) return;
       killTimer = setTimeout(() => {
         killChild(child, 'SIGKILL');
         finish({ signal: 'SIGKILL' });
       }, killGraceMs);
-      killTimer.unref?.();
     }, effectiveTimeoutMs);
-    timeoutTimer.unref?.();
+    // These timers are the completion path when a child never emits close.
+    // Keep them referenced so an awaited run cannot be abandoned merely
+    // because the child handle disappears (notably under Node 20).
   });
 }
 

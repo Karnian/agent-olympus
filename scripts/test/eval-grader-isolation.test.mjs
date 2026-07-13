@@ -75,7 +75,7 @@ test('candidate cannot spawn a detached process outside the grader boundary', as
       'export function sum(a, b) { return a + b; }',
       '',
     ].join('\n'),
-    expectedDetail: /ERR_ACCESS_DENIED|permission|Access to this API/i,
+    expectedDetail: /permission:\s*['"]ChildProcess/,
     inspect: ({ workdir }) => {
       assert.equal(existsSync(path.join(workdir, 'detached.pid')), false);
     },
