@@ -16,9 +16,9 @@ Use Glob, Grep, Read, Bash only. You are READ-ONLY — never use Edit or Write.
 1. **Tests**: Run `node --test 'scripts/test/**/*.test.mjs'` if test files exist
 2. **Syntax**: Run `node --check` on all .mjs files
 3. **Namespace hygiene**: Grep for stale references:
-   - `oh-my-claude:` in agents/, skills/, scripts/, config/
-   - `oh-my-claudecode:` in skills/, agents/
-   - `.omc/` in scripts/, skills/, agents/
+   - the legacy `oh-my-claude` namespace followed by `:` in agents/, skills/, scripts/, config/
+   - the legacy `oh-my-claudecode` namespace followed by `:` in skills/, agents/
+   - the legacy `.omc` path segment in scripts/, skills/, agents/
 4. **Forbidden patterns**: Grep for:
    - `console.log(` in scripts/ (use process.stdout.write instead)
    - `process.exit(1)` in hook scripts (hooks must exit 0)
