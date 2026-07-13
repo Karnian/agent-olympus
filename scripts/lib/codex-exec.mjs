@@ -1,12 +1,14 @@
 import { spawn as nodeSpawn } from 'child_process';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { buildCodexExecArgs } from './codex-approval.mjs';
-import { codexVersionMeta } from './cli-version.mjs';
+import { codexVersionMeta, meetsMinimum } from './cli-version.mjs';
+import { classifyCodexDiagnostic } from './codex-error-classifier.mjs';
 
 /** Valid resolved permission levels (mirrors codex-approval VALID_LEVELS). */
 const VALID_SPAWN_LEVELS = new Set(['suggest', 'auto-edit', 'full-auto']);
 const CODEX_EXEC_VERSION_NOTE =
   'codex {version} predates the 0.142.5 security fix (WebSocket payloads written to trace logs); upgrade recommended';
+const IGNORE_USER_CONFIG_MIN_VERSION = '0.122.0';
 
 /**
  * @typedef {Object} CodexHandle
@@ -75,11 +77,9 @@ export function mapJsonlErrorToCategory(errorText) {
   if (!errorText) return 'unknown';
   const text = String(errorText);
 
-  if (/rmcp::transport|Auth\(AuthorizationRequired\)|authorization\s*required/i.test(text)) return 'mcp_auth';
-  if (/authentication|unauthorized|invalid.*api.*key|API key/i.test(text)) return 'auth_failed';
-  if (/rate.?limit|429|quota.*exceeded|too many requests/i.test(text)) return 'rate_limited';
+  const diagnosticCategory = classifyCodexDiagnostic(text);
+  if (diagnosticCategory) return diagnosticCategory;
   if (/command not found|ENOENT|codex:.*not found/i.test(text)) return 'not_installed';
-  if (/ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up|network error/i.test(text)) return 'network';
   if (/fatal error|unhandled exception|panic:|SIGSEGV|SIGABRT|segmentation fault/i.test(text)) return 'crash';
   if (/timeout|timed?\s*out|did not complete within/i.test(text)) return 'timeout';
 
@@ -117,6 +117,10 @@ function buildConfigOverrideArgs(opts = {}) {
   return args;
 }
 
+function buildExecConfigArgs(opts = {}) {
+  return opts.ignoreUserConfig === true ? ['--ignore-user-config'] : [];
+}
+
 /**
  * Build the Codex CLI argv for `spawn()`. Exposed for hermetic testing.
  *
@@ -129,6 +133,9 @@ function buildConfigOverrideArgs(opts = {}) {
  * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level]
  * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
  *   overrides placed before `exec`, after approval flags
+ * @param {boolean} [opts.ignoreUserConfig] - Add Codex exec's
+ *   `--ignore-user-config` option after `exec`; authentication and explicit
+ *   command-line config overrides remain available
  * @param {boolean} [opts.persist] - When true, omit --ephemeral so Codex can resume the session
  * @returns {string[]}
  */
@@ -143,6 +150,7 @@ export function _buildSpawnArgs(opts = {}) {
     return [
       ...globalArgs,
       'exec',
+      ...buildExecConfigArgs(opts),
       '--json',
       '-',
     ];
@@ -151,6 +159,7 @@ export function _buildSpawnArgs(opts = {}) {
   return [
     ...globalArgs,
     'exec',
+    ...buildExecConfigArgs(opts),
     '--json',
     '--ephemeral',
     '-',
@@ -170,6 +179,8 @@ export function _buildSpawnArgs(opts = {}) {
  * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level]
  * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
  *   overrides placed before `exec`, after approval flags
+ * @param {boolean} [opts.ignoreUserConfig] - Add the resume subcommand's
+ *   `--ignore-user-config` option after `resume`
  * @returns {string[]}
  */
 export function _buildResumeArgs(threadId, opts = {}) {
@@ -182,6 +193,7 @@ export function _buildResumeArgs(threadId, opts = {}) {
     ...buildConfigOverrideArgs(opts),
     'exec',
     'resume',
+    ...buildExecConfigArgs(opts),
     '--json',
     threadId,
     '-',
@@ -191,6 +203,20 @@ export function _buildResumeArgs(threadId, opts = {}) {
 function spawnCodexProcess(args, prompt, opts = {}) {
   const codexPath = resolveBinary('codex');
   const workerMeta = probeCodexWorkerMeta(codexPath, opts);
+
+  if (opts.ignoreUserConfig === true) {
+    if (
+      workerMeta.codexVersion === null
+      || !meetsMinimum(workerMeta.codexVersion, IGNORE_USER_CONFIG_MIN_VERSION)
+    ) {
+      const detected = workerMeta.codexVersion || 'unknown';
+      throw new Error(
+        `--no-mcp requires Codex >=${IGNORE_USER_CONFIG_MIN_VERSION} `
+        + `(--ignore-user-config support); detected ${detected}. `
+        + 'Upgrade with: npm install -g @openai/codex@latest',
+      );
+    }
+  }
 
   const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;
   const child = spawnImpl(codexPath, args, {
@@ -330,6 +356,8 @@ function emitVersionLog(opts, level, message) {
  *   the appropriate `-a never -s <sandbox>` global flags.
  * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
  *   overrides placed before `exec`, after approval flags
+ * @param {boolean} [opts.ignoreUserConfig] - Skip CODEX_HOME/config.toml for
+ *   this execution while retaining authentication and CLI overrides
  * @param {boolean} [opts.persist] - When true, omit --ephemeral so Codex writes
  *   a resumable session
  * @param {Object} [opts.env] - Additional environment variables merged over process.env
@@ -351,6 +379,8 @@ export function spawn(prompt, opts = {}) {
  *   permission tier; resolved by callers via `resolveCodexApproval`
  * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
  *   overrides placed before `exec`, after approval flags
+ * @param {boolean} [opts.ignoreUserConfig] - Skip CODEX_HOME/config.toml for
+ *   the resumed execution while retaining authentication and CLI overrides
  * @param {Object} [opts.env] - Additional environment variables merged over process.env
  * @returns {CodexHandle}
  */

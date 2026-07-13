@@ -12,6 +12,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  classifyTmuxWorker,
   completeClaudeFallback,
   demoteCodexWorkersIfNeeded,
   detectCodexError,
@@ -64,6 +65,217 @@ test('detectCodexError: "authorization required" → mcp_auth', () => {
   const result = detectCodexError('MCP authorization required; please sign in');
   assert.equal(result.failed, true);
   assert.equal(result.reason, 'mcp_auth');
+});
+
+test('detectCodexError: MCP authentication wording → mcp_auth', () => {
+  const result = detectCodexError('MCP server authentication required; please sign in');
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'mcp_auth');
+});
+
+test('detectCodexError: MCP server requires authentication → mcp_auth', () => {
+  const result = detectCodexError('MCP server requires authentication; please sign in');
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'mcp_auth');
+});
+
+test('detectCodexError: bare AuthorizationRequired enum → mcp_auth', () => {
+  const result = detectCodexError('transport failed: AuthorizationRequired');
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'mcp_auth');
+});
+
+test('detectCodexError: non-MCP authorization required → auth_failed', () => {
+  const result = detectCodexError('OpenAI API says authorization required');
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'auth_failed');
+});
+
+test('detectCodexError: MCP OAuth/auth/HTTP signals → mcp_auth within one diagnostic record', () => {
+  const samples = [
+    'ERROR rmcp::transport::worker: OAuth authentication failed',
+    'ERROR rmcp::transport::worker: HTTP 401 unauthorized',
+    'MCP server OAuth token expired',
+    'MCP server is not authenticated',
+    'ERROR rmcp::transport::worker: OAuth login required',
+    'MCP server returned HTTP 403 Forbidden',
+    'MCP server failed\nadditional detail: authorization required',
+    'ERROR rmcp::transport::worker: startup failed\nOAuth login required',
+  ];
+  for (const sample of samples) {
+    const result = detectCodexError(sample);
+    assert.equal(result.failed, true, sample);
+    assert.equal(result.reason, 'mcp_auth', sample);
+  }
+});
+
+test('detectCodexError: distant unrelated MCP and API auth remain auth_failed', () => {
+  const sample = `MCP startup complete${'.'.repeat(300)}OpenAI API authorization required`;
+  const result = detectCodexError(sample);
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'auth_failed');
+});
+
+test('detectCodexError: adjacent successful MCP startup and OpenAI API auth failure remain generic', () => {
+  const result = detectCodexError('MCP startup succeeded\nOpenAI API authentication failed');
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'auth_failed');
+});
+
+test('detectCodexError: pane-safe mode prefers a later terminal failure over recovered MCP auth', () => {
+  const recoveredMcp = [
+    '2026-07-11T19:00:00Z ERROR rmcp::transport::worker: Auth(AuthorizationRequired); retrying',
+    '2026-07-11T19:00:01Z INFO rmcp::transport::worker: OAuth authentication succeeded',
+  ];
+  const cases = [
+    {
+      terminal: '2026-07-11T19:00:02Z ERROR codex: network error ECONNRESET',
+      expected: 'network',
+    },
+    {
+      terminal: '2026-07-11T19:00:02Z ERROR codex: HTTP 429 too many requests',
+      expected: 'rate_limited',
+    },
+    {
+      terminal: '2026-07-11T19:00:02Z ERROR codex: OpenAI API authentication failed',
+      expected: 'auth_failed',
+    },
+  ];
+
+  for (const { terminal, expected } of cases) {
+    const paneDiagnostics = [...recoveredMcp, terminal].join('\n');
+    const result = detectCodexError(paneDiagnostics, { paneSafe: true });
+    assert.equal(result.failed, true, terminal);
+    assert.equal(result.reason, expected, terminal);
+
+    const nonce = 'a1b2c3d4e5f60708';
+    const tmuxResult = classifyTmuxWorker(
+      { status: 'running', type: 'codex', session: 's', _exitNonce: nonce },
+      `${paneDiagnostics}\n__AO_EXIT__:${nonce}:1\n$ `,
+    );
+    assert.equal(tmuxResult.status, 'failed', terminal);
+    assert.equal(tmuxResult.error?.category, expected, terminal);
+  }
+});
+
+test('detectCodexError: trusted diagnostics prefer a later crash over recovered MCP retries', () => {
+  const sample = [
+    'ERROR rmcp::transport::worker: OAuth authentication failed; retrying',
+    'ERROR rmcp::transport::worker: Auth(AuthorizationRequired); retrying again',
+    'INFO rmcp::transport::worker: OAuth authentication succeeded',
+    'ERROR codex: fatal error SIGABRT',
+  ].join('\n');
+  assert.equal(detectCodexError(sample).reason, 'crash');
+});
+
+test('detectCodexError: pane-safe mode retains a distant explicit MCP recovery record', () => {
+  const sample = [
+    '2026-07-11T19:00:00Z ERROR rmcp::transport::worker: Auth(AuthorizationRequired); retrying',
+    'continuation one',
+    'continuation two',
+    'continuation three',
+    '2026-07-11T19:00:01Z INFO rmcp::transport::worker: OAuth authentication succeeded',
+    '2026-07-11T19:00:02Z ERROR codex: fatal error SIGABRT',
+  ].join('\n');
+
+  const result = detectCodexError(sample, { paneSafe: true });
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'crash');
+});
+
+test('detectCodexError: pane-safe mode does not treat negated MCP recovery as success', () => {
+  const sample = [
+    '2026-07-11T19:00:00Z ERROR rmcp::transport::worker: Auth(AuthorizationRequired); retrying',
+    '2026-07-11T19:00:01Z INFO rmcp::transport::worker: authentication recovery not succeeded',
+  ].join('\n');
+
+  const result = detectCodexError(sample, { paneSafe: true });
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'mcp_auth');
+});
+
+test('detectCodexError: pane-safe filtering preserves recovery and relapse order', () => {
+  const sample = [
+    '2026-07-11T19:00:00Z ERROR rmcp::transport::worker: Auth(AuthorizationRequired); retrying',
+    '2026-07-11T19:00:01Z INFO rmcp::transport::worker: OAuth authentication succeeded',
+    'Transport channel closed, when Auth(AuthorizationRequired)',
+  ].join('\n');
+
+  const result = detectCodexError(sample, { paneSafe: true });
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'mcp_auth');
+});
+
+test('detectCodexError: pane-safe mode rejects model prose disguised as INFO recovery', () => {
+  const sample = [
+    '2026-07-11T19:00:00Z ERROR rmcp::transport::worker: Auth(AuthorizationRequired); retrying',
+    'continuation one',
+    'continuation two',
+    'continuation three',
+    'INFO The example says MCP authentication succeeded',
+  ].join('\n');
+
+  const result = detectCodexError(sample, { paneSafe: true });
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'mcp_auth');
+});
+
+test('detectCodexError: pane-safe mode ignores error tokens quoted in normal agent prose', () => {
+  const samples = [
+    'Analysis: the fixture contains Auth(AuthorizationRequired), which should be documented.',
+    'The tests intentionally mention authentication failed and rate limit exceeded.',
+    'A bare rmcp::transport example appears in this successful review.',
+    'Error: authentication failed',
+    'Warning: rate limit exceeded',
+  ];
+  for (const sample of samples) {
+    assert.deepEqual(detectCodexError(sample, { paneSafe: true }), { failed: false }, sample);
+  }
+});
+
+test('detectCodexError: pane-safe mode keeps prefixed and split MCP diagnostics', () => {
+  const samples = [
+    '2026-07-11T19:06:44.606416Z ERROR rmcp::transport::worker: worker quit\nTransport channel closed, when Auth(AuthorizationRequired)',
+    'ERROR rmcp::transport::worker: OAuth authentication failed',
+    '2026-07-11T19:06:44.606416Z ERROR codex: rate limit exceeded',
+  ];
+  for (const sample of samples) {
+    assert.equal(detectCodexError(sample, { paneSafe: true }).failed, true, sample);
+  }
+});
+
+test('detectCodexError: bare rmcp transport warning is not a failure', () => {
+  const result = detectCodexError(
+    'WARN rmcp::transport::worker: retrying after temporary disconnect',
+  );
+  assert.deepEqual(result, { failed: false });
+});
+
+test('detectCodexError: authentication fallback warning is not a failure', () => {
+  const samples = [
+    'WARN authentication method fallback enabled',
+    'INFO no authentication required for local mode',
+    'INFO this endpoint does not require authentication',
+  ];
+  for (const sample of samples) {
+    assert.deepEqual(detectCodexError(sample), { failed: false }, sample);
+  }
+});
+
+test('detectCodexError: rmcp transport network failure stays network', () => {
+  const result = detectCodexError(
+    'ERROR rmcp::transport::worker: network error ECONNRESET',
+  );
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'network');
+});
+
+test('detectCodexError: rmcp transport rate limit stays rate_limited', () => {
+  const result = detectCodexError(
+    'ERROR rmcp::transport::worker: HTTP 429 too many requests',
+  );
+  assert.equal(result.failed, true);
+  assert.equal(result.reason, 'rate_limited');
 });
 
 test('detectCodexError: "authentication failed" → auth_failed', () => {

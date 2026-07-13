@@ -126,7 +126,7 @@ function makeFakeRunnerSpawner(customPid = 55001) {
   return { spawner, invocations };
 }
 
-test('sync codex --no-mcp appends the override and emits no ignored warning', async () => {
+test('sync codex --no-mcp ignores user config, preserves overrides, and emits no ignored warning', async () => {
   const { adapter, calls } = makeFakeAdapter({ output: 'codex response' });
   ask._inject({
     adapter,
@@ -145,7 +145,8 @@ test('sync codex --no-mcp appends the override and emits no ignored warning', as
   await runMain(['codex', '--no-mcp']);
 
   assert.equal(lastExit, 0);
-  assert.deepEqual(calls.spawnOpts[0].configOverrides, ['existing=1', 'mcp_servers={}']);
+  assert.deepEqual(calls.spawnOpts[0].configOverrides, ['existing=1']);
+  assert.equal(calls.spawnOpts[0].ignoreUserConfig, true);
   assert.equal(stderrCap.join('').includes('--no-mcp only applies to codex'), false);
 });
 
@@ -209,7 +210,7 @@ test('async codex: writes metadata + prompt sidecar + spawns runner + prints han
   assert.equal(parsed.runnerPid, 55001);
 });
 
-test('async codex --no-mcp persists the flag and restores the override in detached runner', async () => {
+test('async codex --no-mcp persists the flag and ignores user config in detached runner', async () => {
   const { spawner, invocations } = makeFakeRunnerSpawner();
   ask._inject({
     runJobSpawner: spawner,
@@ -238,7 +239,8 @@ test('async codex --no-mcp persists the flag and restores the override in detach
   await runMain(['_run-job', jobId]);
 
   assert.equal(lastExit, 0);
-  assert.deepEqual(calls.spawnOpts[0].configOverrides, ['mcp_servers={}']);
+  assert.equal(calls.spawnOpts[0].ignoreUserConfig, true);
+  assert.equal(calls.spawnOpts[0].configOverrides, undefined);
   assert.equal(askJobs.readMetadata(jobId).noMcp, true);
 });
 

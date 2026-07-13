@@ -529,12 +529,12 @@ tmux kill-session -t "atlas-codex-1"
 
 ### 10.3 실패 감지 및 Claude 폴백
 
-`detectCodexError()` 함수가 tmux 출력에서 5가지 실패 패턴을 감지:
+`detectCodexError()` 함수가 tmux 출력에서 6가지 실패 패턴을 감지:
 
 | 실패 유형 | 패턴 | 재시도 정책 |
 |-----------|------|-----------|
-| `mcp_auth` | rmcp::transport, Auth(AuthorizationRequired), authorization required | 세션 내 Codex 사용 중단 |
-| `auth_failed` | authentication, unauthorized, invalid api key | 세션 내 Codex 사용 중단 |
+| `mcp_auth` | `Auth(AuthorizationRequired)`/`AuthorizationRequired`, 또는 MCP/RMCP 문맥의 `authorization\|authentication required` | 세션 내 Codex 사용 중단 |
+| `auth_failed` | 명시적인 authentication/authorization 실패, unauthorized, invalid api key | 세션 내 Codex 사용 중단 |
 | `rate_limited` | rate limit, 429, quota exceeded | 세션 내 Codex 사용 중단 |
 | `not_installed` | command not found, ENOENT | 세션 내 Codex 사용 중단 |
 | `network` | ETIMEDOUT, ECONNRESET, ENOTFOUND | 1회 재시도 |

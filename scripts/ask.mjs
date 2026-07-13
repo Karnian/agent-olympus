@@ -74,7 +74,6 @@ const COLLECT_TIMEOUT_MS = 120_000;       // Sync path only
 const RUNNER_COLLECT_TIMEOUT_MS = 86_400_000; // Runner: 24h (spec §4.3 step 11)
 const ARTIFACT_DIR = '.ao/artifacts/ask';
 const VALID_MODELS = ['codex', 'gemini', 'auto'];
-const NO_MCP_CONFIG_OVERRIDE = 'mcp_servers={}';
 const MCP_AUTH_HINT =
   '[hint] an MCP server configured in ~/.codex/config.toml failed authentication — ' +
   're-login to that server, or retry with `ask --no-mcp`.';
@@ -211,13 +210,16 @@ async function loadAdapter(adapterName) {
   throw new Error(`Unknown adapter: ${adapterName}`);
 }
 
-function applyNoMcpConfigOverride(opts, adapterName, noMcp) {
+function applyNoMcpOption(opts, adapterName, noMcp) {
   const base = opts && typeof opts === 'object' ? opts : {};
   if (!noMcp || adapterName !== 'codex-exec') return base;
-  const existing = Array.isArray(base.configOverrides) ? base.configOverrides : [];
   return {
     ...base,
-    configOverrides: [...existing, NO_MCP_CONFIG_OVERRIDE],
+    // `mcp_servers={}` is an empty-table overlay and therefore does not
+    // remove servers loaded from ~/.codex/config.toml. Supported Codex exec
+    // versions provide an explicit, fail-closed switch which skips that file
+    // while retaining CODEX_HOME authentication and command-line -c overrides.
+    ignoreUserConfig: true,
   };
 }
 
@@ -258,7 +260,7 @@ function warnNoMcpIgnored(noMcp, adapterName) {
 export function buildSpawnOpts(adapterName, { noMcp = false } = {}) {
   if (_injected.buildSpawnOpts) {
     const injectedOpts = _injected.buildSpawnOpts(adapterName, { noMcp });
-    return applyNoMcpConfigOverride(injectedOpts, adapterName, noMcp);
+    return applyNoMcpOption(injectedOpts, adapterName, noMcp);
   }
   const opts = { cwd: process.cwd() };
   if (adapterName === 'codex-exec') {
@@ -319,7 +321,7 @@ export function buildSpawnOpts(adapterName, { noMcp = false } = {}) {
       };
     } catch { /* fall through */ }
   }
-  return applyNoMcpConfigOverride(opts, adapterName, noMcp);
+  return applyNoMcpOption(opts, adapterName, noMcp);
 }
 
 function modelLabel(adapterName) {
@@ -346,7 +348,7 @@ export async function runOnce(adapterName, prompt, _testInject = {}) {
   const adapter = _testInject.adapter || _injected.adapter || (await loadAdapter(adapterName));
   const noMcp = _testInject.noMcp === true;
   const opts = _testInject.opts
-    ? applyNoMcpConfigOverride(_testInject.opts, adapterName, noMcp)
+    ? applyNoMcpOption(_testInject.opts, adapterName, noMcp)
     : buildSpawnOpts(adapterName, { noMcp });
   const label = modelLabel(adapterName);
   const path = syncArtifactPath(label);

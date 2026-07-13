@@ -172,6 +172,24 @@ test('_buildSpawnArgs: omitted configOverrides remains byte-identical with no -c
   assert.equal(args.includes('-c'), false);
 });
 
+test('_buildSpawnArgs: ignoreUserConfig is an exec option and preserves global overrides', () => {
+  const override = 'model="gpt-5"';
+  const args = _buildSpawnArgs({
+    level: 'full-auto',
+    configOverrides: [override],
+    ignoreUserConfig: true,
+  });
+
+  assert.deepEqual(args, [
+    '-a', 'never', '-s', 'danger-full-access',
+    '-c', override,
+    'exec', '--ignore-user-config', '--json', '--ephemeral', '-',
+  ]);
+  assert.ok(args.indexOf('-c') < args.indexOf('exec'), 'CLI overrides remain global');
+  assert.ok(args.indexOf('--ignore-user-config') > args.indexOf('exec'),
+    '--ignore-user-config must be an exec option');
+});
+
 test('_buildSpawnArgs: level=auto-edit → -a never -s workspace-write before exec', () => {
   const args = _buildSpawnArgs({ level: 'auto-edit' });
   assert.deepEqual(args, [
@@ -242,6 +260,17 @@ test('_buildSpawnArgs: persist=true omits --ephemeral but keeps exec JSON stdin 
   assert.ok(approvalIdx < execIdx, `-a (${approvalIdx}) must come before exec (${execIdx})`);
 });
 
+test('_buildSpawnArgs: persist=true retains --ignore-user-config', () => {
+  const args = _buildSpawnArgs({
+    level: 'full-auto',
+    persist: true,
+    ignoreUserConfig: true,
+  });
+
+  assert.deepEqual(args.slice(-4), ['exec', '--ignore-user-config', '--json', '-']);
+  assert.equal(args.includes('--ephemeral'), false);
+});
+
 test('_buildSpawnArgs: persist absent keeps --ephemeral regression guard', () => {
   const args = _buildSpawnArgs({ level: 'full-auto' });
   assert.ok(args.includes('--ephemeral'), 'non-persist spawn must remain ephemeral');
@@ -275,6 +304,22 @@ test('_buildResumeArgs: configOverrides are global -c flags before exec', () => 
   ]);
   assert.ok(configIdx >= 0, 'argv should include -c');
   assert.ok(configIdx < execIdx, `-c (${configIdx}) must come before exec (${execIdx})`);
+});
+
+test('_buildResumeArgs: ignoreUserConfig is a resume option and preserves global overrides', () => {
+  const threadId = '0199aabb-ccdd-eeff-8899-aabbccddeeff';
+  const override = 'model="gpt-5"';
+  const args = _buildResumeArgs(threadId, {
+    level: 'full-auto',
+    configOverrides: [override],
+    ignoreUserConfig: true,
+  });
+
+  assert.deepEqual(args, [
+    '-a', 'never', '-s', 'danger-full-access',
+    '-c', override,
+    'exec', 'resume', '--ignore-user-config', '--json', threadId, '-',
+  ]);
 });
 
 test('_buildResumeArgs: rejects empty or invalid threadId', () => {
@@ -358,6 +403,41 @@ test('spawn: no version note at or above minimum or when unknown', () => {
   }
 });
 
+test('spawn and spawnResume: --no-mcp fails closed when Codex lacks ignore-user-config', () => {
+  for (const version of ['0.121.0', null]) {
+    let spawnCount = 0;
+    const opts = {
+      ignoreUserConfig: true,
+      spawn: () => { spawnCount += 1; return createMockChildProcess(); },
+      versionProbe: () => ({
+        version,
+        raw: version ? `codex-cli ${version}\n` : 'unparseable\n',
+      }),
+      log: () => {},
+    };
+
+    assert.throws(() => spawnCodex('hello', opts), /--no-mcp requires Codex >=0\.122\.0/);
+    assert.throws(
+      () => spawnResume('thread-1', 'again', opts),
+      /--no-mcp requires Codex >=0\.122\.0/,
+    );
+    assert.equal(spawnCount, 0, `Codex ${version || 'unknown'} must not be spawned`);
+  }
+});
+
+test('spawn: --no-mcp starts at the supported minimum Codex version', () => {
+  let spawnCount = 0;
+  const handle = spawnCodex('hello', {
+    ignoreUserConfig: true,
+    spawn: () => { spawnCount += 1; return createMockChildProcess(); },
+    versionProbe: () => ({ version: '0.122.0', raw: 'codex-cli 0.122.0\n' }),
+    log: () => {},
+  });
+
+  assert.equal(spawnCount, 1);
+  assert.equal(handle.workerMeta.codexVersion, '0.122.0');
+});
+
 // ─── parseJSONLEvents ─────────────────────────────────────────────────────────
 
 test('parseJSONLEvents: parses valid JSONL into event objects', () => {
@@ -409,6 +489,148 @@ test('mapJsonlErrorToCategory: rmcp AuthorizationRequired → mcp_auth', () => {
 
 test('mapJsonlErrorToCategory: "authorization required" → mcp_auth', () => {
   assert.equal(mapJsonlErrorToCategory('MCP server says authorization required'), 'mcp_auth');
+});
+
+test('mapJsonlErrorToCategory: MCP authentication wording → mcp_auth', () => {
+  assert.equal(mapJsonlErrorToCategory('MCP server authentication required'), 'mcp_auth');
+});
+
+test('mapJsonlErrorToCategory: MCP server requires authentication → mcp_auth', () => {
+  assert.equal(mapJsonlErrorToCategory('MCP server requires authentication'), 'mcp_auth');
+});
+
+test('mapJsonlErrorToCategory: bare AuthorizationRequired enum → mcp_auth', () => {
+  assert.equal(mapJsonlErrorToCategory('transport failed: AuthorizationRequired'), 'mcp_auth');
+});
+
+test('mapJsonlErrorToCategory: non-MCP authorization required → auth_failed', () => {
+  assert.equal(mapJsonlErrorToCategory('OpenAI API says authorization required'), 'auth_failed');
+});
+
+test('mapJsonlErrorToCategory: MCP OAuth/auth/HTTP signals → mcp_auth within one diagnostic record', () => {
+  const samples = [
+    'ERROR rmcp::transport::worker: OAuth authentication failed',
+    'ERROR rmcp::transport::worker: HTTP 401 unauthorized',
+    'MCP server OAuth token expired',
+    'MCP server is not authenticated',
+    'ERROR rmcp::transport::worker: OAuth login required',
+    'MCP server returned HTTP 403 Forbidden',
+    'MCP server failed\nadditional detail: authorization required',
+    'ERROR rmcp::transport::worker: startup failed\nOAuth login required',
+  ];
+  for (const sample of samples) {
+    assert.equal(mapJsonlErrorToCategory(sample), 'mcp_auth', sample);
+  }
+});
+
+test('mapJsonlErrorToCategory: distant unrelated MCP and API auth remain auth_failed', () => {
+  const sample = `MCP startup complete${'.'.repeat(300)}OpenAI API authorization required`;
+  assert.equal(mapJsonlErrorToCategory(sample), 'auth_failed');
+});
+
+test('mapJsonlErrorToCategory: adjacent successful MCP startup and OpenAI API auth failure remain generic', () => {
+  assert.equal(
+    mapJsonlErrorToCategory('MCP startup succeeded\nOpenAI API authentication failed'),
+    'auth_failed',
+  );
+});
+
+test('mapJsonlErrorToCategory: a recovered MCP auth error cannot mask the later terminal failure', () => {
+  const recoveredMcp = [
+    '2026-07-11T19:00:00Z ERROR rmcp::transport::worker: Auth(AuthorizationRequired); retrying',
+    '2026-07-11T19:00:01Z INFO rmcp::transport::worker: OAuth authentication succeeded',
+  ];
+  const cases = [
+    {
+      terminal: '2026-07-11T19:00:02Z ERROR codex: network error ECONNRESET',
+      expected: 'network',
+    },
+    {
+      terminal: '2026-07-11T19:00:02Z ERROR codex: HTTP 429 too many requests',
+      expected: 'rate_limited',
+    },
+    {
+      terminal: '2026-07-11T19:00:02Z ERROR codex: OpenAI API authentication failed',
+      expected: 'auth_failed',
+    },
+    {
+      terminal: '2026-07-11T19:00:02Z ERROR codex: fatal error SIGSEGV',
+      expected: 'crash',
+    },
+    {
+      terminal: '2026-07-11T19:00:02Z ERROR codex: command not found',
+      expected: 'not_installed',
+    },
+    {
+      terminal: '2026-07-11T19:00:02Z ERROR codex: operation timed out',
+      expected: 'timeout',
+    },
+  ];
+
+  for (const { terminal, expected } of cases) {
+    assert.equal(mapJsonlErrorToCategory([...recoveredMcp, terminal].join('\n')), expected);
+  }
+});
+
+test('mapJsonlErrorToCategory: explicit MCP auth recovery clears an otherwise stale failure', () => {
+  const recovered = [
+    'ERROR rmcp::transport::worker: OAuth authentication failed; retrying',
+    'ERROR rmcp::transport::worker: Auth(AuthorizationRequired); retrying again',
+    'INFO rmcp::transport::worker: OAuth authentication succeeded',
+  ].join('\n');
+  assert.equal(mapJsonlErrorToCategory(recovered), 'unknown');
+  assert.equal(mapJsonlErrorToCategory([
+    'ERROR rmcp::transport::worker: Auth(AuthorizationRequired)',
+    'INFO rmcp::transport::worker: server was not authenticated; OAuth authentication succeeded',
+  ].join('\n')), 'unknown');
+});
+
+test('mapJsonlErrorToCategory: negated MCP recovery does not clear a terminal auth failure', () => {
+  const samples = [
+    'ERROR rmcp: OAuth authentication failed; retry was not successful',
+    'Auth(AuthorizationRequired)\nINFO rmcp: authentication recovery not succeeded',
+    'ERROR rmcp: OAuth authentication failed\nINFO rmcp: authentication was never restored',
+    'ERROR rmcp: Auth(AuthorizationRequired)\nINFO rmcp: server was not authenticated successfully',
+    'ERROR rmcp: Auth(AuthorizationRequired)\nINFO rmcp: server was never authenticated successfully',
+    "ERROR rmcp: OAuth authentication failed; recovery wasn't successful",
+    'ERROR rmcp: OAuth authentication failed; recovery cannot be successful',
+    'ERROR rmcp: OAuth authentication failed; recovery is unlikely to be successful',
+  ];
+  for (const sample of samples) {
+    assert.equal(mapJsonlErrorToCategory(sample), 'mcp_auth', sample);
+  }
+});
+
+test('mapJsonlErrorToCategory: bare rmcp transport warning is not mcp_auth', () => {
+  assert.equal(
+    mapJsonlErrorToCategory('WARN rmcp::transport::worker: retrying after temporary disconnect'),
+    'unknown',
+  );
+});
+
+test('mapJsonlErrorToCategory: authentication fallback warning is informational', () => {
+  const samples = [
+    'WARN authentication method fallback enabled',
+    'INFO no authentication required for local mode',
+    'INFO this endpoint does not require authentication',
+  ];
+  for (const sample of samples) {
+    assert.equal(mapJsonlErrorToCategory(sample), 'unknown', sample);
+  }
+});
+
+test('mapJsonlErrorToCategory: rmcp transport network failure stays network', () => {
+  assert.equal(
+    mapJsonlErrorToCategory('ERROR rmcp::transport::worker: network error ECONNRESET'),
+    'network',
+  );
+});
+
+test('mapJsonlErrorToCategory: rmcp transport rate limit stays rate_limited', () => {
+  assert.equal(
+    mapJsonlErrorToCategory('ERROR rmcp::transport::worker: HTTP 429 too many requests'),
+    'rate_limited',
+  );
 });
 
 test('mapJsonlErrorToCategory: "authentication failed" → auth_failed', () => {

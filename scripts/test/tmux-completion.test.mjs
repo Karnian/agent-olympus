@@ -111,10 +111,10 @@ test('classifyTmuxWorker: non-zero exit (no codex signature) → failed/nonzero_
   assert.match(r.error.message, /status 2/);
 });
 
-test('classifyTmuxWorker: non-zero exit + codex signature → failed with the RICHER category', () => {
+test('classifyTmuxWorker: ambiguous free-form error plus non-zero exit stays nonzero_exit', () => {
   const r = classifyTmuxWorker(RUNNING_CODEX, `Error: authentication failed\n${M}:1\n$ `);
   assert.equal(r.status, 'failed');
-  assert.equal(r.error.category, 'auth_failed'); // enriched, not generic nonzero_exit
+  assert.equal(r.error.category, 'nonzero_exit');
 });
 
 test('REGRESSION: prompt returned but NO sentinel → stays running, NOT completed', () => {
@@ -126,10 +126,39 @@ test('REGRESSION: prompt returned but NO sentinel → stays running, NOT complet
   assert.equal(r.error, undefined);
 });
 
-test('classifyTmuxWorker: codex error signature before the sentinel → fail fast', () => {
-  const r = classifyTmuxWorker(RUNNING_CODEX, 'Error: rate limit exceeded\nretrying\n$ ');
+test('classifyTmuxWorker: merged pane diagnostics before the sentinel stay running', () => {
+  const samples = [
+    'Error: rate limit exceeded\nretrying\n$ ',
+    'Warning: authentication failed\n$ ',
+    'ERROR rmcp::transport::worker: MCP server requires authentication\n$ ',
+    '```text\nERROR rmcp::transport::worker: HTTP 403 Forbidden\n```\n$ ',
+  ];
+  for (const pane of samples) {
+    const r = classifyTmuxWorker(RUNNING_CODEX, pane);
+    assert.equal(r.status, 'running', pane);
+    assert.equal(r.error, undefined, pane);
+  }
+});
+
+test('classifyTmuxWorker: normal agent prose quoting MCP errors stays running', () => {
+  const pane = 'Analysis: the fixture contains Auth(AuthorizationRequired) and authentication failed.\n$ ';
+  const r = classifyTmuxWorker(RUNNING_CODEX, pane);
+  assert.equal(r.status, 'running');
+  assert.equal(r.error, undefined);
+});
+
+test('classifyTmuxWorker: non-zero exit does not enrich from auth tokens in agent prose', () => {
+  const pane = `Analysis: the fixture contains Auth(AuthorizationRequired) and authentication failed.\n${M}:1\n$ `;
+  const r = classifyTmuxWorker(RUNNING_CODEX, pane);
   assert.equal(r.status, 'failed');
-  assert.equal(r.error.category, 'rate_limited');
+  assert.equal(r.error.category, 'nonzero_exit');
+});
+
+test('classifyTmuxWorker: non-zero exit still enriches pane-safe MCP diagnostics', () => {
+  const pane = `ERROR rmcp::transport::worker: MCP server requires authentication\n${M}:1\n$ `;
+  const r = classifyTmuxWorker(RUNNING_CODEX, pane);
+  assert.equal(r.status, 'failed');
+  assert.equal(r.error.category, 'mcp_auth');
 });
 
 test('classifyTmuxWorker: exit 0 is authoritative over a stale transient error line', () => {
@@ -152,14 +181,12 @@ test('classifyTmuxWorker: null pane output → running, empty output, no crash',
   assert.equal(r.error, undefined);
 });
 
-// --- F3: the exit sentinel is authoritative across polls, even after a
-//        provisional signature-only failure on an earlier poll ---
+// --- F3: the exit sentinel is authoritative across polls, even when a
+//        persisted/external provisional failure predates the sentinel ---
 
-test('classifyTmuxWorker (F3): a provisionally-failed worker is rescued by a later exit-0', () => {
-  // Poll N flagged it failed on a transient "rate limit … retrying" line (no
-  // sentinel yet). Poll N+1's pane now carries the real exit-0 sentinel — the
-  // worker recovered. Old code gated parsing on status==='running', so the
-  // sentinel was ignored and the worker stayed falsely failed.
+test('classifyTmuxWorker (F3): a previously failed worker is rescued by a later exit-0', () => {
+  // A persisted worker from an older process/version may already be failed.
+  // A later authoritative exit-0 sentinel must still rescue it.
   const worker = { status: 'failed', type: 'codex', session: 's' };
   const r = classifyTmuxWorker(worker, `Error: rate limit exceeded\nretrying\nRecovered.\n${M}:0\n$ `);
   assert.equal(r.status, 'completed');
