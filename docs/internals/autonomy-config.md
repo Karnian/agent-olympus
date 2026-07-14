@@ -66,8 +66,11 @@ the durable anchor; the best-effort `events.jsonl` copy is audit-only. A missing
 torn, malformed, identity-mismatched, or anchor-mismatched task ledger stops
 the run before release side effects. Policy is re-read on every resume and
 immediately before each push or PR mutation, so a follow-up after finalize still
-revokes shipping. The orchestrator cannot approve its own prompt; only an
-actual user response satisfies `"ask"`.
+revokes shipping. The skill protocol accepts only an interactive
+`AskUserQuestion` result as approval, records it, re-reads it before mutation,
+and forbids model-generated prose or self-approval. The ledger provides durable
+run identity, not cryptographic user-origin attestation, so `"ask"` is a
+cooperative runtime trust boundary; headless and unattended runs always halt.
 
 `ship.autoPush` is deprecated but remains validated for compatibility. Within
 a valid config layer that omits `ship.mode`, legacy `autoPush: true` maps to

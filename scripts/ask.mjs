@@ -470,7 +470,7 @@ function printUsage(reason) {
     `[ask] Usage:\n` +
     `[ask]   echo "<prompt>" | node scripts/ask.mjs <codex|gemini|auto> [--no-mcp]\n` +
     `[ask]   echo "<prompt>" | node scripts/ask.mjs async <codex|gemini|auto> [--no-mcp]\n` +
-    `[ask]   --no-mcp: disable configured MCP servers for Codex; ignored for Gemini/Claude.\n` +
+    `[ask]   --no-mcp: ignore Codex user-level config (including MCP); ignored for Gemini/Claude.\n` +
     `[ask]   node scripts/ask.mjs status <jobId>\n` +
     `[ask]   node scripts/ask.mjs collect <jobId> [--wait] [--timeout Ns]\n` +
     `[ask]   node scripts/ask.mjs cancel <jobId>\n` +

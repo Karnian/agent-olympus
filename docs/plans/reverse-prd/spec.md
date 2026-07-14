@@ -529,7 +529,7 @@ tmux kill-session -t "atlas-codex-1"
 
 ### 10.3 실패 감지 및 Claude 폴백
 
-`detectCodexError()` 함수가 tmux 출력에서 6가지 실패 패턴을 감지:
+공유 `detectCodexError()` 분류기가 어댑터 출력을 레코드 순서대로 읽어 7가지 실패 유형을 감지:
 
 | 실패 유형 | 패턴 | 재시도 정책 |
 |-----------|------|-----------|
@@ -537,6 +537,7 @@ tmux kill-session -t "atlas-codex-1"
 | `auth_failed` | 명시적인 authentication/authorization 실패, unauthorized, invalid api key | 세션 내 Codex 사용 중단 |
 | `rate_limited` | rate limit, 429, quota exceeded | 세션 내 Codex 사용 중단 |
 | `not_installed` | command not found, ENOENT | 세션 내 Codex 사용 중단 |
+| `timeout` | timeout, timed out, deadline exceeded | 재시도 예산 내 재시도 |
 | `network` | ETIMEDOUT, ECONNRESET, ENOTFOUND | 1회 재시도 |
 | `crash` | fatal error, SIGSEGV, SIGABRT | 1회 재시도, 재실패 시 Claude 전환 |
 
@@ -656,8 +657,8 @@ JSONC 형식(주석 허용)으로, 의도 카테고리별 라우팅을 사용자
 - GIVEN Codex MCP 서버가 "authorization required" 오류를 반환하면 WHEN detectCodexError()가 감지하면 THEN mcp_auth로 분류하고 세션 내 Codex 사용 중단
 - GIVEN Codex가 "unauthorized" 오류를 반환하면 WHEN detectCodexError()가 감지하면 THEN auth_failed로 분류하고 세션 내 Codex 사용 중단
 - GIVEN Codex가 crash하면 WHEN 1회 재시도 후 재실패하면 THEN Claude executor로 자동 전환
-**Source:** `scripts/lib/worker-spawn.mjs`
-**Test Coverage:** ✅ `scripts/test/worker-spawn.test.mjs` (17 tests, detectCodexError 커버)
+**Source:** `scripts/lib/codex-error-classifier.mjs`, `scripts/lib/worker-spawn.mjs`
+**Test Coverage:** ✅ `worker-spawn`, `codex-exec`, `tmux-completion` 테스트에서 공유 분류기와 어댑터 경계를 커버
 
 ### RF-009: 팀 메시징 시스템 (Inbox/Outbox) [✅ 테스트 있음]
 **As a** Athena 워커, **I want to** 파일 시스템 기반 메시지를 주고받고 싶다, **so that** Claude와 Codex 워커 간 비동기 통신이 가능하다.

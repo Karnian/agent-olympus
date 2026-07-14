@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.5.1] - 2026-07-14
+
+Shipping-safety and Codex MCP diagnostics patch. The zero-dependency Node suite
+is **2851/2851 green across 108 test files**.
+
+### Added
+- **Revocable per-run shipping policy (#82)** — `ship.mode` now resolves to `never`, `ask`, or `auto`, while explicit no-push/no-PR instructions in the original request or any durable user follow-up always win. Ask mode requires a fresh human approval and unattended runs halt without release side effects.
+- **Identity-bound release and CI state machines (#82)** — push/PR operations bind the canonical repository, push URL, default/base branch, head branch, and exact SHA. CI aggregates every workflow for that SHA, rechecks remote HEAD around polling and completion, and links crash-recovered fix candidates to one failed run and attempt.
+- **Codex MCP diagnostics and `--no-mcp` (#81)** — shared record-ordered classification covers exec and tmux paths, distinguishing MCP auth, generic auth, rate limits, network errors, missing binaries, crashes, and timeouts. Codex-only `--no-mcp` skips user-level config, including configured MCP servers, while preserving authentication and explicit CLI overrides.
+
+### Changed
+- **Strict task-update provenance** — user follow-ups are stored in an identity-bound ledger with a durable sequence/hash anchor. Missing, malformed, rolled-back, or mismatched history fails closed; a process interrupted between the ledger and anchor publications may recover only one cryptographically linked append.
+- **Base and PR discovery** — authoritative GitHub metadata takes precedence over stale local `origin/HEAD`, and existing PR lookup/update rejects ambiguous repositories, heads, bases, or returned URLs.
+- **`--no-mcp` documentation** — the skill now states directly that the option ignores the entire user-level Codex config rather than implying that only MCP settings are disabled.
+
+### Fixed
+- Async Codex jobs now retain `noMcp` across detached-runner restart and report actionable `mcp_auth` hints instead of collapsing unauthenticated RMCP startup failures into `unknown`.
+- Recovered MCP authentication logs no longer mask a later terminal provider failure, and tmux pane filtering preserves recovery/relapse order without trusting ordinary model prose.
+- CI recovery cannot push an unlinked local descendant automatically, reuse stale approval, or complete after the remote branch moves away from the pinned SHA.
+
 ## [1.5.0] - 2026-07-13
 
 Reliability and evaluation release — HU-01 P2/P3, bounded provider-exhaustion

@@ -54,10 +54,12 @@ The helper handles capability detection, adapter selection, the
 spawn → collect → shutdown lifecycle, and artifact writing. Output goes to
 stdout; the artifact path is logged to stderr.
 
-For Codex only, append `--no-mcp` to start with configured MCP servers disabled
-(`codex exec --ignore-user-config ...`), in either sync or async mode. This
-skips `~/.codex/config.toml` for that invocation (including non-MCP settings),
-but retains Codex authentication and explicit command-line config overrides.
+For Codex only, append `--no-mcp` to skip user-level Codex configuration for
+that invocation (`codex exec --ignore-user-config ...`), in either sync or
+async mode. This disables configured MCP servers by skipping the entire
+`$CODEX_HOME/config.toml` file (default `~/.codex/config.toml`), including
+non-MCP settings, while retaining Codex authentication and explicit
+command-line config overrides.
 This option requires Codex ≥ 0.122.0. Older or unidentifiable versions fail
 closed with an upgrade instruction instead of starting with MCP state uncertain.
 
