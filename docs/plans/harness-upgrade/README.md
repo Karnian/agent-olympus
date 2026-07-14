@@ -14,8 +14,7 @@
 - `/ask --no-mcp` uses Codex's fail-closed `--ignore-user-config` path and the
   shared ordered failure classifier now diagnoses MCP authentication across
   exec and tmux adapters.
-- The merged release suite count is recorded after the latest `main` integration
-  and full release-gate run.
+- The latest `main` integration is covered by the 2858/2858 merged release suite.
 
 ### v1.5.0 implementation addendum — 2026-07-13
 
@@ -60,7 +59,7 @@
 - **v1.2.3** — **HU-06.1** deterministic phase runner (`scripts/lib/phase-runner.mjs` + the `pipeline.json` per-run ledger; absorbs `loop-guard` as its sole caller) + **HU-06.2** Atlas `SKILL.md` rewritten onto the runner + `phase-contract.test.mjs` (15-assertion contract linter). Plan converged through 3 Codex rounds; library Codex-implemented/Claude-reviewed; Atlas rewrite Claude-implemented/Codex-reviewed ×2. Suite 2289/2289. ⚠️ runtime `claude -p` smoke deferred (Atlas would run unsupervised). HU-06.3 was completed later in v1.5.0.
 - **v1.4.0** — reference refresh: Antigravity `agy` fallback, Codex CLI advisory version gate, `/codex-review`, and adapter metadata cleanup.
 - **v1.5.0 (prepared here)** — HU-01 P2/P3, HU-06.3, event-backed fail-closed recovery, bounded provider failover, HU-17 candidate ingestion, and hardened run finalization. Suite 2719/2719.
-- **v1.5.1 (prepared here)** — revocable shipping, exact-SHA all-workflow CI recovery, and Codex MCP diagnostics with fail-closed `--no-mcp`. Final merged-suite count is recorded by the release gate.
+- **v1.5.1 (prepared here)** — revocable shipping, exact-SHA all-workflow CI recovery, and Codex MCP diagnostics with fail-closed `--no-mcp`. Suite 2858/2858.
 
 **Historical 2026-06-19 snapshot (HU-01 and HU-06.3 superseded by the addendum above):** the rest of the backlog was not started (HU-01, HU-02a, HU-03–05, HU-07–20) + the **4 deferred agents** (`metis`, `prometheus`, `hermes`, `ask` — decide read-only/Bash/unrestricted per their bodies). HU-06 `.1`/`.2` shipped in v1.2.3 and `.4` documentation shipped there; `.3` completed in v1.5.0.
 

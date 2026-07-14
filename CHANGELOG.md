@@ -3,7 +3,7 @@
 ## [1.5.1] - 2026-07-14
 
 Shipping-safety and Codex MCP diagnostics patch. The zero-dependency Node suite
-is **2851/2851 green across 108 test files**.
+is **2858/2858 green across 108 test files**.
 
 ### Added
 - **Revocable per-run shipping policy (#82)** — `ship.mode` now resolves to `never`, `ask`, or `auto`, while explicit no-push/no-PR instructions in the original request or any durable user follow-up always win. Ask mode requires a fresh human approval and unattended runs halt without release side effects.

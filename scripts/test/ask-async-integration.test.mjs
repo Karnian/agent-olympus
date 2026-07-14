@@ -962,7 +962,7 @@ test('runner tee: maybeFlushMetadata is called and lastActivityAt advances', asy
 test('dispatcher: empty argv → exit 3', async () => {
   await runMain([]);
   assert.equal(lastExit, 3);
-  assert.match(stderrCap.join(''), /--no-mcp: disable configured MCP servers for Codex/);
+  assert.match(stderrCap.join(''), /--no-mcp: ignore Codex user-level config \(including MCP\)/);
 });
 
 test('dispatcher: unknown subcommand → exit 3', async () => {
