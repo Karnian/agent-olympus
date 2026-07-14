@@ -26,6 +26,7 @@
 import { spawn as nodeSpawn } from 'child_process';
 import { buildEnhancedPath } from './resolve-binary.mjs';
 import { resolveGeminiBinary } from './gemini-binary.mjs';
+import { createGeminiReadOnlySettings } from './gemini-readonly.mjs';
 import {
   resolveGeminiApiKey,
   maskKey,
@@ -164,6 +165,7 @@ function _flushOutput(handle) {
  * @param {string} [opts.cwd] - Working directory
  * @param {string} [opts.model] - Model override: 'auto' | 'pro' | 'flash' | 'flash-lite'
  * @param {string} [opts.approvalMode] - Approval mode: 'default' | 'auto_edit' | 'yolo' | 'plan'
+ * @param {boolean} [opts.readOnly] - Enforce isolated system settings and no extensions
  * @param {Object} [opts.env] - Additional environment variables merged over process.env
  * @param {number} [opts.timeout] - Timeout in milliseconds (unused here, passed to collect)
  * @returns {GeminiHandle}
@@ -174,6 +176,14 @@ export function spawn(prompt, opts = {}) {
   const binary = resolveBin();
 
   const args = ['--output-format', 'json'];
+
+  // `plan` constrains built-in tools but does not suppress lifecycle hooks,
+  // extensions, skills, or MCP. The system-settings layer below is the
+  // authoritative deny; `-e none` is a second provider-native extension fence.
+  const readOnlySettings = opts.readOnly === true
+    ? createGeminiReadOnlySettings()
+    : null;
+  if (readOnlySettings) args.push('-e', 'none');
 
   // Model selection: -m <model>
   if (opts.model) {
@@ -205,6 +215,7 @@ export function spawn(prompt, opts = {}) {
     PATH: buildEnhancedPath(),
     ...(resolvedKey ? { GEMINI_API_KEY: resolvedKey } : {}),
     ...opts.env,
+    ...(readOnlySettings?.env || {}),
   };
   if (process.env.AO_DEBUG_GEMINI) {
     try {
@@ -214,12 +225,18 @@ export function spawn(prompt, opts = {}) {
     } catch { /* never throw from logging */ }
   }
 
-  const child = spawnImpl(binary.path, args, {
-    cwd: opts.cwd || process.cwd(),
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: mergedEnv,
-    detached: true, // Required for process-group cleanup
-  });
+  let child;
+  try {
+    child = spawnImpl(binary.path, args, {
+      cwd: opts.cwd || process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: mergedEnv,
+      detached: true, // Required for process-group cleanup
+    });
+  } catch (error) {
+    readOnlySettings?.cleanup();
+    throw error;
+  }
 
   /** @type {GeminiHandle} */
   const handle = {
@@ -264,6 +281,7 @@ export function spawn(prompt, opts = {}) {
 
   // On exit: parse accumulated JSON output, determine final status
   child.on('exit', (code) => {
+    readOnlySettings?.cleanup();
     handle._exitCode = code;
     _flushOutput(handle);
     // Non-zero exit with no parsed content → failed
@@ -274,6 +292,7 @@ export function spawn(prompt, opts = {}) {
 
   // Spawn errors (e.g. ENOENT when gemini binary is missing)
   child.on('error', (err) => {
+    readOnlySettings?.cleanup();
     handle._stderrChunks.push(_formatSpawnErrorMessage(err, binary));
     handle.status = 'failed';
   });

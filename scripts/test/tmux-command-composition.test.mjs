@@ -71,10 +71,13 @@ function bashSyntaxCheck(str) {
   }
 }
 
-// buildWorkerCommand writes a /tmp/ao-prompt-<uuid>.txt that the real command
+// buildWorkerCommand writes an OS-temp ao-prompt-<uuid>.txt that the real command
 // would `rm -f` at runtime; under `bash -n` nothing executes, so reap it here.
 function reapPromptFiles(cmd) {
-  for (const m of cmd.match(/\/tmp\/ao-prompt-[0-9a-fA-F-]+\.txt/g) || []) {
+  const tempArtifacts = cmd.match(
+    /\/[^'"\s;]*(?:ao-prompt-[0-9a-fA-F-]+\.txt|ao-gemini-readonly-[0-9a-fA-F-]+\.json)/g,
+  ) || [];
+  for (const m of new Set(tempArtifacts)) {
     try { unlinkSync(m); } catch {}
   }
 }
@@ -219,6 +222,35 @@ for (const type of WORKER_TYPES) {
     assert.ok(ok, `bash -n rejected composed ${type} command:\n${composed}\n${stderr}`);
   });
 }
+
+test('read-only tmux worker commands enforce provider-native restrictive flags', () => {
+  const codex = buildWorkerCommand(
+    { type: 'codex', prompt: 'review', readOnly: true },
+    { cwd: tmpdir(), autonomyConfig: {} },
+  );
+  const gemini = buildWorkerCommand(
+    { type: 'gemini', prompt: 'review', readOnly: true },
+    { cwd: tmpdir(), autonomyConfig: {} },
+  );
+  const claude = buildWorkerCommand(
+    { type: 'claude', prompt: 'review', readOnly: true },
+    { cwd: tmpdir(), autonomyConfig: {} },
+  );
+  try {
+    assert.match(
+      codex,
+      /-a never -s read-only --strict-config -c project_doc_max_bytes=0 -c skills\.bundled\.enabled=false exec --ignore-user-config --ignore-rules --skip-git-repo-check --ephemeral/,
+    );
+    assert.match(gemini, /GEMINI_CLI_SYSTEM_SETTINGS_PATH='[^']*\/ao-gemini-readonly-/);
+    assert.match(gemini, /--approval-mode plan -e none -p/);
+    assert.match(gemini, /rm -f "[^"]*\/ao-gemini-readonly-/,
+      'read-only settings must be removed after the CLI exits');
+    assert.match(claude, /--print --bare --no-session-persistence --permission-mode plan --allowedTools Read Glob Grep/);
+    assert.doesNotMatch(claude, /(?<!no-)session-persistence\b/);
+  } finally {
+    for (const command of [codex, gemini, claude]) reapPromptFiles(command);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Gemini binary fallback wiring: the tmux gemini command must honor

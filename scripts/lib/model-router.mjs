@@ -12,6 +12,17 @@ import { validateRoutingConfig, DEFAULT_ROUTING_CONFIG } from './config-validato
 // Re-export default config for external callers that may need it
 export { DEFAULT_ROUTING_CONFIG };
 
+// These categories are emitted only for explicit action/provider syntax in
+// intent-patterns.mjs. Their semantic signal is stronger than a score-ratio
+// confidence value, which can be diluted by long mixed-domain prompts.
+const CONFIDENCE_EXEMPT_CATEGORIES = new Set([
+  'external-model',
+  'design-review',
+  'security-review',
+  'test-authoring',
+  'product-planning',
+]);
+
 /**
  * Strip JSONC-style comments from a string so it can be parsed by JSON.parse.
  * Handles both // line comments and /* block comments * /.
@@ -108,11 +119,17 @@ function buildRoutingAdvice(category, entry, confidence) {
 
   const adviceByCategory = {
     'visual-engineering': 'Visual/UI task detected. Designer agent with Gemini team worker is optimal for CSS, components, and layout work.',
+    'design-review': 'Design review detected. Read-only Aphrodite review with a Sonnet-class model is recommended.',
+    'security-review': 'Security review detected. Route to the dedicated read-only Security Reviewer with a Sonnet-class model.',
+    'test-authoring': 'Test-authoring request detected. Route to the Test Engineer for test strategy, implementation, and execution.',
+    'product-planning': 'Product planning detected. Route to Hermes, matching the /plan path for PRDs, product specs, and reverse specs.',
     'deep': 'Complex architectural task detected. Architect agent with Opus-class model recommended for thorough analysis.',
-    'quick': 'Simple/quick task detected. Explore agent with Haiku-class model is efficient and cost-effective.',
+    'deep-mutation': 'Complex implementation task detected. Hephaestus with a Sonnet-class model is mutation-capable; Codex can assist as an external worker.',
+    'quick': 'Simple/quick mutation detected. Executor agent with a Sonnet-class model can implement and verify the fix; Explore remains read-only.',
     'writing': 'Documentation/writing task detected. Writer agent with Haiku-class model is well-suited.',
     'artistry': 'Creative/generative task detected. Designer agent with Gemini team worker for visual artistry.',
     'planning': 'Planning/strategy task detected. For product planning (new features, specs, PRD): use /plan skill (Hermes). For implementation planning (refactoring approach, bug fix strategy): EnterPlanMode is fine. Opus-class model recommended.',
+    'external-model': 'Explicit external-model intent detected. Route through the Ask agent so the requested Codex/Gemini second opinion is preserved.',
     'unknown': 'Intent unclear. Proceeding with default Sonnet model and executor agent.',
   };
 
@@ -147,7 +164,10 @@ export function routeByIntent(intentResult) {
       : DEFAULT_ROUTING_CONFIG.thresholds.minConfidence;
 
   // Low-confidence results fall back to 'unknown' routing
-  const effectiveCategory = confidence < minConfidence ? 'unknown' : category;
+  const isConfidenceExempt = CONFIDENCE_EXEMPT_CATEGORIES.has(category);
+  const effectiveCategory = !isConfidenceExempt && confidence < minConfidence
+    ? 'unknown'
+    : category;
   const entry =
     table[effectiveCategory] ||
     table['unknown'] ||

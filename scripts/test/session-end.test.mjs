@@ -27,6 +27,12 @@ import { fileURLToPath } from 'node:url';
 import { createRun } from '../lib/run-artifacts.mjs';
 import { finalizeFailedRun } from '../lib/run-failure.mjs';
 import { getPhaseSequence } from '../lib/phase-runner.mjs';
+import {
+  captureRuntimePermissions,
+  loadRuntimePermissions,
+  loadRuntimeSessionIdentity,
+} from '../lib/runtime-permissions.mjs';
+import { detectClaudePermissionLevel } from '../lib/permission-detect.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = path.resolve(__dirname, '..', 'session-end.mjs');
@@ -49,17 +55,91 @@ async function removeTmpDir(dir) {
  * Run the session-end hook in `cwd`.
  * Returns parsed JSON output from stdout.
  */
-function runHook(cwd, payload = {}) {
+function runHook(cwd, payload = {}, env = {}) {
   const raw = execFileSync(process.execPath, [SCRIPT], {
     encoding: 'utf-8',
     cwd,
-    env: { ...process.env },
+    env: { ...process.env, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
     input: JSON.stringify(payload),
     timeout: 10000,
   });
   return JSON.parse(raw.trim());
 }
+
+describe('session-end: revokes external runtime permission grant', () => {
+  let tmpDir;
+  let runtimeHome;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    runtimeHome = `${tmpDir}-runtime-home`;
+    mkdirSync(path.join(tmpDir, '.ao', 'state'), { recursive: true, mode: 0o700 });
+    mkdirSync(runtimeHome, { recursive: true, mode: 0o700 });
+  });
+  after(async () => {
+    await removeTmpDir(tmpDir);
+    await removeTmpDir(runtimeHome);
+  });
+
+  it('tombstones the grant so restored workspace identity cannot replay it', () => {
+    const sessionId = 'session-end-runtime-grant';
+    assert.equal(captureRuntimePermissions({
+      permissionMode: 'bypassPermissions',
+      permissionModeObserved: true,
+      source: 'hook_stdin',
+      sessionId,
+    }, { cwd: tmpDir, runtimeHome }), true);
+    const identity = loadRuntimeSessionIdentity({ cwd: tmpDir });
+    const identityText = readFileSync(path.join(tmpDir, '.ao', 'state', 'ao-runtime-permissions.json'), 'utf8');
+
+    runHook(tmpDir, { session_id: sessionId, cwd: tmpDir }, { HOME: runtimeHome });
+
+    assert.equal(loadRuntimePermissions({
+      cwd: tmpDir,
+      runtimeHome,
+      expectedSessionId: sessionId,
+      expectedCaptureId: identity.captureId,
+    }), null);
+
+    // Simulate a surviving workspace process restoring both local records.
+    writeFileSync(path.join(tmpDir, '.ao', 'state', 'ao-runtime-permissions.json'), identityText, { mode: 0o600 });
+    writeFileSync(path.join(tmpDir, '.ao', 'state', 'ao-current-session.json'), JSON.stringify({ sessionId }), { mode: 0o600 });
+    assert.equal(detectClaudePermissionLevel({
+      cwd: tmpDir,
+      home: '/nonexistent',
+      runtimeHome,
+      stateBase: path.join(tmpDir, '.ao', 'state'),
+    }), 'suggest');
+  });
+
+  it('does not let a late SessionEnd revoke a newer concurrent session grant', () => {
+    const oldSession = 'session-end-old';
+    const newSession = 'session-end-new';
+    assert.equal(captureRuntimePermissions({
+      permissionMode: 'bypassPermissions',
+      permissionModeObserved: true,
+      source: 'hook_stdin',
+      sessionId: oldSession,
+    }, { cwd: tmpDir, runtimeHome }), true);
+    assert.equal(captureRuntimePermissions({
+      permissionMode: 'acceptEdits',
+      permissionModeObserved: true,
+      source: 'hook_stdin',
+      sessionId: newSession,
+    }, { cwd: tmpDir, runtimeHome }), true);
+    const current = loadRuntimeSessionIdentity({ cwd: tmpDir });
+
+    runHook(tmpDir, { session_id: oldSession, cwd: tmpDir }, { HOME: runtimeHome });
+
+    const grant = loadRuntimePermissions({
+      cwd: tmpDir,
+      runtimeHome,
+      expectedSessionId: newSession,
+      expectedCaptureId: current.captureId,
+    });
+    assert.equal(grant?.permissionMode, 'acceptEdits');
+  });
+});
 
 function createTerminalFailure(cwd, failure = {}) {
   const runsBase = path.join(cwd, '.ao', 'artifacts', 'runs');

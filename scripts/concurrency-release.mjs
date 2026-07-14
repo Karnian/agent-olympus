@@ -14,23 +14,7 @@
  */
 import { readStdin } from './lib/stdin.mjs';
 import { detectProvider } from './lib/provider-detect.mjs';
-import { readFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
-import { atomicWriteFileSync } from './lib/fs-atomic.mjs';
-
-const STATE_DIR = join(process.cwd(), '.ao', 'state');
-const STATE_FILE = join(STATE_DIR, 'ao-concurrency.json');
-const STALE_TASK_MS = 3 * 60 * 1000; // 3 minutes (down from 10)
-
-function readState() {
-  try { return JSON.parse(readFileSync(STATE_FILE, 'utf-8')); }
-  catch { return { activeTasks: [] }; }
-}
-
-function writeState(state) {
-  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-  atomicWriteFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-}
+import { releaseHookConcurrency } from './lib/concurrency-limits.mjs';
 
 async function main() {
   try {
@@ -48,40 +32,9 @@ async function main() {
       process.exit(0);
     }
 
-    const state = readState();
-    const now = Date.now();
-
-    // Strategy 1: Try to release by task_id if available
-    const taskId = data.tool_input?.task_id ?? data.subagent_id ?? null;
-    let releasedById = false;
-    if (taskId) {
-      const before = state.activeTasks.length;
-      state.activeTasks = (state.activeTasks || []).filter(t => t.id !== taskId);
-      releasedById = state.activeTasks.length < before;
-    }
-
-    // Strategy 2: Release oldest matching provider (skip if already released by ID)
+    const taskId = data.tool_use_id ?? data.tool_input?.task_id ?? data.subagent_id ?? null;
     const provider = detectProvider(data.tool_input ?? {});
-    let releasedByProvider = false;
-    state.activeTasks = (state.activeTasks || []).filter(t => {
-      const age = now - new Date(t.startedAt || 0).getTime();
-      // Prune stale tasks (Strategy 3)
-      if (age > STALE_TASK_MS) return false;
-      // Release oldest matching provider (only if not already released by ID)
-      if (!releasedById && !releasedByProvider && t.provider === provider) {
-        releasedByProvider = true;
-        return false;
-      }
-      return true;
-    });
-
-    // SubagentStop safety net: if nothing was released and we have any tasks,
-    // release the oldest task regardless of provider (prevents permanent zombies)
-    if (isSubagentStop && !releasedById && !releasedByProvider && state.activeTasks.length > 0) {
-      state.activeTasks.shift(); // remove oldest
-    }
-
-    writeState(state);
+    releaseHookConcurrency(process.cwd(), { taskId, provider, isSubagentStop });
     process.stdout.write('{}');
     process.exit(0);
   } catch {

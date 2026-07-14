@@ -19,37 +19,48 @@ const execFileAsync = promisify(execFile);
 import { resolveBinary } from './tmux-session.mjs';
 import { resolveGeminiBinary } from './gemini-binary.mjs';
 import { resolveClaudeBinary, buildEnhancedPath } from './resolve-binary.mjs';
-import { loadAutonomyConfig } from './autonomy.mjs';
 
 const AO_DIR = '.ao';
 const STATE_DIR = path.join(AO_DIR, 'state');
 const CAPABILITY_CACHE_PATH = path.join(STATE_DIR, 'ao-capabilities.json');
 const CAPABILITY_CACHE_TTL_MS = 60 * 60 * 1000; // 60 minutes (binaries rarely change mid-session)
+const CAPABILITY_CACHE_SCHEMA_VERSION = 3;
 
 /**
  * Read cached capabilities if still valid (within TTL).
- * @returns {object|null} Cached capabilities or null if expired/missing
+ * Native Agent Teams is environment- and CLI-version-sensitive, so callers
+ * must provide a fresh probe. We intentionally execute `claude --version`
+ * before consulting this cache whenever the experimental flag is enabled.
+ * That keeps a cached result from surviving a CLI upgrade/downgrade or a
+ * broken/replaced binary.
+ *
+ * @param {{ envEnabled: boolean, claudePath: string|null, claudeVersion: string|null, supported: boolean, worktreeSupported: boolean }} nativeTeamProbe
+ * @returns {object|null} Cached capabilities or null if expired/missing/stale
  */
-function readCapabilityCache() {
+function readCapabilityCache(nativeTeamProbe) {
   try {
     const stat = statSync(CAPABILITY_CACHE_PATH);
     const ageMs = Date.now() - stat.mtimeMs;
     if (ageMs > CAPABILITY_CACHE_TTL_MS) return null;
 
     const raw = readFileSync(CAPABILITY_CACHE_PATH, 'utf-8');
-    const cached = JSON.parse(raw);
+    const entry = JSON.parse(raw);
+    if (entry?.schemaVersion !== CAPABILITY_CACHE_SCHEMA_VERSION) return null;
+    const cached = entry.capabilities;
     // Validate shape — must have at least hasTmux key
-    if (typeof cached.hasTmux !== 'boolean') return null;
-    // Re-check environment-sensitive fields that are instant to compute
-    let currentNativeTeam = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
-    if (!currentNativeTeam) {
-      try {
-        const autonomy = loadAutonomyConfig(process.cwd());
-        if (autonomy.nativeTeams === true) currentNativeTeam = true;
-      } catch {}
-    }
+    if (!cached || typeof cached.hasTmux !== 'boolean') return null;
+
+    const cachedNativeProbe = entry.nativeTeamProbe;
+    if (!cachedNativeProbe ||
+        cachedNativeProbe.envEnabled !== nativeTeamProbe.envEnabled ||
+        cachedNativeProbe.claudePath !== nativeTeamProbe.claudePath ||
+        cachedNativeProbe.claudeVersion !== nativeTeamProbe.claudeVersion ||
+        cachedNativeProbe.supported !== nativeTeamProbe.supported ||
+        cachedNativeProbe.worktreeSupported !== nativeTeamProbe.worktreeSupported) return null;
+
     const currentPreviewMCP = existsSync('.claude/launch.json');
-    if (cached.hasNativeTeamTools !== currentNativeTeam) return null;
+    if (cached.hasNativeTeamTools !== nativeTeamProbe.supported) return null;
+    if (cached.hasAgentWorktreeIsolation !== nativeTeamProbe.worktreeSupported) return null;
     if (cached.hasPreviewMCP !== currentPreviewMCP) return null;
     return cached;
   } catch {
@@ -60,11 +71,16 @@ function readCapabilityCache() {
 /**
  * Write capabilities to cache file.
  * @param {object} capabilities
+ * @param {{ envEnabled: boolean, claudePath: string|null, claudeVersion: string|null, supported: boolean }} nativeTeamProbe
  */
-function writeCapabilityCache(capabilities) {
+function writeCapabilityCache(capabilities, nativeTeamProbe) {
   try {
     mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-    writeFileSync(CAPABILITY_CACHE_PATH, JSON.stringify(capabilities), { mode: 0o600 });
+    writeFileSync(CAPABILITY_CACHE_PATH, JSON.stringify({
+      schemaVersion: CAPABILITY_CACHE_SCHEMA_VERSION,
+      capabilities,
+      nativeTeamProbe,
+    }), { mode: 0o600 });
   } catch {
     // Non-critical — caching failure doesn't affect functionality
   }
@@ -166,6 +182,29 @@ export function meetsMinVersion(versionStr, minMajor, minMinor, minPatch) {
 }
 
 /**
+ * Evaluate the documented Native Agent Teams runtime prerequisites.
+ * Policy files may express orchestration preferences, but they cannot create
+ * runtime tools. Native teams are available only when the experimental flag
+ * is exactly `1` and a successfully executed Claude CLI reports >= 2.1.178,
+ * the first release with the implicit team lifecycle used by Athena.
+ *
+ * @param {string|undefined} envValue
+ * @param {string|null|undefined} claudeVersion
+ * @returns {boolean}
+ */
+export function supportsNativeAgentTeams(envValue, claudeVersion) {
+  return envValue === '1' &&
+    typeof claudeVersion === 'string' &&
+    meetsMinVersion(claudeVersion, 2, 1, 178);
+}
+
+/** Require the release that fail-closes commands after an isolated worktree disappears. */
+export function supportsAgentWorktreeIsolation(claudeVersion) {
+  return typeof claudeVersion === 'string'
+    && meetsMinVersion(claudeVersion, 2, 1, 203);
+}
+
+/**
  * Detect available capabilities for orchestrator execution.
  * All checks are fail-safe: if detection fails, capability is marked false.
  *
@@ -178,6 +217,7 @@ export function meetsMinVersion(versionStr, minMajor, minMinor, minPatch) {
  *   hasGeminiAcp: boolean,
  *   hasGitWorktree: boolean,
  *   hasNativeTeamTools: boolean,
+ *   hasAgentWorktreeIsolation: boolean,
  *   hasPreviewMCP: boolean
  * }>}
  */
@@ -267,15 +307,40 @@ async function tryExecAsync(cmd, args, opts) {
 }
 
 export async function detectCapabilities() {
-  // Check file-based cache first (hooks are separate processes, so in-memory cache doesn't work)
-  const cached = readCapabilityCache();
-  if (cached) return cached;
-
   const enhancedEnv = { ...process.env, PATH: buildEnhancedPath() };
   const execOpts = { encoding: 'utf-8', timeout: 5000, env: enhancedEnv };
 
+  // Native Agent Teams is not a project policy toggle: it requires both the
+  // runtime flag and a real, sufficiently recent Claude CLI. Probe the version
+  // before reading the general capability cache so CLI upgrades/downgrades are
+  // observed immediately rather than after the one-hour cache TTL.
+  const nativeTeamEnvEnabled = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
+  const resolvedClaudePath = resolveClaudeBinary();
+  const claudePath = (resolvedClaudePath && resolvedClaudePath !== 'claude')
+    ? resolvedClaudePath
+    : null;
+  const claudeVersionOut = claudePath
+    ? await tryExecAsync(claudePath, ['--version'], execOpts)
+    : null;
+  const claudeVersion = claudeVersionOut?.trim() || null;
+  const nativeTeamProbe = {
+    envEnabled: nativeTeamEnvEnabled,
+    claudePath,
+    claudeVersion,
+    supported: supportsNativeAgentTeams(
+      process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,
+      claudeVersion,
+    ),
+    worktreeSupported: supportsAgentWorktreeIsolation(claudeVersion),
+  };
+
+  // Check file-based cache after the fresh environment/version probe. Hooks
+  // are separate processes, so an in-memory cache would not help here.
+  const cached = readCapabilityCache(nativeTeamProbe);
+  if (cached) return cached;
+
   // --- Wave 1: parallel binary existence checks ---
-  const [tmuxBin, codexBin, geminiBin, claudePath, gitWorktreeOut] = await Promise.all([
+  const [tmuxBin, codexBin, geminiBin, gitWorktreeOut] = await Promise.all([
     // tmux
     (async () => {
       const bin = resolveBinary('tmux');
@@ -292,11 +357,6 @@ export async function detectCapabilities() {
     (async () => {
       const r = resolveGeminiBinary();
       return r.resolved ? r.path : null;
-    })(),
-    // claude
-    (async () => {
-      const bin = resolveClaudeBinary();
-      return (bin && bin !== 'claude') ? bin : null;
     })(),
     // git worktree
     tryExecAsync('git', ['worktree', 'list'], execOpts),
@@ -332,24 +392,19 @@ export async function detectCapabilities() {
     hasCodexAppServer = appServerOut !== null;
   }
 
-  // Instant checks (no subprocess)
-  let hasNativeTeamTools = process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS === '1';
-  if (!hasNativeTeamTools) {
-    try {
-      const autonomy = loadAutonomyConfig(process.cwd());
-      if (autonomy.nativeTeams === true) hasNativeTeamTools = true;
-    } catch {}
-  }
+  // Instant checks (the native-team subprocess probe was performed above).
+  const hasNativeTeamTools = nativeTeamProbe.supported;
+  const hasAgentWorktreeIsolation = nativeTeamProbe.worktreeSupported;
   const hasPreviewMCP = existsSync('.claude/launch.json');
 
-  const capabilities = { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGeminiCli, hasGeminiAcp, hasGitWorktree, hasNativeTeamTools, hasPreviewMCP };
-  writeCapabilityCache(capabilities);
+  const capabilities = { hasTmux, hasCodex, hasCodexExecJson, hasCodexAppServer, hasClaudeCli, hasGeminiCli, hasGeminiAcp, hasGitWorktree, hasNativeTeamTools, hasAgentWorktreeIsolation, hasPreviewMCP };
+  writeCapabilityCache(capabilities, nativeTeamProbe);
   return capabilities;
 }
 
 /**
  * Format capability report for human-readable display.
- * @param {{ hasTmux: boolean, hasCodex: boolean, hasClaudeCli: boolean, hasGeminiCli: boolean, hasGitWorktree: boolean, hasNativeTeamTools: boolean, hasPreviewMCP: boolean }} caps
+ * @param {{ hasTmux: boolean, hasCodex: boolean, hasClaudeCli: boolean, hasGeminiCli: boolean, hasGitWorktree: boolean, hasNativeTeamTools: boolean, hasAgentWorktreeIsolation: boolean, hasPreviewMCP: boolean }} caps
  * @param {{ orchestrator?: string }} [opts] - Optional display options
  * @returns {string}
  */
@@ -363,7 +418,8 @@ export function formatCapabilityReport(caps, opts) {
     fmt(caps.hasClaudeCli, 'claude-cli ', 'headless Claude Code workers'),
     fmt(caps.hasGeminiCli, 'gemini-cli ', 'Gemini CLI workers'),
     fmt(caps.hasGitWorktree, 'git worktree', 'isolated parallel workspaces'),
-    fmt(caps.hasNativeTeamTools, 'Native Agent Teams', 'peer-to-peer team orchestration (CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS)'),
+    fmt(caps.hasNativeTeamTools, 'Native Agent Teams', 'Claude teammate task/mailbox coordination (Claude Code 2.1.178+ plus CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1)'),
+    fmt(caps.hasAgentWorktreeIsolation, 'Agent worktree', 'isolated Claude subagents with fail-closed worktree removal (Claude Code 2.1.203+)'),
     fmt(caps.hasPreviewMCP, 'preview MCP', caps.hasPreviewMCP
       ? 'visual verification'
       : 'visual verification (no .claude/launch.json)'),

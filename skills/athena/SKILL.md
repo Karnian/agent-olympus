@@ -1,13 +1,17 @@
 ---
 name: athena
-description: Self-driving team orchestrator — spawns Claude + Codex + Gemini peer-to-peer team and loops until task is fully complete
+description: Self-driving hybrid team orchestrator — native Claude collaboration plus bridged Codex/Gemini workers
 ---
 
 <Athena_Orchestrator>
 
 ## Purpose
 
-Athena is the self-driving team orchestrator. Unlike Atlas (one brain, many hands), Athena spawns a real team where workers talk to EACH OTHER. She never stops until every worker's output is integrated, tested, and reviewed.
+Athena is the self-driving team orchestrator. Unlike Atlas (one brain, many
+hands), Athena gives native Claude teammates a shared task list and direct
+messaging. Adapter-backed Codex and Gemini workers remain external executors;
+Athena relays their results and follow-up context. She never stops until every
+worker's output is integrated, tested, and reviewed.
 
 Atlas = one brain delegating.
 Athena = many brains collaborating.
@@ -15,7 +19,7 @@ Athena = many brains collaborating.
 ## Use_When
 
 - User says "athena", "아테나", "팀으로 해", "같이 해", "team", "collaborate"
-- Task has interdependent parts (API + frontend + tests)
+- Task splits into non-overlapping work packages that benefit from shared discoveries (for example, API + frontend + tests with explicit ownership)
 - Workers need to share discoveries in real-time
 - Large-scale work across many files
 
@@ -52,11 +56,17 @@ import {
 } from './scripts/lib/phase-runner.mjs';
 import {
   addEvent, appendUserTaskUpdate, createRun, finalizeRun, getActiveRunId,
-  getRun, getUserTaskUpdates,
+  getRun, getRunReviewBasePin, getUserTaskUpdates, pinRunReviewBase,
 } from './scripts/lib/run-artifacts.mjs';
 import { loadAutonomyConfig, resolveRunShipMode } from './scripts/lib/autonomy.mjs';
 import { recoverOrphanedRun } from './scripts/lib/orphan-run-recovery.mjs';
-import { loadCheckpoint } from './scripts/lib/checkpoint.mjs';
+import { loadCheckpoint, saveCheckpoint } from './scripts/lib/checkpoint.mjs';
+import { loadRuntimeSessionIdentity } from './scripts/lib/runtime-permissions.mjs';
+import {
+  getCurrentSessionId,
+  getSession,
+  isSessionAlive,
+} from './scripts/lib/session-registry.mjs';
 
 const currentAthenaRequest = <user_request>;
 if (typeof currentAthenaRequest !== 'string' || !currentAthenaRequest.trim()) {
@@ -73,7 +83,7 @@ if (orphanRecovery && !orphanRecovery.ok && !orphanRecovery.canCreateNewRun) {
 // canCreateNewRun is true only for an exact terminal summary revalidated under
 // the transition lock. A missing run directory is not worker-liveness proof.
 // Unknown, absent, corrupt, linked, or identity-unproven evidence stops here;
-// no TeamCreate, Task, adapter spawn, or native teammate launch may follow.
+// no Task/Agent dispatch, adapter spawn, or native teammate launch may follow.
 const recoveredCheckpointRunId = orphanRecovery?.ok ? orphanRecovery.runId : null;
 const createdAthenaRun = (activeAthenaRunId || recoveredCheckpointRunId)
   ? null
@@ -84,6 +94,33 @@ if (createdAthenaRun && !createdAthenaRun.ok) {
 const runId = activeAthenaRunId
   || recoveredCheckpointRunId
   || createdAthenaRun.runId;
+// Native Claude teammates exist only inside the Claude session that launched
+// them. The project-scoped current-session pointer is conservative: a missing
+// pointer or a concurrent session that moved it makes native ownership
+// unprovable and therefore fail-closed. Adapter supervisors do not use this
+// fence because their on-disk generation is independently recoverable.
+const readClaudeSessionBinding = () => {
+  const currentSessionId = getCurrentSessionId();
+  const originSessionId = getRun(runId).summary?.sessionId;
+  // Session identity intentionally ignores the permission-upgrade cache's
+  // 30-minute TTL. It authorizes nothing by itself and is accepted only with
+  // the same live registry session and current-session pointer below.
+  const runtimeIdentity = loadRuntimeSessionIdentity({ cwd });
+  const originSession = getSession(originSessionId);
+  const validCurrent = typeof currentSessionId === 'string' && currentSessionId.trim().length > 0;
+  const validOrigin = typeof originSessionId === 'string' && originSessionId.trim().length > 0;
+  const runtimeMatches = runtimeIdentity?.source === 'hook_stdin'
+    && runtimeIdentity.sessionId === originSessionId;
+  const registryMatches = originSession?.sessionId === originSessionId
+    && originSession.status === 'active'
+    && isSessionAlive(originSessionId);
+  return {
+    currentSessionId: validCurrent ? currentSessionId : null,
+    originSessionId: validOrigin ? originSessionId : null,
+    proven: validCurrent && validOrigin && currentSessionId === originSessionId
+      && runtimeMatches && registryMatches,
+  };
+};
 // Every invocation, including a follow-up that resumes an active/recovered
 // run, must atomically append the current user-authored constraint to the
 // strict task ledger before the pipeline can continue. The best-effort event
@@ -140,7 +177,9 @@ if (!pipelineInit.ok || pipelineInit.degraded) {
 }
 const { resumePhase, resumePolicy } = pipelineInit;
 // On resume, jump to resumePhase. Earlier completed phases return skip:true;
-// recover phases return reason:'recover' and MUST adopt persisted state.
+// recover phases return reason:'recover' and MUST reconcile persisted state.
+// Adopt only with the required provider/session proof; otherwise preserve it
+// and stop at the runner boundary.
 ```
 
 Runner consult points:
@@ -171,13 +210,13 @@ or `shouldEscalate:true` is authoritative.
        │                  │              │
   ┌────┴────┐       ┌────┴────┐    ┌────┴────┐
   │ Claude  │       │ Codex   │    │ Gemini  │
-  │ Native  │◄─────►│ Workers │◄──►│ Workers │
+  │ Native  │       │ Workers │    │ Workers │
   │ Team    │       │         │    │         │
   └────┬────┘       └────┬────┘    └────┬────┘
        │                  │              │
-  SendMessage        adapter-based    message queue
-  TaskList           (appserver/      (enqueueMessage →
-  (peer-to-peer)      exec/tmux)      auto-drain)
+  SendMessage        lead relay via   lead relay via
+  TaskList           appserver/       ACP/exec/tmux
+  (native peers)      exec/tmux       message queue
 ```
 
 ## Steps
@@ -243,8 +282,8 @@ Before starting any work:
      Missing/corrupt/symlinked summary or pipeline, identity drift, unsafe
      ancestry, an absent run directory, and unknown pre-launch state all return
      `canCreateNewRun === false`. STOP and preserve the checkpoint, any team or
-     supervisor state, and all worktrees. Do not call `createRun`, `TeamCreate`,
-     `Task`, adapter spawn, or any native teammate launch.
+     supervisor state, and all worktrees. Do not call `createRun`, dispatch an
+     `Agent`/`Task`, spawn an adapter worker, or launch any native teammate.
    - **Restart** → allowed only after the old run is positively terminal or
      explicitly terminalized and its active pointer is cleared. Otherwise
      preserve state and STOP; clearing the checkpoint or observing a missing
@@ -295,6 +334,48 @@ for (const action of preflightReport.actions) {
 const { hasNativeTeamTools, hasCodex, hasCodexAppServer, hasCodexExecJson, hasGeminiCli, hasGeminiAcp, hasTmux } = preflightReport.capabilities;
 const cwd = process.cwd();
 const capabilities = preflightReport.capabilities;
+import { resolveReviewBase } from './scripts/lib/review-package.mjs';
+const persistedTriageOutputs = getPipelineState(runId).phases.triage?.outputs;
+let pinnedReviewBase;
+const durableReviewBase = getRunReviewBasePin(runId);
+if (durableReviewBase.ok) {
+  pinnedReviewBase = durableReviewBase.pin;
+  const revalidatedBase = resolveReviewBase({
+    cwd,
+    baseRef: pinnedReviewBase.baseRefCommit,
+  });
+  if (revalidatedBase.baseRefCommit !== pinnedReviewBase.baseRefCommit) {
+    throw new Error('BLOCKED: Athena immutable review-base commit no longer resolves exactly');
+  }
+  if (persistedTriageOutputs && (
+    persistedTriageOutputs.reviewBaseRef !== pinnedReviewBase.baseRef
+    || persistedTriageOutputs.reviewBaseCommit !== pinnedReviewBase.baseRefCommit
+    || persistedTriageOutputs.reviewBaseSource !== pinnedReviewBase.source
+  )) {
+    throw new Error('BLOCKED: Athena pipeline replica disagrees with the immutable review-base pin');
+  }
+  const checkpointHasReviewBase = pendingCheckpoint
+    && ['reviewBaseRef', 'reviewBaseCommit', 'reviewBaseSource']
+      .some((key) => Object.hasOwn(pendingCheckpoint, key));
+  if (checkpointHasReviewBase && (
+    pendingCheckpoint.reviewBaseRef !== pinnedReviewBase.baseRef
+    || pendingCheckpoint.reviewBaseCommit !== pinnedReviewBase.baseRefCommit
+    || pendingCheckpoint.reviewBaseSource !== pinnedReviewBase.source
+  )) {
+    throw new Error('BLOCKED: Athena checkpoint disagrees with the immutable review-base pin');
+  }
+} else {
+  if (!createdAthenaRun || triageGate.skip) {
+    throw new Error(`BLOCKED: Athena resumed without a valid immutable review-base pin (${durableReviewBase.reason})`);
+  }
+  const resolvedReviewBase = resolveReviewBase({ cwd });
+  const pinned = pinRunReviewBase(runId, resolvedReviewBase);
+  if (!pinned.ok) {
+    throw new Error(`BLOCKED: Athena could not durably pin the review base before analysis (${pinned.reason})`);
+  }
+  pinnedReviewBase = pinned.pin;
+}
+const pinnedReviewBaseCommit = pinnedReviewBase.baseRefCommit;
 import { formatCapabilityReport } from './scripts/lib/preflight.mjs';
 Output: formatCapabilityReport(preflightReport.capabilities, { orchestrator: 'Athena' })
 
@@ -327,7 +408,13 @@ Task(subagent_type="agent-olympus:metis", model="opus",
   - Gemini: <hasGeminiCli ? 'AVAILABLE (ACP: ' + hasGeminiAcp + ')' : 'NOT AVAILABLE — do not assign Gemini workers'>
   - tmux: <hasTmux ? 'available' : 'NOT available — parallel workers need native teams'>
   - Native Teams: <hasNativeTeamTools ? 'enabled (SendMessage available)' : 'disabled (orchestrator-mediated relay)'>
-  Max workers: <hasCodex ? '5 Claude + 2 Codex' : '5 Claude'> + <hasGeminiCli ? '2 Gemini' : '0 Gemini'>
+  Concurrency policy:
+  - Treat config/model-routing.jsonc concurrency.maxParallelTasks,
+    maxClaudeWorkers, maxCodexWorkers, and maxGeminiWorkers as authoritative.
+  - AO_CONCURRENCY_GLOBAL, AO_CONCURRENCY_CLAUDE, AO_CONCURRENCY_CODEX, and
+    AO_CONCURRENCY_GEMINI may tighten or override those values at runtime.
+  - The concurrency gate enforces the effective limits. Recommend a conservative
+    team within them and never substitute a numeric cap embedded in this prompt.
 
   Worker assignment rules:
   - ONLY assign Codex workers if Codex is AVAILABLE above
@@ -372,8 +459,19 @@ Output: "[Athena] Metis team design complete — <N> workers proposed."
 ```
 
 ```javascript
-await completePhase(runId, 'triage', undefined, {
-  checkpointData: { teamDesign: metis_output, completedStories: [], activeWorkers: [] },
+await completePhase(runId, 'triage', {
+  reviewBaseRef: pinnedReviewBase.baseRef,
+  reviewBaseCommit: pinnedReviewBaseCommit,
+  reviewBaseSource: pinnedReviewBase.source,
+}, {
+  checkpointData: {
+    teamDesign: metis_output,
+    completedStories: [],
+    activeWorkers: [],
+    reviewBaseRef: pinnedReviewBase.baseRef,
+    reviewBaseCommit: pinnedReviewBaseCommit,
+    reviewBaseSource: pinnedReviewBase.source,
+  },
 });
 const contextGate = enterPhase(runId, 'context');
 ```
@@ -419,6 +517,7 @@ Before team planning, ensure a structured spec exists. Hermes acts as the qualit
 
 **Check for existing spec:**
 ```
+let hermes_output;
 Does .ao/prd.json exist AND is it non-empty?
 ```
 
@@ -426,8 +525,11 @@ Does .ao/prd.json exist AND is it non-empty?
 
 Hermes validates the existing spec against the current task:
 ```
-Task(subagent_type="agent-olympus:hermes", model="opus",
-  prompt="VALIDATE this existing specification against the task and team design.
+hermes_output = Task(subagent_type="agent-olympus:hermes", model="opus",
+  prompt="MODE: validate
+  OUTPUT_CONTRACT: AO_SPEC_V1
+
+  Validate this existing specification against the task and team design.
 
   Existing spec: <contents of .ao/prd.json>
   Task: <user_request>
@@ -440,61 +542,75 @@ Task(subagent_type="agent-olympus:hermes", model="opus",
   4. Are scope boundaries clear (goals vs non-goals)?
   5. Can stories be cleanly assigned to independent workers?
 
-  If spec is SUFFICIENT: respond with 'VERDICT: PASS' and a one-line summary.
-  If spec needs updates: respond with 'VERDICT: UPDATE' and the corrected spec
-    in the same JSON format, preserving existing fields that are still valid.
-  If spec is fundamentally mismatched: respond with 'VERDICT: RECREATE' and
-    produce a new spec from scratch.")
+  Return exactly one AO_SPEC_V1 JSON object.
+  If sufficient: verdict PASS with specMarkdown:null and prd:null.
+  If updates are needed: verdict UPDATE with complete specMarkdown and prd.
+  If fundamentally mismatched: verdict RECREATE with complete replacements.
+  PASS only when both paired artifacts exist and the current PRD already has
+  every AO_SPEC_V1 PRD field (including mode, risks, and passes:false) with
+  uppercase GIVEN/WHEN/THEN criteria. A legacy /plan shape requires UPDATE.
+  Paired .ao/spec.md exists: <true|false>.
+  Preserve every still-valid field and set every returned story's passes to false.")
 ```
 
-If VERDICT is UPDATE or RECREATE → overwrite `.ao/prd.json` and `.ao/spec.md` with Hermes output.
+Never write the raw Hermes response to either artifact. The shared validation step
+below preserves both existing files for PASS and writes separate typed artifacts
+for UPDATE or RECREATE.
 
 #### Case B: .ao/prd.json does NOT exist (user skipped /plan)
 
 Hermes creates a spec from the team design:
 ```
-Task(subagent_type="agent-olympus:hermes", model="opus",
-  prompt="Create a product specification for this task.
+hermes_output = Task(subagent_type="agent-olympus:hermes", model="opus",
+  prompt="MODE: <product-feature|engineering-change|bugfix, selected from the task>
+  OUTPUT_CONTRACT: AO_SPEC_V1
+
+  Create an executable specification for this task.
 
   Task: <user_request>
   Team design: <metis_team_design>
   External context (if gathered): <external_context>
 
-  Produce a structured spec with:
-  1. Problem Statement — WHO has this problem, WHAT is the pain, WHY now
-  2. Target Users — specific personas
-  3. Goals — specific, measurable objectives
-  4. Non-Goals — explicitly out of scope
-  5. User Stories — each with ID (US-001), JTBD format, GIVEN/WHEN/THEN acceptance criteria
-  6. Success Metrics — measurable outcomes with target values
-  7. Constraints — from team design analysis
-  8. Risks & Unknowns — areas needing caution
+  Return exactly one AO_SPEC_V1 JSON object with verdict CREATE, complete
+  specMarkdown, and a machine-readable prd. Every story must have a unique ID,
+  a specific title, non-empty GIVEN/WHEN/THEN acceptance criteria, and passes:false.
+
+  Product fields such as personas and outcome metrics are required only for a
+  product-feature. Engineering changes and bug fixes instead emphasize invariants,
+  compatibility, migration/rollback, failure behavior, and verification.
 
   IMPORTANT: Replace untestable words (robust, fast, user-friendly, seamless,
   efficient, intuitive) with measurable alternatives.
   Ensure stories have clear boundaries so they can be assigned to independent workers.")
 ```
 
-**Sub-agent output validation (Hermes) — MANDATORY:**
-```
-hermes_output = <result from Hermes Task() call above>
+**Sub-agent output validation and persistence (Hermes) — MANDATORY:**
+```javascript
+import { writeHermesSpecArtifacts } from './scripts/lib/spec-artifact.mjs';
 
-If hermes_output is empty OR hermes_output.length < 50:
-  Output: "[Athena] ⚠ Hermes spec creation returned empty. Retrying with reduced input..."
-  import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
+let specArtifactResult;
+try {
+  specArtifactResult = writeHermesSpecArtifacts(hermes_output);
+} catch (error) {
+  Output: "[Athena] ⚠ Hermes returned an invalid AO_SPEC_V1 envelope — retrying once with reduced input...";
+  const { extractStructuralSummary } = await import('./scripts/lib/input-guard.mjs');
   const { summary } = extractStructuralSummary(<user_request>, 100);
   hermes_output = Task(subagent_type="agent-olympus:hermes", model="sonnet",
-    prompt="Create a product spec for: " + summary)
+    prompt="MODE: <same selected mode>\nOUTPUT_CONTRACT: AO_SPEC_V1\nThe prior envelope or persisted pair failed validation. Return a complete CREATE for Case B, or UPDATE/RECREATE for Case A; never PASS after artifact validation failure. Task: " + summary);
+  try {
+    specArtifactResult = writeHermesSpecArtifacts(hermes_output);
+  } catch (retryError) {
+    Output: "[Athena] ✗ Spec Gate FAILED — Hermes did not return a valid typed specification after retry.";
+    await addWisdom({ category: 'debug', lesson: 'Athena Spec Gate failed: invalid AO_SPEC_V1 output after retry.', confidence: 'high' });
+    STOP — do not proceed with missing or malformed artifacts.
+  }
+}
 
-  If hermes_output is STILL empty:
-    Output: "[Athena] ✗ Spec Gate FAILED — Hermes could not create spec after retry."
-    Output: "[Athena] Try: (1) run /plan first, or (2) provide a smaller task scope."
-    await addWisdom({ category: 'debug', lesson: 'Athena Spec Gate failed: Hermes empty output.', confidence: 'high' });
-    STOP — do not proceed.
+if (!specArtifactResult.written && <Case B: no existing PRD>) {
+  STOP — PASS cannot create the missing specification.
+}
+Output: "[Athena] Spec gate passed — " + specArtifactResult.summary;
 ```
-
-Write Hermes output to `.ao/spec.md` and `.ao/prd.json`.
-Output: "[Athena] Spec gate passed — <N> user stories ready for team planning."
 
 ```javascript
 await completePhase(runId, 'spec', undefined, {
@@ -513,23 +629,58 @@ resume, reuse the durable `.ao/prd.json`; otherwise plan and validate below.
 
 Output: "[Athena] Phase 1: PLAN — creating execution plan..."
 
-**[OPTIONAL] Consensus Plan** <!-- AO-CONTRACT:consensus-plan --> — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
+```javascript
+import { readPlanningPrdForExecution } from './scripts/lib/execution-prd-store.mjs';
+
+// Pin the typed planning generation before any planner sees it. The same CAS
+// generation is required when the approved assignments are persisted below.
+const planningPrdState = readPlanningPrdForExecution({ cwd });
+let approvedConsensusAssignmentPlan = null;
 ```
-Skill(skill="agent-olympus:consensus-plan",
+
+**[OPTIONAL] Consensus Plan** <!-- AO-CONTRACT:consensus-plan --> — for complex
+tasks with 3 or more user stories, replace the standard Prometheus + Momus
+assignment pass with the consensus-plan skill. It returns assignments only and
+never writes the typed PRD:
+
+```javascript
+import { parseConsensusAssignmentPlan } from './scripts/lib/consensus-assignment-plan.mjs';
+import { writeOutbox } from './scripts/lib/artifact-pipe.mjs';
+
+const consensusRawOutput = Skill(skill="agent-olympus:consensus-plan",
   args="Run consensus planning for this task.
+  OUTPUT_CONTRACT: AO_CONSENSUS_ASSIGNMENT_PLAN_V1
+  Orchestrator: athena
+  Source PRD generation: <planningPrdState.generation>
+  Available providers: Claude=true, Codex=<hasCodex>, Gemini=<hasGeminiCli>
   Task: <user_request>
   Analysis: <metis_team_design>
-  Spec: <contents of .ao/prd.json>
+  Spec: <planningPrdState.prd>
   Wisdom: <formatWisdomForPrompt()>
-  External context (if gathered): <external_context>")
+  External context (if gathered): <external_context>");
+approvedConsensusAssignmentPlan = parseConsensusAssignmentPlan(consensusRawOutput, {
+  orchestrator: 'athena',
+});
+// Audit copy only; never reload the fail-open archival pipe as authority.
+await writeOutbox(
+  runId,
+  'plan',
+  'consensus-assignment-plan.json',
+  approvedConsensusAssignmentPlan,
+);
 ```
-If consensus-plan is used, skip the standard Prometheus + Momus steps below and go directly to PRD generation.
+If consensus-plan is used, skip the standard Prometheus + Momus steps below.
+The common checked enrichment block later consumes
+`approvedConsensusAssignmentPlan`; no consensus path may directly mutate
+`.ao/prd.json`.
 
 **Standard path** (fewer than 3 stories or moderate complexity):
 ```
 Task(subagent_type="agent-olympus:prometheus", model="opus",
   prompt="Team execution plan:
   - Assign tasks to workers by name
+  - For every Claude worker choose one execution agentType from:
+    executor, designer, test-engineer, debugger, hephaestus, writer
   - Define parallel vs sequential order
   - Set acceptance criteria per task
   - Define handoff protocol: when Worker A finishes X, SendMessage to Worker B
@@ -545,17 +696,32 @@ Task(subagent_type="agent-olympus:momus", model="sonnet",
   Plan: <plan>")
 ```
 
-**Generate PRD** with worker assignments:
+**Enrich the typed PRD** with worker assignments. Read the AO_SPEC_V1
+`.ao/prd.json` created by the Spec Gate and preserve its `mode`, `scale`, goals,
+non-goals, constraints, risks, open questions, and any mode-specific product
+fields. Never replace it with a reduced execution-only object:
 ```json
 {
   "projectName": "athena-<task-slug>",
+  "mode": "engineering-change",
+  "scale": "M",
+  "goals": ["..."],
+  "nonGoals": ["..."],
+  "constraints": ["..."],
+  "risks": ["..."],
+  "openQuestions": [],
   "userStories": [
     {
       "id": "US-001",
       "title": "...",
       "assignedWorker": "api-worker",
       "workerType": "claude",
-      "acceptanceCriteria": ["GET /users returns 200", "POST creates user"],
+      "agentType": "executor",
+      "scope": ["api/users.mjs", "test/users.test.mjs"],
+      "acceptanceCriteria": [
+        "GIVEN a valid request WHEN GET /users runs THEN it returns 200 with User[]",
+        "GIVEN valid input WHEN POST /users runs THEN the user is persisted"
+      ],
       "passes": false,
       "parallelGroup": "A"
     }
@@ -575,10 +741,59 @@ Display cost breakdown per model tier to user. If `.ao/autonomy.json` has `budge
 
 **PRD QUALITY RULE**: Generic criteria are FORBIDDEN.
 - ❌ "Implementation is complete" / "Works correctly"
-- ✅ "GET /api/users returns 200 with User[] body"
-- ✅ "Test file tests/auth.test.ts exists and all cases pass"
+- ✅ "GIVEN a valid request WHEN GET /api/users runs THEN it returns 200 with User[]"
+- ✅ "GIVEN the auth suite WHEN tests run THEN all named cases pass"
+
+Every story also needs a machine-readable `scope` array. The current Athena
+launcher is deliberately one parallel wave: every story uses the same
+`parallelGroup`, scopes owned by different workers are globally disjoint,
+case-folded explicit repo-relative paths, and wildcard scopes are rejected.
+Cross-worker dependencies are rejected because dependent worktrees do not see
+another worker's unmerged branch. Dependencies are allowed only between
+stories assigned to the same worker, in dependency-first PRD order. Unsafe
+traversal, duplicate ownership, overlap, and dependency cycles fail validation.
+Every Claude story also persists one `agentType` chosen from the execution-only
+allowlist (`executor`, `designer`, `test-engineer`, `debugger`, `hephaestus`,
+`writer`). Stories assigned to the same worker must use the same role. Codex
+and Gemini stories omit `agentType`; their adapter type is already explicit.
+
+Persist the enriched superset PRD only through the hardened generation-CAS
+store. It re-reads the AO_SPEC planning generation, proves only allowlisted
+worker-assignment fields changed, validates the exact execution schema, and
+durably replaces the authoritative file. Never call
+`writeHermesSpecArtifacts()` again after enrichment; a new spec requires a
+terminalized/restarted run.
 
 ```javascript
+import {
+  assertExecutionPrd,
+  validateChangedPathsAgainstScope,
+} from './scripts/lib/execution-prd.mjs';
+import { buildConsensusExecutionPrd } from './scripts/lib/consensus-assignment-plan.mjs';
+import { enrichExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
+
+const executionCandidate = approvedConsensusAssignmentPlan
+  ? buildConsensusExecutionPrd(
+      planningPrdState.prd,
+      approvedConsensusAssignmentPlan,
+      {
+        orchestrator: 'athena',
+        sourcePrdGeneration: planningPrdState.generation,
+        hasCodex,
+        hasGemini: hasGeminiCli,
+      },
+    )
+  : <standard Prometheus-enriched AO_SPEC_V1 superset>;
+const plannedExecutionPrdState = enrichExecutionPrd(executionCandidate, {
+  cwd,
+  orchestrator: 'athena',
+  expectedGeneration: planningPrdState.generation,
+});
+const plannedExecutionPrd = plannedExecutionPrdState.prd;
+assertExecutionPrd(plannedExecutionPrd, {
+  orchestrator: 'athena',
+  allowCompleted: false,
+});
 await completePhase(runId, 'plan', undefined, {
   checkpointData: { prdSnapshot: <prd.json contents>, completedStories: [], activeWorkers: [] },
 });
@@ -600,20 +815,39 @@ const spawnGate = enterPhase(runId, 'spawn');
 Each worker operates in its own git worktree so parallel file changes never collide.
 ```javascript
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { createWorkerWorktree } from './scripts/lib/worktree.mjs';
 import { allocateTeamRunId, monitorTeam } from './scripts/lib/worker-spawn.mjs';
+import {
+  assertExecutionPrd,
+  buildExecutionTeamSlug,
+  buildAthenaWorkerDefinitions,
+} from './scripts/lib/execution-prd.mjs';
+import {
+  loadConcurrencyLimits,
+  readActiveConcurrencyCounts,
+  validateWorkerBatchConcurrency,
+} from './scripts/lib/concurrency-limits.mjs';
 import {
   computeAthenaWorktreeDigest,
   planAthenaSpawnRecovery,
   validateAthenaCheckpointBinding,
 } from './scripts/lib/athena-recovery.mjs';
+import {
+  acknowledgeAthenaStart,
+  allAthenaStartsAcknowledged,
+  assertAthenaStartLedger,
+  buildAthenaStartConfirmation,
+  buildAthenaStartMessage,
+  initializeAthenaStartLedger,
+  markAthenaStartSent,
+  planAthenaStartResume,
+} from './scripts/lib/athena-start.mjs';
+import { readExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
 
-const prd = JSON.parse(readFileSync('.ao/prd.json', 'utf-8'));
-if (!/^athena-[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/.test(prd.projectName)) {
-  throw new Error('Unsafe Athena projectName for worker state');
-}
-const teamSlug = prd.projectName;
+const executionPrdState = readExecutionPrd({ cwd, orchestrator: 'athena' });
+const prd = executionPrdState.prd;
+assertExecutionPrd(prd, { orchestrator: 'athena', allowCompleted: true });
+const teamSlug = buildExecutionTeamSlug(prd.projectName, { orchestrator: 'athena' });
 const baseCommit = execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], {
   encoding: 'utf-8',
 }).trim();
@@ -628,44 +862,31 @@ if (rootStatus) {
     'Athena parallel worktrees must branch from a committed checkpoint; preserve current changes and use Atlas or commit before team execution',
   );
 }
-const storiesByWorker = new Map();
-for (const story of prd.userStories) {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(story.assignedWorker)) {
-    throw new Error(`Unsafe assignedWorker: ${story.assignedWorker}`);
-  }
-  if (!['claude', 'codex', 'gemini'].includes(story.workerType)) {
-    throw new Error(`Unsupported workerType: ${story.workerType}`);
-  }
-  const group = storiesByWorker.get(story.assignedWorker) || [];
-  group.push(story);
-  storiesByWorker.set(story.assignedWorker, group);
-}
-const workerDefinitions = [...storiesByWorker.entries()].map(([name, stories]) => {
-  const workerType = stories[0].workerType;
-  if (stories.some((story) => story.workerType !== workerType)) {
-    throw new Error(`Worker ${name} has mixed provider types in one assignment`);
-  }
-  const requestedModels = new Set(stories.map((story) => story.model).filter(Boolean));
-  if (requestedModels.size > 1) {
-    throw new Error(`Worker ${name} has conflicting model assignments`);
-  }
-  return {
-    name,
-    type: workerType,
-    // `sonnet` is a Claude tier, not a valid Codex/Gemini default. External
-    // adapters select their own default unless the PRD supplies a
-    // provider-specific model through a future explicit contract.
-    model: workerType === 'claude' ? (stories[0].model || 'sonnet') : undefined,
-    stories,
-    prompt: stories.map((story) => [
+const workerDefinitions = buildAthenaWorkerDefinitions(prd, { allowCompleted: true })
+  .map((worker) => ({
+    ...worker,
+    prompt: worker.stories.map((story) => [
       `${story.id}: ${story.title}`,
+      `Scope:\n${story.scope.map((item) => `- ${item}`).join('\n')}`,
       `Acceptance criteria:\n${story.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}`,
     ].join('\n')).join('\n\n'),
-  };
+  }));
+const launchConcurrency = validateWorkerBatchConcurrency(workerDefinitions, {
+  limits: loadConcurrencyLimits(),
+  active: readActiveConcurrencyCounts(cwd),
 });
+if (!launchConcurrency.ok) {
+  throw new Error(`Athena launch exceeds effective concurrency limits: ${launchConcurrency.errors.join('; ')}`);
+}
+
+// assertExecutionPrd owns story identity, assignment, provider/model, the
+// one-wave group contract, dependency references/cycles, and machine-readable
+// scope ownership. It rejects wildcard/unsafe paths, cross-worker dependencies,
+// and overlapping scopes across every concurrently launched worker. JSON
+// parsing or planner prose alone is never launch authority.
 
 // AO-CONTRACT:spawn-progress — persist exact bounded identity BEFORE the first
-// createWorkerWorktree / TeamCreate / Agent / spawnTeam call.
+// createWorkerWorktree / native Agent / fallback Agent / spawnTeam call.
 const intendedWorkers = workerDefinitions.map((worker) => worker.name).sort().join(',');
 const adapterOnly = workerDefinitions.every((worker) => worker.type !== 'claude');
 const hasAdapterWorkers = workerDefinitions.some((worker) => (
@@ -675,6 +896,16 @@ const plannedSpawnPath = adapterOnly
   ? 'adapter-only'
   : (hasNativeTeamTools ? 'native-or-mixed' : 'fallback-or-mixed');
 const recoverySpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
+const nativeSessionRequired = plannedSpawnPath === 'native-or-mixed';
+const spawnSessionBinding = readClaudeSessionBinding();
+if (nativeSessionRequired && !spawnSessionBinding.proven) {
+  throw new Error(
+    'Athena native launch/recovery session is missing or differs from the originating Claude session; preserve all teams/worktrees and stop',
+  );
+}
+const nativeSessionId = nativeSessionRequired
+  ? spawnSessionBinding.currentSessionId
+  : 'none';
 // Fresh runs allocate the adapter generation before any launch. Recovery must
 // reuse the exact ledger generation; it never mints a new one for the same run.
 const adapterRunId = spawnGate.reason === 'recover'
@@ -686,6 +917,7 @@ const expectedSpawn = {
   intendedWorkers,
   spawnPath: plannedSpawnPath,
   adapterRunId,
+  nativeSessionId,
   launchState: 'not-started',
   baseCommit,
 };
@@ -698,6 +930,16 @@ if (spawnGate.reason !== 'recover') {
 
 const spawnCheckpoint = await loadCheckpoint('athena');
 const persistedSpawn = getPipelineState(runId).phases.spawn?.outputs;
+const nativeSessionMatches = !nativeSessionRequired || (
+  spawnSessionBinding.proven
+  && persistedSpawn?.nativeSessionId === nativeSessionId
+  && spawnCheckpoint?.nativeSessionId === nativeSessionId
+);
+if (spawnGate.reason === 'recover' && nativeSessionRequired && !nativeSessionMatches) {
+  throw new Error(
+    'Athena native teammate adoption is not proven in the originating Claude session; preserve state and stop without claiming adoption',
+  );
+}
 // AO-CONTRACT:team-recover
 const durableAdapterState = hasAdapterWorkers ? monitorTeam(teamSlug) : null;
 const adapterTeamProof = durableAdapterState ? {
@@ -709,7 +951,13 @@ const adapterTeamProof = durableAdapterState ? {
     status: worker.status,
   })),
 } : null;
-const nativeTaskList = !adapterOnly && hasNativeTeamTools ? TaskList(teamSlug) : null;
+// TaskList is session-local and accepts no team identifier. Never query it as
+// adoption evidence unless the current invocation, run summary, spawn ledger,
+// and checkpoint all prove the same originating Claude session.
+const nativeObservationAllowed = spawnGate.reason === 'recover'
+  && nativeSessionRequired
+  && nativeSessionMatches;
+const nativeTaskList = nativeObservationAllowed ? TaskList() : null;
 const nativeTaskItems = Array.isArray(nativeTaskList)
   ? nativeTaskList
   : (nativeTaskList?.tasks || []);
@@ -753,8 +1001,23 @@ for (const worker of (spawnRecoveryMode === 'spawn' ? workerDefinitions : [])) {
     created: info.created,
   };
 }
-if (workerDefinitions.length > 1 && Object.values(worktrees).some((item) => !item.created)) {
-  throw new Error('Athena parallel execution requires isolated git worktrees; use Atlas or run workers serially');
+if (Object.values(worktrees).some((item) => !item.created || item.path === cwd)) {
+  throw new Error('Athena scope enforcement requires an isolated git worktree for every worker; use Atlas when isolation is unavailable');
+}
+const preparedWorktrees = spawnRecoveryMode === 'adopt'
+  ? spawnCheckpoint?.worktrees
+  : worktrees;
+const preparedWorktreeDigest = computeAthenaWorktreeDigest(preparedWorktrees);
+if (!preparedWorktreeDigest) {
+  throw new Error('Athena cannot bind START or execution to the prepared worktree mapping');
+}
+if (spawnRecoveryMode === 'spawn') {
+  const worktreeProgress = recordPhaseOutputs(runId, 'spawn', {
+    worktreeDigest: preparedWorktreeDigest,
+  });
+  if (!worktreeProgress.ok || worktreeProgress.degraded) {
+    throw new Error('Athena worktree identity was not durable; dispatch remains forbidden');
+  }
 }
 
 let spawnCheckpointPayload = null;
@@ -766,7 +1029,10 @@ if (spawnRecoveryMode === 'spawn') {
     intendedWorkers,
     spawnPath: plannedSpawnPath,
     adapterRunId,
+    nativeSessionId,
     baseCommit,
+    prdGeneration: executionPrdState.generation,
+    worktreeDigest: preparedWorktreeDigest,
     launchState: 'not-started',
     prdSnapshot: prd,
     completedStories: [],
@@ -780,6 +1046,16 @@ if (spawnRecoveryMode === 'spawn') {
   }
 }
 ```
+
+Cross-session native recovery is intentionally not an adoption path. A future
+replacement-worker path may resume from the durable task/PRD snapshot only after
+it proves, for every worker, that the recorded worktree still matches its
+canonical path and branch, `git status --porcelain` is empty, HEAD is a committed
+descendant of `baseCommit`, and the worker result is not already integrated. It
+must record a new replacement generation and new launch events; it must never
+label replacement workers as the old native team. Those commit/ancestry/task
+validators are not yet implemented, so the current behavior is to preserve all
+artifacts and stop.
 
 All Path A/Path B dispatch snippets below run only in `spawnRecoveryMode ===
 'spawn'`. Immediately before the first actual dispatch, update
@@ -803,63 +1079,259 @@ if (spawnRecoveryMode === 'spawn') {
 }
 ```
 
+Build every Claude execution prompt from one validated context renderer. It
+accepts only the worker definitions returned by `buildAthenaWorkerDefinitions()`;
+there is no free-form role interpolation at dispatch time:
+
+```javascript
+const claudeWorkers = workerDefinitions
+  .filter((worker) => worker.type === 'claude')
+  .sort((left, right) => left.name.localeCompare(right.name));
+
+function buildClaudeWorkerExecutionContext(worker, nativeTaskIdsByStory = null) {
+  if (!worker.subagentType || !worker.subagentType.startsWith('agent-olympus:')) {
+    throw new Error(`Athena Claude worker ${worker.name} has no validated subagentType`);
+  }
+  const sharedTaskIds = nativeTaskIdsByStory === null
+    ? null
+    : Object.fromEntries(worker.storyIds.map((storyId) => {
+      const taskId = nativeTaskIdsByStory[storyId];
+      if (!taskId) throw new Error(`Athena worker ${worker.name} is missing task ID for ${storyId}`);
+      return [storyId, taskId];
+    }));
+  return JSON.stringify({
+    schemaVersion: 1,
+    workerName: worker.name,
+    subagentType: worker.subagentType,
+    model: worker.model,
+    storyIds: worker.storyIds,
+    stories: worker.stories.map((story) => ({
+      id: story.id,
+      title: story.title,
+      acceptanceCriteria: story.acceptanceCriteria,
+      dependsOn: story.dependsOn || [],
+    })),
+    scope: worker.scope,
+    worktreePath: preparedWorktrees[worker.name].path,
+    branchName: preparedWorktrees[worker.name].branch,
+    sharedTaskIds,
+    constraints: prd.constraints,
+    nonGoals: prd.nonGoals,
+    baseCommit,
+    protocol: {
+      scope: 'Edit only scope entries and only inside worktreePath.',
+      completion: 'Commit to branchName before reporting done.',
+      taskLifecycle: sharedTaskIds
+        ? 'Mark supplied task IDs in_progress before work and completed only after commit.'
+        : 'No native shared task IDs on fallback path.',
+    },
+    harnessConstraints: harness_context || null,
+  });
+}
+```
+
 **Claude workers** — dispatch depends on runtime capabilities:
 
-#### Path A: Native Agent Teams (`hasNativeTeamTools === true`)
+#### Path A: Native Agent Teams (`hasNativeTeamTools === true`, Claude Code 2.1.178+)
 
 When `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is set, use native team tools directly:
 
 ```
-IF spawnRecoveryMode !== 'spawn': skip this entire block.
-TeamCreate("athena-<slug>")
-// If TeamCreate fails (tool unavailable, error response) → fall back to Path B for ALL workers.
-// Log wisdom: "Native teams unavailable at runtime — fell back to adapter chain"
-addEvent(runId, { type: 'native_team_created', detail: { teamName: "athena-<slug>" } })
+IF spawnRecoveryMode !== 'spawn' OR claudeWorkers.length === 0: skip this entire block.
+// No explicit team-creation call and no deprecated team identifier argument.
+// The first successful native teammate Agent launch forms the team automatically.
+// It is a bootstrap handshake only: implementation cannot begin until the
+// shared tasks and their IDs are durably checkpointed.
+1. Select `firstWorker = claudeWorkers[0]` and launch:
+   Agent(name="<first-worker>", description="Bootstrap Athena teammate",
+       subagent_type=firstWorker.subagentType, model=firstWorker.model,
+       run_in_background=true,
+       prompt="Join the Athena team, report READY, and remain idle. Do not read,
+       edit, test, or commit project files until the lead assigns your persisted
+       shared tasks and sends START.")
+2. After READY, record native_team_formed. If this launch fails or its outcome
+   is ambiguous, preserve the run/worktrees and stop. Never switch this run to
+   Path B after a native Agent launch was attempted.
+3. Create the shared task graph for every PRD story:
+   nativeTaskIdsByStory = {};
+   for each story in PRD order:
+     createdTask = TaskCreate(
+       subject="<story.id>: <story.title>",
+       description="<exact acceptance criteria and persisted scope>",
+       activeForm="Implementing <story.id>")
+     require a non-empty createdTask.taskId;
+     nativeTaskIdsByStory[story.id] = createdTask.taskId;
+   for each story.dependsOn:
+     TaskUpdate(taskId=nativeTaskIdsByStory[story.id],
+       addBlockedBy=story.dependsOn.map(id => nativeTaskIdsByStory[id]))
+   TaskUpdate(taskId="<each first-worker story task>", owner="<first-worker>")
+4. Build the deterministic START ledger from the exact run, execution-PRD
+   generation, and prepared-worktree digest. Save every worker as `pending`
+   together with `nativeTaskIdsByStory`, then re-read it before START:
+   const nativeTaskCheckpoint = await saveCheckpoint('athena', {
+     ...spawnCheckpointPayload,
+     launchState: 'started',
+     nativeTaskIdsByStory,
+     nativeStartLedger: initializeAthenaStartLedger({
+       runId,
+       nativeSessionId,
+       prdGeneration: executionPrdState.generation,
+       worktreeDigest: preparedWorktreeDigest,
+       workerNames: claudeWorkers.map((worker) => worker.name),
+     }),
+     worktrees,
+   });
+   if (!nativeTaskCheckpoint.ok || nativeTaskCheckpoint.degraded) {
+     throw new Error('Athena shared task IDs were not durable; keep the bootstrap teammate idle and stop');
+   }
+   const persistedNativeTasks = await loadCheckpoint('athena');
+   if (JSON.stringify(persistedNativeTasks?.nativeTaskIdsByStory)
+     !== JSON.stringify(nativeTaskIdsByStory)
+     || !assertAthenaStartLedger(persistedNativeTasks?.nativeStartLedger)
+     || persistedNativeTasks.nativeStartLedger.nativeSessionId !== nativeSessionId
+     || persistedNativeTasks.nativeStartLedger.prdGeneration !== executionPrdState.generation
+     || persistedNativeTasks.nativeStartLedger.worktreeDigest !== preparedWorktreeDigest) {
+     throw new Error('Athena task/START pending checkpoint could not be re-read; do not send START');
+   }
+   Failure is fatal and no implementation message or additional Agent launch follows.
+5. After the durable re-read, derive the one canonical context per worker:
+   `claudeExecutionContextByWorker = new Map(claudeWorkers.map(worker =>
+   [worker.name, buildClaudeWorkerExecutionContext(worker, nativeTaskIdsByStory)]))`.
+   Launch every remaining Claude worker in parallel:
+   Agent(name="<worker>", description="Execute assigned Athena stories",
+       subagent_type=worker.subagentType, model=worker.model,
+       run_in_background=true,
+       prompt="Join the formed Athena team, report READY, and remain idle. Do
+       not read, edit, test, or commit project files until the lead assigns
+       your persisted shared tasks and sends START.")
+   After each successful READY, assign that worker's shared tasks with
+   TaskUpdate(taskId="...", owner="<worker>") and record native_teammate_spawned.
+6. Re-read `assignedNativeTasks = TaskList()` and, for every Claude story,
+   require the entry whose ID is `nativeTaskIdsByStory[story.id]` to have
+   `owner === story.assignedWorker`. A missing/mismatched owner stops the run
+   with every teammate idle. A plain START, task-ID-only message, or START
+   before verified ownership is forbidden. Continue through the durable
+   handshake below; do not authorize edits directly from this step. Each
+   worker must eventually use
+   TaskUpdate(taskId="...", status="in_progress") and, only after its clean
+   committed branch is ready, TaskUpdate(taskId="...", status="completed").
 
-For each Claude worker:
-  1. Read `{ path: worktreePath, branch: branchName }` from `worktrees[worker.name]` created above.
-  2. Task(team_name=teamSlug, name="<worker>",
-       subagent_type="agent-olympus:<agentType>", model="<model>",
-       prompt="You are <worker> on team athena.
-       YOUR SCOPE: <files>
-       YOUR TASK: <stories>
-       YOUR WORKTREE: <worktreePath>  (work only inside this directory)
-       PROTOCOL: Commit your progress to branch <branchName> before signalling done.
-                 SendMessage to <workers> when done.
-       CONSTRAINT: Do NOT edit files outside your scope or worktree.
-       TDD_INSTRUCTION: If your story has testable acceptance criteria, follow TDD discipline:
-         write a failing test first (RED), then minimum code to pass (GREEN), then refactor.
-         Do not write production code before tests.
-       [OPTIONAL] For new functionality: follow /tdd discipline when implementing testable features.
-       [If harness_context exists:]
-       ## Harness Constraints
-       Follow these golden principles: <harness_context>
-       Respect dependency layers defined in docs/ARCHITECTURE.md.")
-  3. addEvent(runId, { type: 'native_teammate_spawned', detail: { worker: "<worker>", agentType: "<agentType>" } })
+If any later launch, task assignment, or START delivery fails, preserve the live
+team and worktrees and stop at the runner recovery boundary. Never relaunch an
+existing worker or silently convert a partially formed native team into fallback.
 ```
 
-#### Path B: Fallback (`hasNativeTeamTools === false` or TeamCreate failed)
+The step-4 durability boundary is concrete and occurs before any START message
+or non-bootstrap Agent call.
+
+**Durable native START/ACK handshake (fresh launch and same-session recovery):**
+
+This block runs for Path A when `spawnRecoveryMode` is either `spawn` or
+`adopt`. On `adopt`, it launches no Agent and creates no tasks; it uses the
+checkpointed roster/tasks and the already-proven `TaskList()` adoption only.
+
+```javascript
+let nativeStartCheckpoint = await loadCheckpoint('athena');
+let nativeStartLedger = nativeStartCheckpoint?.nativeStartLedger;
+assertAthenaStartLedger(nativeStartLedger);
+if (nativeStartCheckpoint.runId !== runId
+  || nativeStartCheckpoint.nativeSessionId !== nativeSessionId
+  || nativeStartLedger.nativeSessionId !== nativeSessionId
+  || nativeStartLedger.prdGeneration !== executionPrdState.generation
+  || nativeStartLedger.worktreeDigest !== preparedWorktreeDigest) {
+  throw new Error('Athena START recovery identity/session mismatch; preserve the native team and stop');
+}
+const startRecovery = planAthenaStartResume(nativeStartLedger, { nativeSessionId });
+const claudeExecutionContextByWorker = new Map(claudeWorkers.map((worker) => [
+  worker.name,
+  buildClaudeWorkerExecutionContext(worker, nativeStartCheckpoint.nativeTaskIdsByStory),
+]));
+
+// pending and sent both retry the exact same deterministic token. Persisting
+// `sent` happens after delivery: a crash between the two leaves `pending`, so
+// same-session recovery safely resends instead of guessing whether it arrived.
+for (const workerName of startRecovery.resendStart) {
+  SendMessage({
+    to: workerName,
+    summary: 'Deliver deterministic START context',
+    message: buildAthenaStartMessage(
+      nativeStartLedger,
+      workerName,
+      claudeExecutionContextByWorker.get(workerName),
+    ),
+  });
+  nativeStartLedger = markAthenaStartSent(nativeStartLedger, workerName);
+  const sentCheckpoint = await saveCheckpoint('athena', {
+    ...nativeStartCheckpoint,
+    nativeStartLedger,
+  });
+  if (!sentCheckpoint.ok || sentCheckpoint.degraded) {
+    throw new Error('Athena START delivery state was not durable; preserve the team for same-session retry');
+  }
+  nativeStartCheckpoint = await loadCheckpoint('athena');
+  assertAthenaStartLedger(nativeStartCheckpoint?.nativeStartLedger);
+  nativeStartLedger = nativeStartCheckpoint.nativeStartLedger;
+}
+
+// Teammates must emit exactly `START_ACK <token>` and remain idle. For each
+// incoming teammate message, bind the sender and exact content below. No file
+// read/edit/test/commit is authorized until the resulting `acked` ledger is
+// saved and re-read, after which START_CONFIRMED releases that one worker.
+for (const { sender: workerName, content: ackMessage } of <incoming START_ACK messages>) {
+  nativeStartLedger = acknowledgeAthenaStart(nativeStartLedger, {
+    workerName,
+    nativeSessionId,
+    message: ackMessage,
+  });
+  const ackCheckpoint = await saveCheckpoint('athena', {
+    ...nativeStartCheckpoint,
+    nativeStartLedger,
+  });
+  if (!ackCheckpoint.ok || ackCheckpoint.degraded) {
+    throw new Error('Athena START ACK was not durable; keep the teammate idle');
+  }
+  nativeStartCheckpoint = await loadCheckpoint('athena');
+  assertAthenaStartLedger(nativeStartCheckpoint?.nativeStartLedger);
+  nativeStartLedger = nativeStartCheckpoint.nativeStartLedger;
+  SendMessage({
+    to: workerName,
+    summary: 'Confirm acknowledged START',
+    message: buildAthenaStartConfirmation(nativeStartLedger, workerName),
+  });
+}
+
+// A crash after confirmation replays START_CONFIRMED only; it never reopens a
+// second execution. A cross-session invocation fails inside planAthenaStartResume.
+for (const workerName of startRecovery.resendConfirmation) {
+  SendMessage({
+    to: workerName,
+    summary: 'Replay START confirmation',
+    message: buildAthenaStartConfirmation(nativeStartLedger, workerName),
+  });
+}
+if (!allAthenaStartsAcknowledged(nativeStartLedger)) {
+  throw new Error('Athena cannot complete spawn until every START ACK is durably checkpointed');
+}
+```
+
+#### Path B: Fallback (`hasNativeTeamTools === false` before any native launch)
 
 When native teams are unavailable, Claude workers are spawned as independent subagents:
 
 ```
-IF spawnRecoveryMode !== 'spawn': skip this entire block.
+IF spawnRecoveryMode !== 'spawn' OR claudeWorkers.length === 0: skip this entire block.
 For each Claude worker:
   1. Read `{ path: worktreePath, branch: branchName }` from `worktrees[worker.name]` created above.
-  2. Agent(subagent_type="agent-olympus:<agentType>", model="<model>",
-       prompt="You are <worker>.
-       YOUR SCOPE: <files>
-       YOUR TASK: <stories>
-       YOUR WORKTREE: <worktreePath>  (work only inside this directory)
-       PROTOCOL: Commit your progress to branch <branchName> before completion.
-       CONSTRAINT: Do NOT edit files outside your scope or worktree.
-       TDD_INSTRUCTION: (same as Path A)
-       [If harness_context exists:] (same as Path A)")
+  2. Agent(description="Execute isolated Athena stories",
+       subagent_type=worker.subagentType, model=worker.model,
+       run_in_background=true,
+       prompt="START\n" + buildClaudeWorkerExecutionContext(worker, null))
 ```
 
 Note: In Path B, Claude workers are independent batch executors — no inter-worker SendMessage.
 The orchestrator bridges communication by reading worker outputs and injecting context into subsequent tasks.
 
+<!-- AO-CONTRACT:provider-lifecycle:start -->
 **Codex/Gemini workers** (batch executors — canonical adapter spawn):
 
 The adapter is selected automatically based on detected capabilities. Do not
@@ -941,10 +1413,27 @@ const worktreeDigest = computeAthenaWorktreeDigest(activeWorktrees);
 if (!worktreeDigest) {
   throw new Error('Athena worktree mapping is invalid or cannot be bound to a digest');
 }
+if (worktreeDigest !== preparedWorktreeDigest) {
+  throw new Error('Athena worktree mapping changed after START identity was prepared');
+}
+const durableNativeStart = plannedSpawnPath === 'native-or-mixed'
+  ? await loadCheckpoint('athena')
+  : null;
+if (durableNativeStart && (
+  durableNativeStart.nativeSessionId !== nativeSessionId
+  || durableNativeStart.prdGeneration !== executionPrdState.generation
+  || durableNativeStart.worktreeDigest !== worktreeDigest
+  || !assertAthenaStartLedger(durableNativeStart.nativeStartLedger)
+  || !allAthenaStartsAcknowledged(durableNativeStart.nativeStartLedger)
+)) {
+  throw new Error('Athena native START handshake is not durably complete; preserve the team and stop');
+}
 const spawnCompletion = await completePhase(runId, 'spawn', {
   launchState: 'durable',
   worktreeDigest,
   adapterRunId,
+  nativeSessionId,
+  prdGeneration: executionPrdState.generation,
 }, {
   checkpointData: {
     runId,
@@ -955,6 +1444,12 @@ const spawnCompletion = await completePhase(runId, 'spawn', {
     launchState: 'durable',
     worktreeDigest,
     adapterRunId,
+    nativeSessionId,
+    prdGeneration: executionPrdState.generation,
+    ...(durableNativeStart ? {
+      nativeTaskIdsByStory: durableNativeStart.nativeTaskIdsByStory,
+      nativeStartLedger: durableNativeStart.nativeStartLedger,
+    } : {}),
     prdSnapshot: <prd.json>,
     completedStories: [],
     activeWorkers: <spawned worker names>,
@@ -972,19 +1467,32 @@ if (!spawnCompletion.ok || spawnCompletion.degraded) {
 ```javascript
 // AO-CONTRACT:monitor-recover
 const monitorGate = enterPhase(runId, 'monitor');
-// reason:'recover' adopts the persisted teamSlug/worktrees and polls only that
-// team. It never calls createWorkerWorktree, TeamCreate, Agent, or spawnTeam.
+// reason:'recover' reuses the persisted teamSlug/worktrees and polls only that
+// team. Adapter generations are process-independent; a native roster is usable
+// only under the originating-session fence below. This phase never creates a
+// worktree, dispatches Agent, or calls spawnTeam.
 const monitorCheckpoint = await loadCheckpoint('athena');
 const monitorSpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
 const phase3TeamSlug = monitorSpawnIdentity?.teamSlug;
 const phase3IntendedWorkers = monitorSpawnIdentity?.intendedWorkers;
 const phase3SpawnPath = monitorSpawnIdentity?.spawnPath;
 const phase3AdapterRunId = monitorSpawnIdentity?.adapterRunId;
+const phase3NativeSessionId = monitorSpawnIdentity?.nativeSessionId;
 const phase3BaseCommit = monitorSpawnIdentity?.baseCommit;
 const phase3WorktreeDigest = monitorSpawnIdentity?.worktreeDigest;
 if (!validateAthenaCheckpointBinding(monitorCheckpoint, monitorSpawnIdentity, { cwd })
   || monitorCheckpoint.worktreeDigest !== phase3WorktreeDigest) {
   throw new Error('Athena monitor checkpoint does not belong to this run/team; preserve all workers and stop');
+}
+const monitorSessionBinding = readClaudeSessionBinding();
+if (phase3SpawnPath === 'native-or-mixed' && (
+  !monitorSessionBinding.proven
+  || phase3NativeSessionId !== monitorSessionBinding.currentSessionId
+  || monitorCheckpoint.nativeSessionId !== phase3NativeSessionId
+)) {
+  throw new Error(
+    'Athena cannot monitor/adopt native teammates outside their originating Claude session; preserve state and stop',
+  );
 }
 const monitorWorktrees = monitorCheckpoint.worktrees;
 if (!monitorWorktrees || typeof monitorWorktrees !== 'object') {
@@ -1014,7 +1522,7 @@ if (!monitorWorktrees || typeof monitorWorktrees !== 'object') {
 │     → if !allowed: stop monitoring, force-collect results + escalate any stalled workers
 │
 │   IF Path A (native teams):
-│     Check TaskList("athena-<slug>") for Claude worker status [LLM tool call]
+│     Check TaskList() for Claude worker status [LLM tool call; zero arguments]
 │     If TaskList shows a worker with no progress for 5+ minutes → treat as stalled
 │
 │   IF Path B (fallback):
@@ -1038,6 +1546,7 @@ if (!monitorWorktrees || typeof monitorWorktrees !== 'object') {
 **Worker execution & monitoring model (supervisor).** <!-- AO-CONTRACT:provider-failover --> Non-tmux adapter workers (codex-exec, codex-appserver, claude-cli, gemini-exec, gemini-acp) do NOT run in your process — `spawnTeam()` launches a **detached supervisor** per worker that owns the adapter and writes its completion/failure/output to disk. So the canonical monitor loop is:
 
 ```javascript
+import { execFileSync } from 'node:child_process';
 import {
   collectResults,
   completeClaudeFallback,
@@ -1073,6 +1582,7 @@ for (const w of (status?.workers || []).filter((worker) => worker.status === 'fa
     w.originalPrompt,
     { category: w.errorReason, message: w.errorMessage },
   );
+  if (!fallback.targetProvider) continue;
   const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
   const progress = await pollProviderFallback(dispatched, cwd, capabilities);
   for (const childTeam of progress.teamNames || []) providerTeamsToShutdown.add(childTeam);
@@ -1097,6 +1607,7 @@ if (status?.workers.every((worker) => worker.status === 'completed')) {
 ```
 
 `monitorTeam` classifies supervisor workers from their disk snapshot. Actual retry/failover is owned by `reassignProvider()` + `dispatchProviderFallback()` + `pollProviderFallback()` so every retry is a new execution. You do NOT need to `capturePane` supervisor workers. The per-worker `capturePane` + `detectCodexError` snippets below are the **tmux-fallback path** only.
+<!-- AO-CONTRACT:provider-lifecycle:end -->
 
 **Legacy checkpoint recovery only (pre-canonical tmux sessions):**
 
@@ -1230,6 +1741,7 @@ const workerTerminalCheckpoint = await saveCheckpoint('athena', {
   intendedWorkers: phase3IntendedWorkers,
   spawnPath: phase3SpawnPath,
   adapterRunId: phase3AdapterRunId,
+  nativeSessionId: phase3NativeSessionId,
   baseCommit: phase3BaseCommit,
   launchState: 'durable',
   worktreeDigest: phase3WorktreeDigest,
@@ -1258,6 +1770,7 @@ const monitorCompletion = await completePhase(runId, 'monitor', {
   terminalWorkers: phase3IntendedWorkers,
   worktreeDigest: phase3WorktreeDigest,
   adapterRunId: phase3AdapterRunId,
+  nativeSessionId: phase3NativeSessionId,
 }, {
   checkpointData: {
     runId,
@@ -1265,6 +1778,7 @@ const monitorCompletion = await completePhase(runId, 'monitor', {
     intendedWorkers: phase3IntendedWorkers,
     spawnPath: phase3SpawnPath,
     adapterRunId: phase3AdapterRunId,
+    nativeSessionId: phase3NativeSessionId,
     baseCommit: phase3BaseCommit,
     launchState: 'durable',
     worktreeDigest: phase3WorktreeDigest,
@@ -1314,6 +1828,7 @@ const wisdomCompletion = await completePhase(runId, 'wisdom', undefined, {
     intendedWorkers: wisdomSpawnIdentity.intendedWorkers,
     spawnPath: wisdomSpawnIdentity.spawnPath,
     adapterRunId: wisdomSpawnIdentity.adapterRunId,
+    nativeSessionId: wisdomSpawnIdentity.nativeSessionId,
     baseCommit: wisdomSpawnIdentity.baseCommit,
     launchState: wisdomSpawnIdentity.launchState,
     worktreeDigest: wisdomSpawnIdentity.worktreeDigest,
@@ -1355,21 +1870,53 @@ if (!validateAthenaCheckpointBinding(integrationCheckpoint, integrationSpawnIden
 ```javascript
 import { execFileSync } from 'node:child_process';
 import { mergeWorkerBranch, removeWorkerWorktree } from './scripts/lib/worktree.mjs';
+import {
+  parseNulDelimitedGitPaths,
+  validateChangedPathsAgainstScope,
+} from './scripts/lib/execution-prd.mjs';
 
-// Sort workers by dependency order (dependents last)
-const orderedWorkers = sortByDependency(completedWorkers);
+// Execution validation rejects cross-worker dependencies, so integration order
+// is deterministic by worker identity; per-worker story dependencies were
+// already executed sequentially inside that worker in PRD order.
+const orderedWorkers = [...completedWorkers]
+  .sort((left, right) => left.name.localeCompare(right.name));
 const phase4Worktrees = integrationCheckpoint.worktrees;
 const mergedWorkers = new Set(integrationCheckpoint.mergedWorkers ?? []);
 const integrationProviderTeams = new Set(integrationCheckpoint.providerTeamsToShutdown ?? []);
 if (!phase4Worktrees || typeof phase4Worktrees !== 'object') {
   throw new Error('Phase 4 checkpoint has no worktree mapping; preserve .ao/worktrees and recover the checkpoint before integration');
 }
+const integrationRootHead = execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], {
+  encoding: 'utf8',
+}).trim();
+const integrationRootStatus = execFileSync('git', [
+  '-C', cwd, 'status', '--porcelain=v1', '-z',
+], { encoding: null });
+const expectedIntegrationRootHead = mergedWorkers.size === 0
+  ? integrationSpawnIdentity.baseCommit
+  : integrationCheckpoint.integratedRootHead;
+if (!/^[a-f0-9]{40,64}$/.test(expectedIntegrationRootHead || '')
+  || integrationRootHead !== expectedIntegrationRootHead
+  || integrationRootStatus.length !== 0) {
+  throw new Error(
+    'Athena project root changed before integration; a teammate may have escaped its worktree. Preserve every branch/worktree and stop',
+  );
+}
 
 for (const worker of orderedWorkers) {
   if (mergedWorkers.has(worker.name)) continue;  // idempotent resume after a durable merge checkpoint
 
+  const preMergeRootStatus = execFileSync('git', [
+    '-C', cwd, 'status', '--porcelain=v1', '-z',
+  ], { encoding: null });
+  if (preMergeRootStatus.length !== 0) {
+    throw new Error(`Athena project root became dirty before merging ${worker.name}; preserve state and stop`);
+  }
+
   const { branch, path, created } = phase4Worktrees[worker.name] ?? {};
-  if (!created || !branch || !path || path === cwd) continue;  // fallback/shared-root mode
+  if (!created || !branch || !path || path === cwd) {
+    throw new Error(`Worker ${worker.name} lacks the isolated worktree required for scope validation`);
+  }
 
   const dirty = execFileSync('git', ['-C', path, 'status', '--porcelain'], {
     encoding: 'utf-8',
@@ -1378,11 +1925,41 @@ for (const worker of orderedWorkers) {
     throw new Error(`Worker ${worker.name} completed with uncommitted work; preserve its worktree and resume integration`);
   }
 
+  // Do not trust the prompt-level scope instruction. Prove the committed
+  // worker branch changed only its persisted scope before merge. NUL framing
+  // and fatal UTF-8 decoding prevent path splitting or replacement tricks.
+  const changedPathBuffer = execFileSync('git', [
+    '-C', cwd, 'diff', '--name-only', '-z',
+    `${integrationSpawnIdentity.baseCommit}...${branch}`, '--',
+  ], { encoding: null });
+  const changedPaths = parseNulDelimitedGitPaths(changedPathBuffer);
+  const ownedScope = prd.userStories
+    .filter((story) => story.assignedWorker === worker.name)
+    .flatMap((story) => story.scope);
+  const scopeCheck = validateChangedPathsAgainstScope(changedPaths, ownedScope);
+  if (!scopeCheck.ok) {
+    throw new Error(
+      `Worker ${worker.name} changed files outside its persisted scope: ${scopeCheck.outsideScope.join(', ')}`,
+    );
+  }
+
   const result = mergeWorkerBranch(cwd, branch, worker.name);
   if (!result.success) {
     // mergeWorkerBranch aborts the failed merge. Preserve the branch/worktree;
     // route the conflict through the normal bounded retry path before cleanup.
     throw new Error(`Worker ${worker.name} merge failed: ${result.conflicts.join(', ')}`);
+  }
+  const postMergeRootStatus = execFileSync('git', [
+    '-C', cwd, 'status', '--porcelain=v1', '-z',
+  ], { encoding: null });
+  if (postMergeRootStatus.length !== 0) {
+    throw new Error(`Athena merge for ${worker.name} left the project root dirty; preserve all integration evidence and stop`);
+  }
+  const postMergeRootHead = execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+  }).trim();
+  if (!/^[a-f0-9]{40,64}$/.test(postMergeRootHead)) {
+    throw new Error(`Athena merge for ${worker.name} produced an invalid root HEAD`);
   }
 
   // Persist the merge before deleting its only isolated worktree. If this save
@@ -1396,6 +1973,7 @@ for (const worker of orderedWorkers) {
     intendedWorkers: integrationSpawnIdentity.intendedWorkers,
     spawnPath: integrationSpawnIdentity.spawnPath,
     adapterRunId: integrationSpawnIdentity.adapterRunId,
+    nativeSessionId: integrationSpawnIdentity.nativeSessionId,
     baseCommit: integrationSpawnIdentity.baseCommit,
     launchState: integrationSpawnIdentity.launchState,
     worktreeDigest: integrationSpawnIdentity.worktreeDigest,
@@ -1404,6 +1982,7 @@ for (const worker of orderedWorkers) {
     activeWorkers: [],
     worktrees: phase4Worktrees,
     mergedWorkers: [...mergedWorkers],
+    integratedRootHead: postMergeRootHead,
     providerTeamsToShutdown: [...integrationProviderTeams],
     startedAt,
     taskDescription,
@@ -1424,30 +2003,203 @@ Task(subagent_type="agent-olympus:executor", model="sonnet",
   prompt="Integrate Codex output: <codex_result>. Target files: <scope>")
 ```
 
-**Codex Cross-Validation** <!-- AO-CONTRACT:cross-validation --> (per story) — MANDATORY: before marking a story `passes: true`:
-```bash
-# CRITICAL: resolve binary path first — worktree shells may not inherit full PATH
-CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
-tmux new-session -d -s "athena-<slug>-codex-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "athena-<slug>-codex-xval-<story-id>" "\"$CODEX_BIN\" <approval-flag> exec \"Cross-validate implementation of <US-ID> (<story title>). Files changed in merged tree: <post-merge files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or 'none'>. Check: (1) all acceptance criteria met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings.\"" Enter
-# Poll: tmux capture-pane -pt "athena-<slug>-codex-xval-<story-id>" -S -200 (every 15s)
-# Cleanup: tmux kill-session -t "athena-<slug>-codex-xval-<story-id>"
+**External Cross-Validation** <!-- AO-CONTRACT:cross-validation --> (per story)
+— MANDATORY before marking a story `passes: true`. Prefer Codex, then Gemini,
+and use only the canonical adapter lifecycle:
+
+```javascript
+import {
+  allocateTeamRunId,
+  collectResults,
+  dispatchProviderFallback,
+  monitorTeam,
+  pollProviderFallback,
+  reassignProvider,
+  shutdownTeam,
+  spawnTeam,
+} from './scripts/lib/worker-spawn.mjs';
+import {
+  assertCrossValidationTeamState,
+  buildCrossValidationRequest,
+  buildCrossValidationTeamName,
+  parseCrossValidationResult,
+} from './scripts/lib/cross-validation.mjs';
+import {
+  assertReviewSnapshotCurrent,
+  cleanupReviewSnapshot,
+  materializeReviewSnapshot,
+} from './scripts/lib/review-snapshot.mjs';
+
+const verificationGitEvidence = buildReviewPackage({ cwd, baseRef: pinnedReviewBaseCommit });
+const preferredValidationProvider = hasCodex
+  ? 'codex'
+  : ((hasGeminiAcp || hasGeminiCli) ? 'gemini' : null);
+const validationTeamSlug = buildCrossValidationTeamName({
+  orchestrator: 'athena',
+  runId,
+  storyId: story.id,
+  reviewTreeOid: verificationGitEvidence.reviewTreeOid,
+});
+const validationTeamsToShutdown = new Set([validationTeamSlug]);
+let validationOutput = null;
+let validationProviderUsed = null;
+let validationSnapshot = null;
+
+if (preferredValidationProvider) {
+  validationSnapshot = materializeReviewSnapshot({
+    cwd,
+    reviewTreeOid: verificationGitEvidence.reviewTreeOid,
+    ownerId: validationTeamSlug,
+  });
+  assertReviewSnapshotCurrent(validationSnapshot, { cwd });
+  const validationRequest = buildCrossValidationRequest({
+    orchestrator: 'athena',
+    runId,
+    storyId: story.id,
+    storyTitle: story.title,
+    reviewTreeOid: verificationGitEvidence.reviewTreeOid,
+    provider: preferredValidationProvider,
+    snapshot: validationSnapshot,
+    scope: story.scope,
+    acceptanceCriteria: story.acceptanceCriteria,
+    harnessContext: harness_context,
+  });
+  const existingValidationState = monitorTeam(validationTeamSlug);
+  const validationState = existingValidationState
+    ? assertCrossValidationTeamState(existingValidationState, validationRequest)
+    : await spawnTeam(
+    validationTeamSlug,
+    [validationRequest.worker],
+    cwd,
+    capabilities,
+    { runId: allocateTeamRunId() },
+  );
+
+  // Repeat this canonical monitor step at the runner boundary until terminal.
+  const validationStatus = monitorTeam(validationTeamSlug);
+  const validator = validationStatus?.workers?.[0];
+  if (validator?.status === 'running' || validator?.status === 'retry') {
+    // Persist/yield and poll this same identity again. Never stop or respawn it.
+    continue;
+  } else if (validator?.status === 'completed') {
+    const actualProvider = validator.fallbackProvider || validator.type
+      || validationState.workers[0].type;
+    if (actualProvider === 'codex' || actualProvider === 'gemini') {
+      assertCrossValidationTeamState(validationStatus, validationRequest);
+      assertReviewSnapshotCurrent(validationSnapshot, { cwd });
+      validationOutput = parseCrossValidationResult(
+        collectResults(validationTeamSlug)['external-validator'],
+        validationRequest.identity,
+      );
+      assertReviewSnapshotCurrent(validationSnapshot, { cwd });
+      validationProviderUsed = actualProvider;
+    }
+  } else if (validator?.status === 'failed') {
+    const fallback = await reassignProvider(
+      validationTeamSlug,
+      validator.name,
+      validator.originalPrompt,
+      { category: validator.errorReason, message: validator.errorMessage },
+      validator.session,
+      { worker: validator, capabilities },
+    );
+    const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
+    const progress = await pollProviderFallback(dispatched, cwd, capabilities);
+    for (const childTeam of progress.teamNames || []) validationTeamsToShutdown.add(childTeam);
+    if (progress.status === 'running') {
+      // Persist/yield and poll the same dispatched child; cleanup is terminal-only.
+      continue;
+    } else if (progress.status === 'completed') {
+      const actualProvider = progress.dispatched?.replacementWorker?.type;
+      if (actualProvider === 'codex' || actualProvider === 'gemini') {
+        assertReviewSnapshotCurrent(validationSnapshot, { cwd });
+        validationOutput = parseCrossValidationResult(
+          progress.output,
+          validationRequest.identity,
+        );
+        assertReviewSnapshotCurrent(validationSnapshot, { cwd });
+        validationProviderUsed = actualProvider;
+      }
+    }
+    // A native Claude handoff is not independent external validation. Treat
+    // claude-task/exhausted/ambiguous outcomes as the explicit skip below.
+  }
+}
+
+for (const validationTeam of validationTeamsToShutdown) {
+  await shutdownTeam(validationTeam, cwd);
+}
+if (validationSnapshot) {
+  cleanupReviewSnapshot(validationSnapshot, {
+    cwd,
+    ownerId: validationTeamSlug,
+  });
+}
 ```
-- **PASS** → `addVerification(runId, { story_id, verdict: 'pass', evidence: 'codex xval passed', verifiedBy: 'codex' })` → mark `passes: true`, proceed.
-- **FAIL** → `addVerification(runId, { story_id, verdict: 'fail', evidence: '<specific findings>', verifiedBy: 'codex' })` → route findings back to the responsible worker via inbox for fix, re-validate (max 2 cycles).
-- **Codex unavailable BUT Gemini available** → use Gemini as alternative cross-validator:
-```bash
-GEMINI_BIN=$(which gemini 2>/dev/null || echo /opt/homebrew/bin/gemini)
-tmux new-session -d -s "athena-<slug>-gemini-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "athena-<slug>-gemini-xval-<story-id>" "\"$GEMINI_BIN\" <approval-flag> -p \"Cross-validate implementation of <US-ID>. Files: <files>. Criteria: <criteria>. Reply PASS or FAIL with findings.\"" Enter
+Every `addVerification` call must include one criterion record for every PRD
+acceptance criterion, indexed from zero. Copy `criterion_text` exactly. A pass
+uses `pass` for every criterion; a fail marks each failed criterion `fail` and
+records fresh evidence for every remaining criterion; an unavailable validator
+uses `skip` for every criterion. The top-level verdict is the exact rollup (any
+fail → fail, else any skip → skip, else pass). Before the fresh post-merge
+local criteria checks or external validation, build
+`verificationGitEvidence = buildReviewPackage({ cwd, baseRef: pinnedReviewBaseCommit })`. Run every check with
+the validator read-only against that exact snapshot, prove the tree is still
+current before persistence, and bind the record to its tree OID. A failed
+append or any tree mutation during validation is a hard verification failure:
+```javascript
+// Run the fresh post-merge criteria checks and read-only validator now, against this snapshot.
+assertReviewPackageCurrent(verificationGitEvidence, { cwd });
+const verificationWrite = addVerification(runId, {
+  story_id: story.id,
+  verdict: '<pass|fail|skip>',
+  evidence: '<overall fresh evidence>',
+  verifiedBy: '<codex|gemini|athena>',
+  reviewTreeOid: verificationGitEvidence.reviewTreeOid,
+  criteria: story.acceptanceCriteria.map((criterion_text, criterion_index) => ({
+    criterion_index,
+    criterion_text,
+    verdict: '<criterion pass|fail|skip>',
+    evidence: '<criterion-specific fresh evidence>',
+  })),
+});
+if (!verificationWrite.ok) {
+  throw new Error(`verification evidence was not persisted: ${verificationWrite.reason}`);
+}
+assertReviewPackageCurrent(verificationGitEvidence, { cwd });
 ```
-  Record: `addVerification(runId, { story_id, verdict: 'pass'|'fail', evidence: '<findings>', verifiedBy: 'gemini' })`
-- **Neither Codex nor Gemini available** → **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'no external validator available: cross-validation skipped', verifiedBy: 'athena' })`. Log: `[Athena] Cross-validation skipped for <story-id>: no external validator available.`
+- **PASS** → write the complete criterion-level record with `verdict:'pass'`,
+  then transition the story through the hardened generation-CAS store (an
+  explicit policy-authorized all-criteria `skip` follows the same transition):
+  ```javascript
+  import {
+    readExecutionPrd,
+    setExecutionStoryPasses,
+  } from './scripts/lib/execution-prd-store.mjs';
+
+  const storyPrdState = readExecutionPrd({ cwd, orchestrator: 'athena' });
+  const passedStoryPrdState = setExecutionStoryPasses([story.id], true, {
+    cwd,
+    orchestrator: 'athena',
+    expectedGeneration: storyPrdState.generation,
+  });
+  ```
+- **FAIL** → write the complete criterion-level record with the correct fail rollup → route findings back to the responsible worker via inbox for fix, re-validate (max 2 cycles).
+- **Codex unavailable BUT Gemini available** → the preferred-provider selection
+  above starts Gemini through the same adapter lifecycle. Record the same
+  complete criterion-level shape with `verifiedBy:'gemini'`.
+- **Neither external provider returns a terminal independent result** → **MUST
+  explicitly record the skip** with every criterion marked `skip`,
+  criterion-specific evidence, and `verifiedBy:'athena'`. Log: `[Athena]
+  Cross-validation skipped for <story-id>: no external validator available.`
 - **Note**: Run xval against post-merge file paths, not per-worker file paths, to catch violations introduced during conflict resolution.
 
 > **IMPORTANT**: "skip silently" does NOT mean "do nothing". Every story MUST have a verification record — pass, fail, or explicit skip. The PR verification gate will block if any story lacks a record.
 
-Mark stories `passes: true` in prd.json only after Codex cross-validation passes (or is unavailable with explicit skip recorded).
+Call `setExecutionStoryPasses([story.id], true, ...)` only after Codex
+cross-validation passes (or is unavailable with explicit skip recorded). On a
+stale generation, re-read and re-evaluate the transition; never overwrite the
+file or bypass CAS. Use `passedStoryPrdState.prd` for the next checkpoint.
 
 Run **simultaneously**: build, tests, linter.
 
@@ -1469,7 +2221,9 @@ Task(subagent_type="agent-olympus:themis", model="sonnet",
   prompt="Run quality gate checks on integration output.")
 ```
 - FAIL → debug and retry (max 2 retry cycles); debug path follows the 4-step escalation chain above
-- CONDITIONAL → log, proceed
+- CONDITIONAL → BLOCKED unless every unavailable check is an explicit
+  policy-authorized skip already recorded in verification evidence; otherwise
+  preserve the run/worktrees and do not enter review
 - PASS → proceed to Phase 5
 Note: Skip this checkpoint if Themis agent is absent.
 
@@ -1489,6 +2243,17 @@ Note: Skip this checkpoint if Themis agent is absent.
 │        for evidence-driven hypothesis analysis
 └── Loop until ALL PASS or a Loop Guard stop signal fires (local soft budget: ~5 fix cycles)
 ```
+
+Before completing `integrate`, perform a mandatory final-tree verification
+sweep: build one fresh `verificationGitEvidence`, rerun every story's acceptance
+criteria and read-only cross-validation against that unchanged merged tree,
+append one complete record per story with
+`reviewTreeOid: verificationGitEvidence.reviewTreeOid`, require every
+`addVerification(...).ok === true`, and finish with
+`assertReviewPackageCurrent(verificationGitEvidence, { cwd })`. Any mutation,
+missing story, or failed append keeps integrate nonterminal. This sweep
+supersedes records created before later workers or conflict resolution changed
+the merged tree.
 
 ```javascript
 // AO-CONTRACT:debug-escalation — the loop above uses recordPhaseError and the
@@ -1522,6 +2287,7 @@ const integrateCompletion = await completePhase(runId, 'integrate', {
     intendedWorkers: integrationSpawnIdentity.intendedWorkers,
     spawnPath: integrationSpawnIdentity.spawnPath,
     adapterRunId: integrationSpawnIdentity.adapterRunId,
+    nativeSessionId: integrationSpawnIdentity.nativeSessionId,
     baseCommit: integrationSpawnIdentity.baseCommit,
     launchState: integrationSpawnIdentity.launchState,
     worktreeDigest: integrationSpawnIdentity.worktreeDigest,
@@ -1556,49 +2322,151 @@ to compute the minimal reviewer set for the actual diff scope. Cuts 60-80% of
 reviewer overhead while still catching security-relevant code via the
 `securityPatterns` regex set.
 
-```bash
-node -e '
-  import("./scripts/lib/review-router.mjs").then(async (m) => {
-    const { execSync } = await import("node:child_process");
-    // Use full branch diff vs origin/HEAD (not just HEAD~1) so multi-commit branches route correctly.
-    const base = (() => {
-      try { return execSync("git symbolic-ref refs/remotes/origin/HEAD", { encoding: "utf-8" }).trim().replace(/^refs\/remotes\/origin\//, ""); }
-      catch { return "main"; }
-    })();
-    const range = `origin/${base}...HEAD`;
-    const paths = execSync(`git diff --name-only ${range}`, { encoding: "utf-8" })
-      .split("\n").filter(Boolean);
-    const content = execSync(`git diff ${range}`, { encoding: "utf-8" });
-    const r = m.routeReviewers({ diffPaths: paths, diffContent: content });
-    console.log(JSON.stringify(r, null, 2));
+```javascript
+import {
+  assertReviewPackageCurrent,
+  attachReviewContext,
+  buildReviewPackage,
+} from './scripts/lib/review-package.mjs';
+import {
+  handleEscalation,
+  routeReviewers,
+} from './scripts/lib/review-router.mjs';
+import { getRunVerificationsStrict } from './scripts/lib/run-artifacts.mjs';
+import { readExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
+
+let reviewPackage;
+let r;
+try {
+  const gitEvidence = buildReviewPackage({ cwd, baseRef: pinnedReviewBaseCommit });
+  r = routeReviewers({
+    diffPaths: gitEvidence.diffPaths,
+    diffContent: gitEvidence.diff,
+    baseDir: cwd,
   });
-'
+  if (r.reviewers.length === 0 || r.allowedReviewers.length === 0
+    || r.rejectedReviewers.length > 0
+    || r.reviewers.some((reviewer) => !r.allowedReviewers.includes(reviewer))) {
+    throw new Error('review routing selected an empty or non-approval reviewer set');
+  }
+  const strictVerification = getRunVerificationsStrict(runId);
+  if (!strictVerification.ok) {
+    throw new Error(`review verification evidence is unsafe: ${strictVerification.reason}`);
+  }
+  const prd = readExecutionPrd({ cwd, orchestrator: 'athena' }).prd;
+  reviewPackage = attachReviewContext(gitEvidence, {
+    prd,
+    verification: strictVerification.verifications,
+  });
+} catch (error) {
+  STOP — review evidence is incomplete or unsafe; preserve integration state and do not approve.
+}
 ```
 
-Spawn ONLY the reviewers in `r.reviewers`, in parallel.
+Spawn ONLY the reviewers in `r.reviewers`, in parallel. Each receives the exact
+same immutable, dual-digested `reviewPackage` and this caller instruction, which
+overrides any legacy prose output format. A normal no-rule fallback warning may
+be logged, but a rejected reviewer or empty active allowlist blocks the phase:
+
+```
+OUTPUT_CONTRACT: AO_REVIEW_V1
+Review only the supplied reviewPackage. Return exactly one JSON object with:
+schemaVersion:1, reviewer:<reviewer>,
+reviewDigest:<copy reviewPackage.reviewDigest.value exactly>,
+verdict:APPROVE|REVISE|REJECT|BLOCKED,
+findings:[{severity:critical|high|medium|low|info, confidence:0..1,
+file:string|null, line:positive-integer|null, evidence:string,
+recommendation:string}], escalations:[{additionalReviewer,reason}].
+APPROVE requires empty findings and escalations; every other verdict requires at
+least one finding. A non-null finding.file must be in reviewPackage.diffPaths.
+Copy the complete reviewDigest exactly; never substitute evidenceDigest.
+Escalate only to one of: <serialized r.allowedReviewers>.
+reviewPackage: <serialized reviewPackage>
+```
+
+If the diff, PRD, or verification evidence cannot be loaded, or any story is not
+`passes:true` with terminal `pass`/explicit `skip` verification whose
+`reviewTreeOid` exactly equals the package tree, stop as BLOCKED instead of
+sending a partial package or approving from an implementer summary. Historical
+records may describe older trees; the latest record for every story may not.
 
 **Step 5.1 — Handle reviewer escalation** <!-- AO-CONTRACT:review-escalation -->
 
-If any reviewer emits `{type: 'RE-REVIEW-REQUESTED', additionalReviewer, reason}`,
-call `handleEscalation(currentSet, flag)` and spawn the requested reviewer in the
-**same iteration** (not the next loop).
-
-```
-┌─→ loopTick(runId, 'review') → if !allowed: stop the review loop, escalate unresolved findings
-│   ALL APPROVED → DONE ✓
-│   ANY ESCALATION → spawn additional reviewer same iteration (does NOT consume a round)
-│   ANY REJECTED → use the bounded reattempt below, fix in the root integration tree, re-review
-└── Loop until ALL APPROVED or loopTick('review') returns !allowed (default cap 3)
-```
+Parse and aggregate every result before acting:
 
 ```javascript
+import { aggregateReviewResults } from './scripts/lib/review-contract.mjs';
+
+const reviewRound = loopTick(runId, 'review');
+if (!reviewRound.allowed) STOP and preserve the run/worktrees;
+
+let currentReviewers = [...r.reviewers];
+const rawReviewerOutputsByName = new Map();
+let reviewApproved = false;
+Fire every initial reviewer in parallel with reviewPackage, then store each raw
+AO_REVIEW_V1 response under its bare reviewer name. Missing output remains
+missing so aggregation fails closed; do not substitute summaries.
+const handledEscalations = new Set();
+let aggregate;
+for (;;) {
+  aggregate = aggregateReviewResults(rawReviewerOutputsByName, currentReviewers, {
+    allowedReviewers: r.allowedReviewers,
+    reviewPackage,
+  });
+  if (aggregate.errors.length > 0) STOP and report aggregate.errors plus findings;
+
+  const requestersToRerun = new Set();
+  for (const requestingResult of aggregate.results) {
+    for (const escalation of requestingResult.escalations) {
+      const escalationKey = `${requestingResult.reviewer}\0${escalation.additionalReviewer}`;
+      if (handledEscalations.has(escalationKey)) {
+        STOP — a reviewer repeated an already-fulfilled escalation instead of issuing a final verdict.
+      }
+      const routed = handleEscalation(currentReviewers, escalation, {
+        allowedReviewers: r.allowedReviewers,
+        baseDir: cwd,
+      });
+      if (routed.rejected || routed.warning) {
+        STOP — rejected or downgraded escalation is a review blocker.
+      }
+      currentReviewers = routed.reviewers;
+      if (currentReviewers.length > r.allowedReviewers.length || currentReviewers.length > 5) {
+        STOP — reviewer escalation exceeded the active allowlisted bound;
+      }
+      if (routed.escalated) {
+        spawn the additional reviewer in this same iteration with reviewPackage;
+        collect its AO_REVIEW_V1 output into rawReviewerOutputsByName under its bare name;
+      }
+      handledEscalations.add(escalationKey);
+      requestersToRerun.add(requestingResult.reviewer);
+    }
+  }
+  if (requestersToRerun.size > 0) {
+    After every requested specialist output is stored, rerun each requesting
+    reviewer with those raw specialist results and the unchanged reviewPackage.
+    Replace that requester's prior raw output in rawReviewerOutputsByName so its
+    next response is a final verdict, not the stale escalating verdict.
+    continue;
+  }
+  if (aggregate.verdict === 'BLOCKED') STOP and report aggregate findings;
+  break;
+}
+if (aggregate.verdict === 'APPROVE') {
+  assertReviewPackageCurrent(reviewPackage, { cwd });
+  reviewApproved = true; // continue to the checkpoint-preserving completion block below
+}
+
 // AO-CONTRACT:review-reject-reattempt
-const reviewRetry = reattempt(runId, {
-  reopen: ['integrate'],
-  reason: 'review_reject',
-});
-if (!reviewRetry.allowed) {
-  // STOP + preserve run/worktrees; the 15-attempt cap is authoritative.
+if (aggregate.verdict === 'REVISE' || aggregate.verdict === 'REJECT') {
+  delegate only the grounded findings to an executor/debugger scoped to the
+  root integration tree; the Athena lead coordinates and never edits them itself;
+  const reviewRetry = reattempt(runId, {
+    reopen: ['integrate'],
+    reason: 'review_reject',
+  });
+  if (!reviewRetry.allowed) {
+    // STOP + preserve run/worktrees; the 15-attempt cap is authoritative.
+  }
 }
 // Athena has no `verify` phase. Never target that Atlas-only phase; return through the
 // integrate recovery path and then start the next review round.
@@ -1606,16 +2474,20 @@ if (!reviewRetry.allowed) {
 
 **Rollback**: `.ao/autonomy.json` → `{ "reviewRouter": { "disabled": true } }`.
 
-After all required reviewers approve:
+Only when `reviewApproved === true`, preserve the full Athena checkpoint and complete the phase:
 
 ```javascript
-await completePhase(runId, 'review', undefined, {
+await completePhase(runId, 'review', {
+  approvedReviewDigest: reviewPackage.reviewDigest.value,
+  approvedReviewTreeOid: reviewPackage.reviewTreeOid,
+}, {
   checkpointData: {
     runId,
     teamSlug: reviewSpawnIdentity.teamSlug,
     intendedWorkers: reviewSpawnIdentity.intendedWorkers,
     spawnPath: reviewSpawnIdentity.spawnPath,
     adapterRunId: reviewSpawnIdentity.adapterRunId,
+    nativeSessionId: reviewSpawnIdentity.nativeSessionId,
     baseCommit: reviewSpawnIdentity.baseCommit,
     launchState: reviewSpawnIdentity.launchState,
     worktreeDigest: reviewSpawnIdentity.worktreeDigest,
@@ -1634,7 +2506,7 @@ if (!validateAthenaCheckpointBinding(finalizeCheckpoint, finalizeSpawnIdentity, 
 }
 ```
 
-### Phase 5b — SLOP CLEAN + COMMIT
+### Phase 5b — SLOP CLEAN + FINAL CONTENT
 
 Finalize is `reexecute` on resume. Use `runId` as an idempotency marker for the
 changelog and exec-plan row: update an existing row/entry for this run instead
@@ -1657,10 +2529,10 @@ counts as approval.
 After review approved:
 1. Run `Skill(skill="agent-olympus:slop-cleaner")` on all changed files
 2. Re-run build + tests to verify no regression
-3. Run `Skill(skill="agent-olympus:git-master")` for atomic commits
-4. **Optional branch completion**: only when `shipMode === 'auto'`, invoke
+3. **Optional branch completion**: only when `shipMode === 'auto'`, invoke
    `Skill(skill="agent-olympus:finish-branch")` for its local verification
-   checklist. Explicitly stop it before any push, PR, merge, or option prompt;
+   checklist before the final review. Explicitly stop it before any push, PR,
+   merge, or option prompt. It also may not mutate source files or create commits;
    Phase 6 below is the sole owner of outward shipping actions. Skip this helper
    entirely for `never` and `ask`.
 
@@ -1670,15 +2542,19 @@ Skip the entire changelog update when
 `noShip || config.ship.updateChangelog === false`. In particular,
 `ship.mode: "never"` suppresses this release side effect.
 
-Generate a CHANGELOG entry from the completed PRD:
-```bash
-node -e "
-  import { generateChangelogEntry, prependToChangelog } from './scripts/lib/changelog.mjs';
-  import { readFileSync } from 'fs';
-  const prd = JSON.parse(readFileSync('.ao/prd.json', 'utf8'));
-  const entry = generateChangelogEntry({ prd, version: '<detected or specified>', date: new Date().toISOString().slice(0,10) });
-  prependToChangelog('CHANGELOG.md', entry);
-"
+Generate or replace this run's CHANGELOG entry from the completed PRD:
+```javascript
+import { generateChangelogEntry } from './scripts/lib/changelog.mjs';
+import { upsertChangelogEntry } from './scripts/lib/finalize-content.mjs';
+import { readExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
+
+const prd = readExecutionPrd({ cwd, orchestrator: 'athena' }).prd;
+const entry = generateChangelogEntry({
+  prd,
+  version: '<detected or specified>',
+  date: new Date().toISOString().slice(0, 10),
+});
+upsertChangelogEntry('CHANGELOG.md', entry, { runId, cwd });
 ```
 If no CHANGELOG.md exists, one is created. Include in the next commit.
 
@@ -1688,27 +2564,230 @@ Skip the entire tracker update (including moving an active plan) when
 `noShip || config.ship.updateTechDebtTracker === false`. In particular,
 `ship.mode: "never"` suppresses this release side effect.
 
-If `docs/exec-plans/` exists, record this task as a completed plan entry:
-```bash
-# Ensure tracker has header row on first use
-if [ ! -f docs/exec-plans/tech-debt-tracker.md ]; then
-  printf "# Tech Debt Tracker\n| Date | Task | Files | Stories | Notes |\n|------|------|-------|---------|-------|\n" \
-    > docs/exec-plans/tech-debt-tracker.md
-fi
-echo "| $(date +%Y-%m-%d) | <task-slug> | <N files changed> | <N stories> | <one-line summary> |" \
-  >> docs/exec-plans/tech-debt-tracker.md
+If `docs/exec-plans/` exists, upsert this run's completed plan entry:
+```javascript
+import { upsertTechDebtTrackerRow } from './scripts/lib/finalize-content.mjs';
+
+upsertTechDebtTrackerRow(
+  'docs/exec-plans/tech-debt-tracker.md',
+  '| <date> | <task-slug> | <N files changed> | <N stories> | <one-line summary> |',
+  { runId, cwd },
+);
 ```
-If an active exec-plan file exists in `docs/exec-plans/active/`, move it to `docs/exec-plans/completed/`.
+If an active exec-plan file exists in `docs/exec-plans/active/`, move it to
+`docs/exec-plans/completed/` atomically. On resume, an existing destination with
+the source absent proves the move already completed; any other collision is a
+blocker rather than permission to overwrite.
 Include this file in the commit.
 
+### Phase 5e — FINAL REVIEW LOCK + COMMIT
+
+Cleanup, changelog, tracker, and checklist activity occurred after the first
+review, so that approval is not commit authority. Build Git evidence for the
+final filesystem tree first. Then, without mutating it, re-run all required
+checks and per-story acceptance/cross-validation against that exact snapshot
+and collect one fresh record per story. Prove the snapshot is still current
+before persisting those records, append them with its exact tree OID, and create
+a fresh complete review package from strict evidence. Never reuse the Phase 5
+package or reviewer outputs.
+
 ```javascript
-await completePhase(runId, 'finalize', undefined, {
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import {
+  assertReviewPackageCurrent,
+  assertReviewPackageHeadTree,
+  attachReviewContext,
+  buildReviewPackage,
+} from './scripts/lib/review-package.mjs';
+import { aggregateReviewResults } from './scripts/lib/review-contract.mjs';
+import { handleEscalation, routeReviewers } from './scripts/lib/review-router.mjs';
+import {
+  addVerification,
+  beginVerificationGeneration,
+  getSealedVerificationGeneration,
+  getVerificationGenerationProgress,
+  sealVerificationGeneration,
+} from './scripts/lib/run-artifacts.mjs';
+import { readExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
+
+const finalPrd = readExecutionPrd({ cwd, orchestrator: 'athena' }).prd;
+const finalGitEvidence = buildReviewPackage({ cwd, baseRef: pinnedReviewBaseCommit });
+assertReviewPackageCurrent(finalGitEvidence, { cwd });
+const finalGenerationInput = {
+  reviewTreeOid: finalGitEvidence.reviewTreeOid,
+  storyIds: finalPrd.userStories.map(story => story.id),
+  phase: 'final-review',
+};
+let finalGenerationStart = beginVerificationGeneration(runId, finalGenerationInput);
+if (!finalGenerationStart.ok
+  && finalGenerationStart.reason === 'different-verification-generation-already-open'
+  && finalGenerationStart.currentReviewTreeOid !== finalGitEvidence.reviewTreeOid) {
+  finalGenerationStart = beginVerificationGeneration(runId, finalGenerationInput, {
+    supersedeGenerationId: finalGenerationStart.currentGenerationId,
+  });
+}
+if (!finalGenerationStart.ok) {
+  throw new Error(`final verification generation did not start: ${finalGenerationStart.reason}`);
+}
+const finalGenerationId = finalGenerationStart.generation.generationId;
+const finalGenerationProgress = getVerificationGenerationProgress(
+  runId,
+  finalGenerationId,
+);
+if (!finalGenerationProgress.ok) {
+  throw new Error(`final verification progress is unsafe: ${finalGenerationProgress.reason}`);
+}
+const missingFinalStoryIds = new Set(finalGenerationProgress.missingStoryIds);
+for (const story of finalPrd.userStories.filter(item => missingFinalStoryIds.has(item.id))) {
+  // Re-run this story's named acceptance criteria and independent read-only
+  // cross-validation now against finalGitEvidence. Bind the concrete result;
+  // no historical ledger record or prior reviewer output may populate it.
+  const freshFinalRecord = {
+    story_id: story.id,
+    verdict: '<pass|skip exact criterion rollup>',
+    evidence: '<fresh overall evidence from this final-tree sweep>',
+    verifiedBy: '<codex|gemini|athena>',
+    criteria: story.acceptanceCriteria.map((criterion_text, criterion_index) => ({
+      criterion_index,
+      criterion_text,
+      verdict: '<pass|skip>',
+      evidence: '<fresh criterion-specific evidence>',
+    })),
+  };
+  assertReviewPackageCurrent(finalGitEvidence, { cwd });
+  const persisted = addVerification(runId, {
+    ...freshFinalRecord,
+    reviewTreeOid: finalGitEvidence.reviewTreeOid,
+    verificationGenerationId: finalGenerationId,
+  });
+  if (!persisted.ok) {
+    throw new Error(`final verification evidence was not persisted: ${persisted.reason}`);
+  }
+}
+assertReviewPackageCurrent(finalGitEvidence, { cwd });
+const finalGenerationSeal = sealVerificationGeneration(runId, finalGenerationId);
+if (!finalGenerationSeal.ok) {
+  throw new Error(`final verification generation did not seal: ${finalGenerationSeal.reason}`);
+}
+const finalSealedGeneration = getSealedVerificationGeneration(runId, finalGenerationId);
+if (!finalSealedGeneration.ok) {
+  throw new Error(`sealed final verification is unsafe: ${finalSealedGeneration.reason}`);
+}
+assertReviewPackageCurrent(finalGitEvidence, { cwd });
+const finalRoute = routeReviewers({
+  diffPaths: finalGitEvidence.diffPaths,
+  diffContent: finalGitEvidence.diff,
+  baseDir: cwd,
+});
+const finalReviewPackage = attachReviewContext(finalGitEvidence, {
+  prd: finalPrd,
+  verification: finalSealedGeneration.records,
+});
+if (finalRoute.reviewers.length === 0 || finalRoute.allowedReviewers.length === 0
+  || finalRoute.rejectedReviewers.length > 0
+  || finalRoute.reviewers.some((reviewer) => !finalRoute.allowedReviewers.includes(reviewer))) {
+  throw new Error('final review routing selected an empty or non-approval reviewer set');
+}
+const finalRound = loopTick(runId, 'final-review');
+if (!finalRound.allowed || finalRound.degraded) {
+  throw new Error('final review iteration budget or ledger is unavailable');
+}
+let finalReviewers = [...finalRoute.reviewers];
+const finalRawOutputsByName = new Map();
+// Spawn every final reviewer with finalReviewPackage and the AO_REVIEW_V1
+// contract, then store each raw response under its bare reviewer name.
+Fire every initial finalReviewers member in parallel with finalReviewPackage.
+For each completed response:
+  finalRawOutputsByName.set(<bare reviewer name>, <raw AO_REVIEW_V1 response>);
+Do not aggregate until every initial reviewer either has a stored response or
+is deliberately absent so aggregation returns BLOCKED.
+const finalHandledEscalations = new Set();
+let finalAggregate;
+for (;;) {
+  finalAggregate = aggregateReviewResults(finalRawOutputsByName, finalReviewers, {
+    allowedReviewers: finalRoute.allowedReviewers,
+    reviewPackage: finalReviewPackage,
+  });
+  if (finalAggregate.errors.length > 0) break;
+  const finalRequestersToRerun = new Set();
+  for (const requestingResult of finalAggregate.results) {
+    for (const escalation of requestingResult.escalations) {
+      const escalationKey = `${requestingResult.reviewer}\0${escalation.additionalReviewer}`;
+      if (finalHandledEscalations.has(escalationKey)) {
+        throw new Error('final reviewer repeated an already-fulfilled escalation');
+      }
+      const routed = handleEscalation(finalReviewers, escalation, {
+        allowedReviewers: finalRoute.allowedReviewers,
+        baseDir: cwd,
+      });
+      if (routed.rejected || routed.warning) {
+        throw new Error('final review escalation was rejected or downgraded');
+      }
+      finalReviewers = routed.reviewers;
+      if (routed.escalated) {
+        Fire escalation.additionalReviewer with the same finalReviewPackage;
+        finalRawOutputsByName.set(
+          escalation.additionalReviewer,
+          <raw AO_REVIEW_V1 response>,
+        );
+      }
+      finalHandledEscalations.add(escalationKey);
+      finalRequestersToRerun.add(requestingResult.reviewer);
+    }
+  }
+  if (finalRequestersToRerun.size > 0) {
+    Rerun each requesting reviewer with all fulfilled specialist raw results,
+    then replace its stale escalating result in finalRawOutputsByName.
+    continue;
+  }
+  break;
+}
+if (finalAggregate.verdict === 'BLOCKED') {
+  throw new Error(`final post-mutation review is blocked: ${finalAggregate.errors.join('; ')}`);
+}
+if (finalAggregate.verdict === 'REVISE' || finalAggregate.verdict === 'REJECT') {
+  const finalRetry = reattempt(runId, {
+    reopen: ['integrate'],
+    reason: 'final_review_reject',
+  });
+  if (!finalRetry.allowed || finalRetry.degraded) {
+    throw new Error('final review rejected and the bounded integration retry was unavailable');
+  }
+  Delegate only the findings in finalAggregate.results to a scoped executor/debugger
+  under the reopened integrate path. The Athena lead coordinates and never
+  edits the integration tree; rebuild verification and the final package after
+  the delegated fixes.
+  throw new Error('final post-mutation review did not approve; reopen integrate/review and do not commit');
+}
+assertReviewPackageCurrent(finalReviewPackage, { cwd });
+Skill(skill="agent-olympus:git-master");
+assertReviewPackageHeadTree(finalReviewPackage, { cwd });
+if (execFileSync('git', ['-C', cwd, 'status', '--porcelain'], { encoding: 'utf8' }).trim()) {
+  throw new Error('git-master left content outside the reviewed commit tree');
+}
+const finalCommit = execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], {
+  encoding: 'utf8',
+}).trim();
+```
+
+No source, documentation, generated artifact, index, or worktree mutation is
+allowed between `assertReviewPackageCurrent` and `git-master`; after the commit,
+the HEAD tree must equal the reviewer-bound `reviewTreeOid` exactly.
+
+```javascript
+await completePhase(runId, 'finalize', {
+  finalReviewDigest: finalReviewPackage.reviewDigest.value,
+  finalReviewTreeOid: finalReviewPackage.reviewTreeOid,
+  finalCommit,
+}, {
   checkpointData: {
     runId,
     teamSlug: finalizeSpawnIdentity.teamSlug,
     intendedWorkers: finalizeSpawnIdentity.intendedWorkers,
     spawnPath: finalizeSpawnIdentity.spawnPath,
     adapterRunId: finalizeSpawnIdentity.adapterRunId,
+    nativeSessionId: finalizeSpawnIdentity.nativeSessionId,
     baseCommit: finalizeSpawnIdentity.baseCommit,
     launchState: finalizeSpawnIdentity.launchState,
     worktreeDigest: finalizeSpawnIdentity.worktreeDigest,
@@ -2011,12 +3090,23 @@ if (shipCanAct) {
     for (const missingId of verificationGate.missing) {
       // 1. First attempt: try Codex cross-validation (same as Phase 4 xval step).
       // 2. If Codex unavailable, record explicit skip.
-      addVerification(runId, {
+      const catchupWrite = addVerification(runId, {
         story_id: missingId,
         verdict: 'skip',
         evidence: 'codex unavailable: verification gate catch-up',
         verifiedBy: 'athena',
+        reviewTreeOid: finalReviewPackage.reviewTreeOid,
+        criteria: prd.userStories.find(story => story.id === missingId)
+          .acceptanceCriteria.map((criterion_text, criterion_index) => ({
+            criterion_index,
+            criterion_text,
+            verdict: 'skip',
+            evidence: 'codex unavailable: criterion not externally cross-validated',
+          })),
       });
+      if (!catchupWrite.ok) {
+        throw new Error(`verification catch-up was not persisted: ${catchupWrite.reason}`);
+      }
     }
     verificationGate = checkVerificationGate(runId, storyIds);
   }
@@ -2762,6 +3852,17 @@ if (completeGate.skip) {
   // Report the already-completed run; do not repeat destructive cleanup.
   return;
 }
+const completionUsesNativeTeam = completionSpawnIdentity?.spawnPath === 'native-or-mixed';
+const completionSessionBinding = readClaudeSessionBinding();
+if (completionUsesNativeTeam && (
+  !completionSessionBinding.proven
+  || completionSpawnIdentity.nativeSessionId !== completionSessionBinding.currentSessionId
+  || completionCheckpoint.nativeSessionId !== completionSpawnIdentity.nativeSessionId
+)) {
+  throw new Error(
+    'Athena native cleanup is outside the originating Claude session; preserve checkpoint, team artifacts, and worktrees',
+  );
+}
 ```
 
 Prune wisdom to prevent unbounded growth:
@@ -2782,15 +3883,25 @@ Clean up:
     throw new Error(`Refusing Athena cleanup with unmerged workers: ${unmergedWorkers.join(', ')}`);
   }
   ```
-- `clearTeamStatus(teamName)` — delete `.ao/teams/<slug>/status.jsonl` (import from `scripts/lib/worker-status.mjs`)
-- IF Path A (native teams):
-  - `TeamDelete("athena-<slug>")` — if TeamDelete fails, log warning but don't block
-  - `addEvent(runId, { type: 'native_team_deleted', detail: { teamName: "athena-<slug>" } })`
+- IF Path A (native teams), use the supported task and teammate lifecycle:
+  - Read `TaskList()` and require every task to be terminal. Correct a stale task
+    with `TaskUpdate(taskId="...", status="completed")` only when the run artifacts
+    already prove its work completed; never manufacture completion for cleanup.
+  - For every spawned native teammate, send
+    `SendMessage({ to: "<worker>", message: { type: "shutdown_request", reason: "Athena run complete" } })`.
+  - Wait for shutdown acknowledgements and teammate exits. If any teammate is
+    active or its state is unknown, preserve the checkpoint, native team, `.ao/`
+    artifacts, and worktrees and STOP before destructive cleanup.
+  - Once no native teammate or task is active, let the lead/runtime perform its
+    supported shared-resource cleanup and record
+    `addEvent(runId, { type: 'native_team_shutdown_complete' })`. Never edit or
+    remove `~/.claude/teams/` or `~/.claude/tasks/` directly.
 - Shut down Codex + Gemini workers properly via adapter lifecycle:
   ```javascript
   import { shutdownTeam } from './scripts/lib/worker-spawn.mjs';
   await shutdownTeam(completionSpawnIdentity.teamSlug, cwd);  // supervisor-first: signals each worker's detached supervisor group (whose SIGTERM handler shuts the adapter down), then reaps any orphaned adapter group; tmux workers killed directly
   ```
+- `clearTeamStatus(teamName)` — delete `.ao/teams/<slug>/status.jsonl` (import from `scripts/lib/worker-status.mjs`)
 - Remove `.ao/teams/<slug>/`
 - Remove `.ao/state/athena-state.json`, `.ao/prd.json`
 - Clean up any remaining worktrees:
@@ -2896,7 +4007,7 @@ Gemini workers are assigned when the task involves visual/multimodal work, or wh
 
 ## Communication_Protocol
 
-**Claude ↔ Claude** (Path A — native teams): `SendMessage(to="worker", content="...")`
+**Claude ↔ Claude** (Path A — native teams): `SendMessage({ to: "worker", summary: "Relay coordination update", message: "..." })`
 **Claude ↔ Claude** (Path B — fallback): No direct messaging. Orchestrator reads agent output and injects context into subsequent agent prompts (orchestrator-mediated relay).
 
 **Codex** communication depends on the adapter:
@@ -3013,9 +4124,9 @@ task.
 
 | | Atlas | Athena |
 |---|---|---|
-| Communication | Hub-and-spoke | Peer-to-peer |
-| Discovery sharing | Lead relays | Workers share directly |
-| Best for | Independent tasks | Interdependent tasks |
+| Communication | Hub-and-spoke | Native Claude peers; lead bridges external workers |
+| Discovery sharing | Lead relays | Claude teammates share directly; Codex/Gemini use lead relay |
+| Best for | Independent tasks | Non-overlapping work packages that benefit from discovery sharing |
 | Overhead | Lower | Higher |
 
 </Athena_Orchestrator>

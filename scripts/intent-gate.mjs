@@ -125,8 +125,13 @@ function buildAdvice(category, confidence, directory) {
 
   const adviceMap = {
     'visual-engineering': 'Consider using the designer agent or Gemini for visual/UI tasks. Sonnet-class model recommended.',
+    'design-review': 'Design review detected. Use the read-only Aphrodite reviewer rather than an implementation agent.',
+    'security-review': 'Security review detected. Use the dedicated read-only security-reviewer agent.',
+    'test-authoring': 'Test-authoring request detected. Use the test-engineer agent for test strategy, implementation, and execution.',
+    'product-planning': 'Product planning detected. Use /plan, which invokes Hermes for PRDs, product specs, and reverse specs.',
     'deep': 'Opus-class model recommended for complex architectural analysis. Consider /deep-dive or architect agent.',
-    'quick': 'Haiku-class model is sufficient for this task. Explore agent can handle it efficiently.',
+    'deep-mutation': 'Complex implementation detected. Use the mutation-capable Hephaestus agent with Sonnet; keep read-only Architect for review-only work.',
+    'quick': 'Quick mutation task detected. Use the executor agent with a Sonnet-class model; Explore is read-only and cannot implement the fix.',
     'writing': 'Writer agent recommended. Haiku-class model is well-suited for documentation tasks.',
     'artistry': 'Designer agent with Gemini team worker recommended for creative/generative tasks. Sonnet-class model.',
     'planning': 'For product planning (new features, systems, specs): use /plan skill which invokes Hermes for structured spec generation. For implementation planning (how to refactor, approach a bug fix): EnterPlanMode is fine. Opus-class model recommended.',

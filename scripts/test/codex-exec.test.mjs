@@ -190,6 +190,29 @@ test('_buildSpawnArgs: ignoreUserConfig is an exec option and preserves global o
     '--ignore-user-config must be an exec option');
 });
 
+test('_buildSpawnArgs: read-only isolation keeps -c global and ignore flags after exec', () => {
+  const args = _buildSpawnArgs({
+    level: 'suggest',
+    configOverrides: ['project_doc_max_bytes=0', 'skills.bundled.enabled=false'],
+    strictConfig: true,
+    ignoreUserConfig: true,
+    ignoreRules: true,
+    skipGitRepoCheck: true,
+  });
+  assert.deepEqual(args, [
+    '-a', 'never', '-s', 'read-only', '--strict-config',
+    '-c', 'project_doc_max_bytes=0',
+    '-c', 'skills.bundled.enabled=false',
+    'exec', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check', '--json', '--ephemeral', '-',
+  ]);
+  const execIndex = args.indexOf('exec');
+  assert.ok(args.lastIndexOf('-c') < execIndex, 'all -c overrides are global');
+  assert.ok(args.indexOf('--strict-config') < execIndex, '--strict-config is global');
+  assert.ok(args.indexOf('--ignore-rules') > execIndex, '--ignore-rules is an exec option');
+  assert.ok(args.indexOf('--skip-git-repo-check') > execIndex,
+    '--skip-git-repo-check is an exec option');
+});
+
 test('_buildSpawnArgs: level=auto-edit → -a never -s workspace-write before exec', () => {
   const args = _buildSpawnArgs({ level: 'auto-edit' });
   assert.deepEqual(args, [
@@ -436,6 +459,51 @@ test('spawn: --no-mcp starts at the supported minimum Codex version', () => {
 
   assert.equal(spawnCount, 1);
   assert.equal(handle.workerMeta.codexVersion, '0.122.0');
+});
+
+test('spawn: --ignore-rules fails closed below Codex 0.143 or when version is unknown', () => {
+  for (const version of ['0.142.5', null]) {
+    let spawnCount = 0;
+    assert.throws(
+      () => spawnCodex('review', {
+        ignoreRules: true,
+        spawn: () => { spawnCount += 1; return createMockChildProcess(); },
+        versionProbe: () => ({
+          version,
+          raw: version ? `codex-cli ${version}\n` : 'unparseable\n',
+        }),
+        log: () => {},
+      }),
+      /rule isolation requires Codex >=0\.143\.0/,
+    );
+    assert.equal(spawnCount, 0);
+  }
+});
+
+test('spawn: --ignore-rules starts at Codex 0.143', () => {
+  let spawnCount = 0;
+  const handle = spawnCodex('review', {
+    ignoreRules: true,
+    spawn: () => { spawnCount += 1; return createMockChildProcess(); },
+    versionProbe: () => ({ version: '0.143.0', raw: 'codex-cli 0.143.0\n' }),
+    log: () => {},
+  });
+  assert.equal(spawnCount, 1);
+  assert.equal(handle.workerMeta.codexVersion, '0.143.0');
+});
+
+test('spawn: --strict-config fails closed below Codex 0.143', () => {
+  let spawnCount = 0;
+  assert.throws(
+    () => spawnCodex('review', {
+      strictConfig: true,
+      spawn: () => { spawnCount += 1; return createMockChildProcess(); },
+      versionProbe: () => ({ version: '0.142.5', raw: 'codex-cli 0.142.5\n' }),
+      log: () => {},
+    }),
+    /strict validator config requires Codex >=0\.143\.0/,
+  );
+  assert.equal(spawnCount, 0);
 });
 
 // ─── parseJSONLEvents ─────────────────────────────────────────────────────────

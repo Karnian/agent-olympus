@@ -1,9 +1,9 @@
 /**
- * Tests for scripts/lib/review-router.mjs (v1.0.2 US-005)
+ * Tests for scripts/lib/review-router.mjs (v1.1.0 US-005)
  *
  * Covers:
  *   1. Disabled gate via autonomy.json → full set immediately
- *   2. CSS-only diff → frontend reviewers (aphrodite, designer)
+ *   2. CSS-only diff → read-only UI reviewer (aphrodite)
  *   3. Backend-only diff → backend reviewers (architect, security-reviewer)
  *   4. alwaysInclude force-add (code-reviewer)
  *   5. No-match → full fallback + warning
@@ -11,6 +11,9 @@
  *   7. Chaos test: 30+ obfuscated secret patterns all trigger security-reviewer
  *   8. handleEscalation adds requested reviewer in same iteration
  *   9. Regex-based api[_-]?key matches apikey/api_key/api-key/apiKey
+ *  10. Execution roles never participate in approval routing or escalation
+ *  11. AO_REVIEW_V1 contract metadata is returned with every route
+ *  12. Review-policy self-changes force the immutable built-in reviewer set
  */
 
 import { describe, it, before, after } from 'node:test';
@@ -38,6 +41,34 @@ async function makeTmpProject() {
   return dir;
 }
 
+describe('review-router: routed reviewer output contract', () => {
+  for (const reviewer of ['code-reviewer', 'architect']) {
+    it(`${reviewer} gives AO_REVIEW_V1 precedence over its legacy verdict`, async () => {
+      const source = await fs.readFile(path.join(REPO_ROOT, 'agents', `${reviewer}.md`), 'utf-8');
+      const section = source.slice(source.indexOf('### AO_REVIEW_V1 caller contract'));
+      assert.match(section, /takes precedence over the\nlegacy prose and `stage_verdict` format/);
+      assert.match(section, /exactly one valid JSON\nobject, with no Markdown fence and no surrounding prose/);
+      const exampleMatch = section.match(/```json\n([\s\S]*?)\n```/);
+      assert.ok(exampleMatch, `${reviewer}: missing AO_REVIEW_V1 JSON example`);
+      const example = JSON.parse(exampleMatch[1]);
+      assert.deepEqual(
+        Object.keys(example),
+        ['schemaVersion', 'reviewer', 'reviewDigest', 'verdict', 'findings', 'escalations'],
+      );
+      assert.equal(example.schemaVersion, 1);
+      assert.equal(example.reviewer, reviewer);
+      assert.equal(typeof example.reviewDigest, 'string');
+      assert.match(section, /`reviewDigest` must exactly copy `reviewPackage\.reviewDigest\.value`/);
+      assert.equal(typeof example.findings[0].confidence, 'number');
+      assert.match(example.findings[0].severity, /^(critical|high|medium|low|info)$/);
+      assert.deepEqual(
+        Object.keys(example.escalations[0]),
+        ['additionalReviewer', 'reason'],
+      );
+    });
+  }
+});
+
 describe('review-router: loadRoutingConfig', () => {
   it('returns parsed JSONC config from real repo', async () => {
     const mod = await freshImport();
@@ -46,6 +77,14 @@ describe('review-router: loadRoutingConfig', () => {
     assert.ok(Array.isArray(cfg.rules));
     assert.ok(Array.isArray(cfg.securityPatterns));
     assert.ok(cfg.securityPatterns.length >= 30);
+    assert.deepEqual(
+      [...cfg.approvalReviewers].sort(),
+      ['aphrodite', 'architect', 'code-reviewer', 'security-reviewer', 'themis'],
+    );
+    assert.equal(cfg.reviewResultContract.name, 'AO_REVIEW_V1');
+    assert.equal(cfg.reviewResultContract.schemaVersion, 1);
+    assert.ok(cfg.reviewResultContract.required.includes('reviewDigest'));
+    assert.deepEqual(cfg.reviewResultContract.escalationRequired, ['additionalReviewer', 'reason']);
   });
 
   it('returns {} when config missing', async () => {
@@ -68,8 +107,17 @@ describe('review-router: routeReviewers basic scopes', () => {
       baseDir: tmp,
     });
     assert.ok(r.reviewers.includes('aphrodite'));
-    assert.ok(r.reviewers.includes('designer'));
+    assert.ok(!r.reviewers.includes('designer'));
     assert.ok(!r.reviewers.includes('architect'));
+    assert.equal(r.reviewResultContract.name, 'AO_REVIEW_V1');
+    assert.deepEqual(
+      r.allowedReviewers,
+      ['aphrodite', 'architect', 'code-reviewer', 'security-reviewer', 'themis'],
+    );
+    assert.deepEqual(
+      r.reviewResultContract.verdicts,
+      ['APPROVE', 'REVISE', 'REJECT', 'BLOCKED'],
+    );
   });
 
   it('Backend-only diff → architect + security-reviewer', async () => {
@@ -94,8 +142,8 @@ describe('review-router: routeReviewers basic scopes', () => {
     });
     assert.deepEqual(
       [...r.reviewers].sort(),
-      ['aphrodite', 'designer'],
-      `CSS-only must minimal-route to {aphrodite,designer}, got ${JSON.stringify(r.reviewers)}`,
+      ['aphrodite'],
+      `CSS-only must minimal-route to {aphrodite}, got ${JSON.stringify(r.reviewers)}`,
     );
     assert.ok(!r.reviewers.includes('code-reviewer'));
     assert.ok(!r.reviewers.includes('architect'));
@@ -119,10 +167,93 @@ describe('review-router: routeReviewers basic scopes', () => {
       assert.ok(r.reviewers.includes('architect'));
       assert.ok(r.reviewers.includes('security-reviewer'));
       assert.ok(r.reviewers.includes('aphrodite'));
-      assert.ok(r.reviewers.includes('test-engineer'));
+      assert.ok(r.reviewers.includes('themis'));
+      assert.ok(!r.reviewers.includes('test-engineer'));
+      assert.ok(!r.reviewers.includes('designer'));
+      assert.ok(!r.reviewers.includes('writer'));
       assert.match(r.warning || '', /rollback mode/);
     } finally {
       await fs.writeFile(cfgPath, original);
+    }
+  });
+
+  it('review-routing config changes ignore config narrowing and force every built-in reviewer', async () => {
+    const mod = await freshImport();
+    const cfgPath = path.join(tmp, 'config', 'review-routing.jsonc');
+    const original = await fs.readFile(cfgPath, 'utf-8');
+    const narrowed = original.replace(
+      /"approvalReviewers": \[[\s\S]*?\n  \],/,
+      '"approvalReviewers": ["aphrodite"],',
+    );
+    assert.notEqual(narrowed, original);
+    await fs.writeFile(cfgPath, narrowed);
+    try {
+      const r = mod.routeReviewers({
+        diffPaths: ['config/review-routing.jsonc'],
+        diffContent: narrowed,
+        baseDir: tmp,
+      });
+      assert.deepEqual(r.reviewers, [
+        'aphrodite',
+        'architect',
+        'code-reviewer',
+        'security-reviewer',
+        'themis',
+      ]);
+      assert.deepEqual(r.allowedReviewers, r.reviewers);
+      assert.equal(r.policySelfReview, true);
+      assert.equal(r.disabled, false);
+      assert.ok(r.reviewers.includes('security-reviewer'));
+      assert.ok(r.reviewResultContract.required.includes('reviewDigest'));
+      assert.match(r.warning || '', /forcing immutable built-in reviewer set/);
+    } finally {
+      await fs.writeFile(cfgPath, original);
+    }
+  });
+
+  it('review policy source and autonomy changes cannot use disabled or narrowed routing', async () => {
+    const mod = await freshImport();
+    mkdirSync(path.join(tmp, '.ao'), { recursive: true });
+    const autonomyPath = path.join(tmp, '.ao', 'autonomy.json');
+    await fs.writeFile(
+      autonomyPath,
+      JSON.stringify({ reviewRouter: { disabled: true } }),
+    );
+    try {
+      for (const policyPath of [
+        '.ao/autonomy.json',
+        'agents/aphrodite.md',
+        'agents/architect.md',
+        'agents/athena.md',
+        'agents/atlas.md',
+        'agents/code-reviewer.md',
+        'agents/security-reviewer.md',
+        'agents/themis.md',
+        'scripts/lib/review-contract.mjs',
+        'scripts/lib/review-package.mjs',
+        'scripts/lib/review-router.mjs',
+        'scripts/lib/run-artifacts.mjs',
+        'scripts/lib/phase-runner.mjs',
+        'skills/athena/SKILL.md',
+        'skills/atlas/SKILL.md',
+      ]) {
+        const r = mod.routeReviewers({
+          diffPaths: [policyPath],
+          diffContent: 'policy changed',
+          baseDir: tmp,
+        });
+        assert.equal(r.policySelfReview, true, policyPath);
+        assert.equal(r.disabled, false, policyPath);
+        assert.deepEqual(r.reviewers, [
+          'aphrodite',
+          'architect',
+          'code-reviewer',
+          'security-reviewer',
+          'themis',
+        ], policyPath);
+      }
+    } finally {
+      await fs.rm(path.dirname(autonomyPath), { recursive: true, force: true });
     }
   });
 
@@ -137,6 +268,77 @@ describe('review-router: routeReviewers basic scopes', () => {
     assert.ok(r.warning);
     assert.ok(r.reviewers.length >= 4);
     assert.ok(r.reviewers.includes('security-reviewer'));
+    assert.ok(r.reviewers.includes('themis'));
+    assert.ok(!r.reviewers.includes('test-engineer'));
+    assert.ok(!r.reviewers.includes('designer'));
+    assert.ok(!r.reviewers.includes('writer'));
+  });
+
+  it('Missing config fails safely to the built-in approval reviewers', async () => {
+    const mod = await freshImport();
+    const r = mod.routeReviewers({
+      diffPaths: ['unknown/file.xyz'],
+      diffContent: '',
+      baseDir: path.join(tmp, 'missing-project'),
+    });
+    assert.deepEqual(
+      [...r.reviewers].sort(),
+      ['aphrodite', 'architect', 'code-reviewer', 'security-reviewer', 'themis'],
+    );
+    assert.equal(r.reviewResultContract.name, 'AO_REVIEW_V1');
+  });
+
+  it('Test diff routes to Themis + code-reviewer, never test-engineer', async () => {
+    const mod = await freshImport();
+    const r = mod.routeReviewers({
+      diffPaths: ['scripts/test/example.test.mjs'],
+      diffContent: 'test("example", () => {})',
+      baseDir: tmp,
+    });
+    assert.ok(r.reviewers.includes('themis'));
+    assert.ok(r.reviewers.includes('code-reviewer'));
+    assert.ok(!r.reviewers.includes('test-engineer'));
+  });
+
+  it('Docs diff routes to code-reviewer, never writer', async () => {
+    const mod = await freshImport();
+    const r = mod.routeReviewers({
+      diffPaths: ['docs/usage.md'],
+      diffContent: '# Usage',
+      baseDir: tmp,
+    });
+    assert.deepEqual(r.reviewers, ['code-reviewer']);
+    assert.ok(!r.reviewers.includes('writer'));
+  });
+
+  it('stale execution-only rule is rejected and falls back safely', async () => {
+    const mod = await freshImport();
+    const cfgPath = path.join(tmp, 'config', 'review-routing.jsonc');
+    const original = await fs.readFile(cfgPath, 'utf-8');
+    const patched = original.replace(
+      '"reviewers": ["aphrodite"]',
+      '"reviewers": ["designer", "test-engineer", "writer"]',
+    );
+    await fs.writeFile(cfgPath, patched);
+    try {
+      const r = mod.routeReviewers({
+        diffPaths: ['src/styles/foo.css'],
+        diffContent: '.foo { color: blue; }',
+        baseDir: tmp,
+      });
+      assert.deepEqual(
+        [...r.rejectedReviewers].sort(),
+        ['designer', 'test-engineer', 'writer'],
+      );
+      assert.match(r.warning || '', /no safe approval reviewers/);
+      assert.ok(r.reviewers.includes('code-reviewer'));
+      assert.ok(r.reviewers.includes('themis'));
+      assert.ok(!r.reviewers.includes('designer'));
+      assert.ok(!r.reviewers.includes('test-engineer'));
+      assert.ok(!r.reviewers.includes('writer'));
+    } finally {
+      await fs.writeFile(cfgPath, original);
+    }
   });
 });
 
@@ -241,10 +443,9 @@ describe('review-router: chaos test — 30+ obfuscated secret patterns', () => {
 });
 
 describe('review-router: handleEscalation', () => {
-  it('adds the requested reviewer in same iteration', async () => {
+  it('adds an AO_REVIEW_V1 escalation in the same iteration', async () => {
     const mod = await freshImport();
     const r = mod.handleEscalation(['code-reviewer', 'aphrodite'], {
-      type: 'RE-REVIEW-REQUESTED',
       additionalReviewer: 'security-reviewer',
       reason: 'detected hardcoded API key in shared util',
     });
@@ -253,11 +454,23 @@ describe('review-router: handleEscalation', () => {
     assert.equal(r.reason, 'detected hardcoded API key in shared util');
   });
 
+  it('continues to accept the legacy typed escalation shape', async () => {
+    const mod = await freshImport();
+    const r = mod.handleEscalation(['code-reviewer'], {
+      type: 'RE-REVIEW-REQUESTED',
+      additionalReviewer: 'architect',
+      reason: 'shared contract changed',
+    });
+    assert.equal(r.escalated, true);
+    assert.ok(r.reviewers.includes('architect'));
+  });
+
   it('idempotent — already-included reviewer marks escalated=false', async () => {
     const mod = await freshImport();
     const r = mod.handleEscalation(['code-reviewer', 'security-reviewer'], {
       type: 'RE-REVIEW-REQUESTED',
       additionalReviewer: 'security-reviewer',
+      reason: 'security review is already active',
     });
     assert.equal(r.escalated, false);
     assert.ok(r.reviewers.includes('security-reviewer'));
@@ -267,7 +480,35 @@ describe('review-router: handleEscalation', () => {
     const mod = await freshImport();
     const r = mod.handleEscalation(['code-reviewer'], { type: 'OTHER' });
     assert.equal(r.escalated, false);
+    assert.equal(r.rejected, true);
     assert.deepEqual(r.reviewers, ['code-reviewer']);
+  });
+
+  it('rejects escalation to execution roles and sanitizes the current set', async () => {
+    const mod = await freshImport();
+    for (const role of ['designer', 'test-engineer', 'writer']) {
+      const r = mod.handleEscalation(['code-reviewer', role], {
+        type: 'RE-REVIEW-REQUESTED',
+        additionalReviewer: role,
+        reason: 'not an approval reviewer',
+      });
+      assert.equal(r.escalated, false);
+      assert.deepEqual(r.reviewers, ['code-reviewer']);
+      assert.equal(r.rejected, true);
+      assert.match(r.warning || '', /outside active allowlist/);
+    }
+  });
+
+  it('rejects a built-in reviewer excluded by the active routed allowlist', async () => {
+    const mod = await freshImport();
+    const r = mod.handleEscalation(['code-reviewer'], {
+      additionalReviewer: 'security-reviewer',
+      reason: 'credential flow changed',
+    }, { allowedReviewers: ['code-reviewer', 'architect'] });
+    assert.equal(r.escalated, false);
+    assert.equal(r.rejected, true);
+    assert.deepEqual(r.reviewers, ['code-reviewer']);
+    assert.match(r.warning || '', /outside active allowlist/);
   });
 });
 
@@ -292,5 +533,10 @@ describe('review-router: disabled via autonomy.json', () => {
     });
     assert.equal(r.disabled, true);
     assert.ok(r.reviewers.length >= 4);
+    assert.ok(r.reviewers.includes('themis'));
+    assert.ok(!r.reviewers.includes('designer'));
+    assert.ok(!r.reviewers.includes('test-engineer'));
+    assert.ok(!r.reviewers.includes('writer'));
+    assert.equal(r.reviewResultContract.name, 'AO_REVIEW_V1');
   });
 });

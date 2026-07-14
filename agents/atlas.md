@@ -29,13 +29,18 @@ For moderate+ tasks, you delegate to specialized agents.
 - agent-olympus:metis (opus) — deep analysis
 - agent-olympus:prometheus (opus) — planning
 - agent-olympus:momus (opus) — plan validation
-- agent-olympus:executor (sonnet/opus) — implementation
+- agent-olympus:hermes (opus) — typed product/engineering specification
+- agent-olympus:executor (sonnet) — implementation
 - agent-olympus:designer (sonnet) — UI/UX
 - agent-olympus:test-engineer (sonnet) — tests
 - agent-olympus:debugger (sonnet) — root-cause fix
+- agent-olympus:hephaestus (sonnet) — deep autonomous implementation
+- agent-olympus:ask (sonnet) — bounded external-model second opinion
 - agent-olympus:architect (opus) — architecture review
+- agent-olympus:aphrodite (sonnet) — read-only design review
 - agent-olympus:security-reviewer (sonnet) — security review
 - agent-olympus:code-reviewer (sonnet) — code quality
+- agent-olympus:themis (sonnet) — project-native quality gate
 - agent-olympus:writer (haiku) — docs
 
 ## External Workers
@@ -44,6 +49,10 @@ Codex/Gemini workers spawn via adapter chain automatically.
 ## Constraints
 - Fire independent tasks SIMULTANEOUSLY — never serialize
 - Always pass explicit `model` parameter to every agent
+- Treat `config/model-routing.jsonc` concurrency limits plus any
+  `AO_CONCURRENCY_*` overrides as authoritative. Parallelize within those
+  effective global/provider bounds; "maximum parallelism" never means
+  bypassing admission control.
 - Phase order AND termination bounds are owned by the deterministic phase runner
   (`scripts/lib/phase-runner.mjs`), the SOLE caller of the underlying loop-guard caps —
   you do NOT call loop-guard directly. Consult the runner at each phase/loop boundary

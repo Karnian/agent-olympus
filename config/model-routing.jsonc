@@ -3,7 +3,7 @@
 // Changes here override the built-in defaults in scripts/lib/model-router.mjs.
 //
 // Route keys match intent categories from scripts/lib/intent-patterns.mjs:
-//   visual-engineering | design-review | deep | quick | writing | artistry | planning | unknown
+//   visual-engineering | design-review | security-review | test-authoring | product-planning | deep | deep-mutation | quick | writing | artistry | planning | external-model | unknown
 //
 // Model aliases: "opus" | "sonnet" | "haiku"  (resolved at runtime by Claude Code)
 // Agent aliases: any agent available via the Skill tool  (agent-olympus:<name>)
@@ -36,6 +36,33 @@
       "teamWorkerType": "gemini"
     },
 
+    // Explicit security review/audit requests
+    // → dedicated read-only security reviewer
+    "security-review": {
+      "agent": "agent-olympus:security-reviewer",
+      "model": "sonnet",
+      "fallbackChain": ["sonnet", "opus"],
+      "teamWorkerType": null
+    },
+
+    // Explicit requests to write or add tests
+    // → test engineer instead of the documentation writer
+    "test-authoring": {
+      "agent": "agent-olympus:test-engineer",
+      "model": "sonnet",
+      "fallbackChain": ["sonnet", "opus"],
+      "teamWorkerType": null
+    },
+
+    // PRD, product-spec, and reverse-spec requests
+    // → Hermes, matching the /plan product-planning path
+    "product-planning": {
+      "agent": "agent-olympus:hermes",
+      "model": "opus",
+      "fallbackChain": ["opus", "sonnet"],
+      "teamWorkerType": null
+    },
+
     // Complex architectural / system-level tasks
     // → architect agent + opus for maximum reasoning depth
     "deep": {
@@ -45,12 +72,21 @@
       "teamWorkerType": null
     },
 
+    // Deep implementation work needs a mutation-capable worker. Architecture
+    // reviews remain on the read-only `deep`/architect route above.
+    "deep-mutation": {
+      "agent": "agent-olympus:hephaestus",
+      "model": "sonnet",
+      "fallbackChain": ["sonnet", "opus"],
+      "teamWorkerType": "codex"
+    },
+
     // Simple / quick fixes and small changes
-    // → explore agent + haiku for speed and cost efficiency
+    // → executor agent + sonnet because quick fixes are mutation tasks; explore is read-only
     "quick": {
-      "agent": "agent-olympus:explore",
-      "model": "haiku",
-      "fallbackChain": ["haiku", "sonnet"],
+      "agent": "agent-olympus:executor",
+      "model": "sonnet",
+      "fallbackChain": ["sonnet", "haiku"],
       "teamWorkerType": null
     },
 
@@ -81,6 +117,15 @@
       "teamWorkerType": null
     },
 
+    // Explicit Codex/Gemini/second-opinion intent must remain an external query
+    // instead of falling through to the generic executor route.
+    "external-model": {
+      "agent": "agent-olympus:ask",
+      "model": "sonnet",
+      "fallbackChain": ["sonnet"],
+      "teamWorkerType": null
+    },
+
     // Fallback when intent is unclear or confidence is low
     "unknown": {
       "agent": "agent-olympus:executor",
@@ -91,11 +136,12 @@
   },
 
   // -----------------------------------------------------------------------
-  // Concurrency limits — enforced by concurrency-gate.mjs (PreToolUse)
+  // Concurrency limits — shared by concurrency-gate.mjs (PreToolUse) and
+  // worker-spawn.mjs (detached adapter batches)
   // Env var overrides: AO_CONCURRENCY_GLOBAL, AO_CONCURRENCY_CLAUDE, etc.
   // -----------------------------------------------------------------------
   "concurrency": {
-    // Maximum total parallel Task/Agent invocations
+    // Maximum total parallel Task/Agent invocations or admitted team workers
     "maxParallelTasks": 10,
     // Maximum parallel Claude sub-agent workers
     "maxClaudeWorkers": 8,

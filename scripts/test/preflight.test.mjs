@@ -5,6 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +20,35 @@ async function makeTmpDir() {
 
 async function removeTmpDir(dir) {
   await fs.rm(dir, { recursive: true, force: true });
+}
+
+async function writeFakeClaude(binDir, version) {
+  await fs.mkdir(binDir, { recursive: true });
+  const binPath = path.join(binDir, 'claude');
+  await fs.writeFile(
+    binPath,
+    `#!/bin/sh\nprintf '%s\\n' 'Claude Code ${version}'\n`,
+    { mode: 0o755 },
+  );
+  await fs.chmod(binPath, 0o755);
+  return binPath;
+}
+
+function detectNativeTeamsInChild({ cwd, binDir, envValue }) {
+  const preflightUrl = new URL('../../scripts/lib/preflight.mjs', import.meta.url).href;
+  const script = `const mod = await import(${JSON.stringify(preflightUrl)}); const caps = await mod.detectCapabilities(); console.log(JSON.stringify({ hasNativeTeamTools: caps.hasNativeTeamTools }));`;
+  const env = {
+    ...process.env,
+    PATH: [binDir, process.env.PATH].filter(Boolean).join(path.delimiter),
+  };
+  if (envValue === undefined) delete env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
+  else env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = envValue;
+  const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
+    env,
+    encoding: 'utf-8',
+    cwd,
+  });
+  return JSON.parse(out.trim()).hasNativeTeamTools;
 }
 
 /**
@@ -427,7 +457,7 @@ test('detectCapabilities: returns object with all boolean fields', async () => {
   const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
   const caps = await detectCapabilities();
   assert.ok(typeof caps === 'object' && caps !== null);
-  for (const key of ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP']) {
+  for (const key of ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasAgentWorktreeIsolation', 'hasPreviewMCP']) {
     assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
   }
 });
@@ -453,56 +483,82 @@ test('detectCapabilities: AO_GEMINI_BINARY override satisfies the Gemini capabil
   }
 });
 
-test('detectCapabilities: hasNativeTeamTools follows CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var', async () => {
-  const { execFileSync } = await import('node:child_process');
-  // Isolate cwd so we don't pick up the project's .ao/autonomy.json (which may have nativeTeams:true)
+test('supportsNativeAgentTeams: requires the exact env flag and Claude Code >= 2.1.178', async () => {
+  const { supportsNativeAgentTeams } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(supportsNativeAgentTeams(undefined, '2.1.178'), false);
+  assert.equal(supportsNativeAgentTeams('0', '2.1.178'), false);
+  assert.equal(supportsNativeAgentTeams('true', '2.1.178'), false);
+  assert.equal(supportsNativeAgentTeams('1', null), false);
+  assert.equal(supportsNativeAgentTeams('1', 'not-a-version'), false);
+  assert.equal(supportsNativeAgentTeams('1', 'Claude Code 2.1.177'), false);
+  assert.equal(supportsNativeAgentTeams('1', 'Claude Code 2.1.178'), true);
+  assert.equal(supportsNativeAgentTeams('1', 'Claude Code 2.2.0'), true);
+});
+
+test('supportsAgentWorktreeIsolation: requires fail-closed Claude Code 2.1.203+', async () => {
+  const { supportsAgentWorktreeIsolation } = await import('../../scripts/lib/preflight.mjs');
+  assert.equal(supportsAgentWorktreeIsolation(null), false);
+  assert.equal(supportsAgentWorktreeIsolation('Claude Code 2.1.202'), false);
+  assert.equal(supportsAgentWorktreeIsolation('Claude Code 2.1.203'), true);
+  assert.equal(supportsAgentWorktreeIsolation('Claude Code 2.2.0'), true);
+});
+
+test('detectCapabilities: Native Agent Teams requires the env flag and a supported real Claude CLI', async () => {
   const tmpDir = await makeTmpDir();
   try {
-    const preflightUrl = new URL('../../scripts/lib/preflight.mjs', import.meta.url).href;
-    const script = `const mod = await import(${JSON.stringify(preflightUrl)}); const caps = await mod.detectCapabilities(); console.log(JSON.stringify({ hasNativeTeamTools: caps.hasNativeTeamTools }));`;
+    const binDir = path.join(tmpDir, 'bin');
+    await writeFakeClaude(binDir, '2.1.177');
+    assert.equal(detectNativeTeamsInChild({ cwd: tmpDir, binDir, envValue: '1' }), false);
 
-    // With env var set to '1' → true
-    const out1 = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
-      env: { ...process.env, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1' },
-      encoding: 'utf-8',
-      cwd: tmpDir,
-    });
-    assert.equal(JSON.parse(out1.trim()).hasNativeTeamTools, true);
-
-    // With env var unset → false
-    const env2 = { ...process.env };
-    delete env2.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
-    const out2 = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
-      env: env2,
-      encoding: 'utf-8',
-      cwd: tmpDir,
-    });
-    assert.equal(JSON.parse(out2.trim()).hasNativeTeamTools, false);
+    await writeFakeClaude(binDir, '2.1.178');
+    assert.equal(detectNativeTeamsInChild({ cwd: tmpDir, binDir, envValue: undefined }), false);
+    assert.equal(detectNativeTeamsInChild({ cwd: tmpDir, binDir, envValue: '1' }), true);
   } finally {
     await removeTmpDir(tmpDir);
   }
 });
 
-test('detectCapabilities: hasNativeTeamTools true when .ao/autonomy.json has nativeTeams:true (no env var)', async () => {
-  const { execFileSync } = await import('node:child_process');
+test('detectCapabilities: autonomy nativeTeams policy cannot enable missing runtime tools', async () => {
   const tmpDir = await makeTmpDir();
   try {
-    // Create .ao/autonomy.json with nativeTeams: true
+    const binDir = path.join(tmpDir, 'bin');
+    await writeFakeClaude(binDir, '2.1.178');
     await fs.mkdir(path.join(tmpDir, '.ao'), { recursive: true });
     await fs.writeFile(path.join(tmpDir, '.ao', 'autonomy.json'), JSON.stringify({ nativeTeams: true }));
+    assert.equal(
+      detectNativeTeamsInChild({ cwd: tmpDir, binDir, envValue: undefined }),
+      false,
+    );
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
 
-    const preflightUrl = new URL('../../scripts/lib/preflight.mjs', import.meta.url).href;
-    const script = `const mod = await import(${JSON.stringify(preflightUrl)}); const caps = await mod.detectCapabilities(); console.log(JSON.stringify({ hasNativeTeamTools: caps.hasNativeTeamTools }));`;
+test('detectCapabilities: capability cache invalidates on Claude version and env changes', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const binDir = path.join(tmpDir, 'bin');
+    await writeFakeClaude(binDir, '2.1.177');
+    assert.equal(detectNativeTeamsInChild({ cwd: tmpDir, binDir, envValue: '1' }), false);
 
-    // No env var, but autonomy.json has nativeTeams: true
-    const env = { ...process.env };
-    delete env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS;
-    const out = execFileSync(process.execPath, ['--input-type=module', '-e', script], {
-      env,
-      encoding: 'utf-8',
-      cwd: tmpDir,
-    });
-    assert.equal(JSON.parse(out.trim()).hasNativeTeamTools, true);
+    // The cache is still fresh, but an in-place CLI upgrade must be observed.
+    await writeFakeClaude(binDir, '2.1.178');
+    assert.equal(detectNativeTeamsInChild({ cwd: tmpDir, binDir, envValue: '1' }), true);
+
+    // Disabling the flag must invalidate the cached true result immediately.
+    assert.equal(detectNativeTeamsInChild({ cwd: tmpDir, binDir, envValue: undefined }), false);
+
+    // Re-enabling it must not reuse the cached env-disabled result.
+    assert.equal(detectNativeTeamsInChild({ cwd: tmpDir, binDir, envValue: '1' }), true);
+
+    const cache = JSON.parse(await fs.readFile(
+      path.join(tmpDir, '.ao', 'state', 'ao-capabilities.json'),
+      'utf8',
+    ));
+    assert.equal(cache.schemaVersion, 3);
+    assert.equal(cache.nativeTeamProbe.envEnabled, true);
+    assert.match(cache.nativeTeamProbe.claudeVersion, /2\.1\.178/);
+    assert.equal(cache.capabilities.hasNativeTeamTools, true);
   } finally {
     await removeTmpDir(tmpDir);
   }
@@ -513,7 +569,7 @@ test('detectCapabilities: handles command failures gracefully (all binary checks
   // Even if binaries are missing, the function should never throw
   const caps = await detectCapabilities();
   // All fields must be booleans regardless of environment
-  for (const key of ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP']) {
+  for (const key of ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasAgentWorktreeIsolation', 'hasPreviewMCP']) {
     assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
   }
 });
@@ -524,23 +580,23 @@ test('detectCapabilities: handles command failures gracefully (all binary checks
 
 test('formatCapabilityReport: formats ✓ for true capabilities', async () => {
   const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
-  const caps = { hasTmux: true, hasCodex: true, hasClaudeCli: true, hasGeminiCli: true, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: true };
+  const caps = { hasTmux: true, hasCodex: true, hasClaudeCli: true, hasGeminiCli: true, hasGitWorktree: true, hasNativeTeamTools: true, hasAgentWorktreeIsolation: true, hasPreviewMCP: true };
   const report = formatCapabilityReport(caps);
-  // All 7 entries should show ✓
+  // All entries should show ✓
   const checkmarks = (report.match(/✓/g) || []).length;
-  assert.equal(checkmarks, 7);
+  assert.equal(checkmarks, 8);
 });
 
 test('formatCapabilityReport: formats ✗ for false capabilities', async () => {
   const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
   const caps = { hasTmux: false, hasCodex: false, hasClaudeCli: false, hasGeminiCli: false, hasGitWorktree: false, hasNativeTeamTools: false, hasPreviewMCP: false };
   const report = formatCapabilityReport(caps);
-  // All 7 entries should show ✗
+  // All entries should show ✗
   const crosses = (report.match(/✗/g) || []).length;
-  assert.equal(crosses, 7);
+  assert.equal(crosses, 8);
 });
 
-test('formatCapabilityReport: includes all 7 capability names', async () => {
+test('formatCapabilityReport: includes all capability names', async () => {
   const { formatCapabilityReport } = await import('../../scripts/lib/preflight.mjs');
   const caps = { hasTmux: true, hasCodex: false, hasClaudeCli: true, hasGeminiCli: false, hasGitWorktree: true, hasNativeTeamTools: true, hasPreviewMCP: false };
   const report = formatCapabilityReport(caps);
@@ -550,6 +606,7 @@ test('formatCapabilityReport: includes all 7 capability names', async () => {
   assert.ok(report.includes('gemini-cli'), 'should mention gemini-cli');
   assert.ok(report.includes('git worktree'), 'should mention git worktree');
   assert.ok(report.includes('Native Agent Teams'), 'should mention Native Agent Teams');
+  assert.ok(report.includes('Agent worktree'), 'should mention Agent worktree isolation');
   assert.ok(report.includes('preview MCP'), 'should mention preview MCP');
 });
 
@@ -688,7 +745,7 @@ test('detectCapabilities: hasCodexExecJson is false when codex is not installed'
 test('detectCapabilities: handles all binary fields including hasCodexExecJson as booleans', async () => {
   const { detectCapabilities } = await import('../../scripts/lib/preflight.mjs');
   const caps = await detectCapabilities();
-  const allFields = ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasPreviewMCP'];
+  const allFields = ['hasTmux', 'hasCodex', 'hasCodexExecJson', 'hasCodexAppServer', 'hasClaudeCli', 'hasGeminiCli', 'hasGeminiAcp', 'hasGitWorktree', 'hasNativeTeamTools', 'hasAgentWorktreeIsolation', 'hasPreviewMCP'];
   for (const key of allFields) {
     assert.ok(typeof caps[key] === 'boolean', `${key} should be boolean`);
   }

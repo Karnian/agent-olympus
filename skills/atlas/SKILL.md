@@ -50,7 +50,7 @@ import {
 } from './scripts/lib/phase-runner.mjs';
 import {
   addEvent, appendUserTaskUpdate, createRun, finalizeRun, getActiveRunId,
-  getRun, getUserTaskUpdates,
+  getRun, getRunReviewBasePin, getUserTaskUpdates, pinRunReviewBase,
 } from './scripts/lib/run-artifacts.mjs';
 import { loadAutonomyConfig, resolveRunShipMode } from './scripts/lib/autonomy.mjs';
 const currentAtlasRequest = <user_request>;
@@ -330,9 +330,43 @@ const preflightReport = await runPreflight();
 for (const action of preflightReport.actions) {
   Output: "[Atlas] Preflight: " + action;
 }
-const { hasCodex, hasCodexAppServer, hasCodexExecJson, hasGeminiCli, hasGeminiAcp, hasTmux } = preflightReport.capabilities;
+const { hasAgentWorktreeIsolation, hasCodex, hasCodexAppServer, hasCodexExecJson, hasGeminiCli, hasGeminiAcp, hasTmux } = preflightReport.capabilities;
 const cwd = process.cwd();
 const capabilities = preflightReport.capabilities;
+import { resolveReviewBase } from './scripts/lib/review-package.mjs';
+const persistedTriageOutputs = getPipelineState(runId).phases.triage?.outputs;
+let pinnedReviewBase;
+const durableReviewBase = getRunReviewBasePin(runId);
+if (durableReviewBase.ok) {
+  pinnedReviewBase = durableReviewBase.pin;
+  const revalidatedBase = resolveReviewBase({
+    cwd,
+    baseRef: pinnedReviewBase.baseRefCommit,
+  });
+  if (revalidatedBase.baseRefCommit !== pinnedReviewBase.baseRefCommit) {
+    throw new Error('BLOCKED: Atlas immutable review-base commit no longer resolves exactly');
+  }
+  if (persistedTriageOutputs && (
+    persistedTriageOutputs.reviewBaseRef !== pinnedReviewBase.baseRef
+    || persistedTriageOutputs.reviewBaseCommit !== pinnedReviewBase.baseRefCommit
+    || persistedTriageOutputs.reviewBaseSource !== pinnedReviewBase.source
+  )) {
+    throw new Error('BLOCKED: Atlas pipeline replica disagrees with the immutable review-base pin');
+  }
+} else {
+  // A resumed run without the immediate pin may already have delegated work;
+  // never reconstruct its boundary from today's branch/CI environment.
+  if (!createdAtlasRun || _triage.skip) {
+    throw new Error(`BLOCKED: Atlas resumed without a valid immutable review-base pin (${durableReviewBase.reason})`);
+  }
+  const resolvedReviewBase = resolveReviewBase({ cwd });
+  const pinned = pinRunReviewBase(runId, resolvedReviewBase);
+  if (!pinned.ok) {
+    throw new Error(`BLOCKED: Atlas could not durably pin the review base before analysis (${pinned.reason})`);
+  }
+  pinnedReviewBase = pinned.pin;
+}
+const pinnedReviewBaseCommit = pinnedReviewBase.baseRefCommit;
 Output: formatCapabilityReport(preflightReport.capabilities, { orchestrator: 'Atlas' })
 
 // Step 3: Guard input size
@@ -501,7 +535,17 @@ Output: "[Atlas] Triage + Analysis complete — complexity: <complexity>, scope:
 ```
 
 ```javascript
-await completePhase(runId, 'triage');   // canonical boundary before any later phase can complete or skip
+await completePhase(runId, 'triage', {
+  reviewBaseRef: pinnedReviewBase.baseRef,
+  reviewBaseCommit: pinnedReviewBaseCommit,
+  reviewBaseSource: pinnedReviewBase.source,
+}, {
+  checkpointData: {
+    reviewBaseRef: pinnedReviewBase.baseRef,
+    reviewBaseCommit: pinnedReviewBaseCommit,
+    reviewBaseSource: pinnedReviewBase.source,
+  },
+}); // canonical boundary before any later phase can complete or skip
 ```
 
 **Trivial tasks**: Skip phases 1-2, execute directly (Atlas CAN implement simple things itself).
@@ -512,8 +556,13 @@ PRD so the downstream finalize/ship contract still holds:
 skipPhase(runId, 'context', 'trivial');
 skipPhase(runId, 'spec', 'trivial');
 skipPhase(runId, 'plan', 'trivial');
-// Write .ao/prd.json = { projectName:'atlas-<slug>',
-//   userStories:[{ id:'US-001', title:<task>, acceptanceCriteria:[<derived>], passes:false }] }
+// Write the same AO_SPEC_V1 superset used by the full path:
+// { projectName:'atlas-<slug>', mode:'engineering-change', scale:'S',
+//   goals:[<task outcome>], nonGoals:[], constraints:[], risks:[], openQuestions:[],
+//   userStories:[{ id:'US-001', title:<task>,
+//     acceptanceCriteria:['GIVEN ... WHEN ... THEN ...'], passes:false,
+//     assignTo:'claude', agentType:'executor', model:'sonnet',
+//     scope:['<single concrete repo-relative affected path>'], parallelGroup:'A' }] }
 // Do NOT self-verify here. The normal execute→verify path sets passes:true and records
 // the US-001 verification, so the changelog (passes:true only) and PR body both include it.
 ```
@@ -540,18 +589,28 @@ metis_analysis = {
 }
 ```
 
-If `NEEDS_CODEX`, simultaneously spawn Codex (batch executor — adapter auto-selected):
-```bash
-# Adapter auto-selected by worker-spawn.mjs selectAdapter():
-#   codex-appserver (preferred) → multi-turn JSON-RPC, live steering
-#   codex-exec → single-turn JSONL
-#   tmux (fallback) → legacy pane capture, resolves binary + injects PATH
-# Codex approval mode mirrors Claude's permission level automatically (codex-approval.mjs).
-# Override: set codex.approval in .ao/autonomy.json to "suggest", "auto-edit", or "full-auto".
-CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
-tmux new-session -d -s "atlas-codex-analyze" -c "<cwd>"
-tmux send-keys -t "atlas-codex-analyze" "\"$CODEX_BIN\" <approval-flag> exec \"<analysis prompt>\"" Enter
+If `NEEDS_CODEX`, simultaneously spawn Codex through the canonical worker
+adapter lifecycle (never construct a CLI or tmux command in this skill):
+```javascript
+import {
+  allocateTeamRunId,
+  spawnTeam,
+} from './scripts/lib/worker-spawn.mjs';
+
+const analysisTeam = `atlas-analysis-${runId}`;
+const analysisState = await spawnTeam(analysisTeam, [{
+  name: 'codex-analysis',
+  type: 'codex',
+  prompt: '<analysis prompt>',
+  cwd,
+  // An inherited root path keeps the legacy tmux adapter on the exact same
+  // tree instead of making an unrelated clean worktree.
+  worktreePath: cwd,
+}], cwd, capabilities, { runId: allocateTeamRunId() });
 ```
+`spawnTeam()` owns adapter selection (app-server → exec → tmux), permission
+mirroring, supervisor state, and provider failover. Monitor/collect/shutdown it
+with the same canonical functions used in Phase 3; never bypass that lifecycle.
 
 **[OPTIONAL] Deep Dive** — if metis classifies complexity as `complex` or `architectural` AND ambiguity > 40:
 ```
@@ -581,6 +640,7 @@ Before implementation planning, ensure a structured spec exists. Hermes acts as 
 
 **Check for existing spec:**
 ```
+let hermes_output;
 Does .ao/prd.json exist AND is it non-empty?
 ```
 
@@ -588,8 +648,11 @@ Does .ao/prd.json exist AND is it non-empty?
 
 Hermes validates the existing spec against the current task:
 ```
-Task(subagent_type="agent-olympus:hermes", model="opus",
-  prompt="VALIDATE this existing specification against the task and analysis.
+hermes_output = Task(subagent_type="agent-olympus:hermes", model="opus",
+  prompt="MODE: validate
+  OUTPUT_CONTRACT: AO_SPEC_V1
+
+  Validate this existing specification against the task and analysis.
 
   Existing spec: <contents of .ao/prd.json>
   Task: <user_request>
@@ -602,21 +665,30 @@ Task(subagent_type="agent-olympus:hermes", model="opus",
   4. Are scope boundaries clear (goals vs non-goals)?
   5. Do constraints and risks reflect what metis found in the codebase?
 
-  If spec is SUFFICIENT: respond with 'VERDICT: PASS' and a one-line summary.
-  If spec needs updates: respond with 'VERDICT: UPDATE' and the corrected spec
-    in the same JSON format, preserving existing fields that are still valid.
-  If spec is fundamentally mismatched: respond with 'VERDICT: RECREATE' and
-    produce a new spec from scratch.")
+  Return exactly one AO_SPEC_V1 JSON object.
+  If sufficient: verdict PASS with specMarkdown:null and prd:null.
+  If updates are needed: verdict UPDATE with complete specMarkdown and prd.
+  If fundamentally mismatched: verdict RECREATE with complete replacements.
+  PASS only when both paired artifacts exist and the current PRD already has
+  every AO_SPEC_V1 PRD field (including mode, risks, and passes:false) with
+  uppercase GIVEN/WHEN/THEN criteria. A legacy /plan shape requires UPDATE.
+  Paired .ao/spec.md exists: <true|false>.
+  Preserve every still-valid field and set every returned story's passes to false.")
 ```
 
-If VERDICT is UPDATE or RECREATE → overwrite `.ao/prd.json` and `.ao/spec.md` with Hermes output.
+Never write the raw Hermes response to either artifact. The shared validation step
+below preserves both existing files for PASS and writes separate typed artifacts
+for UPDATE or RECREATE.
 
 #### Case B: .ao/prd.json does NOT exist (user skipped /plan)
 
 Hermes creates a spec from the analysis results:
 ```
-Task(subagent_type="agent-olympus:hermes", model="opus",
-  prompt="Create a product specification for this task.
+hermes_output = Task(subagent_type="agent-olympus:hermes", model="opus",
+  prompt="MODE: <product-feature|engineering-change|bugfix, selected from the task>
+  OUTPUT_CONTRACT: AO_SPEC_V1
+
+  Create an executable specification for this task.
 
   Task: <user_request>
   Analysis: <metis_analysis>
@@ -625,15 +697,13 @@ Task(subagent_type="agent-olympus:hermes", model="opus",
 
   Scale assessment: <detected_scale from Phase 0>
 
-  Produce a structured spec with:
-  1. Problem Statement — WHO has this problem, WHAT is the pain, WHY now
-  2. Target Users — specific personas
-  3. Goals — specific, measurable objectives
-  4. Non-Goals — explicitly out of scope
-  5. User Stories — each with ID (US-001), JTBD format, GIVEN/WHEN/THEN acceptance criteria
-  6. Success Metrics — measurable outcomes with target values
-  7. Constraints — from codebase analysis
-  8. Risks & Unknowns — areas needing caution
+  Return exactly one AO_SPEC_V1 JSON object with verdict CREATE, complete
+  specMarkdown, and a machine-readable prd. Every story must have a unique ID,
+  a specific title, non-empty GIVEN/WHEN/THEN acceptance criteria, and passes:false.
+
+  Product fields such as personas and outcome metrics are required only for a
+  product-feature. Engineering changes and bug fixes instead emphasize invariants,
+  compatibility, migration/rollback, failure behavior, and verification.
 
   IMPORTANT: Replace untestable words (robust, fast, user-friendly, seamless,
   efficient, intuitive) with measurable alternatives.
@@ -643,26 +713,35 @@ Task(subagent_type="agent-olympus:hermes", model="opus",
   For L-scale: comprehensive. Up to 5 open questions with defaults + impact analysis.")
 ```
 
-**Sub-agent output validation (Hermes) — MANDATORY:**
-```
-hermes_output = <result from Hermes Task() call above>
+**Sub-agent output validation and persistence (Hermes) — MANDATORY:**
+```javascript
+import { writeHermesSpecArtifacts } from './scripts/lib/spec-artifact.mjs';
 
-If hermes_output is empty OR hermes_output.length < 50:
-  Output: "[Atlas] ⚠ Hermes spec creation returned empty. Retrying with reduced input..."
-  import { extractStructuralSummary } from './scripts/lib/input-guard.mjs';
+let specArtifactResult;
+try {
+  // Parses exact AO_SPEC_V1 JSON, validates the PRD, and atomically writes
+  // separate .ao/spec.md and .ao/prd.json payloads. PASS performs no write.
+  specArtifactResult = writeHermesSpecArtifacts(hermes_output);
+} catch (error) {
+  Output: "[Atlas] ⚠ Hermes returned an invalid AO_SPEC_V1 envelope — retrying once with reduced input...";
+  const { extractStructuralSummary } = await import('./scripts/lib/input-guard.mjs');
   const { summary } = extractStructuralSummary(<user_request>, 100);
   hermes_output = Task(subagent_type="agent-olympus:hermes", model="sonnet",
-    prompt="Create a product spec for: " + summary)
+    prompt="MODE: <same selected mode>\nOUTPUT_CONTRACT: AO_SPEC_V1\nThe prior envelope or persisted pair failed validation. Return a complete CREATE for Case B, or UPDATE/RECREATE for Case A; never PASS after artifact validation failure. Task: " + summary);
+  try {
+    specArtifactResult = writeHermesSpecArtifacts(hermes_output);
+  } catch (retryError) {
+    Output: "[Atlas] ✗ Spec Gate FAILED — Hermes did not return a valid typed specification after retry.";
+    await addWisdom({ category: 'debug', lesson: 'Atlas Spec Gate failed: invalid AO_SPEC_V1 output after retry.', confidence: 'high' });
+    STOP — do not proceed with missing or malformed artifacts.
+  }
+}
 
-  If hermes_output is STILL empty:
-    Output: "[Atlas] ✗ Spec Gate FAILED — Hermes could not create spec after retry."
-    Output: "[Atlas] Try: (1) run /plan first, or (2) provide a smaller task scope."
-    await addWisdom({ category: 'debug', lesson: 'Atlas Spec Gate failed: Hermes empty output.', confidence: 'high' });
-    STOP — do not proceed.
+if (!specArtifactResult.written && <Case B: no existing PRD>) {
+  STOP — PASS cannot create the missing specification.
+}
+Output: "[Atlas] Spec gate passed — " + specArtifactResult.summary;
 ```
-
-Write Hermes output to `.ao/spec.md` and `.ao/prd.json`.
-Output: "[Atlas] Spec gate passed — <N> user stories ready for planning."
 
 #### After Spec Gate
 
@@ -674,18 +753,50 @@ Proceed to Phase 2 with a guaranteed spec. Prometheus now receives structured re
 
 Output: "[Atlas] Phase 2: PLAN + VALIDATE — creating execution plan..."
 
-<!-- AO-CONTRACT:consensus-plan -->
-**[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories, replace the standard Prometheus + Momus single pass with the consensus-plan skill for a higher-confidence PRD:
+```javascript
+import { readPlanningPrdForExecution } from './scripts/lib/execution-prd-store.mjs';
+
+// Pin the typed planning generation before any planner sees it. The same CAS
+// generation is required when the approved assignments are persisted below.
+const planningPrdState = readPlanningPrdForExecution({ cwd });
+let approvedConsensusAssignmentPlan = null;
 ```
-Skill(skill="agent-olympus:consensus-plan",
+
+<!-- AO-CONTRACT:consensus-plan -->
+**[OPTIONAL] Consensus Plan** — for complex tasks with 3 or more user stories,
+replace the standard Prometheus + Momus assignment pass with the consensus-plan
+skill. It returns assignments only and never writes the typed PRD:
+
+```javascript
+import { parseConsensusAssignmentPlan } from './scripts/lib/consensus-assignment-plan.mjs';
+import { writeOutbox } from './scripts/lib/artifact-pipe.mjs';
+
+const consensusRawOutput = Skill(skill="agent-olympus:consensus-plan",
   args="Run consensus planning for this task.
+  OUTPUT_CONTRACT: AO_CONSENSUS_ASSIGNMENT_PLAN_V1
+  Orchestrator: atlas
+  Source PRD generation: <planningPrdState.generation>
+  Available providers: Claude=true, Codex=<hasCodex>, Gemini=<hasGeminiCli>
   Task: <user_request>
   Analysis: <metis_analysis>
-  Spec: <contents of .ao/prd.json>
+  Spec: <planningPrdState.prd>
   Wisdom: <formatWisdomForPrompt()>
-  External context (if gathered): <external_context>")
+  External context (if gathered): <external_context>");
+approvedConsensusAssignmentPlan = parseConsensusAssignmentPlan(consensusRawOutput, {
+  orchestrator: 'atlas',
+});
+// Audit copy only; never reload the fail-open archival pipe as authority.
+await writeOutbox(
+  runId,
+  'plan',
+  'consensus-assignment-plan.json',
+  approvedConsensusAssignmentPlan,
+);
 ```
-If consensus-plan is used, skip the standard Prometheus + Momus steps below and go directly to PRD generation.
+If consensus-plan is used, skip the standard Prometheus + Momus steps below.
+The common checked enrichment block later consumes
+`approvedConsensusAssignmentPlan`; no consensus path may directly mutate
+`.ao/prd.json`.
 
 **Standard path** (trivial–moderate tasks, or fewer than 3 stories):
 
@@ -693,16 +804,22 @@ If consensus-plan is used, skip the standard Prometheus + Momus steps below and 
 // Inject ORCH_MODE=light marker so prometheus runs its self-audit
 // (agents/prometheus.md "Light-Mode Self-Audit" section) when momus is skipped.
 const _orchModeHint = (orchMode === 'light') ? 'ORCH_MODE=light\n' : '';
+const _prometheusProviderHint = `Provider availability: Codex=${hasCodex ? 'available' : 'unavailable'}, Gemini=${(hasGeminiCli || hasGeminiAcp) ? 'available' : 'unavailable'}. Assign only available providers.`;
+const _prometheusCodexHint = hasCodex
+  ? 'Consider Codex assignments for suitable algorithmic, large-refactoring, or exploratory work.'
+  : 'Codex is unavailable; do not assign any Codex worker.';
 ```
 
 ```
 Task(subagent_type="agent-olympus:prometheus", model="opus",
-  prompt=_orchModeHint + "Create implementation plan with:
+  prompt=_orchModeHint + _prometheusProviderHint + '\n' + _prometheusCodexHint + "\nCreate implementation plan with:
   - Exact file paths per task
-  - Agent type and model tier
+  - For Claude tasks, one execution agentType from:
+    executor, designer, test-engineer, debugger, hephaestus, writer
+  - Provider and model tier
   - Parallel groups (non-overlapping file scopes)
+  - Provider-homogeneous groups, with every Codex/Gemini group before every Claude group
   - Concrete acceptance criteria
-  - Codex assignments for algorithmic/refactoring work
   Spec: <contents of .ao/prd.json>
   Analysis: <metis_analysis>. Task: <user_request>
   External context (if gathered): <external_context>")
@@ -736,24 +853,48 @@ and re-run any skipped stages before proceeding.
 // plan-phase checkpoint is performed by completePhase(runId, 'plan') at the phase exit (see Phase 2 entry).
 ```
 
-**Generate PRD** (after plan approved):
-Write `.ao/prd.json` with user stories from the plan:
+**Enrich the typed PRD** (after plan approved):
+Read the AO_SPEC_V1 `.ao/prd.json` created by the Spec Gate, preserve its
+`mode`, `scale`, goals, non-goals, constraints, risks, open questions, and any
+mode-specific product fields, then add execution assignments to its stories.
+Never replace the typed requirements with a reduced execution-only object.
 ```json
 {
   "projectName": "atlas-<task-slug>",
+  "mode": "engineering-change",
+  "scale": "M",
+  "goals": ["..."],
+  "nonGoals": ["..."],
+  "constraints": ["..."],
+  "risks": ["..."],
+  "openQuestions": [],
   "userStories": [
     {
       "id": "US-001",
       "title": "...",
-      "acceptanceCriteria": ["specific", "measurable", "testable"],
+      "acceptanceCriteria": ["GIVEN ... WHEN ... THEN ..."],
       "passes": false,
       "assignTo": "claude|codex|gemini",
+      "agentType": "executor",
       "model": "opus|sonnet|haiku",
+      "scope": ["src/exact-file.mjs", "test/exact-file.test.mjs"],
       "parallelGroup": "A"
     }
   ]
 }
 ```
+
+Every story persists a unique, explicit, safe repo-relative `scope`; wildcards,
+traversal, duplicates, and overlapping scopes inside one parallel group are
+rejected. Claude stories also persist an execution-only `agentType` from
+`executor`, `designer`, `test-engineer`, `debugger`, `hephaestus`, or `writer`.
+Codex/Gemini stories omit `agentType`.
+
+Atlas groups are deliberately provider-homogeneous. Every external Codex or
+Gemini group must precede every Claude group: external worktrees can then branch
+from and merge into a clean committed root, while Claude may dirty the root only
+after all external integration is finished. If the desired dependency order
+cannot satisfy this invariant, reassign the story provider or use Athena.
 
 **Cost Estimation** — before execution, estimate and display projected cost:
 ```
@@ -771,9 +912,42 @@ Display cost breakdown per model tier to user. If `.ao/autonomy.json` has `budge
 - ❌ "Works correctly"
 
 These ARE acceptable:
-- ✅ "GET /api/users returns 200 with User[] body"
-- ✅ "Function parseConfig() handles missing keys by returning defaults"
-- ✅ "Test file tests/auth.test.ts exists and all 5 cases pass"
+- ✅ "GIVEN a valid request WHEN GET /api/users runs THEN it returns 200 with User[]"
+- ✅ "GIVEN a config missing keys WHEN parseConfig() runs THEN it returns documented defaults"
+- ✅ "GIVEN the auth suite WHEN tests run THEN all five named cases pass"
+
+Persist the enriched superset PRD only through the hardened generation-CAS
+store. The approved plan supplies `<enriched AO_SPEC_V1 superset>`; the store
+re-reads the planning generation, proves that only allowlisted assignment
+fields changed, validates the exact persisted execution schema, and performs a
+durable atomic replacement. Never call `writeHermesSpecArtifacts()` again after
+this enrichment; a new spec requires a terminalized/restarted run.
+
+```javascript
+import { assertExecutionPrd } from './scripts/lib/execution-prd.mjs';
+import { buildConsensusExecutionPrd } from './scripts/lib/consensus-assignment-plan.mjs';
+import { enrichExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
+
+const executionCandidate = approvedConsensusAssignmentPlan
+  ? buildConsensusExecutionPrd(
+      planningPrdState.prd,
+      approvedConsensusAssignmentPlan,
+      {
+        orchestrator: 'atlas',
+        sourcePrdGeneration: planningPrdState.generation,
+        hasCodex,
+        hasGemini: hasGeminiCli,
+      },
+    )
+  : <standard Prometheus-enriched AO_SPEC_V1 superset>;
+const plannedPrdState = enrichExecutionPrd(executionCandidate, {
+  cwd,
+  orchestrator: 'atlas',
+  expectedGeneration: planningPrdState.generation,
+});
+const plannedPrd = plannedPrdState.prd;
+assertExecutionPrd(plannedPrd, { orchestrator: 'atlas', allowCompleted: false });
+```
 
 ```
 // await completePhase(runId, 'plan', null, { checkpointData: { prdSnapshot: <prd.json contents> } })  — see Phase 2 entry; carries the PRD snapshot into the checkpoint.
@@ -798,6 +972,23 @@ if (getPipelineState(runId).attempt === 0) {
 const g = enterPhase(runId, 'execute');  // skipped on resume, or when a review-reject reopened only 'verify'
 // if (!g.skip) { …run the stories below; finish with completePhase(runId, 'execute', …) … }
 ```
+
+Load and validate the persisted execution contract before dispatching any story.
+Resume may legitimately contain already-passed stories, but all assignment,
+dependency, provider, and acceptance-criteria checks still apply:
+
+```javascript
+import {
+  assertExecutionPrd,
+  buildAtlasStoryDefinitions,
+} from './scripts/lib/execution-prd.mjs';
+import { readExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
+
+const executionPrdState = readExecutionPrd({ cwd, orchestrator: 'atlas' });
+const prd = executionPrdState.prd;
+assertExecutionPrd(prd, { orchestrator: 'atlas', allowCompleted: true });
+const storyDefinitions = buildAtlasStoryDefinitions(prd, { allowCompleted: true });
+```
 A later **review reject** re-enters via `reattempt(runId, {reopen:['verify'], reason:'review_reject'})`
 (back to Phase 4); a **quality-gate fail** re-enters via `reattempt(runId, {reopen:['execute','verify'],
 reason:'quality_fail'})` (back here). Each `reattempt` ticks the 15-cap atomically; `!allowed` ⇒ STOP.
@@ -817,28 +1008,76 @@ reason:'quality_fail'})` (back here). Each `reattempt` ticks the 15-cap atomical
 - If any story takes longer than 5 minutes, output a reminder:
   `[Atlas] US-004 still in progress (7m elapsed)...`
 
-For each story in prd.json with `passes: false`, execute and verify:
+For each entry in `storyDefinitions` with `passes: false`, execute and verify:
 
-1. Group independent stories by `parallelGroup` — fire simultaneously
+1. Read `parallelGroup` blocks in their first-appearance PRD order. Validation
+   has already proved that each block has exactly one provider, all external
+   blocks precede all Claude blocks, and scopes inside a block do not overlap.
+   Fire the
+   stories inside one group simultaneously, wait until the whole group is
+   complete, then dispatch the next block. A `dependsOn` target must be in an
+   earlier block; never flatten or reorder groups by provider/model.
 2. Route to the right executor:
 
-**Claude sub-agents:**
-```
-Task(subagent_type="agent-olympus:executor", model="sonnet|opus", prompt="...
-  [If harness_context exists, append:]
-  ## Harness Constraints
-  Follow these golden principles: <harness_context>
-  Respect dependency layers: <docs/ARCHITECTURE.md summary>")
-Task(subagent_type="agent-olympus:designer", model="sonnet", prompt="...
-  [If harness_context exists:]
-  ## Harness Constraints
-  Follow these golden principles: <harness_context>")
-Task(subagent_type="agent-olympus:test-engineer", model="sonnet", prompt="...
-  [If harness_context exists:]
-  ## Harness Constraints
-  Follow these golden principles: <harness_context>")
+**Claude sub-agents — always sequential on the shared root:**
+
+Official `isolation: "worktree"` is not used here: it branches from the default
+branch by default and the Agent tool returns only a text result, not trusted
+worktree/branch metadata that Atlas could validate and merge. Running multiple
+Claude Agents against the shared root is forbidden. Each story is therefore
+bracketed by exact tree captures and a NUL-framed scope proof.
+
+```javascript
+import { execFileSync } from 'node:child_process';
+import {
+  buildExecutionTeamSlug,
+  parseNulDelimitedGitPaths,
+  validateChangedPathsAgainstScope,
+} from './scripts/lib/execution-prd.mjs';
+import {
+  assertCurrentReviewTree,
+  captureCurrentReviewTree,
+} from './scripts/lib/review-package.mjs';
+
+const claudeStories = groupStories.filter((story) => story.assignTo === 'claude');
+const claudePrompt = (story) => [
+  `Implement ${story.id}: ${story.title}`,
+  `AUTHORIZED SCOPE (validated; edit nothing else):\n${story.scope.map((item) => `- ${item}`).join('\n')}`,
+  `ACCEPTANCE CRITERIA:\n${story.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}`,
+  'Commit all completed changes before reporting success.',
+  harness_context ? `Harness constraints:\n${harness_context}` : '',
+].filter(Boolean).join('\n\n');
+
+// Shared-root execution is deliberately sequential. An out-of-scope change
+// stops the run for manual recovery; Atlas never silently rolls it back.
+for (const story of claudeStories) {
+  const beforeTree = captureCurrentReviewTree({ cwd });
+  assertCurrentReviewTree(beforeTree, { cwd });
+  await Agent({
+    description: `Implement sequential ${story.id}`,
+    subagent_type: story.subagentType,
+    model: story.model,
+    prompt: claudePrompt(story),
+  });
+  const afterTree = captureCurrentReviewTree({ cwd });
+  assertCurrentReviewTree(afterTree, { cwd });
+  const changedPathBuffer = execFileSync('git', [
+    '-C', cwd, 'diff', '--name-only', '-z',
+    beforeTree.reviewTreeOid, afterTree.reviewTreeOid, '--',
+  ], { encoding: null });
+  const changedPaths = parseNulDelimitedGitPaths(changedPathBuffer);
+  const scopeCheck = validateChangedPathsAgainstScope(changedPaths, story.scope);
+  if (!scopeCheck.ok) {
+    throw new Error(`Atlas sequential Agent ${story.id} changed files outside scope: ${scopeCheck.outsideScope.join(', ')}; preserve the tree and stop`);
+  }
+}
 ```
 
+`story.subagentType` is produced only by `buildAtlasStoryDefinitions()` and is
+always a concrete allowlisted identifier such as `agent-olympus:executor`; do
+not interpolate planner prose into `subagent_type`.
+
+<!-- AO-CONTRACT:provider-lifecycle:start -->
 **Codex/Gemini workers** (canonical adapter spawn per parallel group):
 
 Do not launch external workers with ad-hoc tmux commands. For each parallel
@@ -850,6 +1089,11 @@ ACP→exec→tmux), permission mirroring, supervisor persistence, and tmux fallb
 import { spawnTeam } from './scripts/lib/worker-spawn.mjs';
 import { execFileSync } from 'node:child_process';
 import {
+  buildExecutionTeamSlug,
+  parseNulDelimitedGitPaths,
+  validateChangedPathsAgainstScope,
+} from './scripts/lib/execution-prd.mjs';
+import {
   createWorkerWorktree,
   mergeWorkerBranch,
   removeWorkerWorktree,
@@ -857,11 +1101,9 @@ import {
 
 // Scope this identity to the current PRD + parallel group. Reuse it unchanged
 // for every monitor/collect/failover poll for this group.
-if (!/^atlas-[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(prd.projectName)) {
-  throw new Error('Unsafe Atlas projectName for worker state');
-}
+const atlasProjectSlug = buildExecutionTeamSlug(prd.projectName, { orchestrator: 'atlas' });
 const safeGroup = String(parallelGroup).replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 40);
-const teamSlug = `${prd.projectName}-${safeGroup}`;
+const teamSlug = `${atlasProjectSlug}-${safeGroup}`;
 const rootStatus = execFileSync('git', ['-C', cwd, 'status', '--porcelain'], {
   encoding: 'utf-8',
 }).trim();
@@ -870,31 +1112,36 @@ if (rootStatus) {
     'External worktrees must branch from a committed Atlas checkpoint; preserve current changes and route this group serially until the root is clean',
   );
 }
+const groupBaseCommit = execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], {
+  encoding: 'utf-8',
+}).trim();
 const externalStories = groupStories
   .filter((story) => story.assignTo === 'codex' || story.assignTo === 'gemini');
 const externalWorkers = externalStories.map((story) => {
   const name = story.id.toLowerCase().replace(/[^a-z0-9._-]/g, '-');
   const worktree = createWorkerWorktree(cwd, teamSlug, name);
-  if (!worktree.created && externalStories.length > 1) {
-    throw new Error('Parallel external workers require isolated git worktrees');
+  if (!worktree.created) {
+    throw new Error('Every Atlas external worker requires an isolated git worktree');
   }
   return {
     type: story.assignTo,
     name,
     prompt: [
       `Implement ${story.id}: ${story.title}`,
+      `AUTHORIZED SCOPE (validated; edit nothing else):\n${story.scope.map((item) => `- ${item}`).join('\n')}`,
       `Acceptance criteria:\n${story.acceptanceCriteria.map((item) => `- ${item}`).join('\n')}`,
-      worktree.created
-        ? `MANDATORY WORKTREE: ${worktree.worktreePath}\nWork only in this directory and commit the completed changes to ${worktree.branchName} before reporting success.`
-        : 'Work in the current project directory; no isolated worktree was created.',
+      `MANDATORY WORKTREE: ${worktree.worktreePath}\nWork only in this directory and commit the completed changes to ${worktree.branchName} before reporting success.`,
       harness_context ? `Harness constraints:\n${harness_context}` : '',
     ].filter(Boolean).join('\n\n'),
     // story.model is a Claude tier (opus/sonnet/haiku), not a portable
     // Codex/Gemini model selector. External adapters choose their own default.
     model: undefined,
-    cwd: worktree.created ? worktree.worktreePath : cwd,
-    worktreePath: worktree.created ? worktree.worktreePath : null,
-    branchName: worktree.created ? worktree.branchName : null,
+    cwd: worktree.worktreePath,
+    worktreePath: worktree.worktreePath,
+    branchName: worktree.branchName,
+    scope: story.scope,
+    storyId: story.id,
+    baseCommit: groupBaseCommit,
   };
 });
 
@@ -952,6 +1199,9 @@ for (const failedWorker of (status?.workers || []).filter((worker) => worker.sta
 
   if (progress.status === 'running') continue;
   if (progress.status === 'completed') {
+    // completeClaudeFallback/provider completion is durably overlaid onto the
+    // parent worker. `status` is this poll's earlier snapshot, so integration
+    // waits for the next runner iteration to re-read monitorTeam(teamSlug).
     results[failedWorker.name] = progress.output;
   } else if (progress.status === 'claude-task') {
     const replacementWorker = progress.dispatched.replacementWorker;
@@ -979,6 +1229,17 @@ if (status?.workers.every((worker) => worker.status === 'completed')) {
     if (dirty) {
       throw new Error(`External worker ${worker.name} completed with uncommitted work; preserve its worktree and resume integration`);
     }
+    const changedPathBuffer = execFileSync(
+      'git', ['-C', worker.worktreePath, 'diff', '--name-only', '-z', `${worker.baseCommit}...HEAD`, '--'],
+      { encoding: null },
+    );
+    const changedPaths = parseNulDelimitedGitPaths(changedPathBuffer);
+    const scopeCheck = validateChangedPathsAgainstScope(changedPaths, worker.scope);
+    if (!scopeCheck.ok) {
+      throw new Error(
+        `External worker ${worker.name} changed paths outside ${worker.storyId} scope: ${scopeCheck.outsideScope.join(', ')}`,
+      );
+    }
     const merged = mergeWorkerBranch(cwd, worker.branchName, worker.name);
     if (!merged.success) {
       throw new Error(`External worker ${worker.name} merge failed: ${merged.conflicts.join(', ')}`);
@@ -989,6 +1250,7 @@ if (status?.workers.every((worker) => worker.status === 'completed')) {
   await shutdownTeam(teamSlug, cwd);
 }
 ```
+<!-- AO-CONTRACT:provider-lifecycle:end -->
 
 Rules:
 - If a failed worker reports `'mcp_auth'`, `'auth_failed'`, `'rate_limited'`, or `'not_installed'`, do NOT manually retry that provider; let the failover chain select the next provider.
@@ -1013,36 +1275,216 @@ If story is a pure refactor / docs / config change (no runtime behavior change):
 
 3. After each story completes, verify its acceptance criteria with FRESH evidence
 
-4. **Codex Cross-Validation** (per story) — MANDATORY: spawn a Codex validator before marking passes: <!-- AO-CONTRACT:cross-validation -->
-```bash
-# CRITICAL: resolve binary path first — worktree shells may not inherit full PATH
-CODEX_BIN=$(which codex 2>/dev/null || echo /opt/homebrew/bin/codex)
-tmux new-session -d -s "atlas-codex-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "atlas-codex-xval-<story-id>" "\"$CODEX_BIN\" <approval-flag> exec \"Cross-validate implementation of <US-ID> (<story title>). Files changed: <files>. Acceptance criteria: <criteria>. Golden principles: <harness_context or 'none'>. Check: (1) all acceptance criteria genuinely met with evidence, (2) no architectural layer violations, (3) golden principles followed. Reply: PASS or FAIL with specific findings.\"" Enter
-# Poll: tmux capture-pane -pt "atlas-codex-xval-<story-id>" -S -200 (every 15s)
-# Cleanup: tmux kill-session -t "atlas-codex-xval-<story-id>"
+4. **External Cross-Validation** (per story) — MANDATORY: prefer Codex, then
+Gemini, before marking passes: <!-- AO-CONTRACT:cross-validation -->
+
+Use the canonical adapter lifecycle only. It preserves registry selection,
+permission mirroring, detached supervision, structured error classification,
+and bounded provider failover; this skill never builds a CLI/tmux command:
+
+```javascript
+import {
+  allocateTeamRunId,
+  collectResults,
+  dispatchProviderFallback,
+  monitorTeam,
+  pollProviderFallback,
+  reassignProvider,
+  shutdownTeam,
+  spawnTeam,
+} from './scripts/lib/worker-spawn.mjs';
+import {
+  assertCrossValidationTeamState,
+  buildCrossValidationRequest,
+  buildCrossValidationTeamName,
+  parseCrossValidationResult,
+} from './scripts/lib/cross-validation.mjs';
+import {
+  assertReviewSnapshotCurrent,
+  cleanupReviewSnapshot,
+  materializeReviewSnapshot,
+} from './scripts/lib/review-snapshot.mjs';
+
+const verificationGitEvidence = buildReviewPackage({ cwd, baseRef: pinnedReviewBaseCommit });
+const preferredValidationProvider = hasCodex
+  ? 'codex'
+  : ((hasGeminiAcp || hasGeminiCli) ? 'gemini' : null);
+const validationTeamSlug = buildCrossValidationTeamName({
+  orchestrator: 'atlas',
+  runId,
+  storyId: story.id,
+  reviewTreeOid: verificationGitEvidence.reviewTreeOid,
+});
+const validationTeamsToShutdown = new Set([validationTeamSlug]);
+let validationOutput = null;
+let validationProviderUsed = null;
+let validationSnapshot = null;
+
+if (preferredValidationProvider) {
+  validationSnapshot = materializeReviewSnapshot({
+    cwd,
+    reviewTreeOid: verificationGitEvidence.reviewTreeOid,
+    ownerId: validationTeamSlug,
+  });
+  assertReviewSnapshotCurrent(validationSnapshot, { cwd });
+  const validationRequest = buildCrossValidationRequest({
+    orchestrator: 'atlas',
+    runId,
+    storyId: story.id,
+    storyTitle: story.title,
+    reviewTreeOid: verificationGitEvidence.reviewTreeOid,
+    provider: preferredValidationProvider,
+    snapshot: validationSnapshot,
+    scope: story.scope,
+    acceptanceCriteria: story.acceptanceCriteria,
+    harnessContext: harness_context,
+  });
+  const existingValidationState = monitorTeam(validationTeamSlug);
+  const validationState = existingValidationState
+    ? assertCrossValidationTeamState(existingValidationState, validationRequest)
+    : await spawnTeam(
+    validationTeamSlug,
+    [validationRequest.worker],
+    cwd,
+    capabilities,
+    { runId: allocateTeamRunId() },
+  );
+
+  // Repeat this canonical monitor step at the runner boundary until terminal.
+  const validationStatus = monitorTeam(validationTeamSlug);
+  const validator = validationStatus?.workers?.[0];
+  if (validator?.status === 'running' || validator?.status === 'retry') {
+    // Persist/yield at the existing runner boundary and poll the same team
+    // identity again. Never shut down or respawn a running validation worker.
+    continue;
+  } else if (validator?.status === 'completed') {
+    const actualProvider = validator.fallbackProvider || validator.type
+      || validationState.workers[0].type;
+    if (actualProvider === 'codex' || actualProvider === 'gemini') {
+      assertCrossValidationTeamState(validationStatus, validationRequest);
+      assertReviewSnapshotCurrent(validationSnapshot, { cwd });
+      validationOutput = parseCrossValidationResult(
+        collectResults(validationTeamSlug)['external-validator'],
+        validationRequest.identity,
+      );
+      assertReviewSnapshotCurrent(validationSnapshot, { cwd });
+      validationProviderUsed = actualProvider;
+    }
+  } else if (validator?.status === 'failed') {
+    const fallback = await reassignProvider(
+      validationTeamSlug,
+      validator.name,
+      validator.originalPrompt,
+      { category: validator.errorReason, message: validator.errorMessage },
+      validator.session,
+      { worker: validator, capabilities },
+    );
+    const dispatched = await dispatchProviderFallback(fallback, cwd, capabilities);
+    const progress = await pollProviderFallback(dispatched, cwd, capabilities);
+    for (const childTeam of progress.teamNames || []) validationTeamsToShutdown.add(childTeam);
+    if (progress.status === 'running') {
+      // Persist/yield and poll the same dispatched child; cleanup is terminal-only.
+      continue;
+    } else if (progress.status === 'completed') {
+      const actualProvider = progress.dispatched?.replacementWorker?.type;
+      if (actualProvider === 'codex' || actualProvider === 'gemini') {
+        assertReviewSnapshotCurrent(validationSnapshot, { cwd });
+        validationOutput = parseCrossValidationResult(
+          progress.output,
+          validationRequest.identity,
+        );
+        assertReviewSnapshotCurrent(validationSnapshot, { cwd });
+        validationProviderUsed = actualProvider;
+      }
+    }
+    // `claude-task`, exhausted, or ambiguous outcomes are not independent
+    // external validation. Record the explicit skip below; do not invent a pass.
+  }
+}
+
+for (const validationTeam of validationTeamsToShutdown) {
+  await shutdownTeam(validationTeam, cwd);
+}
+if (validationSnapshot) {
+  cleanupReviewSnapshot(validationSnapshot, {
+    cwd,
+    ownerId: validationTeamSlug,
+  });
+}
 ```
-- **PASS** → `addVerification(runId, { story_id, verdict: 'pass', evidence: 'codex xval passed', verifiedBy: 'codex' })` → mark `passes: true`, proceed.
-- **FAIL** → `addVerification(runId, { story_id, verdict: 'fail', evidence: '<specific findings>', verifiedBy: 'codex' })` → fix the specific violation, re-run acceptance criteria, re-validate (max 2 cycles).
-- **Codex unavailable BUT Gemini available** → use Gemini as alternative cross-validator:
-```bash
-GEMINI_BIN=$(which gemini 2>/dev/null || echo /opt/homebrew/bin/gemini)
-tmux new-session -d -s "atlas-gemini-xval-<story-id>" -c "<cwd>"
-tmux send-keys -t "atlas-gemini-xval-<story-id>" "\"$GEMINI_BIN\" <approval-flag> -p \"Cross-validate implementation of <US-ID>. Files: <files>. Criteria: <criteria>. Reply PASS or FAIL with findings.\"" Enter
+Every `addVerification` call must include one criterion record for every PRD
+acceptance criterion, indexed from zero. Copy `criterion_text` exactly. A pass
+uses `pass` for every criterion; a fail marks each failed criterion `fail` and
+records fresh evidence for every remaining criterion; an unavailable validator
+uses `skip` for every criterion. The top-level verdict is the exact rollup (any
+fail → fail, else any skip → skip, else pass). Before the fresh local
+criteria checks or external validation, build
+`verificationGitEvidence = buildReviewPackage({ cwd, baseRef: pinnedReviewBaseCommit })`. Run every check with
+the validator read-only against that exact snapshot, prove the tree is still
+current before persistence, and bind the record to its tree OID. A failed
+append or any tree mutation during validation is a hard verification failure:
+```javascript
+// Run the fresh local criteria checks and read-only validator now, against this snapshot.
+assertReviewPackageCurrent(verificationGitEvidence, { cwd });
+const verificationWrite = addVerification(runId, {
+  story_id: story.id,
+  verdict: '<pass|fail|skip>',
+  evidence: '<overall fresh evidence>',
+  verifiedBy: '<codex|gemini|atlas>',
+  reviewTreeOid: verificationGitEvidence.reviewTreeOid,
+  criteria: story.acceptanceCriteria.map((criterion_text, criterion_index) => ({
+    criterion_index,
+    criterion_text,
+    verdict: '<criterion pass|fail|skip>',
+    evidence: '<criterion-specific fresh evidence>',
+  })),
+});
+if (!verificationWrite.ok) {
+  throw new Error(`verification evidence was not persisted: ${verificationWrite.reason}`);
+}
+assertReviewPackageCurrent(verificationGitEvidence, { cwd });
 ```
-  Record: `addVerification(runId, { story_id, verdict: 'pass'|'fail', evidence: '<findings>', verifiedBy: 'gemini' })`
-- **Neither Codex nor Gemini available** → detect via `detectCodexError(paneOutput)` from `scripts/lib/worker-spawn.mjs`. **MUST explicitly record the skip**: `addVerification(runId, { story_id, verdict: 'skip', evidence: 'no external validator available: cross-validation skipped', verifiedBy: 'atlas' })`. Log: `[Atlas] Cross-validation skipped for <story-id>: no external validator available.`
+- **PASS** → write the complete criterion-level record with `verdict:'pass'`,
+  then transition the story through the same generation-CAS store (an explicit
+  policy-authorized all-criteria `skip` follows the same transition):
+  ```javascript
+  import {
+    readExecutionPrd,
+    setExecutionStoryPasses,
+  } from './scripts/lib/execution-prd-store.mjs';
+
+  const storyPrdState = readExecutionPrd({ cwd, orchestrator: 'atlas' });
+  const passedStoryPrdState = setExecutionStoryPasses([story.id], true, {
+    cwd,
+    orchestrator: 'atlas',
+    expectedGeneration: storyPrdState.generation,
+  });
+  ```
+- **FAIL** → write the complete criterion-level record with the correct fail rollup → fix the specific violation, re-run acceptance criteria, re-validate (max 2 cycles).
+- **Codex unavailable BUT Gemini available** → the preferred-provider selection
+  above starts Gemini through the same adapter lifecycle. Record the same
+  complete criterion-level shape with `verifiedBy:'gemini'`.
+- **Neither external provider returns a terminal independent result** → **MUST
+  explicitly record the skip** with every criterion marked `skip`,
+  criterion-specific evidence, and `verifiedBy:'atlas'`. Log: `[Atlas]
+  Cross-validation skipped for <story-id>: no external validator available.`
 
 > **IMPORTANT**: "skip silently" does NOT mean "do nothing". Every story MUST have a verification record — pass, fail, or explicit skip. The PR verification gate will block if any story lacks a record.
 
-5. Mark `passes: true` in prd.json only when ALL criteria verified AND Codex cross-validation passes (or is unavailable with explicit skip recorded)
+5. Call `setExecutionStoryPasses([story.id], true, ...)` only when ALL criteria
+   verified AND Codex cross-validation passes (or is unavailable with explicit
+   skip recorded). On a stale generation, re-read and re-evaluate the transition;
+   never overwrite the file or bypass CAS.
 6. Record learnings via wisdom calls after each story:
    ```
    addWisdom({ category: 'pattern', lesson: '<codebase convention discovered>', confidence: 'high' })
    addWisdom({ category: 'debug',   lesson: '<pitfall to avoid>',              confidence: 'high' })
    addWisdom({ category: 'build',   lesson: '<build/test learning>',           confidence: 'medium' })
    ```
-6. After each story passes: mark `passes: true` in `.ao/prd.json` — the authoritative story-level state the runner reads on resume (no per-story checkpoint needed; `completePhase('execute')` checkpoints the phase).
+6. After each story passes, retain `passedStoryPrdState.prd` as the checkpoint
+   snapshot. The store is the authoritative story-level state the runner reads
+   on resume (no per-story checkpoint needed; `completePhase('execute')`
+   checkpoints the phase).
 
 **Wisdom tracking** — call `addWisdom()` after each story with appropriate category:
 - `'test'` — test framework quirks, test patterns that work
@@ -1153,21 +1595,40 @@ Task(subagent_type="agent-olympus:themis", model="sonnet",
   if (!q.allowed) {
     // quality budget exhausted — escalate to user with the specific failure reasons
   } else {
-    // STEP 1 (REQUIRED): mark the quality-failed stories passes:false in .ao/prd.json.
-    //   Atlas execute only re-runs passes:false stories, so WITHOUT this flip the
-    //   reopen below is a no-op (burns an attempt doing nothing).
-    setStoriesPassesFalse(<quality-failed story ids>);   // mutate .ao/prd.json
+    // STEP 1 (REQUIRED): rollback through the hardened store. It atomically
+    // cascades passes:false to transitive dependents so resume cannot retain a
+    // downstream pass whose prerequisite failed quality review.
+    const failedPrdState = readExecutionPrd({ cwd, orchestrator: 'atlas' });
+    const rolledBackPrdState = setExecutionStoryPasses(
+      <quality-failed story ids>,
+      false,
+      {
+        cwd,
+        orchestrator: 'atlas',
+        expectedGeneration: failedPrdState.generation,
+      },
+    );
     // STEP 2: re-enter the outer loop. reattempt ALREADY ticks the 15-cap; the re-entry
     //   resumes at enterPhase('execute') and does NOT re-call beginAttempt (no double-tick).
     reattempt(runId, { reopen: ['execute', 'verify'], reason: 'quality_fail' });
   }
   ```
-- If verdict is CONDITIONAL → log warnings, proceed to Phase 5
+- If verdict is CONDITIONAL → BLOCKED unless every unavailable check is an
+  explicit policy-authorized skip already recorded in verification evidence;
+  otherwise do not complete verify or proceed to review
 - If verdict is PASS → proceed to Phase 5
 Note: This phase is OPTIONAL. If Themis agent is absent, skip and proceed.
 
 **Phase exit (runner):** once the verify checks + the optional visual (4.2) and quality
-(4.5) gates all pass, call `await completePhase(runId, 'verify')` before Phase 5.
+(4.5) gates all pass, perform a mandatory final-tree verification sweep before
+calling `await completePhase(runId, 'verify')`: build one fresh
+`verificationGitEvidence`, rerun every story's acceptance criteria and read-only
+cross-validation against that unchanged tree, append one complete record per
+story with `reviewTreeOid: verificationGitEvidence.reviewTreeOid`, require every
+`addVerification(...).ok === true`, and finish with
+`assertReviewPackageCurrent(verificationGitEvidence, { cwd })`. Any mutation,
+missing story, or failed append keeps verify nonterminal. This sweep supersedes
+per-story records made before later stories changed the tree.
 
 ### Phase 5 — REVIEW (loop until approved)
 
@@ -1180,67 +1641,182 @@ minimal reviewer set for the actual diff scope. This eliminates 60-80% of wasted
 reviewer tokens on irrelevant diffs while still catching security-relevant code
 in shared utilities via the `securityPatterns` regex set.
 
-```bash
-node -e '
-  import("./scripts/lib/review-router.mjs").then(async (m) => {
-    const { execSync } = await import("node:child_process");
-    // Use full branch diff vs origin/HEAD (not just HEAD~1) so multi-commit branches route correctly.
-    const base = (() => {
-      try { return execSync("git symbolic-ref refs/remotes/origin/HEAD", { encoding: "utf-8" }).trim().replace(/^refs\/remotes\/origin\//, ""); }
-      catch { return "main"; }
-    })();
-    const range = `origin/${base}...HEAD`;
-    const paths = execSync(`git diff --name-only ${range}`, { encoding: "utf-8" })
-      .split("\n").filter(Boolean);
-    const content = execSync(`git diff ${range}`, { encoding: "utf-8" });
-    const r = m.routeReviewers({ diffPaths: paths, diffContent: content });
-    console.log(JSON.stringify(r, null, 2));
+```javascript
+import {
+  assertReviewPackageCurrent,
+  attachReviewContext,
+  buildReviewPackage,
+} from './scripts/lib/review-package.mjs';
+import {
+  handleEscalation,
+  routeReviewers,
+} from './scripts/lib/review-router.mjs';
+import { getRunVerificationsStrict } from './scripts/lib/run-artifacts.mjs';
+import { readExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
+
+let reviewPackage;
+let r;
+try {
+  // Includes merge-base→HEAD commits plus staged, unstaged, newly staged, and
+  // untracked content. Empty, unsafe, ambiguous, or oversized evidence throws.
+  const gitEvidence = buildReviewPackage({ cwd, baseRef: pinnedReviewBaseCommit });
+  r = routeReviewers({
+    diffPaths: gitEvidence.diffPaths,
+    diffContent: gitEvidence.diff,
+    baseDir: cwd,
   });
-'
+  if (r.reviewers.length === 0 || r.allowedReviewers.length === 0
+    || r.rejectedReviewers.length > 0
+    || r.reviewers.some((reviewer) => !r.allowedReviewers.includes(reviewer))) {
+    throw new Error('review routing selected an empty or non-approval reviewer set');
+  }
+  const strictVerification = getRunVerificationsStrict(runId);
+  if (!strictVerification.ok) {
+    throw new Error(`review verification evidence is unsafe: ${strictVerification.reason}`);
+  }
+  const prd = readExecutionPrd({ cwd, orchestrator: 'atlas' }).prd;
+  reviewPackage = attachReviewContext(gitEvidence, {
+    prd,
+    verification: strictVerification.verifications,
+  });
+} catch (error) {
+  STOP — review evidence is incomplete or unsafe; report the blocker and do not approve.
+}
 ```
 
 Spawn ONLY the reviewers in `r.reviewers`, in parallel. Honor `securityHit=true`
-by always including `agent-olympus:security-reviewer`. If `r.warning` is set,
-log it but proceed with the fallback set.
+by always including `agent-olympus:security-reviewer`. A normal no-rule fallback
+warning may be logged, but any rejected reviewer, empty active allowlist, or
+reviewer outside that allowlist is BLOCKED.
+
+The package is the review evidence boundary. A reviewer must not approve from an
+implementer summary alone. Its Git evidence and full PRD/verification context
+have separate SHA-256 digests; every PRD story must already be `passes:true` and
+have terminal `pass` or explicit `skip` verification whose `reviewTreeOid`
+exactly equals the package tree. Historical records may describe older trees,
+but the latest record for every story may not. Otherwise package creation fails
+and the phase stops as BLOCKED.
 
 **Step 5.1 — Spawn reviewer fan-out**
 
 ```
+const rawReviewerOutputsByName = new Map();
 For each reviewer in r.reviewers, fire in parallel:
-  Task(subagent_type="agent-olympus:<reviewer>", model="sonnet|opus", prompt="...")
+  const rawOutput = Task(subagent_type="agent-olympus:<reviewer>", model="sonnet|opus",
+    prompt="OUTPUT_CONTRACT: AO_REVIEW_V1
+    Review only the supplied reviewPackage. Return exactly one JSON object with:
+    schemaVersion:1, reviewer:<reviewer>,
+    reviewDigest:<copy reviewPackage.reviewDigest.value exactly>,
+    verdict:APPROVE|REVISE|REJECT|BLOCKED,
+    findings:[{severity:critical|high|medium|low|info, confidence:0..1,
+    file:string|null, line:positive-integer|null, evidence:string,
+    recommendation:string}], escalations:[{additionalReviewer,reason}].
+    APPROVE requires empty findings and escalations; every other verdict requires
+    at least one finding. A non-null finding.file must be in reviewPackage.diffPaths.
+    Copy the complete reviewDigest exactly; never substitute evidenceDigest.
+    Escalate only to one of: <serialized r.allowedReviewers>.
+    reviewPackage: <serialized reviewPackage>")
+  rawReviewerOutputsByName.set(<bare reviewer name>, rawOutput)
+
+Do not start aggregation until every initially selected reviewer has either a
+stored raw output or an explicit missing result that will make aggregation BLOCKED.
 ```
 
 **Step 5.2 — Handle reviewer escalation** <!-- AO-CONTRACT:review-escalation -->
 
-Reviewers may emit a structured escalation flag mid-run:
+Reviewers may emit a structured escalation entry inside AO_REVIEW_V1:
 ```json
-{ "type": "RE-REVIEW-REQUESTED",
-  "additionalReviewer": "security-reviewer",
+{ "additionalReviewer": "security-reviewer",
   "reason": "detected hardcoded API key in shared util" }
 ```
 
-When you see this flag, call `handleEscalation(currentSet, flag)` and spawn the
+When you see this flag, call `handleEscalation(currentSet, flag, options)` and spawn the
 requested reviewer in the **same iteration** (not the next loop). This catches
 the case where code-reviewer notices security-relevant code that the path-based
 router missed.
 
-```
-┌─→ const rr = loopTick(runId, 'review')  → if !rr.allowed: stop the review loop, escalate unresolved findings to user (cap 3)
-│   Collect verdicts
-│   ├─ ALL APPROVED → await completePhase(runId, 'review'); DONE ✓
-│   ├─ ANY ESCALATION → spawn additional reviewer same iteration (does NOT consume a round)
-│   └─ ANY REJECTED → fix issues, then re-enter the outer loop:
-│        reattempt(runId, { reopen: ['verify'], reason: 'review_reject' })   // AO-CONTRACT:review-reject-reattempt
-│          → ticks the 15-cap; if !allowed: STOP + escalate. Else loop back to Phase 4 (verify), then re-review.
-└── Loop until ALL APPROVED (→ completePhase) or loopTick / reattempt returns !allowed
+```javascript
+import { aggregateReviewResults } from './scripts/lib/review-contract.mjs';
+
+const rr = loopTick(runId, 'review');
+if (!rr.allowed) STOP and escalate unresolved findings to the user;
+
+let currentReviewers = [...r.reviewers];
+const handledEscalations = new Set();
+let aggregate;
+for (;;) {
+  aggregate = aggregateReviewResults(rawReviewerOutputsByName, currentReviewers, {
+    allowedReviewers: r.allowedReviewers,
+    reviewPackage,
+  });
+  // Missing, malformed, or identity-mismatched output fails closed. A valid
+  // BLOCKED result may first request a specialist through a typed escalation.
+  if (aggregate.errors.length > 0) STOP and report aggregate.errors plus findings;
+
+  const requestersToRerun = new Set();
+  for (const requestingResult of aggregate.results) {
+    for (const escalation of requestingResult.escalations) {
+      const escalationKey = `${requestingResult.reviewer}\0${escalation.additionalReviewer}`;
+      if (handledEscalations.has(escalationKey)) {
+        STOP — a reviewer repeated an already-fulfilled escalation instead of issuing a final verdict.
+      }
+      const routed = handleEscalation(currentReviewers, escalation, {
+        allowedReviewers: r.allowedReviewers,
+        baseDir: cwd,
+      });
+      if (routed.rejected || routed.warning) {
+        STOP — rejected or downgraded escalation is a review blocker, not a warning to ignore.
+      }
+      currentReviewers = routed.reviewers;
+      if (currentReviewers.length > r.allowedReviewers.length || currentReviewers.length > 5) {
+        STOP — reviewer escalation exceeded the active allowlisted bound;
+      }
+      if (routed.escalated) {
+        spawn the additional reviewer in this same iteration with reviewPackage;
+        collect its AO_REVIEW_V1 output into rawReviewerOutputsByName under its bare name;
+      }
+      handledEscalations.add(escalationKey);
+      requestersToRerun.add(requestingResult.reviewer);
+    }
+  }
+  if (requestersToRerun.size > 0) {
+    After every requested specialist output is stored, rerun each requesting
+    reviewer with those raw specialist results and the unchanged reviewPackage.
+    Replace that requester's prior raw output in rawReviewerOutputsByName so its
+    next response is a final verdict, not the stale escalating verdict.
+    continue; // newly added reviewers may themselves request another specialist
+  }
+  if (aggregate.verdict === 'BLOCKED') STOP and report aggregate findings;
+  break;
+}
+if (aggregate.verdict === 'APPROVE') {
+  // Rebuild HEAD/index/worktree evidence after the last reviewer response.
+  // Any concurrent mutation invalidates approval and must return through verify.
+  assertReviewPackageCurrent(reviewPackage, { cwd });
+  await completePhase(runId, 'review', {
+    approvedReviewDigest: reviewPackage.reviewDigest.value,
+    approvedReviewTreeOid: reviewPackage.reviewTreeOid,
+  });
+}
+if (aggregate.verdict === 'REVISE' || aggregate.verdict === 'REJECT') {
+  fix the grounded findings;
+  reattempt(runId, { reopen: ['verify'], reason: 'review_reject' }); // AO-CONTRACT:review-reject-reattempt
+  // If not allowed, STOP. Otherwise return through verify before re-review.
+}
 ```
 
 **Rollback**: set `.ao/autonomy.json` → `{ "reviewRouter": { "disabled": true } }`
 to bypass the router entirely and always run the full reviewer set.
 
-### Phase 5b — SLOP CLEAN + COMMIT
+### Phase 5b — SLOP CLEAN + FINAL CONTENT
 
-**Phase entry (runner):** `enterPhase(runId, 'finalize')` — covers 5b (slop+commit), 5c (changelog), 5d (exec-plan). After 5d, `await completePhase(runId, 'finalize')`.
+**Phase entry (runner):** `enterPhase(runId, 'finalize')` — covers 5b (cleanup),
+5c (changelog), 5d (exec-plan), and 5e (final review lock + commit). Complete
+`finalize` only after the post-mutation review and tree-bound commit succeed.
+
+Finalize is `reexecute` on resume. Every changelog entry and exec-plan tracker
+row must use `runId` as its durable idempotency key, replacing the same run's
+prior marked block rather than appending a duplicate.
 
 Resolve the release policy before invoking any helper that can offer or perform
 shipping. Explicit shipping constraints in the original task brief or any
@@ -1260,10 +1836,10 @@ counts as approval.
 After review approved:
 1. Run `Skill(skill="agent-olympus:slop-cleaner")` on all changed files
 2. Re-run build + tests to verify no regression from cleanup
-3. Run `Skill(skill="agent-olympus:git-master")` for atomic commits
-4. **Optional branch completion**: only when `shipMode === 'auto'`, invoke
+3. **Optional branch completion**: only when `shipMode === 'auto'`, invoke
    `Skill(skill="agent-olympus:finish-branch")` for its local verification
-   checklist. Explicitly stop it before any push, PR, merge, or option prompt;
+   checklist before the final review. Explicitly stop it before any push, PR,
+   merge, or option prompt. It also may not mutate source files or create commits;
    Phase 6 below is the sole owner of outward shipping actions. Skip this helper
    entirely for `never` and `ask`.
 
@@ -1273,15 +1849,19 @@ Skip the entire changelog update when
 `noShip || config.ship.updateChangelog === false`. In particular,
 `ship.mode: "never"` suppresses this release side effect.
 
-Generate a CHANGELOG entry from the completed PRD:
-```bash
-node -e "
-  import { generateChangelogEntry, prependToChangelog } from './scripts/lib/changelog.mjs';
-  import { readFileSync } from 'fs';
-  const prd = JSON.parse(readFileSync('.ao/prd.json', 'utf8'));
-  const entry = generateChangelogEntry({ prd, version: '<detected or specified>', date: new Date().toISOString().slice(0,10) });
-  prependToChangelog('CHANGELOG.md', entry);
-"
+Generate or replace this run's CHANGELOG entry from the completed PRD:
+```javascript
+import { generateChangelogEntry } from './scripts/lib/changelog.mjs';
+import { upsertChangelogEntry } from './scripts/lib/finalize-content.mjs';
+import { readExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
+
+const prd = readExecutionPrd({ cwd, orchestrator: 'atlas' }).prd;
+const entry = generateChangelogEntry({
+  prd,
+  version: '<detected or specified>',
+  date: new Date().toISOString().slice(0, 10),
+});
+upsertChangelogEntry('CHANGELOG.md', entry, { runId, cwd });
 ```
 If no CHANGELOG.md exists, one is created. Include in the next commit.
 
@@ -1291,18 +1871,216 @@ Skip the entire tracker update (including moving an active plan) when
 `noShip || config.ship.updateTechDebtTracker === false`. In particular,
 `ship.mode: "never"` suppresses this release side effect.
 
-If `docs/exec-plans/` exists, record this task as a completed plan entry:
-```bash
-# Ensure tracker has header row on first use
-if [ ! -f docs/exec-plans/tech-debt-tracker.md ]; then
-  printf "# Tech Debt Tracker\n| Date | Task | Files | Stories | Notes |\n|------|------|-------|---------|-------|\n" \
-    > docs/exec-plans/tech-debt-tracker.md
-fi
-echo "| $(date +%Y-%m-%d) | <task-slug> | <N files changed> | <N stories> | <one-line summary> |" \
-  >> docs/exec-plans/tech-debt-tracker.md
+If `docs/exec-plans/` exists, upsert this run's completed plan entry:
+```javascript
+import { upsertTechDebtTrackerRow } from './scripts/lib/finalize-content.mjs';
+
+upsertTechDebtTrackerRow(
+  'docs/exec-plans/tech-debt-tracker.md',
+  '| <date> | <task-slug> | <N files changed> | <N stories> | <one-line summary> |',
+  { runId, cwd },
+);
 ```
-If an active exec-plan file exists in `docs/exec-plans/active/`, move it to `docs/exec-plans/completed/`.
+If an active exec-plan file exists in `docs/exec-plans/active/`, move it to
+`docs/exec-plans/completed/` atomically. On resume, an existing destination with
+the source absent proves the move already completed; any other collision is a
+blocker rather than permission to overwrite.
 Include this file in the commit.
+
+### Phase 5e — FINAL REVIEW LOCK + COMMIT
+
+Cleanup, changelog, tracker, and checklist activity occurred after the first
+review, so that approval is not commit authority. Build Git evidence for the
+final filesystem tree first. Then, without mutating it, re-run all required
+checks and per-story acceptance/cross-validation against that exact snapshot
+and collect one fresh record per story. Prove the snapshot is still current
+before persisting those records, append them with its exact tree OID, and build
+a new complete package from strict evidence. Never reuse the Phase 5 package or
+reviewer outputs.
+
+```javascript
+import { execFileSync } from 'node:child_process';
+import {
+  assertReviewPackageCurrent,
+  assertReviewPackageHeadTree,
+  attachReviewContext,
+  buildReviewPackage,
+} from './scripts/lib/review-package.mjs';
+import { aggregateReviewResults } from './scripts/lib/review-contract.mjs';
+import { handleEscalation, routeReviewers } from './scripts/lib/review-router.mjs';
+import {
+  addVerification,
+  beginVerificationGeneration,
+  getSealedVerificationGeneration,
+  getVerificationGenerationProgress,
+  sealVerificationGeneration,
+} from './scripts/lib/run-artifacts.mjs';
+import { readExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
+
+const finalPrd = readExecutionPrd({ cwd, orchestrator: 'atlas' }).prd;
+const finalGitEvidence = buildReviewPackage({ cwd, baseRef: pinnedReviewBaseCommit });
+assertReviewPackageCurrent(finalGitEvidence, { cwd });
+const finalGenerationInput = {
+  reviewTreeOid: finalGitEvidence.reviewTreeOid,
+  storyIds: finalPrd.userStories.map(story => story.id),
+  phase: 'final-review',
+};
+let finalGenerationStart = beginVerificationGeneration(runId, finalGenerationInput);
+if (!finalGenerationStart.ok
+  && finalGenerationStart.reason === 'different-verification-generation-already-open'
+  && finalGenerationStart.currentReviewTreeOid !== finalGitEvidence.reviewTreeOid) {
+  finalGenerationStart = beginVerificationGeneration(runId, finalGenerationInput, {
+    supersedeGenerationId: finalGenerationStart.currentGenerationId,
+  });
+}
+if (!finalGenerationStart.ok) {
+  throw new Error(`final verification generation did not start: ${finalGenerationStart.reason}`);
+}
+const finalGenerationId = finalGenerationStart.generation.generationId;
+const finalGenerationProgress = getVerificationGenerationProgress(
+  runId,
+  finalGenerationId,
+);
+if (!finalGenerationProgress.ok) {
+  throw new Error(`final verification progress is unsafe: ${finalGenerationProgress.reason}`);
+}
+const missingFinalStoryIds = new Set(finalGenerationProgress.missingStoryIds);
+for (const story of finalPrd.userStories.filter(item => missingFinalStoryIds.has(item.id))) {
+  // Re-run this story's named acceptance criteria and independent read-only
+  // cross-validation now against finalGitEvidence. Bind the concrete result;
+  // no historical ledger record or prior reviewer output may populate it.
+  const freshFinalRecord = {
+    story_id: story.id,
+    verdict: '<pass|skip exact criterion rollup>',
+    evidence: '<fresh overall evidence from this final-tree sweep>',
+    verifiedBy: '<codex|gemini|atlas>',
+    criteria: story.acceptanceCriteria.map((criterion_text, criterion_index) => ({
+      criterion_index,
+      criterion_text,
+      verdict: '<pass|skip>',
+      evidence: '<fresh criterion-specific evidence>',
+    })),
+  };
+  assertReviewPackageCurrent(finalGitEvidence, { cwd });
+  const persisted = addVerification(runId, {
+    ...freshFinalRecord,
+    reviewTreeOid: finalGitEvidence.reviewTreeOid,
+    verificationGenerationId: finalGenerationId,
+  });
+  if (!persisted.ok) {
+    throw new Error(`final verification evidence was not persisted: ${persisted.reason}`);
+  }
+}
+assertReviewPackageCurrent(finalGitEvidence, { cwd });
+const finalGenerationSeal = sealVerificationGeneration(runId, finalGenerationId);
+if (!finalGenerationSeal.ok) {
+  throw new Error(`final verification generation did not seal: ${finalGenerationSeal.reason}`);
+}
+const finalSealedGeneration = getSealedVerificationGeneration(runId, finalGenerationId);
+if (!finalSealedGeneration.ok) {
+  throw new Error(`sealed final verification is unsafe: ${finalSealedGeneration.reason}`);
+}
+assertReviewPackageCurrent(finalGitEvidence, { cwd });
+const finalRoute = routeReviewers({
+  diffPaths: finalGitEvidence.diffPaths,
+  diffContent: finalGitEvidence.diff,
+  baseDir: cwd,
+});
+const finalReviewPackage = attachReviewContext(finalGitEvidence, {
+  prd: finalPrd,
+  verification: finalSealedGeneration.records,
+});
+if (finalRoute.reviewers.length === 0 || finalRoute.allowedReviewers.length === 0
+  || finalRoute.rejectedReviewers.length > 0
+  || finalRoute.reviewers.some((reviewer) => !finalRoute.allowedReviewers.includes(reviewer))) {
+  throw new Error('final review routing selected an empty or non-approval reviewer set');
+}
+const finalRound = loopTick(runId, 'final-review');
+if (!finalRound.allowed || finalRound.degraded) {
+  throw new Error('final review iteration budget or ledger is unavailable');
+}
+let finalReviewers = [...finalRoute.reviewers];
+const finalRawOutputsByName = new Map();
+// Spawn every final reviewer with finalReviewPackage and the AO_REVIEW_V1
+// contract, then store each raw response under its bare reviewer name.
+Fire every initial finalReviewers member in parallel with finalReviewPackage.
+For each completed response:
+  finalRawOutputsByName.set(<bare reviewer name>, <raw AO_REVIEW_V1 response>);
+Do not aggregate until every initial reviewer either has a stored response or
+is deliberately absent so aggregation returns BLOCKED.
+const finalHandledEscalations = new Set();
+let finalAggregate;
+for (;;) {
+  finalAggregate = aggregateReviewResults(finalRawOutputsByName, finalReviewers, {
+    allowedReviewers: finalRoute.allowedReviewers,
+    reviewPackage: finalReviewPackage,
+  });
+  if (finalAggregate.errors.length > 0) break;
+  const finalRequestersToRerun = new Set();
+  for (const requestingResult of finalAggregate.results) {
+    for (const escalation of requestingResult.escalations) {
+      const escalationKey = `${requestingResult.reviewer}\0${escalation.additionalReviewer}`;
+      if (finalHandledEscalations.has(escalationKey)) {
+        throw new Error('final reviewer repeated an already-fulfilled escalation');
+      }
+      const routed = handleEscalation(finalReviewers, escalation, {
+        allowedReviewers: finalRoute.allowedReviewers,
+        baseDir: cwd,
+      });
+      if (routed.rejected || routed.warning) {
+        throw new Error('final review escalation was rejected or downgraded');
+      }
+      finalReviewers = routed.reviewers;
+      if (routed.escalated) {
+        Fire escalation.additionalReviewer with the same finalReviewPackage;
+        finalRawOutputsByName.set(
+          escalation.additionalReviewer,
+          <raw AO_REVIEW_V1 response>,
+        );
+      }
+      finalHandledEscalations.add(escalationKey);
+      finalRequestersToRerun.add(requestingResult.reviewer);
+    }
+  }
+  if (finalRequestersToRerun.size > 0) {
+    Rerun each requesting reviewer with all fulfilled specialist raw results,
+    then replace its stale escalating result in finalRawOutputsByName.
+    continue;
+  }
+  break;
+}
+if (finalAggregate.verdict === 'BLOCKED') {
+  throw new Error(`final post-mutation review is blocked: ${finalAggregate.errors.join('; ')}`);
+}
+if (finalAggregate.verdict === 'REVISE' || finalAggregate.verdict === 'REJECT') {
+  const finalRetry = reattempt(runId, {
+    reopen: ['verify'],
+    reason: 'final_review_reject',
+  });
+  if (!finalRetry.allowed || finalRetry.degraded) {
+    throw new Error('final review rejected and the bounded verify retry was unavailable');
+  }
+  Delegate only the findings in finalAggregate.results to executor or debugger under
+  the reopened verify path; rebuild verification and the entire final review
+  package after the fixes. Never continue with this rejected package.
+  throw new Error('final post-mutation review did not approve; reopen verify/review and do not commit');
+}
+assertReviewPackageCurrent(finalReviewPackage, { cwd });
+Skill(skill="agent-olympus:git-master");
+assertReviewPackageHeadTree(finalReviewPackage, { cwd });
+if (execFileSync('git', ['-C', cwd, 'status', '--porcelain'], { encoding: 'utf8' }).trim()) {
+  throw new Error('git-master left content outside the reviewed commit tree');
+}
+await completePhase(runId, 'finalize', {
+  finalReviewDigest: finalReviewPackage.reviewDigest.value,
+  finalReviewTreeOid: finalReviewPackage.reviewTreeOid,
+  finalCommit: execFileSync('git', ['-C', cwd, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+});
+```
+
+No source, documentation, generated artifact, index, or worktree mutation is
+allowed between `assertReviewPackageCurrent` and `git-master`; after the commit,
+the HEAD tree must equal the reviewer-bound `reviewTreeOid` exactly.
 
 ### Phase 6 — SHIP (PR Creation + Issue Linking)
 
@@ -1588,12 +2366,23 @@ if (shipCanAct) {
     for (const missingId of verificationGate.missing) {
       // 1. First attempt: try Codex cross-validation (same as Phase 3 step 4).
       // 2. If Codex unavailable, record explicit skip.
-      addVerification(runId, {
+      const catchupWrite = addVerification(runId, {
         story_id: missingId,
         verdict: 'skip',
         evidence: 'codex unavailable: verification gate catch-up',
         verifiedBy: 'atlas',
+        reviewTreeOid: finalReviewPackage.reviewTreeOid,
+        criteria: prd.userStories.find(story => story.id === missingId)
+          .acceptanceCriteria.map((criterion_text, criterion_index) => ({
+            criterion_index,
+            criterion_text,
+            verdict: 'skip',
+            evidence: 'codex unavailable: criterion not externally cross-validated',
+          })),
       });
+      if (!catchupWrite.ok) {
+        throw new Error(`verification catch-up was not persisted: ${catchupWrite.reason}`);
+      }
     }
     verificationGate = checkVerificationGate(runId, storyIds);
   }

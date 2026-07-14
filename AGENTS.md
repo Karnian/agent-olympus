@@ -16,7 +16,9 @@ User Request
          │
          ▼
     Atlas/Athena Pipeline:
-    Triage → Analyze → Plan(+PRD) → Execute → Verify → Review → Slop Clean → Commit
+    Triage → Analyze → Plan(+PRD) → Execute → Verify → Review → Finalize
+                                                               ↓
+                                      Re-verify final tree → Final Review → Commit
          │           │                              │
          │           └─ /research (if needed)       └─ /trace (if debugger fails)
          └─ /deepinit (if unfamiliar codebase)
@@ -44,7 +46,7 @@ agent-olympus/
 │   ├── code-reviewer.md          — Code quality review, read-only (Sonnet)
 │   ├── explore.md                — Fast codebase scanner (Haiku)
 │   ├── writer.md                 — Documentation writer (Haiku)
-│   ├── hephaestus.md             — Codex deep worker (Sonnet)
+│   ├── hephaestus.md             — Deep autonomous coder (Sonnet)
 │   ├── ask.md                    — Quick Codex/Gemini query agent (Sonnet)
 │   └── themis.md                 — Quality gate: tests/lint/AC verification (Sonnet)
 ├── skills/                       — 37 user-facing skills (workflow recipes)
@@ -52,6 +54,8 @@ agent-olympus/
 │   ├── athena/SKILL.md           — /athena: autonomous team pipeline
 │   ├── plan/SKILL.md             — /plan: forward/reverse product planning
 │   ├── ask/SKILL.md              — /ask: quick Codex/Gemini query (sync + async)
+│   ├── codex-goal/SKILL.md        — /codex-goal: bounded Codex delegation
+│   ├── codex-review/SKILL.md      — /codex-review: independent Codex diff gate
 │   ├── deep-interview/SKILL.md   — /deep-interview: Socratic clarification
 │   ├── deepinit/SKILL.md         — /deepinit: codebase AGENTS.md generation
 │   ├── research/SKILL.md         — /research: parallel web research
@@ -92,10 +96,10 @@ agent-olympus/
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (2858 tests, 108 files; v1.5.1: 2858/2858 passing)
+│   ├── test/                     — node:test unit tests (current tree: 3168 tests, 127 files; published v1.5.1 baseline: 2858/108)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
-│       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
+│       ├── intent-patterns.mjs   — Intent classifier (12 categories + unknown fallback, multilingual)
 │       ├── model-router.mjs      — Routing logic with JSONC config merge
 │       ├── tmux-session.mjs      — Tmux session lifecycle + sanitizeForShellArg()
 │       ├── inbox-outbox.mjs      — File-based message queue (legacy, used by tmux fallback)
@@ -180,22 +184,13 @@ agent-olympus/
 - Key files: `scripts/lib/worker-spawn.mjs`, `codex-appserver.mjs`, `codex-exec.mjs`, `claude-cli.mjs`, `gemini-acp.mjs`, `gemini-exec.mjs`, `permission-detect.mjs`.
 - Detached worker supervisor -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md); permission mirroring -> [docs/internals/permission-mirroring.md](docs/internals/permission-mirroring.md); Gemini credentials -> [docs/internals/credentials.md](docs/internals/credentials.md).
 
-## Deep References
-
-- Hook architecture / per-hook details -> [docs/internals/hooks.md](docs/internals/hooks.md).
-- Autonomy config resolution (layered, CI kill-switch) -> [docs/internals/autonomy-config.md](docs/internals/autonomy-config.md).
-- Adapter priority + session naming -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md).
-- schemaVersion convention -> [docs/development.md](docs/development.md).
-
 ## Contributing
 
-- Add an agent: follow [docs/development.md#how-to-add-a-new-agent](docs/development.md#how-to-add-a-new-agent).
-- Add a skill: follow [docs/development.md#how-to-add-a-new-skill](docs/development.md#how-to-add-a-new-skill).
-- Add a hook: follow [docs/development.md#how-to-add-a-new-hook](docs/development.md#how-to-add-a-new-hook).
+Follow [docs/development.md](docs/development.md) when adding agents, skills, hooks, or persisted formats.
 
 ## Testing
 
-Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the current 3168-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
@@ -217,7 +212,7 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | Agent | Role |
 |-------|------|
 | **atlas** | Hub-and-spoke: one brain delegates to many sub-agents; supports session recovery via checkpoint |
-| **athena** | Peer-to-peer: Claude + Codex + Gemini team via adapter system; supports session recovery via checkpoint |
+| **athena** | Hybrid team: native Claude teammates plus lead-bridged Codex/Gemini adapters; supports session recovery via checkpoint |
 
 ### Planning & Specification (Opus)
 | Agent | Role |
@@ -234,16 +229,16 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | **designer** | UI/UX implementation specialist |
 | **test-engineer** | Test strategy, TDD, coverage |
 | **debugger** | Root-cause analysis and fix |
-| **hephaestus** | Codex deep worker (large refactoring, algorithms) |
+| **hephaestus** | Deep autonomous coder (large refactoring, algorithms) |
 
-### Review (Read-Only)
+### Review & Quality Gate (No Direct Edits)
 | Agent | Role |
 |-------|------|
 | **architect** (Opus) | Functional completeness, architecture alignment |
 | **aphrodite** | UI/UX design critique — Nielsen heuristics, Gestalt principles, WCAG 2.2 AA |
 | **security-reviewer** | OWASP Top 10, secrets, injection |
 | **code-reviewer** | Logic defects, SOLID, DRY, AI slop |
-| **themis** | Quality gate: tests, lint, namespace, frontmatter, per-AC verification |
+| **themis** | Test-executing quality gate; final tree freshness rejects side effects |
 
 ### Utility
 | Agent | Role |
@@ -258,7 +253,7 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | Skill | Trigger | What It Does |
 |-------|---------|--------------|
 | `/atlas` | "해줘", "do it" | Full autonomous pipeline: triage → analyze → plan → execute → verify → review → commit |
-| `/athena` | "팀으로 해", "team" | Same pipeline but with Claude + Codex + Gemini team (each in git worktree) via adapter system |
+| `/athena` | "팀으로 해", "team" | Native Claude teammates plus lead-bridged Codex/Gemini workers, all worktree-isolated |
 | `/plan` | "기획", "spec", "역기획" | Adaptive product planner — forward (idea→spec) and reverse (code→spec) |
 
 ### Pre-Processing
@@ -324,9 +319,9 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | Event | Hook | Purpose |
 |-------|------|---------|
 | SessionStart | session-start | Inject prior wisdom + interrupted checkpoint context at session start |
-| SessionStart | runtime-permissions-capture | Capture runtime `permission_mode` from hook stdin/env to `.ao/state/ao-runtime-permissions.json` (async, v1.1.6) |
-| UserPromptSubmit | intent-gate | Classify user intent into 7 categories (multilingual) |
-| UserPromptSubmit | runtime-permissions-capture | Refresh runtime `permission_mode` cache so mid-session mode flips are picked up on next turn (async, v1.1.6) |
+| SessionStart | runtime-permissions-capture | Bind hook session identity to an external private runtime grant (async) |
+| UserPromptSubmit | intent-gate | Classify user intent into 12 categories + unknown fallback (multilingual) |
+| UserPromptSubmit | runtime-permissions-capture | Refresh the bound grant without trusting project-local state (async) |
 | PreToolUse:Task | concurrency-gate | Enforce parallel task limits |
 | PreToolUse:Task | model-router | Inject model routing advice based on intent |
 | PreToolUse:Agent | concurrency-gate | Same limits for Agent tool |
@@ -370,7 +365,7 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | Claude Haiku | explore, writer | Fast scans, documentation |
 | Claude Sonnet | executor, designer, aphrodite, debugger, ask, reviewers, hephaestus | Standard implementation and review |
 | Claude Opus | atlas, athena, metis, prometheus, momus, hermes, architect | Orchestration, analysis, planning |
-| OpenAI Codex | hephaestus (via adapter) | Algorithms, large refactoring, deep exploration |
+| OpenAI Codex | adapter workers | Algorithms, large refactoring, deep exploration |
 | Google Gemini | (via adapter) | Cross-validation, alternative perspective |
 
 ## Key Design Decisions

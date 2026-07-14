@@ -214,6 +214,36 @@ describe('intent-gate: intent classification produces routing context', () => {
       prompt: 'help me plan the roadmap and strategy for the new feature',
       expectCategory: 'planning',
     },
+    {
+      label: 'design-review from exact UI review prompt',
+      prompt: 'UI 리뷰해줘',
+      expectCategory: 'design-review',
+    },
+    {
+      label: 'security-review from exact Korean security review prompt',
+      prompt: '보안 리뷰해줘',
+      expectCategory: 'security-review',
+    },
+    {
+      label: 'test-authoring from explicit unit-test request',
+      prompt: 'write unit tests for the authentication database layer',
+      expectCategory: 'test-authoring',
+    },
+    {
+      label: 'product-planning from PRD request',
+      prompt: 'write a PRD for this feature',
+      expectCategory: 'product-planning',
+    },
+    {
+      label: 'product-planning from Korean reverse-spec request',
+      prompt: '이 코드 역기획해줘',
+      expectCategory: 'product-planning',
+    },
+    {
+      label: 'deep-mutation from refactor prompt',
+      prompt: 'refactor the auth module',
+      expectCategory: 'deep-mutation',
+    },
   ];
 
   for (const { label, prompt, expectCategory } of cases) {
@@ -224,6 +254,22 @@ describe('intent-gate: intent classification produces routing context', () => {
       assert.ok(ctx.includes(expectCategory), `expected category "${expectCategory}" in: ${ctx}`);
     });
   }
+
+  it('keeps UserPromptSubmit advice aligned with review and mutation-capable routes', () => {
+    const design = runHook({ prompt: 'review the UI', cwd: tmpDir }, { cwd: tmpDir });
+    const mutation = runHook({ prompt: 'optimize this slow database query', cwd: tmpDir }, { cwd: tmpDir });
+    assert.match(design.hookSpecificOutput?.additionalContext ?? '', /Aphrodite/);
+    assert.match(mutation.hookSpecificOutput?.additionalContext ?? '', /Hephaestus/);
+  });
+
+  it('keeps specialist and product-planning advice aligned with model routing', () => {
+    const security = runHook({ prompt: 'security review the authentication flow', cwd: tmpDir }, { cwd: tmpDir });
+    const tests = runHook({ prompt: 'write unit tests for the auth layer', cwd: tmpDir }, { cwd: tmpDir });
+    const product = runHook({ prompt: 'reverse engineer a spec from this code', cwd: tmpDir }, { cwd: tmpDir });
+    assert.match(security.hookSpecificOutput?.additionalContext ?? '', /security-reviewer/i);
+    assert.match(tests.hookSpecificOutput?.additionalContext ?? '', /test-engineer/i);
+    assert.match(product.hookSpecificOutput?.additionalContext ?? '', /Hermes|\/plan/);
+  });
 });
 
 // ---------------------------------------------------------------------------

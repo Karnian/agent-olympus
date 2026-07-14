@@ -52,6 +52,16 @@ const MAX_EVENTS_BYTES = 16 * 1024 * 1024;
 const MAX_TASK_UPDATES_BYTES = 1024 * 1024;
 const MAX_TASK_UPDATES = 1000;
 const MAX_POINTER_BYTES = 64 * 1024;
+const MAX_VERIFICATION_GENERATION_BYTES = 256 * 1024;
+const MAX_REVIEW_BASE_PIN_BYTES = 16 * 1024;
+const VERIFICATION_GENERATION_FILE = 'verification-generation.json';
+const REVIEW_BASE_PIN_FILE = 'review-base.json';
+const VERIFICATION_GENERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const REVIEW_TREE_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+const REVIEW_BASE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
+const REVIEW_BASE_SOURCE = /^(?:explicit|origin-head|conventional|env:(?:GITHUB_BASE_REF|CI_MERGE_REQUEST_TARGET_BRANCH_NAME|CHANGE_TARGET|SYSTEM_PULLREQUEST_TARGETBRANCH))$/;
+const STORY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const VERIFICATION_PHASE_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 // Listing is an audit convenience, not an unbounded filesystem dump.  Keep
 // the normal small-run behavior while preventing a poisoned artifact root from
 // turning a status call into an arbitrarily large response.
@@ -836,6 +846,176 @@ export function createRun(orchestrator, taskDescription, opts = {}) {
   }
 }
 
+function normalizeReviewBasePinInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || Object.keys(input).length !== 3
+    || !Object.hasOwn(input, 'baseRef')
+    || !Object.hasOwn(input, 'baseRefCommit')
+    || !Object.hasOwn(input, 'source')
+    || !REVIEW_BASE_REF.test(input.baseRef || '')
+    || input.baseRef.includes('..')
+    || input.baseRef.includes('//')
+    || input.baseRef.endsWith('/')
+    || !REVIEW_TREE_OID.test(input.baseRefCommit || '')
+    || !REVIEW_BASE_SOURCE.test(input.source || '')) {
+    throw new Error('invalid review base pin input');
+  }
+  return {
+    baseRef: input.baseRef,
+    baseRefCommit: input.baseRefCommit,
+    source: input.source,
+  };
+}
+
+function validateReviewBasePin(value, runId, now = Date.now()) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).length !== 7
+    || value.schemaVersion !== 1
+    || value.runId !== runId
+    || !REVIEW_BASE_REF.test(value.baseRef || '')
+    || value.baseRef.includes('..')
+    || value.baseRef.includes('//')
+    || value.baseRef.endsWith('/')
+    || !REVIEW_TREE_OID.test(value.baseRefCommit || '')
+    || !REVIEW_BASE_SOURCE.test(value.source || '')
+    || !/^[0-9a-f]{64}$/.test(value.pinDigest || '')) return false;
+  const pinnedAt = canonicalTimestamp(value.pinnedAt);
+  return pinnedAt !== null && pinnedAt <= now + 60_000;
+}
+
+function reviewBasePinDigest(runId, normalized) {
+  return createHash('sha256')
+    .update(JSON.stringify({ runId, ...normalized }), 'utf8')
+    .digest('hex');
+}
+
+function readReviewBasePin(paths, runId, { allowMissing = false } = {}) {
+  const artifact = readBoundRunArtifact(
+    paths,
+    REVIEW_BASE_PIN_FILE,
+    'review base pin',
+    MAX_REVIEW_BASE_PIN_BYTES,
+    { allowMissing },
+  );
+  if (!artifact.present) return null;
+  let value;
+  try { value = JSON.parse(artifact.text); }
+  catch { throw new Error('review base pin is invalid JSON'); }
+  if (!validateReviewBasePin(value, runId)) throw new Error('review base pin is malformed');
+  const expectedDigest = reviewBasePinDigest(runId, {
+    baseRef: value.baseRef,
+    baseRefCommit: value.baseRefCommit,
+    source: value.source,
+  });
+  if (value.pinDigest !== expectedDigest) throw new Error('review base pin digest mismatch');
+  return value;
+}
+
+function sameReviewBasePin(existing, normalized) {
+  return existing.baseRef === normalized.baseRef
+    && existing.baseRefCommit === normalized.baseRefCommit
+    && existing.source === normalized.source;
+}
+
+/**
+ * Durably pin the immutable review base for a run. The first successful write
+ * wins. Repeating the exact pin is idempotent; any later identity change fails
+ * closed so a resumed run cannot silently move its review boundary.
+ *
+ * Call this immediately after createRun() and before analysis or delegation.
+ *
+ * @param {string} runId
+ * @param {{baseRef:string,baseRefCommit:string,source:string}} input
+ * @param {object} [opts]
+ * @returns {{ok:true,created:boolean,pin:object}|{ok:false,reason:string}}
+ */
+export function pinRunReviewBase(runId, input, opts = {}) {
+  try {
+    const normalized = normalizeReviewBasePinInput(input);
+    const paths = bindRunFinalizationPaths(runId, opts);
+    const summaryArtifact = readBoundRunArtifact(
+      paths,
+      'summary.json',
+      'run summary',
+      MAX_SUMMARY_BYTES,
+    );
+    let summary;
+    try { summary = JSON.parse(summaryArtifact.text); }
+    catch { throw new Error('run summary is invalid JSON'); }
+    if (!validateRunSummaryIdentity(summary, runId)) {
+      throw new Error('run summary identity is invalid');
+    }
+
+    const current = readReviewBasePin(paths, runId, { allowMissing: true });
+    if (current) {
+      if (!sameReviewBasePin(current, normalized)) {
+        return { ok: false, reason: 'review-base-pin-mismatch' };
+      }
+      return { ok: true, created: false, pin: Object.freeze(structuredClone(current)) };
+    }
+
+    const pin = {
+      schemaVersion: 1,
+      runId,
+      ...normalized,
+      pinnedAt: new Date().toISOString(),
+      pinDigest: reviewBasePinDigest(runId, normalized),
+    };
+    let created = false;
+    try {
+      paths.revalidate();
+      writeExclusiveRegularArtifact(
+        join(paths.dir, REVIEW_BASE_PIN_FILE),
+        'review base pin',
+        JSON.stringify(pin, null, 2),
+        MAX_REVIEW_BASE_PIN_BYTES,
+      );
+      paths.revalidate();
+      created = true;
+    } catch (error) {
+      // Another process may have won the O_EXCL race. Only the exact same,
+      // fully persisted pin is acceptable; linked or partial leaves still fail.
+      if (error?.code !== 'EEXIST') throw error;
+    }
+
+    const persisted = readReviewBasePin(paths, runId);
+    if (!sameReviewBasePin(persisted, normalized)) {
+      return { ok: false, reason: 'review-base-pin-mismatch' };
+    }
+    return {
+      ok: true,
+      created,
+      pin: Object.freeze(structuredClone(persisted)),
+    };
+  } catch (error) {
+    return { ok: false, reason: error?.message || 'review-base-pin-failed' };
+  }
+}
+
+/** Strictly read a run's immutable review-base pin. */
+export function getRunReviewBasePin(runId, opts = {}) {
+  try {
+    const paths = bindRunReadPaths(runId, opts);
+    const summaryArtifact = readBoundRunArtifact(
+      paths,
+      'summary.json',
+      'run summary',
+      MAX_SUMMARY_BYTES,
+    );
+    let summary;
+    try { summary = JSON.parse(summaryArtifact.text); }
+    catch { throw new Error('run summary is invalid JSON'); }
+    if (!validateRunSummaryIdentity(summary, runId)) {
+      throw new Error('run summary identity is invalid');
+    }
+    const pin = readReviewBasePin(paths, runId, { allowMissing: true });
+    if (!pin) return { ok: false, reason: 'review-base-pin-missing' };
+    return { ok: true, pin: Object.freeze(structuredClone(pin)) };
+  } catch (error) {
+    return { ok: false, reason: error?.message || 'review-base-pin-read-failed' };
+  }
+}
+
 /**
  * Append a timestamped event to events.jsonl for the given run.
  *
@@ -1134,24 +1314,449 @@ export function getUserTaskUpdates(runId, opts = {}) {
   }
 }
 
+function normalizeVerificationGenerationInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || !REVIEW_TREE_OID.test(input.reviewTreeOid || '')
+    || !VERIFICATION_PHASE_PATTERN.test(input.phase || '')
+    || !Array.isArray(input.storyIds) || input.storyIds.length === 0
+    || input.storyIds.length > 10_000
+    || input.storyIds.some(storyId => !STORY_ID_PATTERN.test(storyId || ''))
+    || new Set(input.storyIds).size !== input.storyIds.length) {
+    throw new Error('invalid verification generation input');
+  }
+  return {
+    reviewTreeOid: input.reviewTreeOid,
+    phase: input.phase,
+    storyIds: [...input.storyIds].sort(),
+  };
+}
+
+function validateVerificationGenerationManifest(value, runId, now = Date.now()) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || value.schemaVersion !== 1
+    || value.runId !== runId
+    || !VERIFICATION_GENERATION_ID.test(value.generationId || '')
+    || !REVIEW_TREE_OID.test(value.reviewTreeOid || '')
+    || !VERIFICATION_PHASE_PATTERN.test(value.phase || '')
+    || !Array.isArray(value.storyIds) || value.storyIds.length === 0
+    || value.storyIds.length > 10_000
+    || value.storyIds.some(storyId => !STORY_ID_PATTERN.test(storyId || ''))
+    || new Set(value.storyIds).size !== value.storyIds.length
+    || value.storyIds.some((storyId, index) => index > 0 && value.storyIds[index - 1] >= storyId)
+    || !['open', 'sealed'].includes(value.status)) {
+    return false;
+  }
+  const startedAt = canonicalTimestamp(value.startedAt);
+  if (startedAt === null || startedAt > now + 60_000) return false;
+  const openKeys = [
+    'schemaVersion',
+    'runId',
+    'generationId',
+    'reviewTreeOid',
+    'phase',
+    'storyIds',
+    'status',
+    'startedAt',
+  ];
+  if (value.status === 'open') {
+    return Object.keys(value).length === openKeys.length
+      && openKeys.every(key => Object.hasOwn(value, key));
+  }
+  const sealedAt = canonicalTimestamp(value.sealedAt);
+  return Object.keys(value).length === openKeys.length + 2
+    && [...openKeys, 'sealedAt', 'recordsDigest'].every(key => Object.hasOwn(value, key))
+    && sealedAt !== null
+    && sealedAt >= startedAt
+    && sealedAt <= now + 60_000
+    && /^[0-9a-f]{64}$/.test(value.recordsDigest || '');
+}
+
+function verificationGenerationPaths(mutation) {
+  return {
+    dir: mutation.dir,
+    revalidate: () => revalidateRunningRunMutation(mutation),
+  };
+}
+
+function readVerificationGeneration(paths, runId, { allowMissing = false } = {}) {
+  const artifact = readBoundRunArtifact(
+    paths,
+    VERIFICATION_GENERATION_FILE,
+    'verification generation',
+    MAX_VERIFICATION_GENERATION_BYTES,
+    { allowMissing },
+  );
+  if (!artifact.present) return null;
+  let value;
+  try { value = JSON.parse(artifact.text); }
+  catch { throw new Error('verification generation is invalid JSON'); }
+  if (!validateVerificationGenerationManifest(value, runId)) {
+    throw new Error('verification generation is malformed');
+  }
+  return value;
+}
+
+function persistVerificationGeneration(mutation, manifest) {
+  const paths = verificationGenerationPaths(mutation);
+  const existing = readVerificationGeneration(paths, manifest.runId, { allowMissing: true });
+  // Reading first is intentional: never replace a linked, permissive, or
+  // otherwise unsafe leaf by renaming over it and hiding the evidence.
+  if (existing && existing.runId !== manifest.runId) {
+    throw new Error('verification generation identity mismatch');
+  }
+  const payload = JSON.stringify(manifest, null, 2);
+  if (Buffer.byteLength(payload, 'utf8') > MAX_VERIFICATION_GENERATION_BYTES) {
+    throw new Error('verification generation exceeds its size bound');
+  }
+  revalidateRunningRunMutation(mutation);
+  atomicWriteFileSync(join(mutation.dir, VERIFICATION_GENERATION_FILE), payload, {
+    mode: 0o600,
+    durable: true,
+  });
+  revalidateRunningRunMutation(mutation);
+  const persisted = readVerificationGeneration(paths, manifest.runId);
+  if (JSON.stringify(persisted) !== JSON.stringify(manifest)) {
+    throw new Error('verification generation persistence verification failed');
+  }
+  return persisted;
+}
+
+function verificationRecordsDigest(records) {
+  return createHash('sha256').update(JSON.stringify(records), 'utf8').digest('hex');
+}
+
+function collectVerificationGenerationProgress(manifest, verifications) {
+  const records = verifications.filter(
+    record => record?.verificationGenerationId === manifest.generationId,
+  );
+  const byStory = new Map();
+  const startedAt = Date.parse(manifest.startedAt);
+  for (const record of records) {
+    const timestamp = canonicalTimestamp(record?.timestamp);
+    if (!record || typeof record !== 'object' || Array.isArray(record)
+      || !manifest.storyIds.includes(record.story_id)
+      || byStory.has(record.story_id)
+      || record.reviewTreeOid !== manifest.reviewTreeOid
+      || timestamp === null || timestamp < startedAt || timestamp > Date.now() + 60_000) {
+      throw new Error('verification generation contains a stale, duplicate, or invalid record');
+    }
+    byStory.set(record.story_id, record);
+  }
+  return manifest.storyIds.filter(storyId => byStory.has(storyId)).map(storyId => byStory.get(storyId));
+}
+
+function collectVerificationGenerationRecords(manifest, verifications) {
+  const records = collectVerificationGenerationProgress(manifest, verifications);
+  if (records.length !== manifest.storyIds.length) {
+    throw new Error('verification generation does not contain exactly one record per story');
+  }
+  return records;
+}
+
+function canonicalRecordValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalRecordValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.keys(value).sort().map(key => [key, canonicalRecordValue(value[key])]),
+  );
+}
+
+function generationRecordSemantics(record) {
+  const { timestamp: _timestamp, ...semantic } = record;
+  return JSON.stringify(canonicalRecordValue(semantic));
+}
+
+function readStrictVerificationProgress(paths) {
+  const artifact = readBoundRunArtifact(
+    paths,
+    'verification.jsonl',
+    'run verifications',
+    MAX_EVENTS_BYTES,
+    { allowMissing: true, allowEmpty: true },
+  );
+  if (!artifact.present) return [];
+  return parseStrictVerificationLines(artifact.text);
+}
+
+/**
+ * Open or crash-resume a generation-bound final verification sweep. A single
+ * current manifest makes historical records in verification.jsonl ineligible
+ * for a later final review even when they name the same Git tree. A caller may
+ * replace an open generation only by presenting its exact generation ID and a
+ * different review tree through opts.supersedeGenerationId; this is the
+ * explicit reattempt path after remediation mutates the filesystem snapshot.
+ */
+export function beginVerificationGeneration(runId, input, opts = {}) {
+  let mutation = null;
+  try {
+    const normalized = normalizeVerificationGenerationInput(input);
+    mutation = acquireRunningRunMutation(runId, opts);
+    const paths = verificationGenerationPaths(mutation);
+    const current = readVerificationGeneration(paths, runId, { allowMissing: true });
+    if (current?.status === 'open') {
+      const same = current.reviewTreeOid === normalized.reviewTreeOid
+        && current.phase === normalized.phase
+        && JSON.stringify(current.storyIds) === JSON.stringify(normalized.storyIds);
+      if (same) {
+        return { ok: true, resumed: true, generation: Object.freeze(structuredClone(current)) };
+      }
+      const explicitSupersede = opts.supersedeGenerationId === current.generationId
+        && current.reviewTreeOid !== normalized.reviewTreeOid;
+      if (!explicitSupersede) {
+        return {
+          ok: false,
+          reason: 'different-verification-generation-already-open',
+          currentGenerationId: current.generationId,
+          currentReviewTreeOid: current.reviewTreeOid,
+        };
+      }
+    }
+    const manifest = {
+      schemaVersion: 1,
+      runId,
+      generationId: randomUUID(),
+      ...normalized,
+      status: 'open',
+      startedAt: new Date().toISOString(),
+    };
+    const persisted = persistVerificationGeneration(mutation, manifest);
+    return {
+      ok: true,
+      resumed: false,
+      supersededGenerationId: current?.status === 'open' ? current.generationId : null,
+      generation: Object.freeze(structuredClone(persisted)),
+    };
+  } catch (error) {
+    return { ok: false, reason: error?.message || 'verification-generation-start-failed' };
+  } finally {
+    releaseRunningRunMutation(mutation);
+  }
+}
+
+/**
+ * Strictly read the already-persisted subset of an open (or sealed)
+ * generation. Resume callers use this to run only missing stories; malformed,
+ * duplicate, stale-tree, or pre-generation records fail closed.
+ */
+export function getVerificationGenerationProgress(runId, generationId, opts = {}) {
+  try {
+    if (!VERIFICATION_GENERATION_ID.test(generationId || '')) {
+      throw new Error('invalid verification generation id');
+    }
+    const paths = bindRunReadPaths(runId, opts);
+    const summaryArtifact = readBoundRunArtifact(
+      paths,
+      'summary.json',
+      'run summary',
+      MAX_SUMMARY_BYTES,
+    );
+    let summary;
+    try { summary = JSON.parse(summaryArtifact.text); }
+    catch { throw new Error('run summary is invalid JSON'); }
+    if (!validateRunSummaryIdentity(summary, runId)) throw new Error('run summary identity is invalid');
+    const generation = readVerificationGeneration(paths, runId);
+    if (generation.generationId !== generationId) {
+      throw new Error('stale verification generation');
+    }
+    const records = collectVerificationGenerationProgress(
+      generation,
+      readStrictVerificationProgress(paths),
+    );
+    if (generation.status === 'sealed') {
+      if (records.length !== generation.storyIds.length
+        || generation.recordsDigest !== verificationRecordsDigest(records)) {
+        throw new Error('sealed verification generation digest mismatch');
+      }
+    }
+    const currentGeneration = readVerificationGeneration(paths, runId);
+    if (JSON.stringify(currentGeneration) !== JSON.stringify(generation)) {
+      throw new Error('verification generation changed during progress read');
+    }
+    return {
+      ok: true,
+      generation: Object.freeze(structuredClone(generation)),
+      records: Object.freeze(structuredClone(records)),
+      missingStoryIds: Object.freeze(
+        generation.storyIds.filter(storyId => !records.some(record => record.story_id === storyId)),
+      ),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      records: [],
+      missingStoryIds: [],
+      reason: error?.message || 'verification-generation-progress-read-failed',
+    };
+  }
+}
+
+/** Seal an exact, post-start, one-record-per-story verification generation. */
+export function sealVerificationGeneration(runId, generationId, opts = {}) {
+  let mutation = null;
+  try {
+    if (!VERIFICATION_GENERATION_ID.test(generationId || '')) {
+      return { ok: false, records: [], reason: 'invalid-verification-generation-id' };
+    }
+    mutation = acquireRunningRunMutation(runId, opts);
+    const paths = verificationGenerationPaths(mutation);
+    const current = readVerificationGeneration(paths, runId);
+    if (current.generationId !== generationId) {
+      return { ok: false, records: [], reason: 'stale-verification-generation' };
+    }
+    const artifact = readBoundRunArtifact(
+      paths,
+      'verification.jsonl',
+      'run verifications',
+      MAX_EVENTS_BYTES,
+    );
+    const verifications = parseStrictVerificationLines(artifact.text);
+    const records = collectVerificationGenerationRecords(current, verifications);
+    const recordsDigest = verificationRecordsDigest(records);
+    if (current.status === 'sealed') {
+      if (current.recordsDigest !== recordsDigest) {
+        return { ok: false, records: [], reason: 'sealed-verification-generation-mismatch' };
+      }
+      return {
+        ok: true,
+        resumed: true,
+        generation: Object.freeze(structuredClone(current)),
+        records: Object.freeze(structuredClone(records)),
+      };
+    }
+    const sealed = {
+      ...current,
+      status: 'sealed',
+      sealedAt: new Date().toISOString(),
+      recordsDigest,
+    };
+    const persisted = persistVerificationGeneration(mutation, sealed);
+    return {
+      ok: true,
+      resumed: false,
+      generation: Object.freeze(structuredClone(persisted)),
+      records: Object.freeze(structuredClone(records)),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      records: [],
+      reason: error?.message || 'verification-generation-seal-failed',
+    };
+  } finally {
+    releaseRunningRunMutation(mutation);
+  }
+}
+
+/** Strictly reload a sealed generation and prove its records still match. */
+export function getSealedVerificationGeneration(runId, generationId, opts = {}) {
+  try {
+    if (!VERIFICATION_GENERATION_ID.test(generationId || '')) {
+      throw new Error('invalid verification generation id');
+    }
+    const paths = bindRunReadPaths(runId, opts);
+    const summaryArtifact = readBoundRunArtifact(
+      paths,
+      'summary.json',
+      'run summary',
+      MAX_SUMMARY_BYTES,
+    );
+    let summary;
+    try { summary = JSON.parse(summaryArtifact.text); }
+    catch { throw new Error('run summary is invalid JSON'); }
+    if (!validateRunSummaryIdentity(summary, runId)) throw new Error('run summary identity is invalid');
+    const generation = readVerificationGeneration(paths, runId);
+    if (generation.status !== 'sealed' || generation.generationId !== generationId) {
+      throw new Error('verification generation is not the requested sealed generation');
+    }
+    if (typeof opts._afterVerificationGenerationRead === 'function') {
+      opts._afterVerificationGenerationRead(
+        join(paths.dir, VERIFICATION_GENERATION_FILE),
+      );
+    }
+    const artifact = readBoundRunArtifact(
+      paths,
+      'verification.jsonl',
+      'run verifications',
+      MAX_EVENTS_BYTES,
+    );
+    const records = collectVerificationGenerationRecords(
+      generation,
+      parseStrictVerificationLines(artifact.text),
+    );
+    if (generation.recordsDigest !== verificationRecordsDigest(records)) {
+      throw new Error('sealed verification generation digest mismatch');
+    }
+    const currentGeneration = readVerificationGeneration(paths, runId);
+    if (JSON.stringify(currentGeneration) !== JSON.stringify(generation)) {
+      throw new Error('verification generation changed during read');
+    }
+    paths.revalidate();
+    return {
+      ok: true,
+      generation: Object.freeze(structuredClone(generation)),
+      records: Object.freeze(structuredClone(records)),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      records: [],
+      reason: error?.message || 'sealed-verification-generation-read-failed',
+    };
+  }
+}
+
 /**
  * Append a verification result to verification.json for the given run.
  * Creates the file if it does not exist.
  *
  * @param {string} runId
- * @param {{ story_id: string, verdict: 'pass'|'fail'|'skip', evidence: *, verifiedBy: string, timestamp: string }} result
+ * @param {{ story_id: string, verdict: 'pass'|'fail'|'skip', evidence: *, verifiedBy: string, timestamp: string, reviewTreeOid?: string }} result
  * @param {object} [opts]
  * @param {string} [opts.base] - Override base directory (for testing)
  * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths
  * @param {object} [opts._runLockOwner] - Existing shared transition-lock owner
+ * @returns {{ok:boolean,reason?:string}}
  */
 export function addVerification(runId, result, opts = {}) {
   let mutation = null;
   try {
-    if (!result || typeof result !== 'object' || Array.isArray(result)) return;
+    if (!result || typeof result !== 'object' || Array.isArray(result)) {
+      return { ok: false, reason: 'invalid-verification' };
+    }
     mutation = acquireRunningRunMutation(runId, opts);
+    const timestamp = result.timestamp || new Date().toISOString();
+    const normalized = { ...result, timestamp };
+    if (Object.hasOwn(result, 'verificationGenerationId')) {
+      if (!VERIFICATION_GENERATION_ID.test(result.verificationGenerationId || '')) {
+        return { ok: false, reason: 'invalid-verification-generation-id' };
+      }
+      const generationPaths = verificationGenerationPaths(mutation);
+      const generation = readVerificationGeneration(generationPaths, runId);
+      const observedAt = canonicalTimestamp(timestamp);
+      if (generation.status !== 'open'
+        || generation.generationId !== result.verificationGenerationId
+        || result.reviewTreeOid !== generation.reviewTreeOid
+        || !generation.storyIds.includes(result.story_id)
+        || observedAt === null
+        || observedAt < Date.parse(generation.startedAt)
+      || observedAt > Date.now() + 60_000) {
+        return { ok: false, reason: 'verification-generation-record-mismatch' };
+      }
+      const existing = readStrictVerificationProgress(generationPaths).filter(
+        record => record?.verificationGenerationId === generation.generationId
+          && record?.story_id === result.story_id,
+      );
+      if (existing.length > 1) {
+        return { ok: false, reason: 'duplicate-verification-generation-records' };
+      }
+      if (existing.length === 1) {
+        return generationRecordSemantics(existing[0]) === generationRecordSemantics(normalized)
+          ? { ok: true, reused: true }
+          : { ok: false, reason: 'conflicting-verification-generation-record' };
+      }
+    }
     const filePath = join(mutation.dir, 'verification.jsonl');
-    const line = JSON.stringify({ ...result, timestamp: result.timestamp || new Date().toISOString() });
+    const line = JSON.stringify(normalized);
     revalidateRunningRunMutation(mutation);
     appendRegularArtifact(filePath, 'run verifications', `${line}\n`, MAX_EVENTS_BYTES);
 
@@ -1178,8 +1783,12 @@ export function addVerification(runId, result, opts = {}) {
         _runLockOwner: mutation.owner,
       });
     }
-  } catch {
-    // fail-safe: verification loss is acceptable, never throw
+    return { ok: true };
+  } catch (error) {
+    // Keep hook/orchestrator callers exception-safe, but make verification
+    // loss observable. Review and shipping gates must fail closed when this
+    // return value is not ok instead of reusing an older passing record.
+    return { ok: false, reason: error?.message || 'verification-append-failed' };
   } finally {
     releaseRunningRunMutation(mutation);
   }
@@ -1383,6 +1992,30 @@ function parseJsonLines(text, { skipInvalid = false } = {}) {
   return parsed;
 }
 
+function parseStrictVerificationLines(text) {
+  const lines = text.split('\n');
+  // appendVerification() always terminates records with LF. Accept that one
+  // terminator, but do not treat blank records in the middle as harmless: a
+  // gate must account for every byte of its verification ledger.
+  if (lines.at(-1) === '') lines.pop();
+  if (lines.length === 0) throw new Error('run verifications are empty');
+
+  const parsed = [];
+  for (const [index, line] of lines.entries()) {
+    if (line.trim().length === 0) {
+      throw new Error(`run verification line ${index + 1} is blank`);
+    }
+    let value;
+    try { value = JSON.parse(line); }
+    catch { throw new Error(`run verification line ${index + 1} is invalid JSON`); }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`run verification line ${index + 1} is not an object`);
+    }
+    parsed.push(value);
+  }
+  return parsed;
+}
+
 function readRunRecord(runId, opts = {}) {
   const paths = bindRunReadPaths(runId, opts);
   const summaryArtifact = readBoundRunArtifact(
@@ -1533,6 +2166,77 @@ export function getRun(runId, opts = {}) {
     return readRunRecord(runId, opts);
   } catch {
     return emptyRunRecord();
+  }
+}
+
+/**
+ * Strictly read the verification ledger for a review/ship gate.
+ *
+ * Unlike getRun(), this API never projects missing, malformed, linked,
+ * permission-unsafe, oversized, or concurrently replaced evidence to an empty
+ * list and never skips a malformed JSONL row. The caller remains responsible
+ * for validating each record against the exact PRD acceptance criteria.
+ *
+ * @param {string} runId
+ * @param {object} [opts]
+ * @param {string} [opts.base] - Override base directory (for testing)
+ * @param {string} [opts.trustedRoot] - Explicit ancestry anchor for custom paths
+ * @returns {{ok:true,verifications:object[]}|{ok:false,verifications:[],reason:string}}
+ */
+export function getRunVerificationsStrict(runId, opts = {}) {
+  try {
+    const paths = bindRunReadPaths(runId, opts);
+    const summaryPath = join(paths.dir, 'summary.json');
+    const summaryArtifact = readBoundRunArtifact(
+      paths,
+      'summary.json',
+      'run summary',
+      MAX_SUMMARY_BYTES,
+    );
+    let summary;
+    try { summary = JSON.parse(summaryArtifact.text); }
+    catch { throw new Error('run summary is invalid JSON'); }
+    if (!validateRunSummaryIdentity(summary, runId)) {
+      throw new Error('run summary identity is invalid');
+    }
+
+    const verificationPath = join(paths.dir, 'verification.jsonl');
+    const artifact = readBoundRunArtifact(
+      paths,
+      'verification.jsonl',
+      'run verifications',
+      MAX_EVENTS_BYTES,
+    );
+
+    // Test-only seam for proving that a replacement after the descriptor read
+    // is rejected before evidence is exposed. Production callers have no
+    // reason to provide it.
+    if (typeof opts._afterVerificationRead === 'function') {
+      opts._afterVerificationRead(verificationPath);
+    }
+
+    paths.revalidate();
+    revalidateRegularArtifact(
+      summaryPath,
+      summaryArtifact.stat,
+      'run summary',
+      MAX_SUMMARY_BYTES,
+    );
+    revalidateRegularArtifact(
+      verificationPath,
+      artifact.stat,
+      'run verifications',
+      MAX_EVENTS_BYTES,
+    );
+    paths.revalidate();
+
+    return { ok: true, verifications: parseStrictVerificationLines(artifact.text) };
+  } catch (error) {
+    return {
+      ok: false,
+      verifications: [],
+      reason: error?.message || 'verification-read-failed',
+    };
   }
 }
 

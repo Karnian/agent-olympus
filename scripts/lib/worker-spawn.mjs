@@ -18,7 +18,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'fs';
-import { join, resolve } from 'path';
+import { isAbsolute, join, resolve } from 'path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import { buildRecoveryStrategy } from './stuck-recovery.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
@@ -42,6 +42,18 @@ import {
   classifyCodexDiagnostic,
   hasExplicitMcpAuthRecovery,
 } from './codex-error-classifier.mjs';
+import {
+  loadConcurrencyLimits,
+  releaseConcurrencyEntries,
+  releaseConcurrencyReservation,
+  reserveWorkerBatchConcurrency,
+} from './concurrency-limits.mjs';
+import {
+  REVIEW_TREE_OID_PATTERN,
+  assertCrossValidationPromptIdentity,
+  crossValidationIdentityKey,
+  normalizeCrossValidationIdentity,
+} from './cross-validation-identity.mjs';
 
 /** Absolute path to the supervisor CLI (launched detached per adapter worker). */
 const SUPERVISOR_SCRIPT = fileURLToPath(new URL('./adapter-worker-supervisor.mjs', import.meta.url));
@@ -53,6 +65,78 @@ const ARTIFACTS_DIR = '.ao/artifacts';
 const STALL_THRESHOLD_MS = 5 * 60 * 1000;
 const CLAUDE_FALLBACK_LOCK_TIMEOUT_MS = 5 * 1000;
 const TEAM_RUN_ID = /^[a-f0-9]{16}$/;
+const REVIEW_TREE_OID = REVIEW_TREE_OID_PATTERN;
+
+class ReviewIdentityViolation extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ReviewIdentityViolation';
+  }
+}
+
+function normalizeValidationIdentity(value, label = 'validationIdentity') {
+  try {
+    return normalizeCrossValidationIdentity(value, label);
+  } catch (error) {
+    throw new ReviewIdentityViolation(error?.message || `${label} is invalid`);
+  }
+}
+
+function validationIdentityKey(value, label) {
+  try {
+    return crossValidationIdentityKey(value, label);
+  } catch (error) {
+    throw new ReviewIdentityViolation(error?.message || `${label} is invalid`);
+  }
+}
+
+function resolveMonotonicReviewIdentity(sources, options = {}) {
+  const readOnlySources = sources.filter(source => source && source.readOnly === true);
+  const readOnly = readOnlySources.length > 0;
+  if (readOnly && options.rejectExplicitDowngrade
+    && sources.some(source => source?.explicitReadOnly === false)) {
+    throw new ReviewIdentityViolation('read-only review identity cannot be downgraded');
+  }
+
+  const oids = [];
+  const identities = [];
+  for (const source of sources) {
+    if (!source) continue;
+    if (source.reviewTreeOid !== undefined && source.reviewTreeOid !== null) {
+      if (!REVIEW_TREE_OID.test(source.reviewTreeOid)) {
+        throw new ReviewIdentityViolation(`${source.label} reviewTreeOid is invalid`);
+      }
+      oids.push(source.reviewTreeOid);
+    }
+    if (source.validationIdentity !== undefined && source.validationIdentity !== null) {
+      const normalized = normalizeValidationIdentity(
+        source.validationIdentity,
+        `${source.label} validationIdentity`,
+      );
+      identities.push(normalized);
+      oids.push(normalized.reviewTreeOid);
+    }
+  }
+  const uniqueOids = new Set(oids);
+  if (uniqueOids.size > 1) {
+    throw new ReviewIdentityViolation('read-only reviewTreeOid values do not match');
+  }
+  const identityKeys = new Set(identities.map(identity => JSON.stringify(identity)));
+  if (identityKeys.size > 1) {
+    throw new ReviewIdentityViolation('validationIdentity values do not match');
+  }
+  if (readOnly && uniqueOids.size !== 1) {
+    throw new ReviewIdentityViolation('read-only review identity requires an exact reviewTreeOid');
+  }
+  if (!readOnly && (uniqueOids.size > 0 || identities.length > 0)) {
+    throw new ReviewIdentityViolation('review identity requires enforced read-only execution');
+  }
+  return {
+    readOnly,
+    reviewTreeOid: readOnly ? [...uniqueOids][0] : null,
+    validationIdentity: identities[0] || null,
+  };
+}
 
 /** Allocate the generation before launch so an orchestrator can persist it first. */
 export function allocateTeamRunId() {
@@ -93,6 +177,7 @@ const CODEX_ERROR_PATTERNS = [
 
 const PROVIDER_EXHAUSTION_PATTERN = /rate.?limit|\b429\b|quota.*exceeded|resource[_ ]exhausted|too many requests/i;
 const PROVIDER_UNAVAILABLE_CATEGORIES = new Set(['network', 'timeout']);
+const CONCURRENCY_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'stopped']);
 const CAPABILITY_KEYS = [
   'hasCodexAppServer',
   'hasCodexExecJson',
@@ -330,6 +415,14 @@ async function killProcessGroups(targets, graceMs = KILL_GRACE_MS) {
  */
 export function selectAdapter(worker, capabilities = {}) {
   if (worker.type === 'codex') {
+    // App-server loads the user's normal Codex configuration/MCP surface and
+    // cannot currently provide an isolated-config guarantee. Read-only review
+    // therefore prefers exec's --ignore-user-config contract and otherwise
+    // falls back to the tmux exec path, which applies the same flag.
+    if (worker.readOnly === true) {
+      if (capabilities.hasCodexExecJson) return 'codex-exec';
+      return 'tmux';
+    }
     if (capabilities.hasCodexAppServer) return 'codex-appserver';
     if (capabilities.hasCodexExecJson) return 'codex-exec';
   }
@@ -423,7 +516,17 @@ export function monitorSupervisorWorker(state, worker, now) {
   try { snapPath = supSnapshotPath(state.projectRoot, state.runId, h.workerRunId); }
   catch { return { status: 'failed', output: '', error: { category: 'supervisor_invalid', message: 'invalid supervisor paths' } }; }
 
-  const r = supReadSnapshot(snapPath, { runId: state.runId, workerRunId: h.workerRunId });
+  const expectedSnapshot = {
+    runId: state.runId,
+    workerRunId: h.workerRunId,
+    ...(worker.readOnly === true ? {
+      readOnly: true,
+      reviewTreeOid: worker.reviewTreeOid,
+      validationIdentity: worker.validationIdentity || null,
+      cwd: worker.cwd || state.projectRoot,
+    } : {}),
+  };
+  const r = supReadSnapshot(snapPath, expectedSnapshot);
 
   if (r.kind === 'ok') {
     const s = r.snapshot;
@@ -480,7 +583,19 @@ export async function shutdownSupervisorWorker(state, worker) {
   // Phase 2: re-read AFTER phase 1 so an adapterPid recorded during the race is
   // seen; reap it only if it survived the supervisor's graceful shutdown.
   try {
-    const r = supReadSnapshot(supSnapshotPath(state.projectRoot, state.runId, h.workerRunId), { runId: state.runId, workerRunId: h.workerRunId });
+    const r = supReadSnapshot(
+      supSnapshotPath(state.projectRoot, state.runId, h.workerRunId),
+      {
+        runId: state.runId,
+        workerRunId: h.workerRunId,
+        ...(worker.readOnly === true ? {
+          readOnly: true,
+          reviewTreeOid: worker.reviewTreeOid,
+          validationIdentity: worker.validationIdentity || null,
+          cwd: worker.cwd || state.projectRoot,
+        } : {}),
+      },
+    );
     if (r.kind === 'ok' && Number.isInteger(r.snapshot.adapterPid) && r.snapshot.adapterPid > 1) {
       await killProcessGroups([{ pid: r.snapshot.adapterPid, startId: r.snapshot.adapterStartId }], KILL_GRACE_MS);
     }
@@ -763,6 +878,117 @@ function stripProviderFields(worker, fields) {
   }
 }
 
+function assertWorkerSecurityContract(worker) {
+  if (!worker || typeof worker !== 'object') {
+    throw new Error('spawnTeam workers must be objects');
+  }
+  if (worker.readOnly !== undefined && typeof worker.readOnly !== 'boolean') {
+    throw new Error(`worker ${String(worker.name || '<unnamed>')} readOnly must be boolean`);
+  }
+  if (worker.readOnly === true) {
+    if (!REVIEW_TREE_OID.test(worker.reviewTreeOid || '')) {
+      throw new ReviewIdentityViolation(
+        `read-only worker ${String(worker.name || '<unnamed>')} requires an exact reviewTreeOid`,
+      );
+    }
+    if (worker.validationIdentity !== undefined
+      && worker.validationIdentity !== null
+      && worker.validationIdentity?.reviewTreeOid !== worker.reviewTreeOid) {
+      throw new ReviewIdentityViolation(
+        `read-only worker ${String(worker.name || '<unnamed>')} has a mismatched validation identity`,
+      );
+    }
+    const validationIdentity = normalizeValidationIdentity(
+      worker.validationIdentity,
+      `worker ${String(worker.name || '<unnamed>')} validationIdentity`,
+    );
+    if (validationIdentity) {
+      try {
+        assertCrossValidationPromptIdentity(
+          worker.prompt ?? worker.originalPrompt,
+          validationIdentity,
+          `worker ${String(worker.name || '<unnamed>')}`,
+        );
+      } catch (error) {
+        throw new ReviewIdentityViolation(error?.message || 'cross-validation prompt is unbound');
+      }
+    }
+  } else if (worker.reviewTreeOid !== undefined || worker.validationIdentity !== undefined) {
+    throw new ReviewIdentityViolation('review identity is permitted only on an enforced read-only worker');
+  }
+}
+
+function resolveReassignmentReviewIdentity(worker, replacementWorker, opts = {}) {
+  return resolveMonotonicReviewIdentity([
+    worker ? {
+      label: 'source worker',
+      readOnly: worker.readOnly,
+      reviewTreeOid: worker.reviewTreeOid,
+      validationIdentity: worker.validationIdentity,
+    } : null,
+    replacementWorker ? {
+      label: 'replacement worker',
+      readOnly: replacementWorker.readOnly,
+      reviewTreeOid: replacementWorker.reviewTreeOid,
+      validationIdentity: replacementWorker.validationIdentity,
+    } : null,
+    {
+      label: 'root options',
+      readOnly: opts.rootReadOnly === true,
+      explicitReadOnly: Object.prototype.hasOwnProperty.call(opts, 'rootReadOnly')
+        ? opts.rootReadOnly
+        : undefined,
+      reviewTreeOid: opts.rootReviewTreeOid,
+      validationIdentity: opts.rootValidationIdentity,
+    },
+  ], { rejectExplicitDowngrade: true });
+}
+
+function bindReplacementReviewIdentity(replacementWorker, identity) {
+  if (!replacementWorker || !identity?.readOnly) return;
+  replacementWorker.readOnly = true;
+  replacementWorker.reviewTreeOid = identity.reviewTreeOid;
+  if (identity.validationIdentity) {
+    replacementWorker.validationIdentity = identity.validationIdentity;
+  }
+}
+
+function publicWorkerReviewIdentity(worker) {
+  const readOnly = worker?.readOnly === true;
+  const reviewTreeOid = readOnly && REVIEW_TREE_OID.test(worker?.reviewTreeOid || '')
+    ? worker.reviewTreeOid
+    : null;
+  let validationIdentity = null;
+  if (readOnly && reviewTreeOid) {
+    try {
+      const normalized = normalizeValidationIdentity(
+        worker.validationIdentity,
+        'worker validationIdentity',
+      );
+      if (normalized?.reviewTreeOid === reviewTreeOid) validationIdentity = normalized;
+    } catch {
+      // Persisted state is same-UID writable. Never echo an unbounded/malformed
+      // object through the public monitor API; a validator resume will reject
+      // this null identity via assertCrossValidationTeamState.
+    }
+  }
+  const boundedAbsolutePath = (value) => (
+    typeof value === 'string'
+    && isAbsolute(value)
+    && !value.includes('\0')
+    && Buffer.byteLength(value, 'utf8') <= 4096
+      ? value
+      : null
+  );
+  return {
+    readOnly,
+    reviewTreeOid,
+    validationIdentity,
+    cwd: boundedAbsolutePath(worker?.cwd),
+    worktreePath: boundedAbsolutePath(worker?.worktreePath),
+  };
+}
+
 /**
  * Build the replacement descriptor consumed by the orchestrator. Exhausted
  * Codex prefers Gemini when a Gemini adapter is available; exhausted Gemini
@@ -900,10 +1126,14 @@ export function planProviderFailover(worker, failureReason, capabilities = {}) {
  */
 export async function reassignProvider(teamName, workerName, originalPrompt, failureReason, sessionOverride, opts = {}) {
   let plan = null;
+  let state = null;
+  let worker = opts.worker || null;
+  let reviewIdentity = null;
   try {
     // Prefer in-memory live state (has _liveHandle), fall back to disk-loaded state
-    const state = opts.liveState || loadTeamState(teamName);
-    const worker = state?.workers?.find(w => w.name === workerName) || opts.worker;
+    state = opts.liveState || loadTeamState(teamName);
+    worker = state?.workers?.find(w => w.name === workerName) || opts.worker;
+    if (worker) assertWorkerSecurityContract(worker);
     const adapterName = worker?._adapterName || 'tmux';
     const registryEntry = ADAPTER_REGISTRY[adapterName];
     plan = planProviderFailover(
@@ -912,6 +1142,8 @@ export async function reassignProvider(teamName, workerName, originalPrompt, fai
       opts.capabilities || state?.capabilities || {},
     );
     if (plan.replacementWorker) plan.replacementWorker.prompt = originalPrompt;
+    reviewIdentity = resolveReassignmentReviewIdentity(worker, plan.replacementWorker, opts);
+    bindReplacementReviewIdentity(plan.replacementWorker, reviewIdentity);
 
     if (isSupervisorWorker(state, worker)) {
       // Supervisor worker: supervisor-first graceful shutdown + adapter reap (F3).
@@ -940,7 +1172,8 @@ export async function reassignProvider(teamName, workerName, originalPrompt, fai
     // makes dispatchProviderFallback idempotent). The resulting repeated,
     // near-identical lessons are absorbed by addWisdom's built-in similarity
     // dedup (Jaccard ≥ 0.7), so no occurrence bookkeeping is needed here.
-    await addWisdom({
+    const addWisdomFn = opts.addWisdom || addWisdom;
+    await addWisdomFn({
       category: 'tool',
       lesson: `Worker "${workerName}" failed (${plan.reason}) — failover target: ${plan.targetProvider || 'none'}. Avoid worker type "${worker?.type || 'unknown'}" for reason "${plan.reason}" in this session.`,
       confidence: 'high',
@@ -958,14 +1191,21 @@ export async function reassignProvider(teamName, workerName, originalPrompt, fai
       rootRunId: opts.rootRunId || state?.runId || opts.parentRunId || null,
       rootWorkerRunId: opts.rootWorkerRunId || workerRunIdentity(worker) || opts.parentWorkerRunId || null,
       rootPrompt: opts.rootPrompt || originalPrompt,
+      rootReadOnly: reviewIdentity.readOnly,
+      rootReviewTreeOid: reviewIdentity.reviewTreeOid,
+      rootValidationIdentity: reviewIdentity.validationIdentity,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof ReviewIdentityViolation) throw error;
     const fallbackPlan = plan || planProviderFailover(
-      { name: workerName, prompt: originalPrompt, type: 'unknown' },
+      worker || { name: workerName, prompt: originalPrompt, type: 'unknown' },
       failureReason,
-      opts.capabilities || {},
+      opts.capabilities || state?.capabilities || {},
     );
     if (fallbackPlan.replacementWorker) fallbackPlan.replacementWorker.prompt = originalPrompt;
+    reviewIdentity = reviewIdentity
+      || resolveReassignmentReviewIdentity(worker, fallbackPlan.replacementWorker, opts);
+    bindReplacementReviewIdentity(fallbackPlan.replacementWorker, reviewIdentity);
     return {
       ...fallbackPlan,
       teamName,
@@ -978,6 +1218,9 @@ export async function reassignProvider(teamName, workerName, originalPrompt, fai
       rootRunId: opts.rootRunId || opts.parentRunId || null,
       rootWorkerRunId: opts.rootWorkerRunId || opts.parentWorkerRunId || null,
       rootPrompt: opts.rootPrompt || originalPrompt,
+      rootReadOnly: reviewIdentity.readOnly,
+      rootReviewTreeOid: reviewIdentity.reviewTreeOid,
+      rootValidationIdentity: reviewIdentity.validationIdentity,
     };
   }
 }
@@ -996,13 +1239,39 @@ function workerRunIdentity(worker) {
 }
 
 function fallbackRootIdentity(fallback) {
-  return {
+  const reviewIdentity = resolveMonotonicReviewIdentity([
+    {
+      label: 'fallback root',
+      readOnly: fallback?.rootReadOnly === true,
+      reviewTreeOid: fallback?.rootReviewTreeOid,
+      validationIdentity: fallback?.rootValidationIdentity,
+    },
+    {
+      label: 'fallback descriptor',
+      readOnly: fallback?.readOnly === true,
+      reviewTreeOid: fallback?.reviewTreeOid,
+      validationIdentity: fallback?.validationIdentity,
+    },
+    fallback?.replacementWorker ? {
+      label: 'fallback replacement worker',
+      readOnly: fallback.replacementWorker.readOnly,
+      reviewTreeOid: fallback.replacementWorker.reviewTreeOid,
+      validationIdentity: fallback.replacementWorker.validationIdentity,
+    } : null,
+  ]);
+  const root = {
     teamName: fallback?.rootTeamName || fallback?.teamName || null,
     workerName: fallback?.rootWorkerName || fallback?.workerName || null,
     runId: fallback?.rootRunId || fallback?.parentRunId || null,
     workerRunId: fallback?.rootWorkerRunId || fallback?.parentWorkerRunId || null,
     prompt: fallback?.rootPrompt || fallback?.prompt || fallback?.replacementWorker?.prompt || '',
   };
+  if (reviewIdentity.readOnly) {
+    root.readOnly = true;
+    root.reviewTreeOid = reviewIdentity.reviewTreeOid;
+    root.validationIdentity = reviewIdentity.validationIdentity;
+  }
+  return root;
 }
 
 function hasCompleteFallbackRoot(identity) {
@@ -1010,19 +1279,24 @@ function hasCompleteFallbackRoot(identity) {
     identity?.teamName
     && identity?.workerName
     && identity?.runId
-    && identity?.workerRunId,
+    && identity?.workerRunId
+    && (!identity.readOnly || REVIEW_TREE_OID.test(identity.reviewTreeOid || '')),
   );
 }
 
 function fallbackRootId(fallback) {
   const root = fallbackRootIdentity(fallback);
-  return createHash('sha256').update(JSON.stringify([
+  const identity = [
     root.teamName,
     root.workerName,
     root.runId,
     root.workerRunId,
     root.prompt,
-  ])).digest('hex').slice(0, 24);
+  ];
+  if (root.readOnly === true) {
+    identity.push(true, root.reviewTreeOid, root.validationIdentity);
+  }
+  return createHash('sha256').update(JSON.stringify(identity)).digest('hex').slice(0, 24);
 }
 
 function claudeFallbackStatePath(handoffId) {
@@ -1222,6 +1496,11 @@ function fallbackIdentityFields(fallback) {
     rootRunId: root.runId,
     rootWorkerRunId: root.workerRunId,
     rootPrompt: root.prompt,
+    ...(root.readOnly === true ? {
+      rootReadOnly: true,
+      rootReviewTreeOid: root.reviewTreeOid,
+      rootValidationIdentity: root.validationIdentity,
+    } : {}),
     handoffId: fallbackRootId(fallback),
   };
 }
@@ -1232,7 +1511,11 @@ function matchesFallbackRoot(record, identity) {
     && root?.teamName === identity.teamName
     && root?.workerName === identity.workerName
     && root?.runId === identity.runId
-    && root?.workerRunId === identity.workerRunId;
+    && root?.workerRunId === identity.workerRunId
+    && (root?.readOnly === true) === (identity.readOnly === true)
+    && (root?.reviewTreeOid || null) === (identity.reviewTreeOid || null)
+    && validationIdentityKey(root?.validationIdentity, 'persisted fallback validationIdentity')
+      === validationIdentityKey(identity.validationIdentity, 'expected fallback validationIdentity');
 }
 
 function readCompletedFallback(fallback) {
@@ -1256,13 +1539,25 @@ function readCompletedFallback(fallback) {
 }
 
 function readCompletedFallbackForWorker(state, worker) {
-  return readCompletedFallback({
-    rootTeamName: state?.teamName,
-    rootWorkerName: worker?.name,
-    rootRunId: state?.runId,
-    rootWorkerRunId: workerRunIdentity(worker),
-    rootPrompt: worker?.originalPrompt || worker?.prompt || '',
-  });
+  try {
+    return readCompletedFallback({
+      rootTeamName: state?.teamName,
+      rootWorkerName: worker?.name,
+      rootRunId: state?.runId,
+      rootWorkerRunId: workerRunIdentity(worker),
+      rootPrompt: worker?.originalPrompt || worker?.prompt || '',
+      rootReadOnly: worker?.readOnly === true,
+      rootReviewTreeOid: worker?.reviewTreeOid || null,
+      rootValidationIdentity: worker?.validationIdentity || null,
+    });
+  } catch (error) {
+    // Team state is same-UID writable. A malformed persisted validation
+    // envelope must invalidate the fallback record, never throw through either
+    // monitorTeam() or collectResults(). Preserve unexpected programmer/I/O
+    // errors so this boundary does not hide unrelated defects.
+    if (error instanceof ReviewIdentityViolation) return null;
+    throw error;
+  }
 }
 
 async function markParentFallbackCompleted(dispatched, handoffId, output, completedAt, opts = {}) {
@@ -1275,6 +1570,10 @@ async function markParentFallbackCompleted(dispatched, handoffId, output, comple
   const worker = parent.workers.find((candidate) => (
     candidate?.name === root.workerName
     && workerRunIdentity(candidate) === root.workerRunId
+    && (candidate?.readOnly === true) === (root.readOnly === true)
+    && (candidate?.reviewTreeOid || null) === (root.reviewTreeOid || null)
+    && validationIdentityKey(candidate?.validationIdentity, 'parent worker validationIdentity')
+      === validationIdentityKey(root.validationIdentity, 'fallback root validationIdentity')
   ));
   if (!worker) return false;
   worker.status = 'completed';
@@ -1507,7 +1806,7 @@ export async function dispatchProviderFallback(fallback, cwd, capabilities = {},
     }, opts);
   }
 
-  const failoverIdentity = JSON.stringify([
+  const failoverIdentityParts = [
     fallback.teamName,
     fallback.workerName,
     fallback.parentRunId,
@@ -1517,7 +1816,18 @@ export async function dispatchProviderFallback(fallback, cwd, capabilities = {},
     fallback.replacementWorker._providerUnavailableAttempts || 0,
     fallback.replacementWorker._providerCrashAttempts || 0,
     createHash('sha256').update(String(fallback.replacementWorker.prompt || '')).digest('hex'),
-  ]);
+  ];
+  if (fallback.replacementWorker.readOnly === true) {
+    failoverIdentityParts.push(
+      true,
+      fallback.replacementWorker.reviewTreeOid,
+      normalizeValidationIdentity(
+        fallback.replacementWorker.validationIdentity,
+        'fallback replacement validationIdentity',
+      ),
+    );
+  }
+  const failoverIdentity = JSON.stringify(failoverIdentityParts);
   const childTeamName = opts.teamName || (
     `failover-${fallback.targetProvider}-` +
     createHash('sha256').update(failoverIdentity).digest('hex').slice(0, 12)
@@ -1550,6 +1860,13 @@ export async function dispatchProviderFallback(fallback, cwd, capabilities = {},
       const sameWorker = existingState.workers?.length === 1
         && existingWorker?.name === fallback.replacementWorker.name
         && existingWorker?.type === fallback.replacementWorker.type
+        && (existingWorker?.readOnly === true) === (fallback.replacementWorker.readOnly === true)
+        && (existingWorker?.reviewTreeOid || null) === (fallback.replacementWorker.reviewTreeOid || null)
+        && validationIdentityKey(existingWorker?.validationIdentity, 'existing worker validationIdentity')
+          === validationIdentityKey(
+            fallback.replacementWorker.validationIdentity,
+            'replacement worker validationIdentity',
+          )
         && existingPrompt === fallback.replacementWorker.prompt;
       if (sameWorker) {
         return {
@@ -1672,6 +1989,9 @@ export async function pollProviderFallback(dispatched, cwd, capabilities = {}, o
         rootRunId: root.runId,
         rootWorkerRunId: root.workerRunId,
         rootPrompt: root.prompt,
+        rootReadOnly: root.readOnly,
+        rootReviewTreeOid: root.reviewTreeOid,
+        rootValidationIdentity: root.validationIdentity,
       },
     );
     const chainedFallback = {
@@ -1681,6 +2001,9 @@ export async function pollProviderFallback(dispatched, cwd, capabilities = {}, o
       rootRunId: root.runId,
       rootWorkerRunId: root.workerRunId,
       rootPrompt: root.prompt,
+      rootReadOnly: root.readOnly,
+      rootReviewTreeOid: root.reviewTreeOid,
+      rootValidationIdentity: root.validationIdentity,
     };
     current = await dispatchProviderFallbackFn(chainedFallback, cwd, capabilities);
   }
@@ -1717,6 +2040,10 @@ export function demoteCodexWorkersIfNeeded(workers, level) {
   let demoted = 0;
   for (const w of workers) {
     if (w && w.type === 'codex') {
+      // A review-only Codex worker is intentionally useful at the suggest
+      // tier: it must remain Codex so the adapter enforces `read-only` rather
+      // than being converted into a potentially broader Claude executor.
+      if (w.readOnly === true) continue;
       w._demotedFrom = 'codex';
       w._demotionReason = (
         `host permission level (${level}) too low for non-interactive codex worker. ` +
@@ -1762,12 +2089,32 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
   if (!TEAM_RUN_ID.test(runId)) {
     throw new Error('spawnTeam runId must be a 16-character lowercase hex generation');
   }
+  if (!Array.isArray(workers) || workers.length === 0) {
+    throw new Error('spawnTeam requires at least one worker');
+  }
+  for (const worker of workers) assertWorkerSecurityContract(worker);
   // ─── Codex permission mirroring + demotion + host sandbox warning ──────
   // Resolve the effective codex level once (intersects permissions.allow
   // with host sandbox detection).
   const autonomy = loadAutonomyConfig(cwd);
   const codexLevel = resolveCodexApproval(autonomy, { cwd });
   demoteCodexWorkersIfNeeded(workers, codexLevel);
+
+  // Adapter batches bypass the PreToolUse Task/Agent hook. Reserve their slots
+  // atomically in the SAME ledger after provider demotion and before any
+  // supervisor, tmux session, manifest, or team-state mutation can occur.
+  const concurrency = reserveWorkerBatchConcurrency(cwd, workers, {
+    teamName,
+    runId,
+    limits: loadConcurrencyLimits({ env: _inject?.env || process.env }),
+    active: _inject?.activeConcurrency,
+  });
+  if (!concurrency.ok) {
+    throw new Error(`spawnTeam concurrency denied: ${concurrency.errors.join('; ')}`);
+  }
+
+  let state = null;
+  try {
 
   // Build credential resolver opts once (used by every gemini spawn below).
   // gemini-exec / gemini-acp inject the resolved key into child process env
@@ -1818,10 +2165,16 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
   // supervisor from a prior same-name run can't be read as current. projectRoot
   // is ABSOLUTE so a detached supervisor (different cwd) resolves paths correctly.
   const projectRoot = resolve(cwd);
-  const state = {
+  state = {
     teamName,
     runId,
     projectRoot,
+    _concurrencyReservation: {
+      schemaVersion: 1,
+      reservationId: concurrency.reservationId,
+      entryIds: concurrency.entryIds,
+      reservedAt: concurrency.entries[0]?.startedAt || new Date().toISOString(),
+    },
     capabilities: normalizeCapabilities(capabilities),
     workers: workers.map((w, i) => ({
       ...w,
@@ -1834,6 +2187,7 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
       retryCount: 0,
       originalPrompt: w.prompt || '',
       _adapterName: adapterNames[i],
+      _concurrencyEntryId: concurrency.entryIds[i],
     })),
     phase: 'spawning',
     startedAt: new Date().toISOString(),
@@ -1868,9 +2222,20 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
       schemaVersion: 1, runId, workerRunId, teamName,
       workerName: worker.name, adapterName,
       projectRoot, cwd: worker.cwd || projectRoot, prompt: worker.prompt || '',
-      level: codexLevel, model: worker.model || null,
+      // `readOnly:true` is an execution contract, not a prompt hint. Every
+      // adapter receives its most restrictive non-interactive mode regardless
+      // of the host session's broader grant.
+      readOnly: worker.readOnly === true,
+      reviewTreeOid: worker.reviewTreeOid || null,
+      validationIdentity: worker.validationIdentity || null,
+      level: worker.readOnly === true ? 'suggest' : codexLevel,
+      model: worker.model || null,
       systemPrompt: worker.systemPrompt || null, maxBudgetUsd: worker.maxBudgetUsd || null,
-      approvalMode: worker.approvalMode || null,
+      approvalMode: worker.readOnly === true ? 'plan' : (worker.approvalMode || null),
+      permissionMode: worker.readOnly === true ? 'plan' : (worker.permissionMode || null),
+      allowedTools: worker.readOnly === true
+        ? ['Read', 'Glob', 'Grep']
+        : (Array.isArray(worker.allowedTools) ? worker.allowedTools : null),
       geminiCredential: wantsGemini ? geminiCredential : null,
       timeoutMs: Number.isInteger(worker.timeoutMs) ? worker.timeoutMs : 600000,
     };
@@ -1991,9 +2356,44 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
     if (_wh && Number.isInteger(_wh.pid)) _wh.startId = readProcStartId(_wh.pid);
   }
 
+  // Individual launch failures must not hold capacity for workers that never
+  // became live. Running siblings retain their exact entry IDs.
+  const failedEntryIds = state.workers
+    .filter(worker => worker.status === 'failed' && worker._concurrencyEntryId)
+    .map(worker => worker._concurrencyEntryId);
+  if (failedEntryIds.length > 0) {
+    const release = releaseConcurrencyEntries(projectRoot, failedEntryIds);
+    if (release.ok) {
+      const releasedAt = new Date().toISOString();
+      for (const worker of state.workers) {
+        if (failedEntryIds.includes(worker._concurrencyEntryId)) {
+          worker._concurrencyReleasedAt = releasedAt;
+        }
+      }
+    } else {
+      state._concurrencyReservation.releaseError = release.error;
+    }
+  }
+
   state.phase = 'running';
   saveTeamState(teamName, state);
   return state;
+  } catch (error) {
+    // A batch-level launch failure can happen after an earlier sibling started
+    // (for example, tmux throws after a supervisor launch). Stop every started
+    // process before releasing the batch so capacity is never re-admitted while
+    // an untracked worker is still live.
+    if (state) {
+      for (const worker of state.workers || []) {
+        if (!isSupervisorWorker(state, worker)) continue;
+        try { await shutdownSupervisorWorker(state, worker); } catch {}
+      }
+      try { killTeamSessions(teamName); } catch {}
+      try { cleanupTeam(teamName); } catch {}
+    }
+    releaseConcurrencyReservation(cwd, concurrency.reservationId);
+    throw error;
+  }
 }
 
 export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _claudeCliModule, _geminiExecModule, _geminiAcpModule) {
@@ -2125,6 +2525,7 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
       status: resolvedStatus,
       originalPrompt: worker.originalPrompt || worker.prompt || '',
       lastOutput: monitorResult.output || null,
+      ...publicWorkerReviewIdentity(worker),
     };
     if (fallbackCompletion) {
       workerEntry.fallbackProvider = fallbackCompletion.provider;
@@ -2167,6 +2568,18 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
         delete state.workers[i].errorMessage;
       }
       stateChanged = true;
+    }
+    if (CONCURRENCY_TERMINAL_STATUSES.has(resolvedStatus)
+      && state.workers[i]._concurrencyEntryId
+      && !state.workers[i]._concurrencyReleasedAt) {
+      const release = releaseConcurrencyEntries(
+        state.projectRoot || state.cwd || process.cwd(),
+        [state.workers[i]._concurrencyEntryId],
+      );
+      if (release.ok) {
+        state.workers[i]._concurrencyReleasedAt = new Date(now).toISOString();
+        stateChanged = true;
+      }
     }
     if (fallbackCompletion && state.workers[i]._providerFallback?.handoffId !== fallbackCompletion.handoffId) {
       state.workers[i]._providerFallback = {
@@ -2300,8 +2713,26 @@ export async function shutdownTeam(teamName, cwd) {
     try { cleanupTeamWorktrees(cwd, teamName); } catch {}
   }
 
-  const statePath = join(STATE_DIR, `team-${teamName}.json`);
-  try { unlinkSync(statePath); } catch {}
+  let concurrencyRelease = { ok: true, released: 0 };
+  const ledgerRoot = cwd || state?.projectRoot || state?.cwd || process.cwd();
+  if (state?._concurrencyReservation?.reservationId) {
+    concurrencyRelease = releaseConcurrencyReservation(
+      ledgerRoot,
+      state._concurrencyReservation.reservationId,
+    );
+  } else if (state?.workers) {
+    concurrencyRelease = releaseConcurrencyEntries(
+      ledgerRoot,
+      state.workers.map(worker => worker._concurrencyEntryId).filter(Boolean),
+    );
+  }
 
-  return { killed };
+  const statePath = join(STATE_DIR, `team-${teamName}.json`);
+  // If a malformed/unsafe ledger prevented exact release, preserve durable team
+  // liveness evidence instead of unlinking it and making recovery ambiguous.
+  if (concurrencyRelease.ok) {
+    try { unlinkSync(statePath); } catch {}
+  }
+
+  return { killed, concurrencyReleased: concurrencyRelease.ok };
 }

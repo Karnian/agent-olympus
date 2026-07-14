@@ -24,6 +24,10 @@
 import { readFileSync } from 'fs';
 import { join, isAbsolute } from 'path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
+import {
+  crossValidationIdentityKey,
+  normalizeCrossValidationIdentity,
+} from './cross-validation-identity.mjs';
 
 export const SUPERVISOR_SCHEMA_VERSION = 1;
 
@@ -47,11 +51,13 @@ const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const ALL_STATUSES = new Set(['running', ...TERMINAL_STATUSES]);
 
 // The ONLY fields persisted in a snapshot. writeSnapshot whitelists to these so
-// P2 can't accidentally leak the prompt, full output, or path capabilities.
+// P2 can't accidentally leak the prompt, full output, or arbitrary path
+// capabilities. `cwd` is the one bounded path retained as execution proof.
 const SNAPSHOT_FIELDS = [
   'runId', 'workerRunId', 'teamName', 'workerName', 'adapterName',
   'status', 'startedAt', 'completedAt',
   'supervisorPid', 'supervisorStartId', 'adapterPid', 'adapterStartId',
+  'readOnly', 'reviewTreeOid', 'validationIdentity', 'cwd',
   'error', 'outputTail', 'outputBytes', 'workerMeta',
 ];
 
@@ -180,7 +186,7 @@ export function clampOutputTail(str) {
 
 /**
  * Atomically write a snapshot (tmp+rename, 0600). WHITELISTS fields (drops prompt
- * / full output / path capabilities), clamps `outputTail`, and stamps
+ * / full output / arbitrary path capabilities), clamps `outputTail`, and stamps
  * `schemaVersion` + `updatedAt` (the heartbeat) — callers must NOT set those.
  * @param {string} path
  * @param {object} snapshot
@@ -211,6 +217,30 @@ function isValidSnapshotShape(o) {
   if (o.supervisorStartId != null && typeof o.supervisorStartId !== 'string') return false;
   if (o.adapterPid != null && !(Number.isSafeInteger(o.adapterPid) && o.adapterPid > 0)) return false;
   if (o.adapterStartId != null && typeof o.adapterStartId !== 'string') return false;
+  if (o.readOnly !== undefined && typeof o.readOnly !== 'boolean') return false;
+  if (o.readOnly === true) {
+    if (typeof o.reviewTreeOid !== 'string'
+      || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(o.reviewTreeOid)) return false;
+    let identity;
+    try { identity = normalizeCrossValidationIdentity(o.validationIdentity); }
+    catch { return false; }
+    if (identity && identity.reviewTreeOid !== o.reviewTreeOid) return false;
+    if (identity && (
+      typeof o.cwd !== 'string'
+      || !isAbsolute(o.cwd)
+      || o.cwd.includes('\0')
+      || Buffer.byteLength(o.cwd, 'utf8') > 4096
+    )) return false;
+  } else {
+    if (o.reviewTreeOid !== undefined && o.reviewTreeOid !== null) return false;
+    if (o.validationIdentity !== undefined && o.validationIdentity !== null) return false;
+  }
+  if (o.cwd !== undefined && (
+    typeof o.cwd !== 'string'
+    || !isAbsolute(o.cwd)
+    || o.cwd.includes('\0')
+    || Buffer.byteLength(o.cwd, 'utf8') > 4096
+  )) return false;
   if (o.workerMeta !== undefined && !isValidWorkerMetaBag(o.workerMeta)) return false;
   // A failure must carry a categorized error.
   if (o.status === 'failed') {
@@ -228,7 +258,7 @@ function isValidSnapshotShape(o) {
  *   { kind: 'ok', snapshot } — valid + (if `expected` given) identity matches
  * Never throws.
  * @param {string} path
- * @param {{runId?:string, workerRunId?:string}} [expected] - reject other-run files
+ * @param {{runId?:string, workerRunId?:string,readOnly?:boolean,reviewTreeOid?:string,validationIdentity?:object|null,cwd?:string}} [expected] - reject other-run/task files
  * @returns {{kind:string, snapshot?:object}}
  */
 export function readSnapshot(path, expected = null) {
@@ -251,8 +281,21 @@ export function readSnapshot(path, expected = null) {
   if (!isValidSnapshotShape(obj)) return { kind: 'corrupt' };
   if (expected) {
     if ((expected.runId && obj.runId !== expected.runId) ||
-        (expected.workerRunId && obj.workerRunId !== expected.workerRunId)) {
+        (expected.workerRunId && obj.workerRunId !== expected.workerRunId) ||
+        (expected.readOnly !== undefined && obj.readOnly !== expected.readOnly) ||
+        (expected.reviewTreeOid && obj.reviewTreeOid !== expected.reviewTreeOid) ||
+        (Object.prototype.hasOwnProperty.call(expected, 'cwd') && obj.cwd !== expected.cwd)) {
       return { kind: 'mismatch' };
+    }
+    if (Object.prototype.hasOwnProperty.call(expected, 'validationIdentity')) {
+      try {
+        if (crossValidationIdentityKey(obj.validationIdentity)
+          !== crossValidationIdentityKey(expected.validationIdentity, 'expected validationIdentity')) {
+          return { kind: 'mismatch' };
+        }
+      } catch {
+        return { kind: 'mismatch' };
+      }
     }
   }
   return { kind: 'ok', snapshot: obj };

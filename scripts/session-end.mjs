@@ -15,6 +15,7 @@ import { finalizeSession, getCurrentSessionId, getSession, pruneSessions } from 
 import { collectRunFailureCandidate } from './lib/eval-failure-candidates.mjs';
 import { readSnapshot as readSupSnapshot, isHeartbeatFresh as supHeartbeatFresh } from './lib/supervisor-state.mjs';
 import { readProcStartId } from './lib/proc-identity.mjs';
+import { revokeRuntimePermissions } from './lib/runtime-permissions.mjs';
 
 const STALE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -138,6 +139,16 @@ async function main() {
     // Finalize session record — use session_id from stdin or pointer file
     const sessionId = _data.session_id || getCurrentSessionId();
     if (sessionId) {
+      // Invalidate the user-private runtime permission grant before any
+      // workspace-controlled identity/pointer can be replayed after this
+      // session ends. Missing or unsafe caches fail closed and never block the
+      // lifecycle hook.
+      try {
+        revokeRuntimePermissions(sessionId, {
+          cwd: (typeof _data.cwd === 'string' && _data.cwd) || process.cwd(),
+        });
+      } catch {}
+
       // HU-17: inspect only runs explicitly linked to this session. Never scan
       // the global run-artifact tree from a lifecycle hook. Collection is
       // local, bounded, metadata-only, and fail-safe; ineligible

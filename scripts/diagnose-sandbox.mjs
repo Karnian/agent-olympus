@@ -38,7 +38,6 @@ import {
   detectClaudePermissionLevelFromSettings,
   explainPermissionLevel,
 } from './lib/permission-detect.mjs';
-import { loadRuntimePermissions } from './lib/runtime-permissions.mjs';
 import { loadAutonomyConfig } from './lib/autonomy.mjs';
 
 function parseArgs(argv) {
@@ -57,8 +56,8 @@ function parseArgs(argv) {
 function buildExplainReport(cwd, autonomyConfig) {
   const settingsFlags = detectClaudePermissions({ cwd });
   const settingsLevel = detectClaudePermissionLevelFromSettings({ cwd });
-  const runtime = loadRuntimePermissions({ cwd });
   const explain = explainPermissionLevel({ cwd });
+  const runtime = explain.runtime;
   const finalLevel = detectClaudePermissionLevel({ cwd });
   const effective = resolveCodexApproval(autonomyConfig, { cwd });
   const hostSandbox = detectHostSandbox({ cwd, autonomyConfig });
@@ -75,23 +74,22 @@ function buildExplainReport(cwd, autonomyConfig) {
       runtime: runtime
         ? {
             present: true,
-            permissionMode: runtime.permissionMode,
-            level: explain.runtime ? explain.runtime.level : null,
+            permissionMode: runtime.mode,
+            level: runtime.level,
             source: runtime.source,
             capturedAt: runtime.capturedAt,
             ageMs: runtime.ageMs,
             sessionId: runtime.sessionId,
-            rawStdinKeys: runtime.rawStdinKeys,
           }
         : {
             present: false,
             note:
               'No runtime permission_mode captured. ' +
               'If you launched Claude Code with --dangerously-skip-permissions ' +
-              'or --permission-mode, the SessionStart hook should have written ' +
-              '.ao/state/ao-runtime-permissions.json. ' +
-              'Restart your session if you upgraded agent-olympus mid-session, ' +
-              'or set CLAUDE_PERMISSION_MODE=<mode> as a fallback.',
+              'or --permission-mode, the SessionStart hook should have bound ' +
+              'the local session identity to the user-private runtime grant. ' +
+              'Restart your session if you upgraded agent-olympus mid-session. ' +
+              'Environment-derived modes are diagnostic-only and cannot promote permissions.',
           },
       hostSandbox,
     },

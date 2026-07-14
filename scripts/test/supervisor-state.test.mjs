@@ -30,6 +30,16 @@ import {
 
 const RUN = 'a1b2c3d4e5f60718';
 const WRK = '00ff00ff00ff00ff';
+const REVIEW_TREE_OID = 'c'.repeat(40);
+const VALIDATION_IDENTITY = {
+  schemaVersion: 1,
+  orchestrator: 'atlas',
+  runId: 'run-1',
+  storyId: 'US-001',
+  reviewTreeOid: REVIEW_TREE_OID,
+  snapshotId: `xval-${'e'.repeat(32)}`,
+  promptDigest: 'd'.repeat(64),
+};
 // A structurally-complete snapshot (identity + liveness + status).
 const VALID = { runId: RUN, workerRunId: WRK, status: 'running', supervisorPid: 123 };
 
@@ -115,6 +125,60 @@ test('writeSnapshot: WHITELISTS fields — prompt/fullOutput/paths are dropped',
     assert.ok(!raw.includes('SECRET'), 'prompt must not be persisted');
     assert.ok(!raw.includes('/etc/evil'), 'arbitrary outputPath must not be persisted');
     assert.equal(readSnapshot(p).kind, 'ok');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('read-only snapshot carries the exact validation identity and rejects tampered proof', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-supstate-'));
+  try {
+    const p = snapshotPath(dir, RUN, WRK);
+    const expected = {
+      runId: RUN,
+      workerRunId: WRK,
+      readOnly: true,
+      reviewTreeOid: REVIEW_TREE_OID,
+      validationIdentity: VALIDATION_IDENTITY,
+      cwd: dir,
+    };
+    writeSnapshot(p, {
+      ...VALID,
+      readOnly: true,
+      reviewTreeOid: REVIEW_TREE_OID,
+      validationIdentity: VALIDATION_IDENTITY,
+      cwd: dir,
+    }, 1);
+    assert.equal(readSnapshot(p, expected).kind, 'ok');
+    assert.deepEqual(readSnapshot(p).snapshot.validationIdentity, VALIDATION_IDENTITY);
+
+    const base = JSON.parse(readFileSync(p, 'utf-8'));
+    writeFileSync(p, JSON.stringify({
+      ...base,
+      validationIdentity: {
+        ...VALIDATION_IDENTITY,
+        snapshotId: `xval-${'f'.repeat(32)}`,
+      },
+    }));
+    assert.equal(readSnapshot(p, expected).kind, 'mismatch', 'snapshotId is execution proof');
+
+    writeFileSync(p, JSON.stringify({
+      ...base,
+      validationIdentity: {
+        ...VALIDATION_IDENTITY,
+        promptDigest: 'a'.repeat(64),
+      },
+    }));
+    assert.equal(readSnapshot(p, expected).kind, 'mismatch', 'promptDigest is execution proof');
+
+    writeFileSync(p, JSON.stringify({ ...base, cwd: join(dir, 'live-root') }));
+    assert.equal(readSnapshot(p, expected).kind, 'mismatch', 'execution cwd is snapshot-bound');
+
+    writeFileSync(p, JSON.stringify({
+      ...base,
+      validationIdentity: { ...VALIDATION_IDENTITY, unexpected: true },
+    }));
+    assert.equal(readSnapshot(p).kind, 'corrupt', 'identity envelope must have exactly seven keys');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

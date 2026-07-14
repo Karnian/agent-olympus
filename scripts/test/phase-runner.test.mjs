@@ -24,6 +24,7 @@ import {
   MONITOR_CAP,
   CI_CAP,
   QUALITY_CAP,
+  FINAL_REVIEW_CAP,
   SCHEMA_VERSION,
   validatePipelineLedgerIdentity,
   getPhaseSequence,
@@ -121,6 +122,7 @@ describe('phase sequence well-formedness', () => {
     assert.equal(MONITOR_CAP, 10);
     assert.equal(CI_CAP, 2);
     assert.equal(QUALITY_CAP, 2);
+    assert.equal(FINAL_REVIEW_CAP, 3);
     assert.equal(SCHEMA_VERSION, 1);
   });
 
@@ -498,6 +500,36 @@ describe('beginAttempt + reattempt', () => {
     }
   });
 
+  test('final review rejection rewinds through the orchestrator attempt phase', async () => {
+    for (const orchestrator of ['atlas', 'athena']) {
+      const cwd = await makeTmpDir();
+      try {
+        const runId = `run-final-reject-${orchestrator}`;
+        const attemptPhase = orchestrator === 'atlas' ? 'execute' : 'integrate';
+        const rewindPhase = orchestrator === 'atlas' ? 'verify' : 'integrate';
+        initPipeline(runId, orchestrator, { cwd });
+        await advanceToAttemptPhase(runId, orchestrator, cwd);
+        assert.equal(beginAttempt(runId, { cwd }).allowed, true);
+        const tail = orchestrator === 'atlas'
+          ? [attemptPhase, 'verify', 'review']
+          : [attemptPhase, 'review'];
+        await completeThrough(runId, cwd, tail);
+        enterPhase(runId, 'finalize', { cwd });
+        assert.equal(loopTick(runId, 'final-review', { cwd }).allowed, true);
+
+        const retry = reattempt(runId, {
+          reopen: [rewindPhase],
+          reason: 'final_review_reject',
+        }, { cwd });
+        assert.equal(retry.allowed, true, orchestrator);
+        assert.deepEqual(retry.reopened, [rewindPhase], orchestrator);
+        assert.equal(nextPhase(runId, { cwd }), rewindPhase, orchestrator);
+      } finally {
+        await removeTmpDir(cwd);
+      }
+    }
+  });
+
   test('first attempt + 14 reattempts fill cap, next reattempt blocks without count skip', async () => {
     const cwd = await makeTmpDir();
     try {
@@ -648,6 +680,33 @@ describe('loopTick', () => {
         assert.deepEqual(results.map(r => r.allowed), [...Array(cap).fill(true), false], `${key} allowed sequence`);
         assert.equal(results.at(-1).count, cap, `${key} count pinned at cap`);
       }
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('final review has an independent bounded counter in finalize', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-final-review';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).allowed, true);
+      await completeThrough(runId, cwd, ['execute', 'verify', 'review']);
+      enterPhase(runId, 'finalize', { cwd });
+      const reviewRoundsBefore = readJson(guardPath(cwd, runId)).counters.reviewRounds.count;
+
+      const results = [];
+      for (let index = 0; index < 4; index += 1) {
+        results.push(loopTick(runId, 'final-review', { cwd }));
+      }
+      assert.deepEqual(results.map(result => result.allowed), [true, true, true, false]);
+      assert.equal(results.at(-1).count, 3);
+      assert.equal(results.at(-1).cap, 3);
+      assert.equal(
+        readJson(guardPath(cwd, runId)).counters.reviewRounds.count,
+        reviewRoundsBefore,
+      );
     } finally {
       await removeTmpDir(cwd);
     }

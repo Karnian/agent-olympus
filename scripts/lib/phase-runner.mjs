@@ -67,6 +67,7 @@ import {
 export const MONITOR_CAP = 10;
 export const CI_CAP = 2;
 export const QUALITY_CAP = 2;
+export const FINAL_REVIEW_CAP = 3;
 export const SCHEMA_VERSION = 1;
 
 const LOG_FILE_NAME = 'pipeline.json';
@@ -82,11 +83,11 @@ const REWIND_REASONS = Object.freeze({
   atlas: Object.freeze({
     plan: new Set(['light_mode_rewind']),
     execute: new Set(['quality_fail']),
-    verify: new Set(['quality_fail', 'review_reject']),
+    verify: new Set(['quality_fail', 'review_reject', 'final_review_reject']),
   }),
   athena: Object.freeze({
     plan: new Set(['light_mode_rewind']),
-    integrate: new Set(['review_reject']),
+    integrate: new Set(['review_reject', 'final_review_reject']),
   }),
 });
 
@@ -822,6 +823,7 @@ function sanitizeRecoveryOutputs(outputs) {
 
 function normalizeLoopKey(key) {
   if (key === 'reviewRounds' || key === 'review') return 'review';
+  if (key === 'finalReviewRounds' || key === 'final-review') return 'final-review';
   if (key === 'monitor') return 'monitor';
   if (key === 'ci') return 'ci';
   if (key === 'quality') return 'quality';
@@ -830,6 +832,9 @@ function normalizeLoopKey(key) {
 
 function loopCounterSpec(orchestrator, key) {
   if (key === 'review') return { phaseId: 'review', name: 'reviewRounds', cap: 3 };
+  if (key === 'final-review') {
+    return { phaseId: 'finalize', name: 'finalReviewRounds', cap: FINAL_REVIEW_CAP };
+  }
   if (key === 'monitor' && orchestrator === 'athena') {
     return { phaseId: 'monitor', name: 'monitor-iterations', cap: MONITOR_CAP };
   }
@@ -1143,6 +1148,12 @@ export function loopTick(runId, keyOrPhaseId, opts = {}) {
     assertSafeLoopGuard(context);
     let result;
     if (key === 'review') result = registerReviewRound(runId, { cwd: context.cwd });
+    else if (key === 'final-review') {
+      result = registerCounter(runId, 'finalReviewRounds', {
+        cwd: context.cwd,
+        cap: FINAL_REVIEW_CAP,
+      });
+    }
     else if (key === 'monitor') result = registerCounter(runId, 'monitor-iterations', { cwd: context.cwd, cap: MONITOR_CAP });
     else if (key === 'ci') result = registerCounter(runId, 'ci-cycles', { cwd: context.cwd, cap: CI_CAP });
     else if (key === 'quality') result = registerCounter(runId, 'quality-cycles', { cwd: context.cwd, cap: QUALITY_CAP });

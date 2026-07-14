@@ -8,6 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   sanitizeName,
   sanitizeForShellArg,
@@ -86,17 +87,35 @@ test('sanitizeForShellArg: coerces non-string to string', () => {
 // sessionName
 // ---------------------------------------------------------------------------
 
+function shortHash(value) {
+  return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 12);
+}
+
 test('sessionName: combines SESSION_PREFIX, teamName, and workerName', () => {
-  assert.equal(sessionName('team', 'worker'), 'ao-team-team-worker');
+  assert.equal(
+    sessionName('team', 'worker'),
+    `ao-team-team-${shortHash('team')}-worker-${shortHash('worker')}`,
+  );
 });
 
 test('sessionName: sanitizes team and worker names', () => {
-  assert.equal(sessionName('my team', 'my worker'), 'ao-team-my-team-my-worker');
+  assert.equal(
+    sessionName('my team', 'my worker'),
+    `ao-team-my-team-${shortHash('my team')}-my-worker-${shortHash('my worker')}`,
+  );
 });
 
 test('sessionName: handles special characters in both parts', () => {
   const result = sessionName('foo/bar', 'baz@qux');
-  assert.equal(result, 'ao-team-foo-bar-baz-qux');
+  assert.equal(
+    result,
+    `ao-team-foo-bar-${shortHash('foo/bar')}-baz-qux-${shortHash('baz@qux')}`,
+  );
+});
+
+test('sessionName: original identity hashes prevent sanitize collisions', () => {
+  assert.notEqual(sessionName('api.v1', 'worker'), sessionName('api-v1', 'worker'));
+  assert.notEqual(sessionName('team', 'api.v1'), sessionName('team', 'api-v1'));
 });
 
 // ---------------------------------------------------------------------------

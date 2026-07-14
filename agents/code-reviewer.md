@@ -62,6 +62,54 @@ All stages must pass. Report stage-by-stage.
 </grounding_rules>
 
 ## Structured Verdict Output (REQUIRED)
+
+### AO_REVIEW_V1 caller contract
+
+If the caller requests `AO_REVIEW_V1`, that contract takes precedence over the
+legacy prose and `stage_verdict` format below. Return exactly one valid JSON
+object, with no Markdown fence and no surrounding prose:
+
+```json
+{
+  "schemaVersion": 1,
+  "reviewer": "code-reviewer",
+  "reviewDigest": "<copy reviewPackage.reviewDigest.value exactly>",
+  "verdict": "REVISE",
+  "findings": [
+    {
+      "severity": "high",
+      "confidence": 0.9,
+      "file": "src/example.ts",
+      "line": 42,
+      "evidence": "Concrete observed behavior or exact code evidence",
+      "recommendation": "Specific remediation"
+    }
+  ],
+  "escalations": [
+    {
+      "additionalReviewer": "security-reviewer",
+      "reason": "Concrete reason this specialist is required"
+    }
+  ]
+}
+```
+
+- `verdict` must be exactly `APPROVE`, `REVISE`, `REJECT`, or `BLOCKED`.
+- `reviewDigest` must exactly copy `reviewPackage.reviewDigest.value`; never
+  recompute it or substitute the Git-only `evidenceDigest`.
+- Finding severity must be `critical`, `high`, `medium`, `low`, or `info`;
+  confidence must be a number from 0 through 1. Use a repo-relative `file` and a positive
+  integer `line` when available; otherwise use `null` for that field.
+- Use empty arrays when there are no findings or escalations. Every non-`APPROVE`
+  verdict, including `BLOCKED`, must include at least one finding that explains
+  the actionable issue or missing evidence. `BLOCKED` means required review
+  inputs or tools were unavailable, not merely that evidence was ambiguous.
+  `APPROVE` requires both arrays to be empty. Escalate only to a reviewer in the
+  caller-provided active allowlist; if none was supplied, emit no escalation.
+  Never append the legacy block when `AO_REVIEW_V1` was requested.
+
+### Legacy contract
+
 **End every review with a fenced STAGE_VERDICT block** so the orchestrator
 can route escalation automatically. This is mandatory.
 

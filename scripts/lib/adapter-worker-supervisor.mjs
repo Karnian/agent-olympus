@@ -30,6 +30,7 @@
 
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
+import { isAbsolute } from 'node:path';
 import { readProcStartId } from './proc-identity.mjs';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import {
@@ -37,6 +38,11 @@ import {
   HEARTBEAT_INTERVAL_MS,
 } from './supervisor-state.mjs';
 import { buildExecOpts, buildAppserverThreadOpts, buildGeminiAcpSessionOpts } from './supervisor-opts.mjs';
+import {
+  REVIEW_TREE_OID_PATTERN,
+  assertCrossValidationPromptIdentity,
+  normalizeCrossValidationIdentity,
+} from './cross-validation-identity.mjs';
 
 /** Practical ceiling so a manifest can't overflow Node's 32-bit timer (→ 1ms). */
 const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24h
@@ -203,7 +209,11 @@ async function runCodexAppserver(mod, m) {
 async function runGeminiAcp(mod, m) {
   // model belongs on createSession (→ unstable_setSessionModel), NOT startServer
   // which ignores it. Mirrors the pre-FLIP in-process worker-spawn path.
-  const h = mod.startServer({ cwd: m.cwd, credential: m.geminiCredential });
+  const h = mod.startServer({
+    cwd: m.cwd,
+    credential: m.geminiCredential,
+    readOnly: m.readOnly === true,
+  });
   liveHandle = h; liveShutdown = mod.shutdownServer;
   onAdapterPid(h.pid);
   onWorkerMeta(h);
@@ -285,14 +295,47 @@ async function main() {
 
   // Validate manifest (DATA only; paths are derived, not trusted from manifest).
   const fixtureAllowed = process.env.AO_SUPERVISOR_ALLOW_FIXTURE === '1';
-  const adapterOk = ADAPTER_ALLOWLIST.has(m.adapterName) || (m.adapterName === 'fixture' && fixtureAllowed);
+  const adapterOk = (ADAPTER_ALLOWLIST.has(m.adapterName)
+    || (m.adapterName === 'fixture' && fixtureAllowed))
+    // codex-appserver loads the normal Codex config/MCP surface and has no
+    // equivalent to exec's ignore-user-config/rules contract.
+    && !(m.readOnly === true && m.adapterName === 'codex-appserver');
+  let normalizedValidationIdentity = null;
+  let readOnlyIdentityOk = false;
+  try {
+    if (m.readOnly === true) {
+      normalizedValidationIdentity = normalizeCrossValidationIdentity(m.validationIdentity);
+      readOnlyIdentityOk = REVIEW_TREE_OID_PATTERN.test(m.reviewTreeOid || '')
+        && (!normalizedValidationIdentity
+          || normalizedValidationIdentity.reviewTreeOid === m.reviewTreeOid);
+      if (readOnlyIdentityOk && normalizedValidationIdentity) {
+        assertCrossValidationPromptIdentity(
+          m.prompt,
+          normalizedValidationIdentity,
+          'supervisor manifest',
+        );
+      }
+    } else {
+      readOnlyIdentityOk = (m.readOnly === false || m.readOnly === undefined)
+        && (m.reviewTreeOid === null || m.reviewTreeOid === undefined)
+        && (m.validationIdentity === null || m.validationIdentity === undefined);
+    }
+  } catch {
+    readOnlyIdentityOk = false;
+  }
   if (m.schemaVersion !== 1 || !isValidId(m.runId) || !isValidId(m.workerRunId) ||
-      typeof m.projectRoot !== 'string' || !adapterOk || typeof m.prompt !== 'string') {
+      typeof m.projectRoot !== 'string' || !adapterOk || typeof m.prompt !== 'string' ||
+      typeof m.cwd !== 'string' || !isAbsolute(m.cwd) || m.cwd.includes('\0') ||
+      Buffer.byteLength(m.cwd, 'utf8') > 4096 ||
+      !readOnlyIdentityOk) {
     process.stderr.write('supervisor: invalid manifest\n');
     process.exit(2); return;
   }
   m.timeoutMs = Number.isInteger(m.timeoutMs) && m.timeoutMs > 0 ? m.timeoutMs : 600_000;
   m.timeoutMs = Math.min(m.timeoutMs, MAX_TIMEOUT_MS); // clamp → no 32-bit timer overflow
+  m.readOnly = m.readOnly === true;
+  m.reviewTreeOid = m.readOnly ? m.reviewTreeOid : null;
+  m.validationIdentity = m.readOnly ? normalizedValidationIdentity : null;
 
   // Derive trusted paths from IDs (NOT from the manifest).
   let basePaths;
@@ -312,6 +355,10 @@ async function main() {
     startedAt: nowMs(),
     supervisorPid: process.pid, supervisorStartId: readProcStartId(process.pid),
     adapterPid: null, adapterStartId: null,
+    readOnly: m.readOnly,
+    reviewTreeOid: m.reviewTreeOid,
+    validationIdentity: m.validationIdentity,
+    cwd: m.cwd,
   };
   writeRunningSnapshot();
 

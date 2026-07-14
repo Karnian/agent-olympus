@@ -15,13 +15,13 @@ Agent Olympus solves the **supervision problem**: you shouldn't have to babysit 
 Two distinct modes:
 
 - **Atlas** — Hub-and-spoke orchestration. One orchestrator brain analyzes the task, creates a plan, spawns specialized agents in parallel, verifies results, and fixes issues autonomously. Best for independent, parallelizable work.
-- **Athena** — Peer-to-peer team orchestration. Multiple agents collaborate via native SendMessage, with Codex/Gemini workers spawned through an adapter system (codex-appserver > codex-exec > tmux fallback). Best for interdependent tasks requiring real-time coordination.
+- **Athena** — Hybrid team orchestration. Claude teammates coordinate through the native task/mailbox lifecycle, while Codex/Gemini remain external workers bridged by the Athena lead through the adapter system (codex-appserver > codex-exec > tmux fallback). Best for large tasks that split into non-overlapping work packages but still benefit from peer discoveries and lead-owned integration.
 
 Both loop until every acceptance criterion is met, the build passes, tests pass, and code review is approved — or escalate with evidence if something is unfixable.
 
 ## Features
 
-- **Two orchestrators**: Atlas (hub-and-spoke) and Athena (peer-to-peer team)
+- **Two orchestrators**: Atlas (hub-and-spoke) and Athena (hybrid native/external team)
 - **19 specialized agents**: Explorer, Metis (analysis), Prometheus (planning), Momus (validation), Hermes (spec), Executor, Designer (UI/UX), **Aphrodite (design review)**, Test Engineer, Debugger, Architect, Security Reviewer, Code Reviewer, Writer (docs), Hephaestus (deep coding), Themis (quality gate), Ask, Atlas, Athena
 - **37 workflow skills**: atlas, athena, ask, deep-interview, research, trace, cancel, slop-cleaner, git-master, deepinit, deep-dive, consensus-plan, external-context, verify-coverage, plan, tdd, systematic-debug, brainstorm, finish-branch, design-critique, a11y-audit, design-system-audit, ux-copy-review, ui-review, harness-init, sessions, setup-gemini-auth, **teach-design, normalize, polish, typeset, arrange, taste, ui-remediate, resume-handoff**, codex-goal, codex-review
 - **Session recovery**: Checkpoint system survives interruptions; resume from any phase
@@ -45,11 +45,11 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **L-scale resilience** *(v0.8.8)*: `input-guard` library prevents sub-agent silent failures on large documents — auto-summarizes oversized inputs while preserving story IDs and acceptance criteria. `preflight` library detects and clears stale pointer files in `.ao/` before each run
 - **Codex permission mirroring** *(v0.9.5, reworked in v1.1.0)*: Automatically detects Claude's merged permission level (across managed/user/project scopes) and mirrors it to Codex's **sandbox axis** — broad `Bash(*)`+broad `Write(*)` → `danger-full-access`; broad Write/Edit or `acceptEdits` → `workspace-write`; scoped-only grants demote to `suggest`. Approval policy is held at `never` (codex 0.118+ is non-interactive). `.ao/autonomy.json` `codex.approval` overrides default auto-detection
 - **Robust hook execution** *(v0.9.8)*: `run.sh` shell wrapper resolves node from nvm/volta/fnm/mise in restricted PATH hook environments; `run.sh || node run.cjs` fallback for Windows; `buildEnhancedPath()` injected into all capability detection child processes
-- **Native Teams config fallback** *(v0.9.8)*: `.ao/autonomy.json` `nativeTeams: true` enables Native Agent Teams without `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` env var
+- **Native Teams capability gate** *(hardened after v1.5.1)*: native teams require `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and Claude Code 2.1.178+; the legacy `.ao/autonomy.json` `nativeTeams` boolean remains parseable for compatibility but cannot manufacture runtime capability
 - **Gemini permission mirroring** *(v0.9.8)*: `.ao/autonomy.json` `gemini.approval` — auto-detect or override Gemini approval mode (`yolo`, `auto_edit`, `plan`, `default`)
 - **Design identity memory** *(v1.0.2)*: `.ao/memory/design-identity.json` — `/teach-design` captures brand colors, typography, spacing, component library; auto-injected into designer/aphrodite/ui-review subagents (hard 2KB cap, worktree-shared, schemaVersion:1)
 - **Anti-pattern scan + precision micro-skills** *(v1.0.2, adapted from [impeccable](https://github.com/pbakaus/impeccable))*: `ui-smell-scan` as finish-branch gate (warn default, block opt-in), modular design reference pack (7 domains), `/normalize`, `/polish`, `/typeset`, `/arrange`, `/ui-remediate` audit→normalize→polish→re-audit convergence chain
-- **Change-aware review router** *(v1.0.2, adapted from [gstack](https://github.com/garrytan/gstack))*: CSS-only diffs minimal-route to `{aphrodite, designer}` (60-80% reviewer overhead cut) with 30+ regex security patterns that force-include `security-reviewer`; `alwaysInclude:["*"]` rollback path
+- **Change-aware review router** *(v1.0.2, hardened after v1.5.1; adapted from [gstack](https://github.com/garrytan/gstack))*: CSS-only diffs minimal-route to the read-only `{aphrodite}` approval reviewer, 30+ security patterns force-include `security-reviewer`, and changes to reviewer prompts or review-gate code force the immutable full reviewer set; `alwaysInclude:["*"]` remains the rollback path
 - **Taste memory** *(v1.0.2, adapted from gstack)*: `.ao/memory/taste.jsonl` accumulates user aesthetic preferences across sessions; replayed to designer/aphrodite (1KB cap, 200-entry FIFO, explicit `/taste prune` grammar)
 - **Browser pause + manual continue** *(v1.0.2, adapted from gstack)*: `/resume-handoff` — on CAPTCHA/auth/MFA, persists sanitized URL + breadcrumb to `.ao/state/browser-handoff.json` (16 sensitive param strip, allow-list breadcrumb, 24h TTL). Deterministic exact-resume deferred to v1.0.3.
 - **Cascade artifact archival pipe** *(v1.0.2, adapted from gstack)*: `.ao/artifacts/pipe/<runId>/<stage>/{inbox,outbox}/` structured stage handoffs (6 canonical stages, 100KB/file + 10MB/run caps, atomic writes). Archival only, NOT prompt-history isolation.
@@ -59,7 +59,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Layered autonomy config** *(v1.1.2)*: `.ao/autonomy.json` resolution merges `defaults ← global ← project`, where the global layer is `AO_AUTONOMY_CONFIG` env override OR the first existing file under `$XDG_CONFIG_HOME/agent-olympus/`, `~/.config/agent-olympus/`, or `~/.ao/`. CI kill-switch skips global layer on shared runners (CI / GITHUB_ACTIONS / etc.) unless `AO_AUTONOMY_CONFIG` is set. Symlink guard rejects global configs escaping allowed roots
 - **Gemini Keychain wizard** *(v1.1.3, partition-list fix in v1.1.4)*: `/setup-gemini-auth` creates an AO-owned Keychain item with `/usr/bin/security` pre-listed as trusted, eliminating the macOS password prompt every Gemini worker spawn would otherwise trigger. Scoped to keychain users — OAuth/Vertex/env-var paths are unaffected
 - **Layered Opus-skew reduction** *(v1.1.0+)*: Per-subagent model usage logging (`ao-model-usage.jsonl`, schemaVersion:1) for measurement; escalation-first routing pipeline that defaults to Sonnet/Haiku and only promotes to Opus on demonstrated need. Summarise with `node scripts/usage-report.mjs`
-- **Runtime permission_mode capture + `/ask codex` read-only fallback** *(v1.1.6)*: SessionStart + UserPromptSubmit hooks read `permission_mode` from Claude Code's hook stdin (or `CLAUDE_PERMISSION_MODE` env) and persist to `.ao/state/ao-runtime-permissions.json` (schemaVersion:1, 30-min TTL). Permission detection now merges settings ⇧ runtime as **upgrade-only** through the same deny/ask/disableBypassPermissionsMode/allowManagedPermissionRulesOnly pipeline — `--dangerously-skip-permissions` no longer leaves the mirror at `suggest`. Independently, `/ask codex` on suggest-tier hosts now falls back to codex's `read-only` sandbox (`-s read-only -a never`) with a system-prompt guard + `git status --porcelain` post-check, instead of exiting with code 2. New `node scripts/diagnose-sandbox.mjs --explain-permissions` shows the full per-layer breakdown. Closes #67/#68/#69
+- **Runtime permission_mode capture + `/ask codex` read-only fallback** *(v1.1.6, hardened after v1.5.1)*: SessionStart + UserPromptSubmit hooks record non-authoritative session identity/diagnostics in `.ao/state/ao-runtime-permissions.json`; the short-lived authoritative grant lives outside the workspace at `~/.cache/agent-olympus/runtime-permissions/<canonical-cwd-sha256>.json`. Promotion requires a hardened current-session + capture-ID match, expires after 30 minutes, and is revoked on SessionEnd; unsafe state falls back to settings-only detection (Windows also stays settings-only until ACL ownership can be proved). The settings ⇧ runtime merge remains **upgrade-only** through the deny/ask/managed-policy pipeline. Independently, `/ask codex` on suggest-tier hosts uses Codex's `read-only` sandbox (`-s read-only -a never`) with a system-prompt guard + `git status --porcelain` post-check. `node scripts/diagnose-sandbox.mjs --explain-permissions` shows the bound layers. Closes #67/#68/#69
 - **Detached worker supervisor** *(v1.2.0)*: Adapter team workers (codex-exec/appserver, claude-cli, gemini-exec/acp) no longer run in-process — `spawnTeam` launches a detached supervisor per worker that owns the adapter and writes completion/failure/output to disk, so the fresh-process-per-poll orchestrator (`monitorTeam`/`collectResults`/`shutdownTeam`) finally observes their outcome across the process boundary (they were previously stuck `running` forever). Run-scoped snapshots (schemaVersion:1) with PID start-time identity for crash/reuse detection, supervisor-first shutdown with orphan-group reap, per-run SessionEnd protection, and prompt-bearing-manifest scrubbing. Shipped across P1–P6 phases with 4 Codex cross-review rounds
 - **HU-01 P2/P3 evaluation harness** *(v1.5.0)*: Six vendored regression/capability tasks run at `k=3` with `pass^k`/`pass@k`, token accounting, declared or measured baselines, benchmark/protocol fingerprints, and trend reports. CI exercises hermetic GREEN/RED fixtures only; paid live Atlas/Athena runs remain an explicit operator action.
 - **Bounded provider failover** *(v1.5.0)*: Exhausted Codex workers move to Gemini when available and then to native Claude, with a fresh retry budget per provider, generation-bound identity, deterministic child teams, and durable completion output. Lost authenticated Claude output fails closed instead of silently rerunning committed work.
@@ -67,7 +67,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Sanitized failed-run feedback loop** *(v1.5.0)*: SessionEnd queues only independently verified, session-linked terminal task failures as metadata/digests. A human must approve and link candidates; prompts, error text, paths, diffs, evidence payloads, and provider output never enter the queue.
 - **Revocable shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`) is overridden by durable user no-ship follow-ups; push/PR operations bind repository, base, branch, and remote HEAD identity. CI aggregates every workflow for the exact pushed SHA and crash recovery links each fix candidate to one failed run and attempt.
 - **Codex MCP recovery + `--no-mcp`** *(v1.5.1)*: `/ask` classifies record-ordered MCP authentication failures across exec and tmux adapters. Codex-only `--no-mcp` skips the entire user-level config, including configured MCP servers, with a fail-closed Codex version gate while preserving authentication and explicit CLI overrides.
-- **2858 unit tests**: Comprehensive test suite using `node:test` across 108 test files (v1.5.1: 2858/2858 passing)
+- **3168 unit tests**: Current development-tree suite using `node:test` across 127 test files (published v1.5.1 baseline: 2858 tests across 108 files)
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -113,9 +113,11 @@ Atlas will:
 5. **Execute** in parallel using specialized agents
 6. **Verify** build, tests, linting
 7. **Review** architecture, security, code quality
-8. **Loop** on failures — debug and retry until everything passes
+8. **Finalize** cleanup/changelog/tracker mutations, then re-run every required
+   check and bind fresh story evidence to the exact final Git tree
+9. **Final review + commit** — commit only the newly reviewed tree; loop on any failure
 
-### Athena (Peer-to-Peer Team)
+### Athena (Hybrid Team)
 
 Spawn a coordinated team:
 
@@ -127,11 +129,13 @@ Athena will:
 
 1. **Design** a team of Claude workers + Codex workers
 2. **Plan** task assignments and handoff points
-3. **Spawn** workers simultaneously
-4. **Monitor** and bridge Claude↔Codex communication
-5. **Integrate** results
-6. **Verify** and review
-7. **Loop** until all workers' outputs are tested and approved
+3. **Bootstrap** the first native Claude teammate, establish the shared task
+   graph, then launch the remaining Claude teammates in parallel
+4. **Spawn** Codex/Gemini adapter workers and bridge cross-provider context
+5. **Monitor** and integrate every isolated worktree
+6. **Verify** and run the initial routed review
+7. **Finalize, re-verify, and re-review** the exact final tree before commit
+8. **Loop** until all worker outputs and final mutations are tested and approved
 
 ### Resume Interrupted Work
 
@@ -249,7 +253,11 @@ User Request
     ↓ Rejections?
 [Fix & Re-review] (Loops until approved)
     ↓
-[Done] (Cleanup, wisdom saved)
+[Finalize] (Cleanup + release-document mutations)
+    ↓
+[Re-verify + Final Review] (Fresh evidence bound to exact Git tree)
+    ↓
+[Commit] (Only the newly approved tree)
 ```
 
 **Phases:**
@@ -260,13 +268,15 @@ User Request
 4. **Execute** — Parallel agent work
 5. **Verify** — Build, tests, lint
 6. **Review** — Architecture, security, code quality
-7. **Slop Clean + Commit** — Cleanup and atomic commits
+7. **Finalize mutations** — Slop cleanup plus resumable changelog/tracker updates
+8. **Final-tree lock** — Re-run story evidence, route a fresh review package,
+   then commit only the tree bound to `reviewTreeOid`
 
-### Athena: Peer-to-Peer Team
+### Athena: Hybrid Native/External Team
 
 **When to use:**
-- Task has interdependent parts (API + frontend need coordination)
-- Workers need to share discoveries in real-time
+- Task can be split into non-overlapping packages owned by separate workers
+- Workers benefit from sharing discoveries in real-time without cross-worker execution dependencies
 - Large-scale work across many files and multiple specialties
 
 **Architecture:**
@@ -289,33 +299,36 @@ User Request
 
 1. **Triage & Team Design** — Map task into independent scopes
 2. **Plan** — Task assignments, dependencies, handoff protocol
-3. **Spawn Team** — Launch all workers simultaneously
+3. **Bootstrap Native Team** — Launch one Claude teammate, establish shared
+   tasks, then fan out the remaining native teammates
 4. **Monitor & Coordinate** — Bridge communication, unblock workers
 5. **Integrate & Verify** — Merge outputs, run build + tests
 6. **Review** — All reviewers, fix rejections
-7. **Slop Clean + Commit** — Final cleanup and commits
+7. **Finalize mutations** — Cleanup and resumable release-document updates
+8. **Final-tree lock** — Fresh per-story verification, routed review, and
+   tree-bound commit
 
 **Key Difference from Atlas:**
 
 | Aspect | Atlas | Athena |
 |--------|-------|--------|
-| Communication | Hub-and-spoke (lead controls all) | Peer-to-peer (workers talk to each other) |
-| Discovery sharing | Lead relays insights | Workers share discoveries directly |
-| Best for | Independent tasks | Interdependent tasks |
+| Communication | Hub-and-spoke (lead controls all) | Claude teammates share natively; Codex/Gemini use lead relay |
+| Discovery sharing | Lead relays insights | Native Claude mailbox plus explicit cross-provider bridge |
+| Best for | Independent tasks | Non-overlapping work packages that benefit from discovery sharing |
 | Overhead | Lower | Higher but more collaborative |
 
 ## Agents (19 Total)
 
 | Agent | Model | Role |
 |-------|-------|------|
-| **atlas** | Opus 4.6 | Hub-and-spoke orchestrator — triage, analyze, plan, execute, verify, review, loop |
-| **athena** | Opus 4.6 | Peer-to-peer team orchestrator — design team, spawn workers, coordinate, bridge, integrate |
+| **atlas** | Opus | Hub-and-spoke orchestrator — triage, analyze, plan, execute, verify, review, loop |
+| **athena** | Opus | Hybrid team orchestrator — own shared tasks, bridge external providers, integrate isolated worktrees |
 | **metis** | Opus | Deep analysis — affected files, hidden requirements, risks, unknowns, recommendations |
 | **prometheus** | Opus | Strategic planner — work breakdown, parallelization, acceptance criteria, file ownership |
 | **momus** | Opus | Plan validator — catches blocking issues before execution begins (clarity, verification, context) |
 | **hermes** | Opus | Product planning specialist — transforms vague ideas into executable specs (forward & reverse PRD) |
 | **explore** | Haiku | Fast codebase scanner — architecture, file structure, tech stack, test framework |
-| **executor** | Sonnet/Opus | Implementation specialist — handles standard coding tasks, focused execution |
+| **executor** | Sonnet | Implementation specialist — handles standard coding tasks, focused execution |
 | **designer** | Sonnet | UI/UX implementation specialist — builds accessible, responsive interfaces with design system discipline |
 | **aphrodite** | Sonnet | UI/UX design reviewer (read-only) — Nielsen heuristics, Gestalt principles, WCAG 2.2 AA critique |
 | **test-engineer** | Sonnet | Test specialist — designs comprehensive test strategies, writes robust tests |
@@ -324,7 +337,7 @@ User Request
 | **architect** | Opus | Architecture reviewer (read-only) — structural integrity, module boundaries |
 | **security-reviewer** | Sonnet | Security reviewer (read-only) — OWASP Top 10, common vulnerabilities |
 | **code-reviewer** | Sonnet | Code quality reviewer (read-only) — standards, patterns, maintainability |
-| **themis** | Sonnet | Quality gate enforcer (read-only) — tests, syntax, namespace hygiene; PASS/FAIL/CONDITIONAL verdict |
+| **themis** | Sonnet | No-direct-edit quality gate — executes project checks; exact-tree freshness rejects side effects |
 | **writer** | Haiku | Documentation specialist — clear, accurate technical docs and code comments |
 | **ask** | Sonnet | Quick single-shot dispatcher — routes questions to Codex/Gemini workers |
 
@@ -333,13 +346,15 @@ User Request
 | Skill | Level | Aliases | Use Case |
 |-------|-------|---------|----------|
 | **atlas** | 5 | `atlas`, `아틀라스`, `do-it`, `해줘`, `just-do-it` | Autonomous hub-and-spoke orchestration |
-| **athena** | 5 | `athena`, `아테나`, `team-do-it`, `팀으로해`, `collaborate` | Autonomous peer-to-peer team orchestration |
+| **athena** | 5 | `athena`, `아테나`, `team-do-it`, `팀으로해`, `collaborate` | Autonomous hybrid native/external team orchestration |
 | **plan** | 4 | `plan`, `계획`, `spec`, `기획`, `prd`, `역기획` | Adaptive product planner — forward (idea→spec) and reverse (code→spec) |
 | **tdd** | 3 | `tdd`, `test-driven`, `테스트주도개발`, `red-green-refactor` | Test-driven development — RED→GREEN→REFACTOR discipline |
 | **brainstorm** | 3 | `brainstorm`, `브레인스토밍`, `design-first`, `설계먼저` | Design-before-code — diverge→converge→refine with approval gate |
 | **systematic-debug** | 3 | `systematic-debug`, `체계적디버깅`, `root-cause-debug`, `디버그` | Root-cause-first debugging — reproduce→isolate→understand→fix→verify |
 | **finish-branch** | 2 | `finish-branch`, `브랜치완료`, `finish`, `완료` | Structured branch completion with verified checklist before merge |
 | **ask** | 2 | `ask`, `물어봐`, `codex`, `gemini`, `quick-ask` | Quick single-shot query to Codex/Gemini |
+| **codex-goal** | 3 | `codex-goal`, `코덱스에위임` | Delegate one bounded goal to Codex with Claude-hosted verification |
+| **codex-review** | 3 | `codex-review`, `코덱스리뷰` | Independent Codex PASS/FAIL review gate for the current diff |
 | **deep-interview** | 4 | `deep-interview`, `인터뷰`, `clarify`, `명확하게` | Socratic requirements clarification |
 | **research** | 3 | `research`, `조사`, `외부정보`, `lookup` | Parallel web research for external knowledge |
 | **trace** | 3 | `trace`, `추적`, `root-cause`, `원인분석` | Evidence-driven root-cause analysis |
@@ -400,9 +415,15 @@ hooks/               Hook event registrations (hooks.json)
 - Purpose: Resume interrupted sessions
 
 **PRD** (`.ao/prd.json`):
-- User stories with acceptance criteria
-- Story status: `passes: true/false`
-- Story assignment: `assignTo`, `model`, `parallelGroup`
+- Common AO_SPEC_V1 fields: `mode`, `scale`, `goals`, `nonGoals`,
+  `constraints`, `risks`, `openQuestions`; product features also require
+  `targetUsers` and measurable `successMetrics`
+- Stories use unique IDs, non-empty uppercase `GIVEN ... WHEN ... THEN ...`
+  criteria, and `passes: true/false`
+- Atlas assignment: `assignTo`, `model`, an allowlisted Claude `agentType`,
+  explicit `scope`, and `parallelGroup`; Athena assignment: `assignedWorker`,
+  `workerType`, `model`, an allowlisted Claude `agentType`, explicit `scope`,
+  and `parallelGroup`
 - Purpose: Track execution progress against requirements
 
 **Wisdom** (`.ao/wisdom.jsonl`):
@@ -584,7 +605,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (2858 tests across 108 files in v1.5.1) covers the core hook libraries. To run:
+A `node:test` based test suite (3168 tests across 127 files in the current development tree; 2858 tests across 108 files in the published v1.5.1 baseline) covers the core hook libraries. To run:
 
 ```bash
 npm test

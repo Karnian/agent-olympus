@@ -197,6 +197,35 @@ describe('concurrency-release: releases oldest matching claude task', () => {
   });
 });
 
+describe('concurrency-release: tool_use_id releases the exact hook reservation', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    writeState(tmpDir, [
+      makeTask('tool-old', 'claude', -2 * 60 * 1000),
+      makeTask('tool-exact', 'claude', -1 * 60 * 1000),
+    ]);
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('does not release an older same-provider task', () => {
+    runHook({
+      tool_name: 'Task',
+      tool_use_id: 'tool-exact',
+      tool_input: { subagent_type: 'agent-olympus:executor' },
+    }, tmpDir);
+    assert.deepEqual(readState(tmpDir).activeTasks.map(task => task.id), ['tool-old']);
+
+    runHook({
+      tool_name: 'Task',
+      tool_use_id: 'already-released',
+      tool_input: { subagent_type: 'agent-olympus:executor' },
+    }, tmpDir);
+    assert.deepEqual(readState(tmpDir).activeTasks.map(task => task.id), ['tool-old'],
+      'an unmatched exact completion must not steal another same-provider slot');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Different provider — does not release tasks for a different provider
 // ---------------------------------------------------------------------------

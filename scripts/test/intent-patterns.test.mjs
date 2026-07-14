@@ -14,7 +14,11 @@ import { classifyIntent } from '../lib/intent-patterns.mjs';
 const VALID_CATEGORIES = new Set([
   'visual-engineering',
   'design-review',
+  'security-review',
+  'test-authoring',
+  'product-planning',
   'deep',
+  'deep-mutation',
   'quick',
   'writing',
   'artistry',
@@ -115,18 +119,100 @@ test('classifyIntent: Korean planning phrase → planning', () => {
   assert.equal(result.category, 'planning');
 });
 
+test('classifyIntent: PRD and reverse-spec requests → product-planning', () => {
+  assert.equal(classifyIntent('write a PRD for this feature').category, 'product-planning');
+  assert.equal(classifyIntent('reverse engineer a spec from this code').category, 'product-planning');
+  assert.equal(classifyIntent('이 코드 역기획해줘').category, 'product-planning');
+  assert.equal(classifyIntent('이 기능 기획해줘').category, 'product-planning');
+});
+
+test('classifyIntent: explicit security review → security-review', () => {
+  assert.equal(classifyIntent('security review the authentication flow').category, 'security-review');
+  assert.equal(classifyIntent('security review this authentication diff').category, 'security-review');
+  assert.equal(classifyIntent('보안 리뷰해줘').category, 'security-review');
+});
+
+test('classifyIntent: explicit test authoring → test-authoring', () => {
+  assert.equal(classifyIntent('write unit tests for the authentication database layer').category, 'test-authoring');
+  assert.equal(classifyIntent('인증 모듈 테스트를 작성해줘').category, 'test-authoring');
+});
+
 // ---------------------------------------------------------------------------
 // deep
 // ---------------------------------------------------------------------------
 
-test('classifyIntent: database refactor → deep', () => {
+test('classifyIntent: database refactor → deep-mutation', () => {
   const result = classifyIntent('refactor the database schema and optimize query performance');
-  assert.equal(result.category, 'deep');
+  assert.equal(result.category, 'deep-mutation');
 });
 
-test('classifyIntent: security auth → deep', () => {
+test('classifyIntent: security auth implementation → deep-mutation', () => {
   const result = classifyIntent('implement authentication with oauth and JWT authorization');
-  assert.equal(result.category, 'deep');
+  assert.equal(result.category, 'deep-mutation');
+});
+
+test('classifyIntent: Korean refactor request → deep-mutation', () => {
+  assert.equal(classifyIntent('리팩토링 해줘').category, 'deep-mutation');
+});
+
+test('classifyIntent: alternate Korean refactoring spelling → deep-mutation', () => {
+  assert.equal(classifyIntent('대규모 리팩터링 해줘').category, 'deep-mutation');
+});
+
+test('classifyIntent: English auth refactor → deep-mutation', () => {
+  assert.equal(classifyIntent('refactor the auth module').category, 'deep-mutation');
+});
+
+test('classifyIntent: database migration request → deep-mutation', () => {
+  assert.equal(classifyIntent('migrate this database schema').category, 'deep-mutation');
+});
+
+test('classifyIntent: query optimization request → deep-mutation', () => {
+  assert.equal(classifyIntent('optimize this slow query').category, 'deep-mutation');
+});
+
+test('classifyIntent: architecture review remains read-only deep analysis', () => {
+  assert.equal(classifyIntent('review the architecture for coupling risks').category, 'deep');
+  assert.equal(classifyIntent('아키텍처 검토해줘').category, 'deep');
+});
+
+test('classifyIntent: explicit planning outranks dense deep mutation nouns', () => {
+  assert.equal(
+    classifyIntent('plan the database schema migration security authorization oauth jwt architecture refactor optimize distributed microservice infrastructure kubernetes concurrency').category,
+    'planning',
+  );
+  assert.equal(
+    classifyIntent('아키텍처 리팩터링 마이그레이션 최적화 구현 계획을 세워줘').category,
+    'planning',
+  );
+});
+
+test('classifyIntent: executing an existing plan remains a mutation', () => {
+  assert.equal(classifyIntent('implement the plan').category, 'quick');
+  assert.equal(classifyIntent('implement the database migration plan').category, 'deep-mutation');
+  assert.equal(classifyIntent('write code for the database migration plan').category, 'deep-mutation');
+});
+
+test('classifyIntent: explicit documentation outranks dense deep nouns', () => {
+  assert.equal(
+    classifyIntent('write documentation for the database schema migration security architecture refactor plan').category,
+    'writing',
+  );
+  assert.equal(
+    classifyIntent('write API documentation for the authentication database schema').category,
+    'writing',
+  );
+});
+
+test('classifyIntent: explicit UI and visualization actions outrank deep nouns', () => {
+  assert.equal(
+    classifyIntent('build a responsive UI dashboard for database security metrics').category,
+    'visual-engineering',
+  );
+  assert.equal(
+    classifyIntent('create a generative SVG visualization for database performance').category,
+    'artistry',
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -170,7 +256,9 @@ test('classifyIntent: code block is stripped before matching', () => {
 test('classifyIntent: scores object contains all categories', () => {
   const result = classifyIntent('write documentation for this React component');
   const expectedCategories = [
-    'visual-engineering', 'design-review', 'deep', 'quick', 'writing', 'artistry', 'planning', 'external-model',
+    'visual-engineering', 'design-review', 'security-review', 'test-authoring',
+    'product-planning', 'deep', 'deep-mutation', 'quick', 'writing', 'artistry',
+    'planning', 'external-model',
   ];
   for (const cat of expectedCategories) {
     assert.ok(cat in result.scores, `scores should contain "${cat}"`);
@@ -211,6 +299,22 @@ test('classifyIntent: Korean design review → design-review', () => {
   assert.ok(result.confidence > 0);
 });
 
+test('classifyIntent: exact Korean UI review outranks broad UI implementation nouns', () => {
+  const result = classifyIntent('UI 리뷰해줘');
+  assert.equal(result.category, 'design-review');
+});
+
+test('classifyIntent: English review-the-UI phrasing routes to design-review', () => {
+  const result = classifyIntent('review the UI before release');
+  assert.equal(result.category, 'design-review');
+});
+
+test('classifyIntent: explicit UI review survives dense visual vocabulary', () => {
+  const result = classifyIntent('review the UI design CSS layout responsive color font button modal navbar sidebar component animation accessibility WCAG');
+  assert.equal(result.category, 'design-review');
+  assert.ok(result.confidence >= 0.7);
+});
+
 test('classifyIntent: usability heuristic evaluation → design-review', () => {
   const result = classifyIntent('evaluate using Nielsen heuristic evaluation and gestalt principles');
   assert.equal(result.category, 'design-review');
@@ -225,6 +329,16 @@ test('classifyIntent: visual regression review → design-review', () => {
 
 test('classifyIntent: design-review dashboard UI → visual-engineering', () => {
   const result = classifyIntent('design a beautiful dashboard UI with React and Tailwind');
+  assert.equal(result.category, 'visual-engineering');
+});
+
+test('classifyIntent: Korean UI implementation remains visual-engineering', () => {
+  const result = classifyIntent('반응형 UI 컴포넌트를 구현해줘');
+  assert.equal(result.category, 'visual-engineering');
+});
+
+test('classifyIntent: English UI implementation remains visual-engineering', () => {
+  const result = classifyIntent('build a responsive UI component');
   assert.equal(result.category, 'visual-engineering');
 });
 
@@ -284,6 +398,12 @@ test('classifyIntent: mixed prompt with codex request overrides deep', () => {
   // even though "auth refactor" scores high in 'deep'
   const result = classifyIntent('ask codex to review this complex auth refactor plan');
   assert.equal(result.category, 'external-model');
+});
+
+test('classifyIntent: external-model survives adversarial mixed-domain vocabulary', () => {
+  const result = classifyIntent('ask codex to review the database schema migration security authorization oauth jwt architecture refactor optimize distributed microservice infrastructure kubernetes concurrency');
+  assert.equal(result.category, 'external-model');
+  assert.ok(result.confidence >= 0.7);
 });
 
 test('classifyIntent: Japanese lowercase codex → external-model', () => {

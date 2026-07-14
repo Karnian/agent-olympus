@@ -21,8 +21,8 @@
  *
  * Fail-safe by design — every code path returns normally, never throws.
  *
- * Known blind spot (Phase-deferred): native team tools (TeamCreate /
- * TaskCreated / TaskCompleted / TeammateIdle) do not fire SubagentStop in
+ * Known blind spot (Phase-deferred): native teammate lifecycle and messaging
+ * events do not fire SubagentStop in
  * the same way as Task() spawns. Athena native-team workers will be missing
  * from the usage log until a dedicated hook is added. Atlas and Agent-tool
  * spawns are covered.

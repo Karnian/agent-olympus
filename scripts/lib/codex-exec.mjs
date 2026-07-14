@@ -9,6 +9,8 @@ const VALID_SPAWN_LEVELS = new Set(['suggest', 'auto-edit', 'full-auto']);
 const CODEX_EXEC_VERSION_NOTE =
   'codex {version} predates the 0.142.5 security fix (WebSocket payloads written to trace logs); upgrade recommended';
 const IGNORE_USER_CONFIG_MIN_VERSION = '0.122.0';
+const IGNORE_RULES_MIN_VERSION = '0.143.0';
+const STRICT_CONFIG_MIN_VERSION = '0.143.0';
 
 /**
  * @typedef {Object} CodexHandle
@@ -118,7 +120,11 @@ function buildConfigOverrideArgs(opts = {}) {
 }
 
 function buildExecConfigArgs(opts = {}) {
-  return opts.ignoreUserConfig === true ? ['--ignore-user-config'] : [];
+  const args = [];
+  if (opts.ignoreUserConfig === true) args.push('--ignore-user-config');
+  if (opts.ignoreRules === true) args.push('--ignore-rules');
+  if (opts.skipGitRepoCheck === true) args.push('--skip-git-repo-check');
+  return args;
 }
 
 /**
@@ -133,9 +139,15 @@ function buildExecConfigArgs(opts = {}) {
  * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level]
  * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
  *   overrides placed before `exec`, after approval flags
+ * @param {boolean} [opts.strictConfig] - Fail if an explicit isolation
+ *   override is unsupported instead of silently ignoring it
  * @param {boolean} [opts.ignoreUserConfig] - Add Codex exec's
  *   `--ignore-user-config` option after `exec`; authentication and explicit
  *   command-line config overrides remain available
+ * @param {boolean} [opts.ignoreRules] - Add Codex exec's `--ignore-rules`
+ *   option after `exec` to skip user/project execpolicy rules
+ * @param {boolean} [opts.skipGitRepoCheck] - Permit an exact-tree snapshot
+ *   materialized without live `.git` metadata
  * @param {boolean} [opts.persist] - When true, omit --ephemeral so Codex can resume the session
  * @returns {string[]}
  */
@@ -143,6 +155,7 @@ export function _buildSpawnArgs(opts = {}) {
   const approvalArgs = buildApprovalArgs(opts);
   const globalArgs = [
     ...approvalArgs,
+    ...(opts.strictConfig === true ? ['--strict-config'] : []),
     ...buildConfigOverrideArgs(opts),
   ];
 
@@ -179,8 +192,11 @@ export function _buildSpawnArgs(opts = {}) {
  * @param {'suggest'|'auto-edit'|'full-auto'} [opts.level]
  * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
  *   overrides placed before `exec`, after approval flags
+ * @param {boolean} [opts.strictConfig] - Fail on invalid explicit config overrides
  * @param {boolean} [opts.ignoreUserConfig] - Add the resume subcommand's
  *   `--ignore-user-config` option after `resume`
+ * @param {boolean} [opts.ignoreRules] - Add `--ignore-rules` after `resume`
+ * @param {boolean} [opts.skipGitRepoCheck] - Add `--skip-git-repo-check`
  * @returns {string[]}
  */
 export function _buildResumeArgs(threadId, opts = {}) {
@@ -190,6 +206,7 @@ export function _buildResumeArgs(threadId, opts = {}) {
 
   return [
     ...buildApprovalArgs(opts),
+    ...(opts.strictConfig === true ? ['--strict-config'] : []),
     ...buildConfigOverrideArgs(opts),
     'exec',
     'resume',
@@ -213,6 +230,32 @@ function spawnCodexProcess(args, prompt, opts = {}) {
       throw new Error(
         `--no-mcp requires Codex >=${IGNORE_USER_CONFIG_MIN_VERSION} `
         + `(--ignore-user-config support); detected ${detected}. `
+        + 'Upgrade with: npm install -g @openai/codex@latest',
+      );
+    }
+  }
+  if (opts.ignoreRules === true) {
+    if (
+      workerMeta.codexVersion === null
+      || !meetsMinimum(workerMeta.codexVersion, IGNORE_RULES_MIN_VERSION)
+    ) {
+      const detected = workerMeta.codexVersion || 'unknown';
+      throw new Error(
+        `read-only rule isolation requires Codex >=${IGNORE_RULES_MIN_VERSION} `
+        + `(--ignore-rules support); detected ${detected}. `
+        + 'Upgrade with: npm install -g @openai/codex@latest',
+      );
+    }
+  }
+  if (opts.strictConfig === true) {
+    if (
+      workerMeta.codexVersion === null
+      || !meetsMinimum(workerMeta.codexVersion, STRICT_CONFIG_MIN_VERSION)
+    ) {
+      const detected = workerMeta.codexVersion || 'unknown';
+      throw new Error(
+        `strict validator config requires Codex >=${STRICT_CONFIG_MIN_VERSION} `
+        + `(--strict-config support); detected ${detected}. `
         + 'Upgrade with: npm install -g @openai/codex@latest',
       );
     }
@@ -356,8 +399,11 @@ function emitVersionLog(opts, level, message) {
  *   the appropriate `-a never -s <sandbox>` global flags.
  * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
  *   overrides placed before `exec`, after approval flags
+ * @param {boolean} [opts.strictConfig] - Fail if an isolation override is unsupported
  * @param {boolean} [opts.ignoreUserConfig] - Skip CODEX_HOME/config.toml for
  *   this execution while retaining authentication and CLI overrides
+ * @param {boolean} [opts.ignoreRules] - Skip user/project execpolicy rules
+ * @param {boolean} [opts.skipGitRepoCheck] - Permit a metadata-free tree snapshot
  * @param {boolean} [opts.persist] - When true, omit --ephemeral so Codex writes
  *   a resumable session
  * @param {Object} [opts.env] - Additional environment variables merged over process.env
@@ -379,8 +425,11 @@ export function spawn(prompt, opts = {}) {
  *   permission tier; resolved by callers via `resolveCodexApproval`
  * @param {string[]} [opts.configOverrides] - Global Codex `-c key=value`
  *   overrides placed before `exec`, after approval flags
+ * @param {boolean} [opts.strictConfig] - Fail if an isolation override is unsupported
  * @param {boolean} [opts.ignoreUserConfig] - Skip CODEX_HOME/config.toml for
  *   the resumed execution while retaining authentication and CLI overrides
+ * @param {boolean} [opts.ignoreRules] - Skip user/project execpolicy rules
+ * @param {boolean} [opts.skipGitRepoCheck] - Permit a metadata-free tree snapshot
  * @param {Object} [opts.env] - Additional environment variables merged over process.env
  * @returns {CodexHandle}
  */

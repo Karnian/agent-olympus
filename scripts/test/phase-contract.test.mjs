@@ -84,7 +84,11 @@ function assertShipSafetyContract(skill, orchestrator) {
     policyResolution >= 0 && finishBranch > policyResolution,
     'ship policy must resolve before the optional finish-branch helper',
   );
-  assert.match(skill, /only when `shipMode === 'auto'`[\s\S]*?finish-branch[\s\S]*?stop it before any push, PR, merge/i);
+  assert.match(
+    skill,
+    /only when `shipMode === 'auto'`[\s\S]*?finish-branch[\s\S]*?stop it before any push, PR,\s+merge/i,
+  );
+  assert.match(skill, /may not mutate source files or create commits/i);
   assert.match(skill, /Phase 6 below is the sole owner of outward shipping actions/);
 
   assert.doesNotMatch(skill, /baseBranch:\s*['"]main['"]/);
@@ -537,8 +541,8 @@ describe('atlas SKILL.md phase-runner contract', () => {
   });
 
   test('quality-fail explicitly flips failed stories passes:false (else execute no-ops)', () => {
-    assert.match(skill, /setStoriesPassesFalse|quality-failed stories passes:false/,
-      'quality-fail must mark the failed stories passes:false as an explicit step');
+    assert.match(skill, /setExecutionStoryPasses\([\s\S]*?<quality-failed story ids>[\s\S]*?false[\s\S]*?expectedGeneration:/,
+      'quality-fail must CAS-rollback failed stories passes:false through the hardened store');
   });
 
   test('dynamic ship/ci skips use skipPhase, not enterPhase().skip', () => {
@@ -611,7 +615,7 @@ describe('athena SKILL.md phase-runner contract', () => {
     assert.match(skill, /missing run directory is not worker-liveness proof/);
     assert.match(skill, /absent run directory[\s\S]*?canCreateNewRun === false/);
     assert.match(skill, /Missing\/corrupt\/symlinked summary or pipeline[\s\S]*?canCreateNewRun === false/);
-    assert.match(skill, /Do not call `createRun`, `TeamCreate`,[\s\S]*?`Task`, adapter[\s\S]*?native teammate launch/);
+    assert.match(skill, /Do not call `createRun`, dispatch an[\s\S]*?`Agent`\/`Task`, spawn an adapter worker[\s\S]*?native teammate/);
     assert.match(skill, /clearing the checkpoint or observing a missing[\s\S]*?never authorizes a new run or team/);
     assert.doesNotMatch(
       skill,
@@ -645,8 +649,10 @@ describe('athena SKILL.md phase-runner contract', () => {
     const record = skill.indexOf("recordPhaseOutputs(runId, 'spawn'", enter);
     const checked = skill.indexOf('if (!spawnProgress.ok || spawnProgress.degraded)', record);
     const worktree = skill.indexOf('const info = createWorkerWorktree(', record);
-    const nativeTeam = skill.indexOf('TeamCreate("athena-<slug>")', record);
-    const fallbackAgent = skill.indexOf('Task(subagent_type=', nativeTeam);
+    const bootstrapAgent = skill.indexOf('Agent(name="<first-worker>"', record);
+    const nativeAgent = skill.indexOf('Agent(name="<worker>"', bootstrapAgent);
+    const pathBFallback = skill.indexOf('#### Path B: Fallback', nativeAgent);
+    const fallbackAgent = skill.indexOf('Agent(description="Execute isolated Athena stories"', pathBFallback);
     const adapter = skill.indexOf('await spawnTeam(teamSlug', record);
     assert.ok(enter >= 0 && enter < record, 'spawn must enter before recording recovery identity');
     assert.ok(
@@ -654,7 +660,14 @@ describe('athena SKILL.md phase-runner contract', () => {
       'adapter generation must be allocated before the durable launch identity',
     );
     assert.ok(record < checked, 'recordPhaseOutputs result must be checked');
-    for (const [name, index] of Object.entries({ worktree, nativeTeam, fallbackAgent, adapter })) {
+    for (const [name, index] of Object.entries({
+      worktree,
+      bootstrapAgent,
+      nativeAgent,
+      pathBFallback,
+      fallbackAgent,
+      adapter,
+    })) {
       assert.ok(checked < index, `${name} launch must follow durable recovery identity`);
     }
     assert.match(skill, /spawnGate\.reason\s*===\s*['"]recover['"]/);
@@ -709,6 +722,71 @@ describe('athena SKILL.md phase-runner contract', () => {
       /worktrees:\s*spawnRecoveryMode === 'adopt'/,
       'adopt must preserve the validated checkpoint instead of downgrading it',
     );
+  });
+
+  test('native-team recovery is session-bound while adapter recovery stays durable', () => {
+    assert.match(skill, /getCurrentSessionId/);
+    assert.match(skill, /getRun\(runId\)\.summary\?\.sessionId/);
+    assert.match(skill, /proven:[\s\S]*?currentSessionId\s*===\s*originSessionId/);
+    assert.match(skill, /expectedSpawn\s*=\s*\{[^}]*nativeSessionId,/s);
+    assert.match(skill, /spawnCheckpointPayload\s*=\s*\{[^}]*nativeSessionId,/s);
+
+    const recoveryFence = skill.indexOf(
+      "if (spawnGate.reason === 'recover' && nativeSessionRequired && !nativeSessionMatches)",
+    );
+    const taskList = skill.indexOf('TaskList()', recoveryFence);
+    const recoveryPlan = skill.indexOf('planAthenaSpawnRecovery({', taskList);
+    assert.ok(
+      recoveryFence >= 0 && recoveryFence < taskList && taskList < recoveryPlan,
+      'native session mismatch must stop before TaskList proof or recovery adoption',
+    );
+
+    const taskListCalls = [...skill.matchAll(/\bTaskList\s*\(([^)]*)\)/g)];
+    assert.ok(taskListCalls.length >= 3);
+    assert.ok(
+      taskListCalls.every((call) => call[1].trim() === ''),
+      'Claude Code 2.1.178+ TaskList calls must not pass a team slug or any argument',
+    );
+
+    const monitorFence = skill.indexOf("phase3SpawnPath === 'native-or-mixed'");
+    const adapterMonitor = skill.indexOf('monitorTeam(phase3TeamSlug)', monitorFence);
+    assert.ok(monitorFence >= 0 && monitorFence < adapterMonitor,
+      'monitor recovery must fence native state before normal polling');
+    assert.match(skill, /const nativeSessionRequired\s*=\s*plannedSpawnPath\s*===\s*['"]native-or-mixed['"]/);
+    assert.match(skill, /const durableAdapterState\s*=\s*hasAdapterWorkers\s*\?\s*monitorTeam\(teamSlug\)/);
+    assert.match(skill, /native cleanup is outside the originating Claude session/);
+    assert.match(skill, /replacement generation[\s\S]*?must never[\s\S]*?old native team/i);
+  });
+
+  test('Athena validates the persisted execution PRD at plan and spawn boundaries', () => {
+    assert.match(
+      skill,
+      /import\s*\{[^}]*\bassertExecutionPrd\b[^}]*\}\s*from\s*['"][^'"]*execution-prd\.mjs['"]/s,
+    );
+    assert.match(
+      skill,
+      /const planningPrdState\s*=\s*readPlanningPrdForExecution\(\{ cwd \}\)[\s\S]*?const plannedExecutionPrdState\s*=\s*enrichExecutionPrd\([\s\S]*?expectedGeneration:\s*planningPrdState\.generation[\s\S]*?assertExecutionPrd\(plannedExecutionPrd,\s*\{[\s\S]*?orchestrator:\s*['"]athena['"][\s\S]*?allowCompleted:\s*false/,
+    );
+    assert.match(
+      skill,
+      /const executionPrdState\s*=\s*readExecutionPrd\(\{ cwd, orchestrator:\s*['"]athena['"] \}\)[\s\S]*?const prd\s*=\s*executionPrdState\.prd[\s\S]*?assertExecutionPrd\(prd,\s*\{\s*orchestrator:\s*['"]athena['"],\s*allowCompleted:\s*true\s*\}\)/,
+    );
+    const planValidation = skill.indexOf('assertExecutionPrd(plannedExecutionPrd');
+    const planCompletion = skill.indexOf("completePhase(runId, 'plan'", planValidation);
+    const spawnValidation = skill.indexOf("assertExecutionPrd(prd, { orchestrator: 'athena', allowCompleted: true })");
+    const worktreeCreation = skill.indexOf('const info = createWorkerWorktree(', spawnValidation);
+    assert.ok(planValidation >= 0 && planValidation < planCompletion,
+      'fresh planning must validate before completing the plan phase');
+    assert.ok(spawnValidation >= 0 && spawnValidation < worktreeCreation,
+      'spawn/resume must validate before creating a worktree or dispatching workers');
+    assert.doesNotMatch(skill, /JSON\.parse\(readFileSync\('\.ao\/prd\.json/,
+      'Athena must use hardened execution PRD reads after enrichment');
+
+    assert.match(skill, /dependency references\/cycles/);
+    assert.match(skill, /machine-readable[\s\S]{0,20}scope ownership/);
+    assert.match(skill, /wildcard\/unsafe paths/);
+    assert.match(skill, /overlapping scopes across every concurrently launched worker/);
+    assert.match(skill, /JSON[\s\S]{0,20}parsing or planner prose alone is never launch authority/);
   });
 
   test('runner initialization and every destructive recovery boundary fail closed', () => {

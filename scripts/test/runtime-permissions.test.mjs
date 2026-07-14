@@ -14,8 +14,19 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync, rmSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 
@@ -24,6 +35,8 @@ import {
   extractPermissionModeFromEnv,
   captureRuntimePermissions,
   loadRuntimePermissions,
+  loadRuntimeCurrentSessionId,
+  loadRuntimeSessionIdentity,
   permissionModeToLevel,
   _internal,
 } from '../lib/runtime-permissions.mjs';
@@ -38,9 +51,55 @@ import {
 
 function makeTmpCwd() {
   const dir = join(tmpdir(), `ao-runtime-perms-${randomUUID()}`);
-  mkdirSync(dir, { recursive: true });
-  mkdirSync(join(dir, '.ao', 'state'), { recursive: true });
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  mkdirSync(join(dir, '.ao', 'state'), { recursive: true, mode: 0o700 });
   return dir;
+}
+
+const TEST_SESSION_ID = 'runtime-permission-test-session';
+
+function runtimeHomeFor(cwd) {
+  return `${cwd}-runtime-home`;
+}
+
+function runtimeOpts(cwd, extra = {}) {
+  return {
+    cwd,
+    runtimeHome: runtimeHomeFor(cwd),
+    stateBase: join(cwd, '.ao', 'state'),
+    ...extra,
+  };
+}
+
+function setCurrentSession(cwd, sessionId = TEST_SESSION_ID) {
+  writeFileSync(
+    join(cwd, '.ao', 'state', 'ao-current-session.json'),
+    JSON.stringify({ sessionId }),
+    { mode: 0o600 },
+  );
+}
+
+function captureBound(cwd, permissionMode, record = {}, opts = {}) {
+  const sessionId = record.sessionId || TEST_SESSION_ID;
+  setCurrentSession(cwd, sessionId);
+  mkdirSync(runtimeHomeFor(cwd), { recursive: true, mode: 0o700 });
+  return captureRuntimePermissions({
+    permissionMode,
+    permissionModeObserved: record.permissionModeObserved ?? permissionMode !== null,
+    source: 'hook_stdin',
+    sessionId,
+    ...record,
+  }, runtimeOpts(cwd, opts));
+}
+
+function loadBound(cwd, opts = {}) {
+  const identity = loadRuntimeSessionIdentity({ cwd });
+  if (!identity) return null;
+  return loadRuntimePermissions(runtimeOpts(cwd, {
+    expectedSessionId: identity.sessionId,
+    expectedCaptureId: identity.captureId,
+    ...opts,
+  }));
 }
 
 function writeSettings(cwd, scope, body) {
@@ -53,6 +112,7 @@ function writeSettings(cwd, scope, body) {
 
 function cleanup(cwd) {
   try { rmSync(cwd, { recursive: true, force: true }); } catch {}
+  try { rmSync(runtimeHomeFor(cwd), { recursive: true, force: true }); } catch {}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -80,9 +140,15 @@ describe('extractPermissionModeFromStdin', () => {
     assert.equal(r.mode, 'default');
   });
 
+  it('accepts current auto and dontAsk hook permission modes', () => {
+    assert.equal(extractPermissionModeFromStdin({ permission_mode: 'auto' }).mode, 'auto');
+    assert.equal(extractPermissionModeFromStdin({ permission_mode: 'dontAsk' }).mode, 'dontAsk');
+  });
+
   it('drops unknown mode values', () => {
     const r = extractPermissionModeFromStdin({ permission_mode: 'godMode' });
     assert.equal(r.mode, null);
+    assert.equal(r.modeObserved, true);
   });
 
   it('drops non-string mode values', () => {
@@ -94,6 +160,7 @@ describe('extractPermissionModeFromStdin', () => {
     assert.equal(extractPermissionModeFromStdin(null).mode, null);
     assert.equal(extractPermissionModeFromStdin(undefined).mode, null);
     assert.deepEqual(extractPermissionModeFromStdin(null).observedKeys, []);
+    assert.equal(extractPermissionModeFromStdin(null).modeObserved, false);
   });
 
   it('captures top-level keys as observedKeys (capped at 20)', () => {
@@ -154,27 +221,128 @@ describe('capture/load round-trip', () => {
   beforeEach(() => { cwd = makeTmpCwd(); });
   afterEach(() => { cleanup(cwd); });
 
-  it('writes and reads back a valid record', () => {
-    const ok = captureRuntimePermissions({
-      permissionMode: 'bypassPermissions',
-      source: 'hook_stdin',
-      sessionId: 'abc',
+  it('splits local identity from the external authoritative grant', () => {
+    const ok = captureBound(cwd, 'bypassPermissions', {
       rawStdinKeys: ['session_id', 'cwd', 'permission_mode'],
-    }, { cwd, now: new Date('2026-05-08T12:00:00Z') });
+    }, { now: new Date('2026-05-08T12:00:00Z') });
     assert.equal(ok, true);
 
-    const rec = loadRuntimePermissions({ cwd, now: new Date('2026-05-08T12:05:00Z') });
+    const identityRaw = JSON.parse(readFileSync(join(cwd, _internal.CACHE_REL_PATH), 'utf8'));
+    assert.equal(identityRaw.kind, _internal.IDENTITY_KIND);
+    assert.equal(identityRaw.sessionId, TEST_SESSION_ID);
+    assert.equal(identityRaw.permissionObservation, 'recognized');
+    assert.equal('permissionMode' in identityRaw, false, 'workspace state is not a grant');
+
+    const rec = loadBound(cwd, { now: new Date('2026-05-08T12:05:00Z') });
     assert.ok(rec, 'expected record');
     assert.equal(rec.permissionMode, 'bypassPermissions');
     assert.equal(rec.source, 'hook_stdin');
-    assert.equal(rec.sessionId, 'abc');
-    assert.deepEqual(rec.rawStdinKeys, ['session_id', 'cwd', 'permission_mode']);
+    assert.equal(rec.sessionId, TEST_SESSION_ID);
     assert.equal(rec.ageMs, 5 * 60 * 1000);
+
+    const grantPath = _internal.runtimeGrantPaths(runtimeOpts(cwd)).file;
+    assert.equal(statSync(dirname(grantPath)).mode & 0o777, 0o700);
+    assert.equal(statSync(grantPath).mode & 0o777, 0o600);
   });
 
-  it('rejects invalid permissionMode (write returns false)', () => {
-    const ok = captureRuntimePermissions({ permissionMode: 'godMode' }, { cwd });
-    assert.equal(ok, false);
+  it('requires a hook session identity and refuses env-only grants', () => {
+    mkdirSync(runtimeHomeFor(cwd), { recursive: true, mode: 0o700 });
+    assert.equal(captureRuntimePermissions({
+      permissionMode: 'bypassPermissions',
+      source: 'hook_stdin',
+    }, runtimeOpts(cwd)), false);
+    assert.equal(captureRuntimePermissions({
+      permissionMode: 'bypassPermissions',
+      source: 'env',
+      sessionId: TEST_SESSION_ID,
+    }, runtimeOpts(cwd)), false);
+    assert.equal(loadRuntimeSessionIdentity({ cwd }), null);
+
+    assert.equal(captureRuntimePermissions({
+      permissionMode: 'bypassPermissions',
+      permissionModeObserved: true,
+      source: 'hook_stdin',
+      permissionSource: 'env',
+      sessionId: TEST_SESSION_ID,
+    }, runtimeOpts(cwd)), true);
+    assert.equal(loadRuntimeSessionIdentity({ cwd }).permissionObservation, 'absent');
+    assert.equal(loadBound(cwd), null);
+  });
+
+  it('persists identity but writes a non-authorizing tombstone for an unknown mode', () => {
+    const ok = captureBound(cwd, 'futureMode', {
+      permissionModeObserved: true,
+      sessionId: 'session-forward-compatible',
+    });
+    assert.equal(ok, true);
+    const identity = loadRuntimeSessionIdentity({ cwd });
+    assert.equal(identity.sessionId, 'session-forward-compatible');
+    assert.equal(identity.permissionObservation, 'unknown');
+    assert.equal(loadBound(cwd), null);
+  });
+
+  it('same-session identity refresh preserves a hardened grant without extending TTL', () => {
+    captureBound(cwd, 'acceptEdits', {
+      sessionId: 'same-session',
+    }, { now: new Date('2026-05-08T12:00:00Z') });
+    captureRuntimePermissions({
+      permissionMode: null,
+      permissionModeObserved: false,
+      source: 'hook_stdin',
+      sessionId: 'same-session',
+    }, runtimeOpts(cwd, { now: new Date('2026-05-08T12:20:00Z') }));
+
+    const identity = loadRuntimeSessionIdentity({ cwd });
+    assert.equal(identity.permissionObservedAt, '2026-05-08T12:00:00.000Z');
+    assert.equal(identity.capturedAt, '2026-05-08T12:20:00.000Z');
+    assert.equal(loadRuntimePermissions(runtimeOpts(cwd, {
+      expectedSessionId: 'same-session',
+      expectedCaptureId: identity.captureId,
+      now: new Date('2026-05-08T12:29:00Z'),
+    })).permissionMode, 'acceptEdits');
+    assert.equal(loadRuntimePermissions(runtimeOpts(cwd, {
+      expectedSessionId: 'same-session',
+      expectedCaptureId: identity.captureId,
+      now: new Date('2026-05-08T12:31:00Z'),
+    })), null);
+  });
+
+  it('new-session identity-only capture tombstones an old grant against replay', () => {
+    captureBound(cwd, 'bypassPermissions', {
+      sessionId: 'old-session',
+    });
+    const oldIdentityText = readFileSync(join(cwd, _internal.CACHE_REL_PATH), 'utf8');
+    const oldIdentity = JSON.parse(oldIdentityText);
+
+    setCurrentSession(cwd, 'new-session');
+    captureRuntimePermissions({
+      permissionMode: null,
+      permissionModeObserved: false,
+      source: 'hook_stdin',
+      sessionId: 'new-session',
+    }, runtimeOpts(cwd));
+
+    assert.equal(loadRuntimePermissions(runtimeOpts(cwd, {
+      expectedSessionId: 'old-session',
+      expectedCaptureId: oldIdentity.captureId,
+    })), null, 'external old-session grant was replaced');
+
+    // Even restoring both workspace-controlled records cannot revive it.
+    writeFileSync(join(cwd, _internal.CACHE_REL_PATH), oldIdentityText, { mode: 0o600 });
+    setCurrentSession(cwd, 'old-session');
+    assert.equal(detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' })), 'suggest');
+  });
+
+  it('explicitly unknown same-session mode revokes a prior grant', () => {
+    captureBound(cwd, 'acceptEdits');
+    captureRuntimePermissions({
+      permissionMode: 'futureMode',
+      permissionModeObserved: true,
+      source: 'hook_stdin',
+      sessionId: TEST_SESSION_ID,
+    }, runtimeOpts(cwd));
+    assert.equal(loadBound(cwd), null);
+    assert.equal(loadRuntimeSessionIdentity({ cwd }).permissionObservation, 'unknown');
   });
 
   it('rejects invalid source (write returns false)', () => {
@@ -185,74 +353,261 @@ describe('capture/load round-trip', () => {
     assert.equal(ok, false);
   });
 
-  it('returns null when cache file is missing', () => {
-    assert.equal(loadRuntimePermissions({ cwd }), null);
+  it('requires explicit session and capture bindings on direct loads', () => {
+    captureBound(cwd, 'bypassPermissions');
+    assert.equal(loadRuntimePermissions(runtimeOpts(cwd)), null);
+    const identity = loadRuntimeSessionIdentity({ cwd });
+    assert.equal(loadRuntimePermissions(runtimeOpts(cwd, {
+      expectedSessionId: 'forged-other-session',
+      expectedCaptureId: identity.captureId,
+    })), null);
   });
 
   it('returns null past TTL', () => {
-    captureRuntimePermissions({ permissionMode: 'default' }, {
-      cwd,
+    captureBound(cwd, 'default', {}, {
       now: new Date('2026-05-08T12:00:00Z'),
     });
-    // 31 minutes later — past 30-min TTL
-    const rec = loadRuntimePermissions({
-      cwd,
-      now: new Date('2026-05-08T12:31:00Z'),
+    assert.equal(loadBound(cwd, { now: new Date('2026-05-08T12:31:00Z') }), null);
+  });
+
+  it('rejects future-dated permission grants instead of bypassing the TTL', () => {
+    captureBound(cwd, 'bypassPermissions', {}, {
+      now: new Date('2026-05-08T12:30:00Z'),
     });
-    assert.equal(rec, null);
+    assert.equal(loadBound(cwd, { now: new Date('2026-05-08T12:00:00Z') }), null);
+  });
+
+  it('rejects an invalid current clock value', () => {
+    captureBound(cwd, 'bypassPermissions', {}, {
+      now: new Date('2026-05-08T12:00:00Z'),
+    });
+    assert.equal(loadBound(cwd, { now: new Date('invalid') }), null);
+  });
+
+  it('retains hook session identity after permission TTL without granting a permission level', () => {
+    captureBound(cwd, 'default', {
+      sessionId: 'session-long-running-team',
+    }, {
+      now: new Date('2026-05-08T12:00:00Z'),
+    });
+    const identity = loadRuntimeSessionIdentity({ cwd });
+    assert.equal(loadRuntimePermissions(runtimeOpts(cwd, {
+      expectedSessionId: identity.sessionId,
+      expectedCaptureId: identity.captureId,
+      now: new Date('2026-05-08T14:00:00Z'),
+    })), null);
+    assert.equal(identity.sessionId, 'session-long-running-team');
+    assert.equal(identity.capturedAt, '2026-05-08T12:00:00.000Z');
   });
 
   it('honors a custom TTL override', () => {
-    captureRuntimePermissions({ permissionMode: 'default' }, {
-      cwd,
+    captureBound(cwd, 'default', {}, {
       now: new Date('2026-05-08T12:00:00Z'),
     });
-    // 100 ms after capture — within 1s custom TTL
-    const fresh = loadRuntimePermissions({
-      cwd,
+    const fresh = loadBound(cwd, {
       now: new Date('2026-05-08T12:00:00.100Z'),
       ttlMs: 1000,
     });
     assert.ok(fresh);
-    // 2s after capture — past 1s custom TTL
-    const stale = loadRuntimePermissions({
-      cwd,
+    const stale = loadBound(cwd, {
       now: new Date('2026-05-08T12:00:02Z'),
       ttlMs: 1000,
     });
     assert.equal(stale, null);
   });
 
-  it('refuses unknown schema versions (forward-compat)', () => {
+  it('never migrates a legacy project-local mode into an authoritative grant', () => {
     const f = join(cwd, '.ao', 'state', 'ao-runtime-permissions.json');
     writeFileSync(f, JSON.stringify({
-      schemaVersion: 99,
+      schemaVersion: 1,
       capturedAt: new Date().toISOString(),
       permissionMode: 'bypassPermissions',
       source: 'hook_stdin',
-    }));
-    assert.equal(loadRuntimePermissions({ cwd }), null);
+      sessionId: TEST_SESSION_ID,
+    }), { mode: 0o600 });
+    setCurrentSession(cwd);
+    assert.equal(loadRuntimeSessionIdentity({ cwd }), null);
+    assert.equal(detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' })), 'suggest');
   });
 
-  it('refuses corrupt JSON without throwing', () => {
-    const f = join(cwd, '.ao', 'state', 'ao-runtime-permissions.json');
-    writeFileSync(f, 'not-json');
-    assert.equal(loadRuntimePermissions({ cwd }), null);
+  it('rejects symlink, hardlink, and 0644 external grant files', () => {
+    captureBound(cwd, 'bypassPermissions');
+    const identity = loadRuntimeSessionIdentity({ cwd });
+    const grant = _internal.runtimeGrantPaths(runtimeOpts(cwd)).file;
+    const original = readFileSync(grant, 'utf8');
+
+    chmodSync(grant, 0o644);
+    assert.equal(loadBound(cwd), null, '0644 rejected');
+    chmodSync(grant, 0o600);
+
+    const hardlink = `${grant}.hardlink`;
+    linkSync(grant, hardlink);
+    assert.equal(loadBound(cwd), null, 'multi-link file rejected');
+    rmSync(hardlink);
+
+    rmSync(grant);
+    const target = `${grant}.target`;
+    writeFileSync(target, original, { mode: 0o600 });
+    symlinkSync(target, grant);
+    assert.equal(loadRuntimePermissions(runtimeOpts(cwd, {
+      expectedSessionId: identity.sessionId,
+      expectedCaptureId: identity.captureId,
+    })), null, 'symlink rejected');
   });
 
-  it('written file has 0o600 mode', () => {
-    captureRuntimePermissions({ permissionMode: 'default' }, { cwd });
-    const f = join(cwd, '.ao', 'state', 'ao-runtime-permissions.json');
-    const mode = statSync(f).mode & 0o777;
-    assert.equal(mode, 0o600);
+  it('rejects replacement after a hardened grant read', () => {
+    captureBound(cwd, 'bypassPermissions');
+    const identity = loadRuntimeSessionIdentity({ cwd });
+    const grant = _internal.runtimeGrantPaths(runtimeOpts(cwd)).file;
+    const replacement = `${grant}.replacement`;
+    writeFileSync(replacement, readFileSync(grant), { mode: 0o600 });
+    assert.equal(loadRuntimePermissions(runtimeOpts(cwd, {
+      expectedSessionId: identity.sessionId,
+      expectedCaptureId: identity.captureId,
+      _beforeGrantRevalidate: () => renameSync(replacement, grant),
+    })), null);
   });
 
-  it('written file is parseable JSON with schemaVersion 1', () => {
-    captureRuntimePermissions({ permissionMode: 'acceptEdits' }, { cwd });
-    const f = join(cwd, '.ao', 'state', 'ao-runtime-permissions.json');
-    const parsed = JSON.parse(readFileSync(f, 'utf-8'));
-    assert.equal(parsed.schemaVersion, 1);
-    assert.equal(parsed.permissionMode, 'acceptEdits');
+  it('rejects unsafe local identity modes and oversized grants', () => {
+    captureBound(cwd, 'bypassPermissions');
+    const identityFile = join(cwd, _internal.CACHE_REL_PATH);
+    chmodSync(identityFile, 0o644);
+    assert.equal(loadRuntimeSessionIdentity({ cwd }), null);
+    assert.equal(detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' })), 'suggest');
+
+    chmodSync(identityFile, 0o600);
+    const grant = _internal.runtimeGrantPaths(runtimeOpts(cwd)).file;
+    writeFileSync(grant, 'x'.repeat(_internal.MAX_CACHE_BYTES + 1), { mode: 0o600 });
+    assert.equal(loadBound(cwd), null);
+  });
+
+  it('hardens the current-session pointer against mode, links, size, and replacement', () => {
+    captureBound(cwd, 'bypassPermissions');
+    const pointer = join(cwd, '.ao', 'state', 'ao-current-session.json');
+    const original = readFileSync(pointer);
+
+    chmodSync(pointer, 0o644);
+    assert.equal(loadRuntimeCurrentSessionId(runtimeOpts(cwd)), null, '0644 pointer rejected');
+    chmodSync(pointer, 0o600);
+
+    const hardlink = `${pointer}.hardlink`;
+    linkSync(pointer, hardlink);
+    assert.equal(loadRuntimeCurrentSessionId(runtimeOpts(cwd)), null, 'multi-link pointer rejected');
+    rmSync(hardlink);
+
+    writeFileSync(pointer, 'x'.repeat(_internal.MAX_POINTER_BYTES + 1), { mode: 0o600 });
+    assert.equal(loadRuntimeCurrentSessionId(runtimeOpts(cwd)), null, 'oversized pointer rejected');
+    writeFileSync(pointer, original, { mode: 0o600 });
+
+    const replacement = `${pointer}.replacement`;
+    writeFileSync(replacement, original, { mode: 0o600 });
+    assert.equal(loadRuntimeCurrentSessionId(runtimeOpts(cwd, {
+      _beforePointerRevalidate: () => renameSync(replacement, pointer),
+    })), null, 'pointer replacement rejected');
+
+    rmSync(pointer);
+    const target = `${pointer}.target`;
+    writeFileSync(target, original, { mode: 0o600 });
+    symlinkSync(target, pointer);
+    assert.equal(loadRuntimeCurrentSessionId(runtimeOpts(cwd)), null, 'pointer symlink rejected');
+  });
+
+  it('rejects local identity hardlinks and symlinks', () => {
+    captureBound(cwd, 'bypassPermissions');
+    const identity = join(cwd, _internal.CACHE_REL_PATH);
+    const original = readFileSync(identity);
+    const hardlink = `${identity}.hardlink`;
+    linkSync(identity, hardlink);
+    assert.equal(loadRuntimeSessionIdentity({ cwd }), null);
+    rmSync(hardlink);
+
+    rmSync(identity);
+    const target = `${identity}.target`;
+    writeFileSync(target, original, { mode: 0o600 });
+    symlinkSync(target, identity);
+    assert.equal(loadRuntimeSessionIdentity({ cwd }), null);
+  });
+
+  it('fails closed when the external cache would overlap the workspace', () => {
+    const ok = captureRuntimePermissions({
+      permissionMode: 'bypassPermissions',
+      permissionModeObserved: true,
+      source: 'hook_stdin',
+      sessionId: TEST_SESSION_ID,
+    }, { cwd, runtimeHome: cwd });
+    assert.equal(ok, false);
+    assert.equal(detectClaudePermissionLevel({
+      cwd,
+      home: '/nonexistent',
+      runtimeHome: cwd,
+      stateBase: join(cwd, '.ao', 'state'),
+    }), 'suggest');
+  });
+
+  it('rejects group/other-writable external cache ancestry', () => {
+    captureBound(cwd, 'bypassPermissions');
+    const cacheParent = join(runtimeHomeFor(cwd), '.cache');
+    chmodSync(cacheParent, 0o722);
+    assert.equal(loadBound(cwd), null);
+    assert.equal(detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' })), 'suggest');
+  });
+
+  it('rejects a grant copied from another canonical project', () => {
+    const other = makeTmpCwd();
+    try {
+      captureBound(cwd, 'bypassPermissions');
+      captureBound(other, 'acceptEdits');
+      const otherIdentity = loadRuntimeSessionIdentity({ cwd: other });
+      const sourceGrant = _internal.runtimeGrantPaths(runtimeOpts(cwd)).file;
+      const otherGrant = _internal.runtimeGrantPaths(runtimeOpts(other)).file;
+      writeFileSync(otherGrant, readFileSync(sourceGrant), { mode: 0o600 });
+      assert.equal(loadRuntimePermissions(runtimeOpts(other, {
+        expectedSessionId: otherIdentity.sessionId,
+        expectedCaptureId: otherIdentity.captureId,
+      })), null);
+    } finally {
+      cleanup(other);
+    }
+  });
+
+  it('requires hook_stdin as the exact external grant source', () => {
+    captureBound(cwd, 'bypassPermissions');
+    const grant = _internal.runtimeGrantPaths(runtimeOpts(cwd)).file;
+    const forged = JSON.parse(readFileSync(grant, 'utf8'));
+    forged.permissionSource = 'manual';
+    writeFileSync(grant, JSON.stringify(forged), { mode: 0o600 });
+    assert.equal(loadBound(cwd), null);
+  });
+
+  it('resolves the production current-session pointer from a worktree common root', () => {
+    const worktree = `${cwd}-worktree`;
+    try {
+      execFileSync('git', ['init', '-q'], { cwd });
+      execFileSync('git', ['config', 'user.email', 'runtime-test@example.invalid'], { cwd });
+      execFileSync('git', ['config', 'user.name', 'Runtime Test'], { cwd });
+      writeFileSync(join(cwd, 'seed.txt'), 'seed\n');
+      execFileSync('git', ['add', 'seed.txt'], { cwd });
+      execFileSync('git', ['commit', '-qm', 'seed'], { cwd });
+      execFileSync('git', ['worktree', 'add', '-qb', 'runtime-pointer-test', worktree], { cwd });
+
+      mkdirSync(runtimeHomeFor(worktree), { recursive: true, mode: 0o700 });
+      assert.equal(captureRuntimePermissions({
+        permissionMode: 'bypassPermissions',
+        permissionModeObserved: true,
+        source: 'hook_stdin',
+        sessionId: TEST_SESSION_ID,
+      }, { cwd: worktree, runtimeHome: runtimeHomeFor(worktree) }), true);
+      setCurrentSession(cwd, TEST_SESSION_ID);
+
+      assert.equal(detectClaudePermissionLevel({
+        cwd: worktree,
+        home: '/nonexistent',
+        runtimeHome: runtimeHomeFor(worktree),
+      }), 'full-auto');
+    } finally {
+      rmSync(worktree, { recursive: true, force: true });
+      rmSync(runtimeHomeFor(worktree), { recursive: true, force: true });
+    }
   });
 });
 
@@ -266,6 +621,8 @@ describe('permissionModeToLevel', () => {
     assert.equal(permissionModeToLevel('acceptEdits'), 'auto-edit');
     assert.equal(permissionModeToLevel('default'), 'suggest');
     assert.equal(permissionModeToLevel('plan'), 'suggest');
+    assert.equal(permissionModeToLevel('auto'), 'suggest');
+    assert.equal(permissionModeToLevel('dontAsk'), 'suggest');
   });
 
   it('returns null for unknown / undefined', () => {
@@ -293,26 +650,26 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
   });
 
   it('runtime bypassPermissions promotes empty settings (suggest → full-auto)', () => {
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
-    const level = detectClaudePermissionLevel({ cwd, home: '/nonexistent' });
+    captureBound(cwd, 'bypassPermissions');
+    const level = detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' }));
     assert.equal(level, 'full-auto');
   });
 
   it('runtime acceptEdits promotes empty settings (suggest → auto-edit)', () => {
-    captureRuntimePermissions({ permissionMode: 'acceptEdits' }, { cwd });
-    const level = detectClaudePermissionLevel({ cwd, home: '/nonexistent' });
+    captureBound(cwd, 'acceptEdits');
+    const level = detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' }));
     assert.equal(level, 'auto-edit');
   });
 
   it('runtime default does NOT promote (suggest → suggest, no-op)', () => {
-    captureRuntimePermissions({ permissionMode: 'default' }, { cwd });
-    const level = detectClaudePermissionLevel({ cwd, home: '/nonexistent' });
+    captureBound(cwd, 'default');
+    const level = detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' }));
     assert.equal(level, 'suggest');
   });
 
   it('runtime plan does NOT promote (suggest → suggest)', () => {
-    captureRuntimePermissions({ permissionMode: 'plan' }, { cwd });
-    const level = detectClaudePermissionLevel({ cwd, home: '/nonexistent' });
+    captureBound(cwd, 'plan');
+    const level = detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' }));
     assert.equal(level, 'suggest');
   });
 
@@ -320,15 +677,15 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
     writeSettings(cwd, 'projectLocal', {
       permissions: { allow: ['Bash(*)', 'Write(*)'] },
     });
-    captureRuntimePermissions({ permissionMode: 'default' }, { cwd });
-    const level = detectClaudePermissionLevel({ cwd, home: '/nonexistent' });
+    captureBound(cwd, 'default');
+    const level = detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' }));
     assert.equal(level, 'full-auto');
   });
 
   it('skipRuntime opts out of override (returns settings tier)', () => {
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    captureBound(cwd, 'bypassPermissions');
     const level = detectClaudePermissionLevel({
-      cwd,
+      ...runtimeOpts(cwd),
       home: '/nonexistent',
       skipRuntime: true,
     });
@@ -336,11 +693,10 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
   });
 
   it('expired runtime cache does not promote', () => {
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, {
-      cwd,
+    captureBound(cwd, 'bypassPermissions', {}, {
       now: new Date(Date.now() - 60 * 60 * 1000), // 1h ago, past 30min TTL
     });
-    const level = detectClaudePermissionLevel({ cwd, home: '/nonexistent' });
+    const level = detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' }));
     assert.equal(level, 'suggest');
   });
 
@@ -348,14 +704,14 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
     writeSettings(cwd, 'projectLocal', {
       permissions: { allow: ['Write(*)'] },
     });
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    captureBound(cwd, 'bypassPermissions');
     assert.equal(
       detectClaudePermissionLevelFromSettings({ cwd, home: '/nonexistent' }),
       'auto-edit',
     );
     // Final level promotes via runtime
     assert.equal(
-      detectClaudePermissionLevel({ cwd, home: '/nonexistent' }),
+      detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' })),
       'full-auto',
     );
   });
@@ -369,11 +725,11 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
     writeSettings(cwd, 'projectLocal', {
       permissions: { deny: ['Bash(*)'] },
     });
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    captureBound(cwd, 'bypassPermissions');
     // Without the fix this would have promoted to full-auto despite the
     // deny — Codex flagged it as a security regression.
     assert.equal(
-      detectClaudePermissionLevel({ cwd, home: '/nonexistent' }),
+      detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' })),
       'auto-edit',
       'broad Bash deny clamps runtime bypassPermissions',
     );
@@ -383,10 +739,10 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
     writeSettings(cwd, 'projectLocal', {
       permissions: { deny: ['Bash(curl:*)'] },
     });
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    captureBound(cwd, 'bypassPermissions');
     // Scoped deny invalidates the broad bash grant under coarse codex sandbox.
     assert.equal(
-      detectClaudePermissionLevel({ cwd, home: '/nonexistent' }),
+      detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' })),
       'auto-edit',
       'scoped Bash deny clamps runtime bypassPermissions to auto-edit',
     );
@@ -396,12 +752,12 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
     writeSettings(cwd, 'projectLocal', {
       permissions: { disableBypassPermissionsMode: true },
     });
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    captureBound(cwd, 'bypassPermissions');
     // bypassDisabled → bypassActive=false → implicit broad DROPPED entirely.
     // The runtime tier does NOT silently fall through to acceptEdits — it
     // collapses to suggest unless an explicit allow list compensates.
     assert.equal(
-      detectClaudePermissionLevel({ cwd, home: '/nonexistent' }),
+      detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' })),
       'suggest',
       'disableBypassPermissionsMode drops the implicit grant; no acceptEdits fallback',
     );
@@ -411,9 +767,9 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
     writeSettings(cwd, 'projectLocal', {
       permissions: { deny: ['Write(*)', 'Edit(*)'] },
     });
-    captureRuntimePermissions({ permissionMode: 'acceptEdits' }, { cwd });
+    captureBound(cwd, 'acceptEdits');
     assert.equal(
-      detectClaudePermissionLevel({ cwd, home: '/nonexistent' }),
+      detectClaudePermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' })),
       'suggest',
       'broad Write+Edit deny invalidates runtime acceptEdits implicit broad',
     );
@@ -453,9 +809,9 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
         allowManagedPermissionRulesOnly: true,
       },
     }));
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    captureBound(cwd, 'bypassPermissions');
     const level = detectClaudePermissionLevel({
-      cwd,
+      ...runtimeOpts(cwd),
       home: '/nonexistent',
       managedRootOverride: managedRoot,
     });
@@ -499,9 +855,9 @@ describe('detectClaudePermissionLevel (settings ⇧ runtime)', () => {
     writeFileSync(join(fakeHome, '.claude', 'settings.json'), JSON.stringify({
       permissions: { deny: ['Bash(curl:*)'] },
     }));
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
+    captureBound(cwd, 'bypassPermissions');
     const level = detectClaudePermissionLevel({
-      cwd,
+      ...runtimeOpts(cwd),
       home: fakeHome,
     });
     // Bash deny union → no broad bash → max tier auto-edit. Runtime promotion
@@ -532,8 +888,8 @@ describe('explainPermissionLevel', () => {
   });
 
   it('reports promotion when runtime upgrades settings', () => {
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
-    const r = explainPermissionLevel({ cwd, home: '/nonexistent' });
+    captureBound(cwd, 'bypassPermissions');
+    const r = explainPermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' }));
     assert.equal(r.settingsLevel, 'suggest');
     assert.equal(r.runtime?.level, 'full-auto');
     assert.equal(r.finalLevel, 'full-auto');
@@ -545,8 +901,8 @@ describe('explainPermissionLevel', () => {
     writeSettings(cwd, 'projectLocal', {
       permissions: { allow: ['Bash(*)', 'Write(*)'] },
     });
-    captureRuntimePermissions({ permissionMode: 'bypassPermissions' }, { cwd });
-    const r = explainPermissionLevel({ cwd, home: '/nonexistent' });
+    captureBound(cwd, 'bypassPermissions');
+    const r = explainPermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' }));
     assert.equal(r.chosenSource, 'settings');
     assert.match(r.chosenSourceReason, /matches settings tier/);
   });
@@ -559,8 +915,8 @@ describe('explainPermissionLevel', () => {
     writeSettings(cwd, 'projectLocal', {
       permissions: { allow: ['Bash(*)', 'Write(*)'] },
     });
-    captureRuntimePermissions({ permissionMode: 'default' }, { cwd });
-    const r = explainPermissionLevel({ cwd, home: '/nonexistent' });
+    captureBound(cwd, 'default');
+    const r = explainPermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' }));
     assert.equal(r.finalLevel, 'full-auto');
     assert.equal(r.chosenSource, 'settings');
     assert.match(r.chosenSourceReason, /matches settings tier full-auto/);
@@ -573,8 +929,8 @@ describe('explainPermissionLevel', () => {
     writeSettings(cwd, 'projectLocal', {
       permissions: { defaultMode: 'bypassPermissions' },
     });
-    captureRuntimePermissions({ permissionMode: 'default' }, { cwd });
-    const r = explainPermissionLevel({ cwd, home: '/nonexistent' });
+    captureBound(cwd, 'default');
+    const r = explainPermissionLevel(runtimeOpts(cwd, { home: '/nonexistent' }));
     assert.equal(r.settingsLevel, 'full-auto', 'settings sees full-auto via implicit broad');
     assert.equal(r.runtime?.level, 'suggest', 'runtime default has no implicit broad');
     assert.equal(r.finalLevel, 'full-auto', 'upgrade-only policy keeps settings tier');

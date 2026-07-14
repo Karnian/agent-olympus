@@ -16,6 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Readable, Writable } from 'node:stream';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 
 import {
   createRpcRequest,
@@ -488,6 +489,46 @@ test('startServer: sets workerMeta from Gemini-compatible binary resolver', () =
   });
 });
 
+test('startServer: read-only ACP injects private system settings and cleans up', () => {
+  let spawnArgs = null;
+  let spawnOptions = null;
+  const child = createMockChildProcess();
+  const handle = startServer({
+    readOnly: true,
+    spawn: (_path, args, options) => {
+      spawnArgs = args;
+      spawnOptions = options;
+      return child;
+    },
+    resolveGeminiBinary: () => ({
+      path: '/fake/gemini', flavor: 'gemini', resolved: true, attempted: ['gemini'],
+    }),
+    credential: { credentialSource: 'env' },
+    env: {
+      GEMINI_API_KEY: '',
+      GEMINI_CLI_SYSTEM_SETTINGS_PATH: '/attacker/override.json',
+    },
+  });
+  const settingsPath = spawnOptions.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH;
+  assert.deepEqual(spawnArgs, ['--acp', '-e', 'none']);
+  assert.notEqual(settingsPath, '/attacker/override.json');
+  assert.equal(statSync(settingsPath).mode & 0o777, 0o600);
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  assert.equal(settings.hooksConfig.enabled, false);
+  assert.deepEqual(settings.tools.core, [
+    'read_file',
+    'read_many_files',
+    'glob',
+    'grep_search',
+    'list_directory',
+  ]);
+  assert.equal(settings.admin.extensions.enabled, false);
+  assert.equal(settings.admin.mcp.enabled, false);
+  child.emit('exit', 0);
+  assert.equal(existsSync(settingsPath), false);
+  assert.equal(handle._exitCode, 0);
+});
+
 test('startServer ENOENT: unresolved binary message names gemini, agy, tier split, and override without changing category', () => {
   const child = createMockChildProcess();
   const resolveGeminiBinary = () => ({
@@ -651,6 +692,39 @@ test('createSession: returns error on server error', async () => {
   const result = await promise;
   assert.ok(result.error);
   assert.equal(handle._sessionId, null);
+});
+
+test('createSession: required approval mode rejects terminally when setSessionMode fails', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  const promise = createSession(handle, {
+    approvalMode: 'plan',
+    requireApprovalMode: true,
+  });
+  emitResponse(child, [...handle._pending.keys()][0], { sessionId: 'ses-required-mode' });
+  await new Promise(resolve => setImmediate(resolve));
+  const modeRequestId = [...handle._pending.keys()][0];
+  emitErrorResponse(child, modeRequestId, { code: -32601, message: 'mode unsupported' });
+  const result = await promise;
+  assert.equal(result.sessionId, undefined);
+  assert.equal(result.error.category, 'crash');
+  assert.match(result.error.message, /Required approval mode "plan" was rejected/);
+});
+
+test('createSession: legacy approval mode failure warns and continues', async () => {
+  const child = createMockChildProcess();
+  const handle = createHandle(child, true);
+  const promise = createSession(handle, { approvalMode: 'plan' });
+  emitResponse(child, [...handle._pending.keys()][0], { sessionId: 'ses-legacy-mode' });
+  await new Promise(resolve => setImmediate(resolve));
+  emitErrorResponse(child, [...handle._pending.keys()][0], {
+    code: -32601,
+    message: 'mode unsupported',
+  });
+  const result = await promise;
+  assert.equal(result.sessionId, 'ses-legacy-mode');
+  assert.equal(handle._warnings.length, 1);
+  assert.match(handle._warnings[0], /worker may use default mode/);
 });
 
 // ─── loadSession ──────────────────────────────────────────────────────────────
@@ -872,6 +946,67 @@ test('server request: auto-responds with empty result', () => {
   assert.ok(autoResp, 'auto-response should have been written');
   assert.equal(autoResp.id, 42);
   assert.deepEqual(autoResp.result, {});
+});
+
+test('read-only server permission request is explicitly cancelled', () => {
+  const child = createMockChildProcess();
+  const handle = startServer({
+    readOnly: true,
+    spawn: () => child,
+    resolveGeminiBinary: () => ({
+      path: '/fake/gemini', flavor: 'gemini', resolved: true, attempted: ['gemini'],
+    }),
+    credential: { credentialSource: 'env' },
+    env: { GEMINI_API_KEY: '' },
+  });
+  const writtenData = [];
+  const origWrite = child.stdin.write.bind(child.stdin);
+  child.stdin.write = (data, ...rest) => {
+    writtenData.push(String(data));
+    return origWrite(data, ...rest);
+  };
+
+  emitServerRequest(child, 43, 'session/request_permission', { action: 'write' });
+  const response = writtenData
+    .map(data => { try { return JSON.parse(data); } catch { return null; } })
+    .find(message => message?.id === 43);
+  assert.deepEqual(response, {
+    jsonrpc: '2.0',
+    id: 43,
+    result: { outcome: { outcome: 'cancelled' } },
+  });
+  assert.notEqual(handle.status, 'failed', 'a denied permission request is handled, not approved');
+  child.emit('exit', 0);
+});
+
+test('read-only unknown server request returns JSON-RPC error and fails permission-closed', () => {
+  const child = createMockChildProcess();
+  const handle = startServer({
+    readOnly: true,
+    spawn: () => child,
+    resolveGeminiBinary: () => ({
+      path: '/fake/gemini', flavor: 'gemini', resolved: true, attempted: ['gemini'],
+    }),
+    credential: { credentialSource: 'env' },
+    env: { GEMINI_API_KEY: '' },
+  });
+  const writtenData = [];
+  const origWrite = child.stdin.write.bind(child.stdin);
+  child.stdin.write = (data, ...rest) => {
+    writtenData.push(String(data));
+    return origWrite(data, ...rest);
+  };
+
+  emitServerRequest(child, 44, 'fs/writeTextFile', { path: '/tmp/forbidden' });
+  const response = writtenData
+    .map(data => { try { return JSON.parse(data); } catch { return null; } })
+    .find(message => message?.id === 44);
+  assert.equal(response?.error?.code, -32001);
+  assert.match(response?.error?.message || '', /Read-only ACP client rejected/);
+  const snapshot = monitor(handle);
+  assert.equal(snapshot.status, 'failed');
+  assert.equal(snapshot.error?.category, 'permission_denied');
+  child.emit('exit', 0);
 });
 
 // ─── monitor ─────────────────────────────────────────────────────────────────

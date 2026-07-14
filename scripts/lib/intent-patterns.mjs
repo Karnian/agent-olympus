@@ -48,6 +48,36 @@ export const INTENT_CATEGORIES = {
     weight: 1.2,
   },
 
+  // These specialist categories are selected by exact action overrides below.
+  // Keeping them in the score map makes persisted intent state and routing
+  // configuration share one complete category vocabulary.
+  'security-review': {
+    patterns: [
+      /\b(?:security\s+(?:review|audit|assessment)|threat\s+model(?:ing|ling)?\s+(?:review|audit))\b/i,
+      /(?:보안\s*(?:리뷰|검토|감사|점검|평가)|위협\s*모델링\s*(?:리뷰|검토|감사))/u,
+    ],
+    keywords: ['security review', 'security audit', '보안 리뷰', '보안 검토'],
+    weight: 1.3,
+  },
+
+  'test-authoring': {
+    patterns: [
+      /\b(?:write|add|create|implement|generate)\s+(?:the\s+|an?\s+)?(?:(?:unit|integration|end[- ]to[- ]end|e2e|regression)\s+)?tests?\b/i,
+      /(?:테스트|시험)(?:를|을)?\s*(?:작성|추가|구현|생성|만들)/u,
+    ],
+    keywords: ['write tests', 'add tests', 'unit tests', 'integration tests', '테스트 작성'],
+    weight: 1.3,
+  },
+
+  'product-planning': {
+    patterns: [
+      /\b(?:prd|product\s+(?:requirements?\s+document|spec(?:ification)?)|reverse\s+(?:spec|specification|prd))\b/i,
+      /(?:PRD|제품\s*(?:요구사항|명세)|역기획)/iu,
+    ],
+    keywords: ['prd', 'product spec', 'product requirements document', 'reverse spec', '역기획'],
+    weight: 1.3,
+  },
+
   'deep': {
     patterns: [
       /\b(architect|refactor|redesign|optimize|optimise|performance|migration|migrate|scale|scaling|infrastructure|distributed|microservice|monolith|system\s*design)\b/i,
@@ -57,7 +87,7 @@ export const INTENT_CATEGORIES = {
       /\b(ci[\/\s]?cd|pipeline|deployment|kubernetes|k8s|docker|terraform|ansible|helm)\b/i,
       /\b(complexity|trade.?off|bottleneck|throughput|latency|concurrency|race\s*condition|deadlock)\b/i,
       // Korean: 아키텍처, 리팩토링, 최적화, 마이그레이션, 보안
-      /(?:아키텍처|리팩토링|최적화|마이그레이션|인프라|보안|인증|데이터베이스)/u,
+      /(?:아키텍처|리팩(?:토|터)링|최적화|마이그레이션|인프라|보안|인증|데이터베이스)/u,
       // Japanese: アーキテクチャ, リファクタリング, 最適化, マイグレーション
       /(?:アーキテクチャ|リファクタリング|最適化|マイグレーション|インフラ|セキュリティ|データベース)/u,
       // Chinese: 架构, 重构, 优化, 迁移, 安全, 数据库
@@ -68,6 +98,15 @@ export const INTENT_CATEGORIES = {
       'scalability', 'distributed', 'microservices', 'event-driven', 'domain-driven',
       'ddd', 'cqrs', 'event sourcing', 'saga', 'circuit breaker',
     ],
+    weight: 1.0,
+  },
+
+  // Selected by the explicit mutation override below when a deep technical
+  // subject is paired with an implementation verb. The ordinary `deep` route
+  // remains read-only architecture analysis.
+  'deep-mutation': {
+    patterns: [],
+    keywords: [],
     weight: 1.0,
   },
 
@@ -181,6 +220,76 @@ export const INTENT_CATEGORIES = {
   },
 };
 
+// Exact review verbs outrank broad visual nouns ("UI", "design"). Keep this
+// narrow so implementation requests such as "build a UI" remain visual work.
+const DESIGN_REVIEW_OVERRIDES = Object.freeze([
+  /\b(?:ui|ux|design)\s*(?:review|critique|audit)\b/i,
+  /\b(?:review|critique|audit)\s+(?:the\s+)?(?:ui|ux|design)\b/i,
+  /(?:UI|UX|디자인)\s*(?:리뷰|검토|비평|감사)(?:해\s*줘|해주세요|해줘|해|하자)?/iu,
+]);
+
+const DEEP_REVIEW_OVERRIDES = Object.freeze([
+  /\b(?:architecture|system\s+design)\s*(?:review|audit|assessment)\b/i,
+  /\b(?:review|audit|assess)\s+(?:the\s+)?(?:architecture|system\s+design)\b/i,
+  /(?:아키텍처|시스템\s*설계)\s*(?:리뷰|검토|감사|평가)/u,
+]);
+
+const SECURITY_REVIEW_OVERRIDES = Object.freeze([
+  /\b(?:security\s+(?:review|audit|assessment)|(?:review|audit|assess)\s+(?:the\s+)?(?:security|threat\s+model))\b/i,
+  /(?:보안|위협\s*모델링)\s*(?:리뷰|검토|감사|점검|평가)/u,
+]);
+
+const TEST_AUTHORING_OVERRIDES = Object.freeze([
+  /\b(?:write|add|create|implement|generate)\s+(?:the\s+|an?\s+)?(?:(?:unit|integration|end[- ]to[- ]end|e2e|regression)\s+)?tests?\b/i,
+  /(?:테스트|시험)(?:를|을)?\s*(?:작성|추가|구현|생성|만들)/u,
+]);
+
+const PRODUCT_PLANNING_OVERRIDES = Object.freeze([
+  /\b(?:write|create|draft|prepare|generate)\s+(?:the\s+|an?\s+)?(?:prd|product\s+(?:requirements?\s+document|spec(?:ification)?))\b/i,
+  /\b(?:reverse[- ]engineer|derive|reconstruct)\s+(?:the\s+|an?\s+)?(?:prd|product\s+spec(?:ification)?|spec(?:ification)?)\b/i,
+  /\breverse\s+(?:spec|specification|prd)\b/i,
+  /(?:PRD|제품\s*(?:요구사항|명세))(?:를|을)?\s*(?:작성|만들|생성|기획)|역기획|(?:^|\s)기획(?:해\s*줘|해주세요|해줘|하자|을\s*해\s*줘)/u,
+]);
+
+const DEEP_MUTATION_OVERRIDES = Object.freeze([
+  /\b(?:refactor|migrate|optimi[sz]e|rewrite|rearchitect|restructure|implement|change|update|fix)\b/i,
+  /(?:리팩(?:토|터)링|마이그레이션|최적화|재작성|재설계|구현|수정|변경)(?:을|를|해|하|해줘|해주세요)?/u,
+]);
+
+// Action-led requests carry more intent than a pile of technical subject
+// nouns. Keep these patterns narrow: they exist to stop words such as
+// "database" and "security" from turning an explicit docs/UI/art request into
+// a read-only architecture task.
+const WRITING_ACTION_OVERRIDES = Object.freeze([
+  /\b(?:write|create|add|update|draft|generate)\s+(?:the\s+|an?\s+)?(?:documentation|docs?|readme|api\s+(?:documentation|docs?|reference)|guide|tutorial|changelog|release\s+notes?|comments?|jsdoc)\b/i,
+  /\b(?:document|explain|describe|annotate)\b/i,
+  /(?:문서화|문서(?:를|을)?\s*(?:작성|추가|갱신|업데이트)|가이드(?:를|을)?\s*(?:작성|추가)|설명해\s*줘)/u,
+]);
+
+const PLAN_EXECUTION_OVERRIDES = Object.freeze([
+  /\b(?:implement|execute|apply|code|build)\s+(?:the\s+)?plan\b/i,
+  /\bwrite\s+(?:the\s+)?code\b/i,
+  /(?:계획(?:을|를)?\s*(?:구현|실행)|코드(?:를|을)?\s*(?:작성|구현))/u,
+]);
+
+const PLANNING_ACTION_OVERRIDES = Object.freeze([
+  /(?:^|[.!?]\s*)\s*(?:please\s+)?(?:plan|strategize|brainstorm)\b/i,
+  /\b(?:create|make|write|draft|prepare|outline)\s+(?:the\s+|an?\s+)?(?:plan|strategy|roadmap|specification|spec|proposal|blueprint)\b/i,
+  /\b(?:help\s+me|let'?s)\s+(?:plan|strategize|brainstorm)\b/i,
+  /(?:계획(?:을|를)?\s*(?:세워|세우|짜|작성|만들)|전략(?:을|를)?\s*(?:세워|세우|짜|작성)|로드맵(?:을|를)?\s*(?:작성|만들))/u,
+]);
+
+const ARTISTRY_ACTION_OVERRIDES = Object.freeze([
+  /\b(?:create|build|generate|draw|render|make|design)\b[^.!?\n]{0,100}\b(?:generative|svg|visuali[sz]ation|canvas|diagram|chart|graph|infographic|heatmap|treemap|sankey|sunburst)\b/i,
+  /(?:만들|생성|그려|제작)[^.!?\n]{0,60}(?:시각화|다이어그램|차트|그래프|캔버스)/u,
+]);
+
+const VISUAL_IMPLEMENTATION_OVERRIDES = Object.freeze([
+  /\b(?:build|create|implement|develop|code|make|design)\b[^.!?\n]{0,100}\b(?:ui|ux|interface|front[ -]?end|responsive|dashboard|component|page|screen|modal|navbar|sidebar|button|css|html|react|vue|svelte)\b/i,
+  /(?:구현|만들|개발|작성)[^.!?\n]{0,60}(?:UI|UX|인터페이스|프론트엔드|반응형|대시보드|컴포넌트|페이지|화면|모달|버튼)/iu,
+  /(?:UI|UX|인터페이스|프론트엔드|반응형|대시보드|컴포넌트|페이지|화면|모달|버튼)[^.!?\n]{0,60}(?:구현|만들|개발|작성)/iu,
+]);
+
 /**
  * Sanitize text before intent classification.
  * Strips code blocks, URLs, and file paths to reduce false-positive matches.
@@ -245,13 +354,73 @@ export function classifyIntent(text) {
   // "ask codex to review this complex auth refactor" should route to /ask,
   // not to 'deep' because 'auth refactor' scored higher in that bucket.
   if (scores['external-model'] > 0) {
-    const totalScore = Object.values(scores).reduce((a, b) => a + b, 0);
-    const confidence = totalScore > 0
-      ? Math.min(1, Math.round((scores['external-model'] / Math.max(totalScore, scores['external-model'])) * 100) / 100)
-      : 0;
     return {
       category: 'external-model',
-      confidence,
+      // Explicit provider syntax is decisive even when many technical nouns
+      // dilute score-ratio confidence.
+      confidence: 0.7,
+      scores,
+    };
+  }
+
+  if (SECURITY_REVIEW_OVERRIDES.some(pattern => pattern.test(clean))) {
+    return { category: 'security-review', confidence: 0.7, scores };
+  }
+
+  if (TEST_AUTHORING_OVERRIDES.some(pattern => pattern.test(clean))) {
+    return { category: 'test-authoring', confidence: 0.7, scores };
+  }
+
+  if (DEEP_REVIEW_OVERRIDES.some(pattern => pattern.test(clean))) {
+    return {
+      category: 'deep',
+      confidence: 0.7,
+      scores,
+    };
+  }
+
+  if (DESIGN_REVIEW_OVERRIDES.some(pattern => pattern.test(clean))) {
+    return {
+      category: 'design-review',
+      // Explicit review syntax is stronger than surrounding visual nouns.
+      confidence: 0.7,
+      scores,
+    };
+  }
+
+  if (PRODUCT_PLANNING_OVERRIDES.some(pattern => pattern.test(clean))) {
+    return { category: 'product-planning', confidence: 0.7, scores };
+  }
+
+  if (WRITING_ACTION_OVERRIDES.some(pattern => pattern.test(clean))) {
+    return { category: 'writing', confidence: 0.7, scores };
+  }
+
+  const executesExistingPlan = PLAN_EXECUTION_OVERRIDES.some(pattern => pattern.test(clean));
+  if (!executesExistingPlan && PLANNING_ACTION_OVERRIDES.some(pattern => pattern.test(clean))) {
+    return { category: 'planning', confidence: 0.7, scores };
+  }
+
+  if (executesExistingPlan) {
+    return {
+      category: scores.deep > 0 ? 'deep-mutation' : 'quick',
+      confidence: 0.7,
+      scores,
+    };
+  }
+
+  if (ARTISTRY_ACTION_OVERRIDES.some(pattern => pattern.test(clean))) {
+    return { category: 'artistry', confidence: 0.7, scores };
+  }
+
+  if (VISUAL_IMPLEMENTATION_OVERRIDES.some(pattern => pattern.test(clean))) {
+    return { category: 'visual-engineering', confidence: 0.7, scores };
+  }
+
+  if (scores.deep > 0 && DEEP_MUTATION_OVERRIDES.some(pattern => pattern.test(clean))) {
+    return {
+      category: 'deep-mutation',
+      confidence: 0.7,
       scores,
     };
   }

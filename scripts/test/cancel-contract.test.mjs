@@ -37,7 +37,8 @@ test('/cancel never makes broad destructive cleanup or checkpoint deletion an au
   assert.doesNotMatch(skill, /grep\s+["'](?:atlas-|athena-)/);
   assert.match(skill, /Do \*\*not\*\* call `shutdownTeam\(\)`/);
   assert.match(skill, /`cleanupTeamWorktrees\(\)`/);
-  assert.match(skill, /`TeamDelete`/);
+  assert.match(skill, /send native-team[\s\S]*?shutdown requests/);
+  assert.doesNotMatch(skill, /TeamDelete/);
   assert.doesNotMatch(skill, /await\s+shutdownTeam\(/);
   assert.match(skill, /spawn` and `monitor` are always preserve-and-stop/i);
   assert.match(skill, /adapter-only.*every intended worker already[\s\S]*?`completed`/i);
