@@ -283,7 +283,7 @@ Choose one:
 Which option?
 ```
 
-#### Option: Auto-Ship (if autonomy.json configured)
+#### Ship Policy (if autonomy.json configured)
 
 Load `.ao/autonomy.json`, then call `resolveRunShipMode(config, taskBrief)` with
 the original request plus durable follow-ups. An explicit no-push/no-PR

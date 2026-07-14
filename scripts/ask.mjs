@@ -75,7 +75,7 @@ const RUNNER_COLLECT_TIMEOUT_MS = 86_400_000; // Runner: 24h (spec §4.3 step 11
 const ARTIFACT_DIR = '.ao/artifacts/ask';
 const VALID_MODELS = ['codex', 'gemini', 'auto'];
 const MCP_AUTH_HINT =
-  '[hint] an MCP server configured in ~/.codex/config.toml failed authentication — ' +
+  '[hint] an MCP server configured in $CODEX_HOME/config.toml (default ~/.codex/config.toml) failed authentication — ' +
   're-login to that server, or retry with `ask --no-mcp`.';
 
 // ═══════════════════════════════════════════════════════════════════════════

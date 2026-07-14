@@ -67,7 +67,7 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **정제된 failed-run 피드백 루프** *(v1.5.0)*: SessionEnd가 독립 검증한 session-linked terminal task failure만 metadata/digest로 큐잉. 후보 승인과 task 연결은 사람이 수행하며 prompt, error text, path, diff, evidence payload, provider output은 큐에 기록하지 않음
 - **취소 가능한 shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`)보다 영속 user no-ship 후속 지시가 우선하며, push/PR은 repository·base·branch·remote HEAD identity에 바인딩. CI는 정확히 push된 SHA의 모든 workflow를 집계하고 crash recovery의 fix candidate를 단일 failed run과 attempt에 연결
 - **Codex MCP 복구 + `--no-mcp`** *(v1.5.1)*: `/ask`가 exec/tmux 어댑터에서 레코드 순서대로 MCP 인증 실패를 분류. Codex 전용 `--no-mcp`는 설정된 MCP server를 포함한 user-level config 전체를 건너뛰며, 인증과 명시적 CLI override는 유지하고 Codex 버전이 불명확하거나 미지원이면 fail-closed
-- **2851개 단위 테스트**: `node:test` 기반 108개 파일의 종합 테스트 스위트 (v1.5.1: 2851/2851 통과)
+- **2858개 단위 테스트**: `node:test` 기반 108개 파일의 종합 테스트 스위트 (v1.5.1: 2858/2858 통과)
 - **페일-세이프 아키텍처**: 훅이 Claude Code를 절대 차단하지 않음; 에러 시 우아한 저하
 
 ## 설치
@@ -410,10 +410,15 @@ hooks/               훅 이벤트 등록 (hooks.json)
 - Codex/Gemini 통신을 위한 워커별 디렉토리 (어댑터 관리)
 - 팀 완료 후 자동 정리
 
-**Worktrees** (`.ao/worktrees/<slug>/<worker>/`) — Athena 전용:
+**Worktrees** (`.ao/worktrees/<slug>/<worker>/`):
 - 각 병렬 워커를 위한 격리된 git worktree
 - 워커 간 파일 충돌 방지
-- 팀 완료 후 병합 및 정리
+- `/codex-goal`은 goal마다 고유 worktree를 만들고, 예정된 경로나 브랜치가
+  이미 있으면 기존 산출물을 변경하지 않고 중단
+- 기존 교체 정책은 폐기 가능한 stale/cancelled 워커 전용이며, 미병합 커밋은
+  `-orphan-<timestamp>` 브랜치로 보존하지만 미커밋·미추적 파일은 삭제
+- stale metadata 또는 동시 교체 경합처럼 상태가 모호하면 fail-closed로 중단;
+  보고된 worktree/브랜치를 확인하고 stale임을 검증한 뒤 prune 및 재시도
 
 ## 세션 복구
 
@@ -566,7 +571,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## 테스트
 
-`node:test` 기반 테스트 스위트 (108개 파일, 2851개 테스트, v1.5.1 기준)가 핵심 훅 라이브러리를 커버합니다:
+`node:test` 기반 테스트 스위트 (108개 파일, 2858개 테스트, v1.5.1 기준)가 핵심 훅 라이브러리를 커버합니다:
 
 ```bash
 npm test

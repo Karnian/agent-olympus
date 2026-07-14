@@ -67,7 +67,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Sanitized failed-run feedback loop** *(v1.5.0)*: SessionEnd queues only independently verified, session-linked terminal task failures as metadata/digests. A human must approve and link candidates; prompts, error text, paths, diffs, evidence payloads, and provider output never enter the queue.
 - **Revocable shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`) is overridden by durable user no-ship follow-ups; push/PR operations bind repository, base, branch, and remote HEAD identity. CI aggregates every workflow for the exact pushed SHA and crash recovery links each fix candidate to one failed run and attempt.
 - **Codex MCP recovery + `--no-mcp`** *(v1.5.1)*: `/ask` classifies record-ordered MCP authentication failures across exec and tmux adapters. Codex-only `--no-mcp` skips the entire user-level config, including configured MCP servers, with a fail-closed Codex version gate while preserving authentication and explicit CLI overrides.
-- **2851 unit tests**: Comprehensive test suite using `node:test` across 108 test files (v1.5.1: 2851/2851 passing)
+- **2858 unit tests**: Comprehensive test suite using `node:test` across 108 test files (v1.5.1: 2858/2858 passing)
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -416,6 +416,16 @@ hooks/               Hook event registrations (hooks.json)
 - Per-worker communication directories for Codex/Gemini (adapter-managed)
 - Cleaned up after team completion
 
+**Worktrees** (`.ao/worktrees/<slug>/<worker>/`):
+- Isolate parallel workers so file changes do not collide
+- `/codex-goal` gives every goal a unique worktree and fails without mutation if
+  its intended path or branch already exists
+- The legacy replacement policy is only for disposable stale/cancelled workers:
+  it preserves unmerged commits under an `-orphan-<timestamp>` branch but
+  discards uncommitted and untracked files in the replaced worktree
+- Ambiguous stale metadata and concurrent replacement races fail closed; inspect
+  the reported worktree/branch and prune confirmed-stale metadata before retrying
+
 ## Session Recovery
 
 If Claude Code crashes or closes during an orchestration:
@@ -574,7 +584,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (2851 tests across 108 files in v1.5.1) covers the core hook libraries. To run:
+A `node:test` based test suite (2858 tests across 108 files in v1.5.1) covers the core hook libraries. To run:
 
 ```bash
 npm test

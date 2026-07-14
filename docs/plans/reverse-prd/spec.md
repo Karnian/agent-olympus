@@ -541,7 +541,8 @@ tmux kill-session -t "atlas-codex-1"
 | `network` | ETIMEDOUT, ECONNRESET, ENOTFOUND | 1회 재시도 |
 | `crash` | fatal error, SIGSEGV, SIGABRT | 1회 재시도, 재실패 시 Claude 전환 |
 
-실패 시 `reassignToClaude()`가 tmux 정리 + wisdom 기록을 처리하고, 오케스트레이터가 `agent-olympus:executor`로 대체 Task를 발행한다.
+실패 시 `reassignProvider()`가 워커 정리와 wisdom 기록 후 다음 provider descriptor를 반환하고,
+`dispatchProviderFallback()`이 Codex → Gemini → Claude 순서의 제한된 failover를 수행한다.
 
 ---
 

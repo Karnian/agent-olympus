@@ -188,7 +188,8 @@ node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs list --older-than 3600         # olde
   `--dangerously-skip-permissions` was captured, or to figure out why
   `/ask codex` ended up in read-only mode.
 - **MCP authentication**: an `mcp_auth` failure means a server configured in
-  `~/.codex/config.toml` needs re-login; authenticate it or retry Codex with `--no-mcp`.
+  `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) needs re-login;
+  authenticate it or retry Codex with `--no-mcp`.
 - Artifacts persist in `.ao/artifacts/ask/` for later reference.
 - Can be used inside Atlas/Athena workflows for quick model consultations.
 
