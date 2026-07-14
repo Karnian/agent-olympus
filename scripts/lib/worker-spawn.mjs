@@ -38,6 +38,10 @@ import {
   detectHostSandbox,
   buildHostSandboxWarning,
 } from './codex-approval.mjs';
+import {
+  classifyCodexDiagnostic,
+  hasExplicitMcpAuthRecovery,
+} from './codex-error-classifier.mjs';
 
 /** Absolute path to the supervisor CLI (launched detached per adapter worker). */
 const SUPERVISOR_SCRIPT = fileURLToPath(new URL('./adapter-worker-supervisor.mjs', import.meta.url));
@@ -81,7 +85,6 @@ function quickHash(str) {
  * @type {Array<{ pattern: RegExp, reason: string }>}
  */
 const CODEX_ERROR_PATTERNS = [
-  { pattern: /authentication|unauthorized|invalid.*api.*key|API key/i, reason: 'auth_failed' },
   { pattern: /rate.?limit|429|quota.*exceeded|too many requests/i, reason: 'rate_limited' },
   { pattern: /command not found|ENOENT|codex:.*not found|No such file or directory|not found in PATH/i, reason: 'not_installed' },
   { pattern: /ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up|network error/i, reason: 'network' },
@@ -541,8 +544,9 @@ export function parseExitMarker(output, nonce = null) {
  *      the old "a shell prompt came back" heuristic, which reported every
  *      failed/no-op/syntax-error worker (codex, claude, AND gemini) as
  *      `completed` — a silent success.
- *   2. No sentinel yet, but a known Codex error signature is present → failed
- *      fast (richer category than a bare non-zero exit).
+ *   2. Without a sentinel, the merged tmux pane is untrusted and the worker
+ *      remains unresolved. Model output can legitimately contain text that
+ *      looks exactly like a CLI diagnostic.
  *   3. Otherwise → still `running`. We do NOT infer completion from a returned
  *      prompt; a genuine hang is caught by the activity-based stall detector in
  *      monitorTeam, not by guessing.
@@ -555,22 +559,14 @@ export function classifyTmuxWorker(worker, paneOutput) {
   const hasPane = !!paneOutput;
 
   // The exit sentinel is AUTHORITATIVE and provider-agnostic. Parse it whenever
-  // the worker is still resolvable — 'running', OR a provisional 'failed'/'retry'
-  // from an EARLIER signature-only poll — so a transient error line (e.g. "rate
-  // limit … retrying") the worker recovered from cannot permanently mask a later
-  // `__AO_EXIT__:0`. A terminal 'completed' (or not-yet-started 'pending') is
+  // the worker is still resolvable — 'running', OR a persisted/external
+  // provisional 'failed'/'retry' state — so a later authoritative
+  // `__AO_EXIT__:0` can still resolve it. A terminal 'completed' (or a
+  // not-yet-started 'pending') is
   // never re-classified. (F3) The nonce scopes the marker against forgery. (F2)
   const resolvable =
     worker?.status === 'running' || worker?.status === 'failed' || worker?.status === 'retry';
   const exitCode = (hasPane && resolvable) ? parseExitMarker(paneOutput, worker?._exitNonce) : null;
-
-  // Supplementary Codex-only signature scan for a STILL-RUNNING worker: enables
-  // fast-fail BEFORE the sentinel lands. Gated to 'running' so it can never
-  // prematurely collapse a 'retry' worker that has no exit code yet.
-  let runningSig = { failed: false };
-  if (worker?.type === 'codex' && worker?.status === 'running' && hasPane) {
-    runningSig = detectCodexError(paneOutput);
-  }
 
   let status = worker?.status;
   let error;
@@ -585,14 +581,17 @@ export function classifyTmuxWorker(worker, paneOutput) {
       // category — e.g. 'crash', which preserves the crash→retry path in
       // monitorTeam — instead of decaying to a generic 'nonzero_exit' on the
       // next poll. (F6)
-      const sig = runningSig.failed
-        ? runningSig
-        : (worker?.type === 'codex' && hasPane ? detectCodexError(paneOutput) : { failed: false });
+      // Only classify pane text after the authoritative non-zero sentinel.
+      // stdout and stderr are merged in tmux, so pre-exit text can be ordinary
+      // model prose or a code block that happens to begin with "Error:".
+      const sig = worker?.type === 'codex' && hasPane
+        ? detectCodexError(paneOutput, { paneSafe: true })
+        : { failed: false };
       if (sig.failed) {
         error = { category: sig.reason, message: sig.message || 'Codex tmux error' };
       } else if (worker?.errorReason && worker.errorReason !== 'nonzero_exit') {
         // The signature line scrolled out of the 200-line pane window, but an
-        // earlier poll already persisted a richer category — keep it rather than
+        // earlier process already persisted a richer category — keep it rather than
         // decay to nonzero_exit. (Codex F4 on the F6 fix)
         error = {
           category: worker.errorReason,
@@ -602,12 +601,6 @@ export function classifyTmuxWorker(worker, paneOutput) {
         error = { category: 'nonzero_exit', message: `Worker command exited with status ${exitCode}` };
       }
     }
-  } else if (runningSig.failed) {
-    status = 'failed';
-    error = {
-      category: runningSig.reason,
-      message: runningSig.message || 'Codex tmux error',
-    };
   }
 
   const result = {
@@ -636,15 +629,50 @@ function monitorTmuxWorker(worker) {
  * Scan tmux pane output for known Codex failure signatures.
  * Returns the first matching error, or `{ failed: false }` if none match.
  *
- * @param {string} output - Raw captured pane text
+ * @param {string} output - Raw captured pane text or trusted stderr
+ * @param {{ paneSafe?: boolean }} [opts] - Restrict a merged tmux-pane scan to
+ *   high-confidence provider/shell diagnostic records
  * @returns {{ failed: boolean, reason?: string, message?: string }}
  */
-export function detectCodexError(output) {
+export function detectCodexError(output, opts = {}) {
   try {
     if (!output || typeof output !== 'string') return { failed: false };
+    const classifiedText = opts.paneSafe === true
+      ? paneDiagnosticWindows(output)
+      : output;
+    if (!classifiedText) return { failed: false };
+
+    const diagnosticCategory = classifyCodexDiagnostic(classifiedText);
+    if (diagnosticCategory === 'mcp_auth') {
+      return {
+        failed: true,
+        reason: 'mcp_auth',
+        message: 'MCP authentication failure detected',
+      };
+    }
+
+    if (diagnosticCategory === 'auth_failed') {
+      return {
+        failed: true,
+        reason: 'auth_failed',
+        message: 'Codex authentication failure detected',
+      };
+    }
+
+    if (diagnosticCategory) {
+      const diagnosticPattern = CODEX_ERROR_PATTERNS.find(
+        entry => entry.reason === diagnosticCategory,
+      )?.pattern;
+      const match = diagnosticPattern ? classifiedText.match(diagnosticPattern) : null;
+      return {
+        failed: true,
+        reason: diagnosticCategory,
+        message: match?.[0]?.slice(0, 200) || `Codex ${diagnosticCategory} failure detected`,
+      };
+    }
 
     for (const { pattern, reason } of CODEX_ERROR_PATTERNS) {
-      const match = output.match(pattern);
+      const match = classifiedText.match(pattern);
       if (match) {
         return { failed: true, reason, message: match[0].slice(0, 200) };
       }
@@ -652,6 +680,43 @@ export function detectCodexError(output) {
     return { failed: false };
   } catch {
     return { failed: false };
+  }
+}
+
+/**
+ * Keep only small windows beginning at high-confidence provider/shell records.
+ * A capture-pane contains both CLI diagnostics and the model's normal answer,
+ * so ambiguous free-form prefixes such as `Error:` and `Warning:` are excluded.
+ * The caller only consults these windows after a non-zero exit sentinel. Two
+ * continuation lines preserve split rmcp/auth diagnostics.
+ *
+ * @param {string} output
+ * @returns {string}
+ */
+function paneDiagnosticWindows(output) {
+  try {
+    const lines = output.split(/\r?\n/);
+    const selectedLineIndexes = new Set();
+    const diagnosticPrefix = /^\s*(?:(?:\d{4}-\d{2}-\d{2}T\S+|\[?\d{4}-\d{2}-\d{2}[^\]]*\]?)\s+(?:ERROR|WARN(?:ING)?|FATAL)\b|(?:ERROR|WARN(?:ING)?|FATAL)\s+(?:r?mcp)::|(?:codex|zsh|bash|sh):|panic:)/i;
+    const mcpInformationalPrefix = /^\s*(?:(?:\d{4}-\d{2}-\d{2}T\S+|\[?\d{4}-\d{2}-\d{2}[^\]]*\]?)\s+)?INFO\s+r?mcp::/i;
+
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      const isDiagnostic = diagnosticPrefix.test(line);
+      const isExplicitRecovery = mcpInformationalPrefix.test(line)
+        && hasExplicitMcpAuthRecovery(line);
+      if (!isDiagnostic && !isExplicitRecovery) continue;
+      const end = isExplicitRecovery ? index + 1 : Math.min(index + 3, lines.length);
+      for (let selected = index; selected < end; selected += 1) {
+        selectedLineIndexes.add(selected);
+      }
+    }
+    return [...selectedLineIndexes]
+      .sort((left, right) => left - right)
+      .map(index => lines[index].slice(0, 600))
+      .join('\n');
+  } catch {
+    return '';
   }
 }
 

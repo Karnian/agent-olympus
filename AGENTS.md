@@ -92,7 +92,7 @@ agent-olympus/
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (2726 tests, 108 files; v1.5.0: 2726/2726 passing)
+│   ├── test/                     — node:test unit tests (2858 tests, 108 files; v1.5.1: 2858/2858 passing)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
@@ -131,6 +131,7 @@ agent-olympus/
 │       ├── gemini-acp.mjs        — Gemini ACP adapter (multi-turn JSON-RPC 2.0)
 │       ├── claude-cli.mjs        — Claude CLI adapter (headless stream-json)
 │       ├── codex-exec.mjs        — Codex exec adapter (single-turn JSONL)
+│       ├── codex-error-classifier.mjs — Ordered Codex failure classifier
 │       ├── codex-appserver.mjs   — Codex app-server adapter (multi-turn JSON-RPC 2.0)
 │       ├── resolve-binary.mjs    — Binary resolution with caching + buildEnhancedPath()
 │       ├── cli-version.mjs       — Fail-open CLI version probe + advisory minimum-version gate
@@ -174,7 +175,7 @@ agent-olympus/
 
 - Workers are selected by adapter priority: Codex `codex-appserver` -> `codex-exec` -> `tmux`; Claude `claude-cli` -> `tmux`; Gemini `gemini-acp` -> `gemini-exec` -> `tmux`.
 - Atlas/Athena run `runPreflight()` before orchestration; trivial work stays Claude-only and cross-validation prefers Codex then Gemini.
-- Autonomy config resolves as `defaults <- global <- project`; project `.ao/autonomy.json` wins, and CI skips the global layer unless explicitly overridden.
+- Autonomy: `defaults <- global <- project`; project wins, CI skips global unless explicit, and task no-ship overrides `ship.mode`.
 - Session names use stable prefixes such as `atlas-codex-<N>`, `athena-<slug>-gemini-<N>`, and `*-xval-<story-id>`.
 - Key files: `scripts/lib/worker-spawn.mjs`, `codex-appserver.mjs`, `codex-exec.mjs`, `claude-cli.mjs`, `gemini-acp.mjs`, `gemini-exec.mjs`, `permission-detect.mjs`.
 - Detached worker supervisor -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md); permission mirroring -> [docs/internals/permission-mirroring.md](docs/internals/permission-mirroring.md); Gemini credentials -> [docs/internals/credentials.md](docs/internals/credentials.md).
@@ -194,7 +195,7 @@ agent-olympus/
 
 ## Testing
 
-Run the 2726-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
@@ -355,7 +356,7 @@ Run the 2726-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | `.ao/state/ao-concurrency.json` | Active task tracking | Updated per task spawn/complete |
 | `.ao/memory/` | Durable design identity and taste memory (`schemaVersion:1`) | Survives SessionEnd and cancel |
 | `.ao/state/supervisor/<runId>/` | Detached worker snapshots/manifests | Swept per inactive run |
-| `.ao/artifacts/runs/<runId>/` | Run evidence + terminal-failure marker | Retained for audit/candidate review |
+| `.ao/artifacts/runs/<runId>/` | Run evidence, failure marker, task ledger | Retained for audit/candidate review |
 | `.ao/artifacts/ask/<jobId>.*` | Async `/ask` raw and rendered outputs | Job-addressable artifacts |
 | `.ao/artifacts/pipe/` | Stage handoff/archive pipe (`plan`, `execute`, `verify`, etc.) | 24h SessionEnd sweep |
 | `.ao/sessions/<sessionId>.json` | Cross-session registry metadata | 90-day TTL |

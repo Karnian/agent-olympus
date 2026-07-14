@@ -189,7 +189,7 @@ async function runCodexAppserver(mod, m) {
   liveHandle = h; liveShutdown = mod.shutdownServer;
   onAdapterPid(h.pid);
   onWorkerMeta(h);
-  // Preserve each step's error CATEGORY (auth_failed/rate_limited/…) instead of
+  // Preserve each step's error CATEGORY (mcp_auth/auth_failed/rate_limited/…) instead of
   // throwing → generic crash, so P3 retry/reassignment routes correctly.
   const init = await mod.initializeServer(h);
   if (init && init.error) return normalize({ status: 'failed', error: init.error });

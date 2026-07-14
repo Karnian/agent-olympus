@@ -283,22 +283,24 @@ Choose one:
 Which option?
 ```
 
-#### Option: Auto-Ship (if autonomy.json configured)
+#### Ship Policy (if autonomy.json configured)
 
-If `.ao/autonomy.json` exists with `ship.autoPush: true`:
-1. Run preflight: `preflightCheck()`
-2. If passes: push branch, create/reuse PR, link issues
-3. Report PR URL
+Load `.ao/autonomy.json`, then call `resolveRunShipMode(config, taskBrief)` with
+the original request plus durable follow-ups. An explicit no-push/no-PR
+instruction always resolves to `never`, even when configuration says `auto`.
 
-If `ship.autoPush` is false (default):
-Present "Create PR" as an additional option alongside existing merge/keep/discard options:
-- **Create PR** — push branch and create a draft PR via `gh pr create`
-  - Extracts issue refs from commits and branch name
-  - Builds PR body from test results and file changes
+- `never`: leave the verified branch ready; do not push, create a PR, or watch CI.
+- `ask`: present **Create PR** alongside merge/keep/discard and require explicit
+  interactive confirmation. An unattended run stops before release side effects.
+- `auto`: run `preflightCheck()`, then push the pinned branch, create or reuse the
+  PR, link issue references, and report the PR URL.
+
+Legacy `ship.autoPush` remains compatibility-only; `ship.mode` is authoritative
+when present.
 
 For structured commit history: invoke /git-master for atomic commit discipline.
 
-**User chooses action. Execute chosen action only after explicit confirmation.**
+**For `ask`, execute the chosen action only after explicit confirmation.**
 
 ## Output Format
 

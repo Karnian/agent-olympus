@@ -4,7 +4,16 @@
  * concurrent corruption.
  */
 
-import { writeFileSync, renameSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'fs';
 import { promises as fsp } from 'fs';
 import { dirname, join } from 'path';
 import { randomUUID } from 'crypto';
@@ -33,15 +42,33 @@ export function atomicMoveSync(srcPath, destPath) {
  * @param {string} filePath - Destination file path
  * @param {string} content  - File content
  * @param {object} [options] - Optional overrides (encoding, mode) merged on top of defaults
+ * @param {boolean} [options.durable=false] - fsync file and containing directory before return
  */
 export function atomicWriteFileSync(filePath, content, options = {}) {
   const dir = dirname(filePath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmpPath = join(dir, `.tmp-${randomUUID()}`);
+  const { durable = false, ...writeOptions } = options;
+  let fd;
   try {
-    writeFileSync(tmpPath, content, { encoding: 'utf-8', mode: 0o600, ...options });
+    writeFileSync(tmpPath, content, { encoding: 'utf-8', mode: 0o600, ...writeOptions });
+    if (durable) {
+      fd = openSync(tmpPath, 'r');
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
+    }
     renameSync(tmpPath, filePath);
+    if (durable && process.platform !== 'win32') {
+      fd = openSync(dir, 'r');
+      fsyncSync(fd);
+      closeSync(fd);
+      fd = undefined;
+    }
   } catch (err) {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch {}
+    }
     try { unlinkSync(tmpPath); } catch {}
     throw err;
   }

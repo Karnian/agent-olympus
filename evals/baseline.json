@@ -12,7 +12,7 @@
       "modelTier": null,
       "orchestrator": "atlas",
       "benchmarkFingerprint": "c9922302b1bf5f76ac00e8d4b11e543a7378279037973f345e1a3fa022fcc877",
-      "pipelineProtocolFingerprint": "a2efd36323e9fc6047757f188fc59fb4d39927a932afecc066946ff16193c1af"
+      "pipelineProtocolFingerprint": "473569e403e04551ff55ccb3791ebc952c8cfb5a92b8349e17d513ae2e6419e6"
     },
     "fix-null-deref": {
       "k": 3,
@@ -23,7 +23,7 @@
       "modelTier": null,
       "orchestrator": "atlas",
       "benchmarkFingerprint": "d5ee4959a359c22ea2713101afac3dfea0519223720f076492f605865495874c",
-      "pipelineProtocolFingerprint": "a2efd36323e9fc6047757f188fc59fb4d39927a932afecc066946ff16193c1af"
+      "pipelineProtocolFingerprint": "473569e403e04551ff55ccb3791ebc952c8cfb5a92b8349e17d513ae2e6419e6"
     },
     "fix-off-by-one": {
       "k": 3,
@@ -34,7 +34,7 @@
       "modelTier": null,
       "orchestrator": "atlas",
       "benchmarkFingerprint": "0c9b17cc3fb036a6a4b2e5c254502ff6c3fe5c12a1ec5fb4bfe6ba214629bdd2",
-      "pipelineProtocolFingerprint": "a2efd36323e9fc6047757f188fc59fb4d39927a932afecc066946ff16193c1af"
+      "pipelineProtocolFingerprint": "473569e403e04551ff55ccb3791ebc952c8cfb5a92b8349e17d513ae2e6419e6"
     }
   }
 }

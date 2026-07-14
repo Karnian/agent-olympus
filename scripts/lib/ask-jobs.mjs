@@ -383,8 +383,8 @@ const SUBCOMMANDS = new Set(['async', 'status', 'collect', 'cancel', 'list', '_r
  * Pure — no I/O, no stdin, no env. Tests can feed arbitrary argv arrays.
  *
  * Accepted forms:
- *   [node, ask.mjs, codex]                        → sync
- *   [node, ask.mjs, async, codex]                 → async launch
+ *   [node, ask.mjs, codex, --no-mcp?]             → sync
+ *   [node, ask.mjs, async, codex, --no-mcp?]      → async launch
  *   [node, ask.mjs, status, <jobId>]              → status
  *   [node, ask.mjs, collect, <jobId>, --wait]     → collect (wait)
  *   [node, ask.mjs, collect, <jobId>, --timeout, N]
@@ -409,9 +409,23 @@ export function parseAskArgs(argv) {
   const first = args[0];
   if (!first) return { command: 'error', reason: 'missing subcommand or model arg' };
 
+  const parseNoMcpFlag = (rest, command) => {
+    let noMcp = false;
+    for (const token of rest) {
+      if (token === '--no-mcp') {
+        noMcp = true;
+      } else {
+        return { error: `unknown ${command} flag: ${token}` };
+      }
+    }
+    return { noMcp };
+  };
+
   // Legacy sync path: first arg is a model name.
   if (VALID_MODELS.includes(first)) {
-    return { command: 'sync', model: first };
+    const flags = parseNoMcpFlag(args.slice(1), 'sync');
+    if (flags.error) return { command: 'error', reason: flags.error };
+    return { command: 'sync', model: first, noMcp: flags.noMcp };
   }
 
   if (!SUBCOMMANDS.has(first)) {
@@ -423,7 +437,9 @@ export function parseAskArgs(argv) {
     if (!model || !VALID_MODELS.includes(model)) {
       return { command: 'error', reason: 'async requires a model arg (codex|gemini|auto)' };
     }
-    return { command: 'async', model };
+    const flags = parseNoMcpFlag(args.slice(2), 'async');
+    if (flags.error) return { command: 'error', reason: flags.error };
+    return { command: 'async', model, noMcp: flags.noMcp };
   }
 
   if (first === 'status' || first === 'cancel' || first === '_run-job') {

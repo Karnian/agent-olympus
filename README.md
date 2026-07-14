@@ -35,8 +35,8 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Stop hook WIP commit**: Auto-saves uncommitted work as a WIP commit on session end
 - **Atomic writes**: All state files use tmp+rename pattern for crash-safe writes
 - **Superpowers methodology**: TDD discipline, systematic debugging, brainstorm-first gate, two-stage code review — embedded as native skills (standalone; no Superpowers install required)
-- **Post-code automation** *(v0.8)*: After commit — auto-create PR, parse issue refs, watch CI, auto-fix failures, update CHANGELOG
-- **Ship policy config** *(v0.8)*: `.ao/autonomy.json` controls `autoPush`, `draftPR`, `ci.maxCycles`, `notify.*`, `costAwareness`
+- **Post-code automation** *(v0.8)*: After commit — ship-policy-gated push/PR, issue refs, exact-SHA CI watch/fix, CHANGELOG update
+- **Ship policy config** *(v0.8, hardened in v1.5.1)*: `.ao/autonomy.json` controls `ship.mode`, PR targeting/update flags, exact-SHA CI watch/retry timing, and `notify.*`; legacy `autoPush` remains compatibility-only
 - **OS notifications** *(v0.8)*: Desktop notifications on task complete/blocked/CI events — macOS, Linux, terminal bell fallback
 - **Cost awareness** *(v0.8)*: Token cost estimate before long runs; configurable per orchestrator
 - **Auto-onboarding** *(v0.8)*: Runs `deepinit` automatically if no `AGENTS.md` found
@@ -65,7 +65,9 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Bounded provider failover** *(v1.5.0)*: Exhausted Codex workers move to Gemini when available and then to native Claude, with a fresh retry budget per provider, generation-bound identity, deterministic child teams, and durable completion output. Lost authenticated Claude output fails closed instead of silently rerunning committed work.
 - **Crash-safe event-backed runs** *(v1.5.0)*: Active-run CAS, phase evidence, finalization locks, terminal-failure markers, and Athena generation adoption make resume/restart fail closed. Hardened no-follow artifact I/O tolerates a torn run-event JSONL record, preserves later valid events, validates only the appended tail, and allows a definitely dead recovery claimant to be safely re-elected without weakening ABA fences.
 - **Sanitized failed-run feedback loop** *(v1.5.0)*: SessionEnd queues only independently verified, session-linked terminal task failures as metadata/digests. A human must approve and link candidates; prompts, error text, paths, diffs, evidence payloads, and provider output never enter the queue.
-- **2726 unit tests**: Comprehensive test suite using `node:test` across 108 test files (v1.5.0: 2726/2726 passing)
+- **Revocable shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`) is overridden by durable user no-ship follow-ups; push/PR operations bind repository, base, branch, and remote HEAD identity. CI aggregates every workflow for the exact pushed SHA and crash recovery links each fix candidate to one failed run and attempt.
+- **Codex MCP recovery + `--no-mcp`** *(v1.5.1)*: `/ask` classifies record-ordered MCP authentication failures across exec and tmux adapters. Codex-only `--no-mcp` skips the entire user-level config, including configured MCP servers, with a fail-closed Codex version gate while preserving authentication and explicit CLI overrides.
+- **2858 unit tests**: Comprehensive test suite using `node:test` across 108 test files (v1.5.1: 2858/2858 passing)
 - **Fail-safe architecture**: Hooks never block Claude Code; graceful degradation on errors
 
 ## Installation
@@ -152,22 +154,36 @@ Reply `resume` to pick up where you left off.
 
 After `/atlas` or `/athena` completes and commits, the SHIP phase runs automatically:
 
-1. Reads `.ao/autonomy.json` for ship policy (`autoPush`, `draftPR`, `ci.maxCycles`)
-2. Pushes branch and creates PR (with parsed issue refs from branch/commits)
-3. Monitors CI via `gh run list` until pass or fail
-4. On CI failure: fetches failed logs → spawns debugger → fixes → pushes → re-polls (max 3 cycles)
+1. Resolves `ship.mode` (`never`, `ask`, or `auto`) and re-checks durable no-ship follow-ups before every release side effect
+2. Binds repository, base, branch, and SHA identity before pushing and creating or reusing a PR
+3. Aggregates every workflow for the exact pushed SHA until all required runs pass or a terminal failure is known
+4. On CI failure: links one bounded fix candidate to the failed run, fixes, pushes, and re-polls up to `ci.maxCycles` (default 2)
 5. Sends desktop notification on completion or block
 
 Configure by creating `.ao/autonomy.json` in your project:
 
 ```json
 {
-  "autoPush": true,
-  "draftPR": false,
-  "ci": { "maxCycles": 3, "pollIntervalMs": 10000 },
-  "notify": { "onDone": true, "onBlocked": true, "onCIFail": true },
-  "costAwareness": true,
-  "progressBriefing": true
+  "ship": {
+    "mode": "ask",
+    "baseBranch": null,
+    "draftPR": true,
+    "updateChangelog": true,
+    "updateTechDebtTracker": true
+  },
+  "ci": {
+    "watchEnabled": true,
+    "maxCycles": 2,
+    "pollIntervalMs": 30000,
+    "timeoutMs": 600000
+  },
+  "notify": {
+    "onComplete": true,
+    "onBlocked": true,
+    "onCIFail": true,
+    "sound": true
+  },
+  "budget": { "warnThresholdUsd": null }
 }
 ```
 
@@ -568,7 +584,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (2726 tests across 108 files in v1.5.0) covers the core hook libraries. To run:
+A `node:test` based test suite (2858 tests across 108 files in v1.5.1) covers the core hook libraries. To run:
 
 ```bash
 npm test

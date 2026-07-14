@@ -54,6 +54,15 @@ The helper handles capability detection, adapter selection, the
 spawn → collect → shutdown lifecycle, and artifact writing. Output goes to
 stdout; the artifact path is logged to stderr.
 
+For Codex only, append `--no-mcp` to skip user-level Codex configuration for
+that invocation (`codex exec --ignore-user-config ...`), in either sync or
+async mode. This disables configured MCP servers by skipping the entire
+`$CODEX_HOME/config.toml` file (default `~/.codex/config.toml`), including
+non-MCP settings, while retaining Codex authentication and explicit
+command-line config overrides.
+This option requires Codex ≥ 0.122.0. Older or unidentifiable versions fail
+closed with an upgrade instruction instead of starting with MCP state uncertain.
+
 ### 3. Branch on exit code
 
 | Exit | Meaning                                  | Action                                                  |
@@ -178,6 +187,9 @@ node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs list --older-than 3600         # olde
   and the narrative reason. Use this to verify that
   `--dangerously-skip-permissions` was captured, or to figure out why
   `/ask codex` ended up in read-only mode.
+- **MCP authentication**: an `mcp_auth` failure means a server configured in
+  `$CODEX_HOME/config.toml` (default `~/.codex/config.toml`) needs re-login;
+  authenticate it or retry Codex with `--no-mcp`.
 - Artifacts persist in `.ao/artifacts/ask/` for later reference.
 - Can be used inside Atlas/Athena workflows for quick model consultations.
 

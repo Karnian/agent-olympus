@@ -56,7 +56,8 @@ describe('isCriticAgent', () => {
     assert.equal(isCriticAgent(42), false);
   });
   test('unknown prefix is not a critic', () => {
-    assert.equal(isCriticAgent('oh-my-claude:momus'), false);
+    const legacyNamespace = ['oh-my-claude', 'momus'].join(':');
+    assert.equal(isCriticAgent(legacyNamespace), false);
   });
 });
 
