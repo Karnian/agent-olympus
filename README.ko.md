@@ -67,8 +67,8 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **정제된 failed-run 피드백 루프** *(v1.5.0)*: SessionEnd가 독립 검증한 session-linked terminal task failure만 metadata/digest로 큐잉. 후보 승인과 task 연결은 사람이 수행하며 prompt, error text, path, diff, evidence payload, provider output은 큐에 기록하지 않음
 - **취소 가능한 shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`)보다 영속 user no-ship 후속 지시가 우선하며, push/PR은 repository·base·branch·remote HEAD identity에 바인딩. CI는 정확히 push된 SHA의 모든 workflow를 집계하고 crash recovery의 fix candidate를 단일 failed run과 attempt에 연결
 - **Codex MCP 복구 + `--no-mcp`** *(v1.5.1)*: `/ask`가 exec/tmux 어댑터에서 레코드 순서대로 MCP 인증 실패를 분류. Codex 전용 `--no-mcp`는 설정된 MCP server를 포함한 user-level config 전체를 건너뛰며, 인증과 명시적 CLI override는 유지하고 Codex 버전이 불명확하거나 미지원이면 fail-closed
-- **3168개 단위 테스트**: 현재 개발 트리 기준 `node:test` 기반 127개 파일의 종합 테스트 스위트 (배포된 v1.5.1 기준선: 108개 파일, 2858개 테스트)
-- **페일-세이프 아키텍처**: 훅이 Claude Code를 절대 차단하지 않음; 에러 시 우아한 저하
+- **3220개 단위 테스트**: 현재 개발 트리 기준 `node:test` 기반 128개 파일의 종합 테스트 스위트 (배포된 v1.5.1 기준선: 108개 파일, 2858개 테스트)
+- **페일-세이프 아키텍처**: 훅은 보통 오류 시 개방하지만, 안전하지 않거나 읽을 수 없거나 해소되지 않은 동시성 상태에서는 승인을 차단
 
 ## 설치
 
@@ -590,7 +590,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## 테스트
 
-`node:test` 기반 테스트 스위트(현재 개발 트리 127개 파일, 3168개 테스트; 배포된 v1.5.1 기준선 108개 파일, 2858개 테스트)가 핵심 훅 라이브러리를 커버합니다:
+`node:test` 기반 테스트 스위트(현재 개발 트리 128개 파일, 3220개 테스트; 배포된 v1.5.1 기준선 108개 파일, 2858개 테스트)가 핵심 훅 라이브러리를 커버합니다:
 
 ```bash
 npm test

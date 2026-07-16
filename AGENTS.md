@@ -96,10 +96,10 @@ agent-olympus/
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (current tree: 3168 tests, 127 files; published v1.5.1 baseline: 2858/108)
+│   ├── test/                     — node:test unit tests (current tree: 3220 tests, 128 files; published v1.5.1 baseline: 2858/108)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
-│       ├── intent-patterns.mjs   — Intent classifier (12 categories + unknown fallback, multilingual)
+│       ├── intent-patterns.mjs   — Intent classifier (13 categories + unknown fallback, multilingual)
 │       ├── model-router.mjs      — Routing logic with JSONC config merge
 │       ├── tmux-session.mjs      — Tmux session lifecycle + sanitizeForShellArg()
 │       ├── inbox-outbox.mjs      — File-based message queue (legacy, used by tmux fallback)
@@ -170,9 +170,9 @@ agent-olympus/
 
 - Naming follows Greek-myth agents where practical, with the `agent-olympus:` namespace for subagents and skills.
 - Scripts are zero-dependency Node.js ESM (`.mjs`), except `scripts/run.cjs` for cross-platform hook wrapping.
-- Hooks are fail-safe: catch errors, write a safe default (`{}`), and exit 0.
+- Hooks exit 0 and normally fail open; concurrency admission alone blocks on unsafe/unknown state.
 - State writes use atomic tmp+rename helpers; state files use mode `0600` and state directories use `0700`.
-- Persisted formats use `schemaVersion: 1`; see [docs/development.md](docs/development.md) for loader/writer rules.
+- Persisted formats are independently versioned (the concurrency ledger is v2); authorization and admission formats fail closed on unknown versions. See [docs/development.md](docs/development.md).
 - State lives under `.ao/`: `state/` is transient, `memory/` is durable, and run/team artifacts are swept by lifecycle rules.
 
 ## Worker Adapter System
@@ -190,7 +190,7 @@ Follow [docs/development.md](docs/development.md) when adding agents, skills, ho
 
 ## Testing
 
-Run the current 3168-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the current 3220-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
@@ -320,7 +320,7 @@ Run the current 3168-test Node suite and syntax checks from [docs/testing.md](do
 |-------|------|---------|
 | SessionStart | session-start | Inject prior wisdom + interrupted checkpoint context at session start |
 | SessionStart | runtime-permissions-capture | Bind hook session identity to an external private runtime grant (async) |
-| UserPromptSubmit | intent-gate | Classify user intent into 12 categories + unknown fallback (multilingual) |
+| UserPromptSubmit | intent-gate | Classify user intent into 13 categories + unknown fallback (multilingual) |
 | UserPromptSubmit | runtime-permissions-capture | Refresh the bound grant without trusting project-local state (async) |
 | PreToolUse:Task | concurrency-gate | Enforce parallel task limits |
 | PreToolUse:Task | model-router | Inject model routing advice based on intent |
@@ -348,7 +348,7 @@ Run the current 3168-test Node suite and syntax checks from [docs/testing.md](do
 | `.ao/state/checkpoint-atlas[-sessionId].json` | Atlas session recovery checkpoint (session-scoped) | Auto-expires after 24h |
 | `.ao/state/checkpoint-athena[-sessionId].json` | Athena session recovery checkpoint (session-scoped) | Auto-expires after 24h |
 | `.ao/state/ao-intent.json` | Last classified intent | Updated per prompt |
-| `.ao/state/ao-concurrency.json` | Active task tracking | Updated per task spawn/complete |
+| `.ao/state/ao-concurrency.json` | Schema-v2 active task tracking and recovery barrier | Updated per task spawn/complete; never generic-TTL swept |
 | `.ao/memory/` | Durable design identity and taste memory (`schemaVersion:1`) | Survives SessionEnd and cancel |
 | `.ao/state/supervisor/<runId>/` | Detached worker snapshots/manifests | Swept per inactive run |
 | `.ao/artifacts/runs/<runId>/` | Run evidence, failure marker, task ledger | Retained for audit/candidate review |
@@ -377,6 +377,6 @@ Run the current 3168-test Node suite and syntax checks from [docs/testing.md](do
 5. **External skill awareness** — Atlas/Athena can invoke installed plugin skills when they fit.
 6. **Zero runtime dependencies** — All scripts use Node.js built-ins only. No npm packages.
 7. **Athena worktree isolation** — Parallel workers use `.ao/worktrees/<slug>/<worker>/`.
-8. **Fail-safe hooks** — Hooks catch errors and output `{}` so Claude Code is never blocked.
+8. **Fail-safe hooks** — Hooks exit 0; concurrency admission alone fails closed on unsafe state.
 9. **Atomic state writes** — State mutations use tmp+rename via `lib/fs-atomic.mjs`.
 10. **tmux injection prevention** — `sanitizeForShellArg()` in `lib/tmux-session.mjs` escapes shell special characters before any `send-keys` call.
