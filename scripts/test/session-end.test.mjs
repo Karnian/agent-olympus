@@ -16,7 +16,7 @@
  * All I/O uses temporary directories; the real .ao/ directory is never touched.
  */
 
-import { describe, it, before, after } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, execSync } from 'node:child_process';
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync, utimesSync } from 'node:fs';
@@ -33,6 +33,9 @@ import {
   loadRuntimeSessionIdentity,
 } from '../lib/runtime-permissions.mjs';
 import { detectClaudePermissionLevel } from '../lib/permission-detect.mjs';
+import {
+  reserveWorkerBatchConcurrency,
+} from '../lib/concurrency-limits.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = path.resolve(__dirname, '..', 'session-end.mjs');
@@ -286,6 +289,79 @@ describe('session-end: preserves recent state files (< 24h)', () => {
     assert.ok(existsSync(recentFile), 'recent file should exist before hook runs');
     runHook(tmpDir);
     assert.ok(existsSync(recentFile), 'recent file should still exist after hook runs');
+  });
+});
+
+describe('session-end: concurrency state has liveness-aware cleanup boundaries', () => {
+  let tmpDir;
+  beforeEach(async () => {
+    tmpDir = await makeTmpDir();
+  });
+  afterEach(async () => { await removeTmpDir(tmpDir); });
+
+  it('preserves stale live ledger/lock generations and removes only valid stale quarantines', () => {
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    const liveArtifacts = [
+      createFile(stateDir, 'ao-concurrency.json', STALE_MS + 1000),
+      createDir(stateDir, 'ao-concurrency.lock', STALE_MS + 1000),
+      createDir(stateDir, 'ao-concurrency.reclaim', STALE_MS + 1000),
+      createDir(stateDir, 'ao-concurrency.lock.claim-11111111-1111-4111-8111-111111111111', STALE_MS + 1000),
+      createDir(stateDir, 'ao-concurrency.lock.stale-22222222-2222-4222-8222-222222222222', STALE_MS + 1000),
+      // A lookalike is not proven to be a collision-safe quarantine and remains protected.
+      createFile(stateDir, 'ao-concurrency.json.corrupt-not-a-generation', STALE_MS + 1000),
+    ];
+    const quarantine = createFile(
+      stateDir,
+      'ao-concurrency.json.corrupt-1770000000000-33333333-3333-4333-8333-333333333333',
+      STALE_MS + 1000,
+    );
+
+    runHook(tmpDir);
+
+    for (const artifact of liveArtifacts) assert.equal(existsSync(artifact), true, artifact);
+    assert.equal(existsSync(quarantine), false);
+  });
+
+  it('does not lose a live reservation when its ledger mtime is older than 24 hours', () => {
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    const limits = { global: 1, claude: 1, codex: 1, gemini: 1 };
+    const first = reserveWorkerBatchConcurrency(tmpDir, [{ name: 'live', type: 'claude' }], {
+      teamName: 'live-team',
+      runId: 'aaaaaaaaaaaaaaaa',
+      limits,
+    });
+    assert.equal(first.ok, true);
+    const ledgerPath = path.join(stateDir, 'ao-concurrency.json');
+    writeFileSync(path.join(stateDir, 'team-live-team.json'), JSON.stringify({
+      teamName: 'live-team',
+      runId: 'aaaaaaaaaaaaaaaa',
+      projectRoot: tmpDir,
+      _concurrencyReservation: {
+        schemaVersion: 1,
+        reservationId: first.reservationId,
+        entryIds: first.entryIds,
+        reservedAt: first.entries[0].startedAt,
+      },
+      workers: [{
+        name: 'live',
+        type: 'claude',
+        status: 'running',
+        startedAt: first.entries[0].startedAt,
+        _concurrencyEntryId: first.entryIds[0],
+      }],
+    }), { mode: 0o600 });
+    setMtime(ledgerPath, STALE_MS + 60 * 60 * 1000);
+
+    runHook(tmpDir);
+
+    assert.equal(existsSync(ledgerPath), true);
+    const second = reserveWorkerBatchConcurrency(tmpDir, [{ name: 'new', type: 'claude' }], {
+      teamName: 'new-team',
+      runId: 'bbbbbbbbbbbbbbbb',
+      limits,
+    });
+    assert.equal(second.ok, false);
+    assert.match(second.errors.join('\n'), /concurrency limit exceeded/);
   });
 });
 

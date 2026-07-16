@@ -2388,7 +2388,11 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
         if (!isSupervisorWorker(state, worker)) continue;
         try { await shutdownSupervisorWorker(state, worker); } catch {}
       }
-      try { killTeamSessions(teamName); } catch {}
+      try {
+        killTeamSessions(teamName, {
+          workerNames: (state.workers || []).map(worker => worker.name).filter(Boolean),
+        });
+      } catch {}
       try { cleanupTeam(teamName); } catch {}
     }
     releaseConcurrencyReservation(cwd, concurrency.reservationId);
@@ -2706,7 +2710,11 @@ export async function shutdownTeam(teamName, cwd) {
   await killProcessGroups(orphanPids);
 
   // Kill tmux sessions
-  const killed = killTeamSessions(teamName);
+  const killed = killTeamSessions(teamName, {
+    workerNames: Array.isArray(state?.workers)
+      ? state.workers.map(worker => worker.name).filter(Boolean)
+      : [],
+  });
   cleanupTeam(teamName);
 
   if (cwd) {

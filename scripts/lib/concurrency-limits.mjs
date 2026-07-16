@@ -1,7 +1,11 @@
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
+  openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -9,10 +13,14 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 import { atomicWriteFileSync } from './fs-atomic.mjs';
-import { readRegularArtifact } from './hardened-fs.mjs';
+import {
+  readRegularArtifact,
+  revalidateRegularArtifact,
+  writeExclusiveRegularArtifact,
+} from './hardened-fs.mjs';
 import { readProcStartId } from './proc-identity.mjs';
 import {
   snapshotPath as supervisorSnapshotPath,
@@ -26,7 +34,11 @@ export const DEFAULT_CONCURRENCY_LIMITS = Object.freeze({
   gemini: 5,
 });
 
-export const CONCURRENCY_SCHEMA_VERSION = 1;
+// v2 makes the fail-closed recovery barrier visible to older readers. The v1
+// reader rejects v2 instead of silently discarding the v2-only `recovery`
+// metadata and authorizing work from an apparently empty ledger.
+export const CONCURRENCY_SCHEMA_VERSION = 2;
+const LEGACY_CONCURRENCY_SCHEMA_VERSION = 1;
 
 const STALE_HOOK_MS = 3 * 60 * 1000;
 const LOCK_WAIT_MS = 10;
@@ -34,6 +46,8 @@ const LOCK_TIMEOUT_MS = 5000;
 const MAX_LEDGER_BYTES = 1024 * 1024;
 const MAX_TEAM_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_SUPERVISOR_SNAPSHOT_BYTES = 64 * 1024;
+const LEDGER_CONTENT_ERROR = 'AO_CONCURRENCY_LEDGER_CONTENT';
+const CONCURRENCY_STATE_ERROR = 'AO_CONCURRENCY_STATE_UNAVAILABLE';
 const PROVIDERS = new Set(['claude', 'codex', 'gemini']);
 const TERMINAL_WORKER_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'stopped']);
 const SAFE_TEAM_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -65,9 +79,11 @@ function sleepSync(ms) {
 
 function assertSafeDirectory(path, label) {
   const stat = lstatSync(path);
+  const wrongOwner = typeof process.getuid === 'function' && stat.uid !== process.getuid();
   if (!stat.isDirectory() || stat.isSymbolicLink()
-    || (process.platform !== 'win32' && (stat.mode & 0o022) !== 0)) {
-    throw new Error(`${label} is unsafe`);
+    || wrongOwner
+    || (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700)) {
+    throw new Error(`${label} (${path}) is unsafe`);
   }
   return stat;
 }
@@ -84,15 +100,49 @@ function ledgerPaths(cwd) {
   const projectRoot = resolve(cwd || process.cwd());
   const aoDir = join(projectRoot, '.ao');
   const stateDir = join(aoDir, 'state');
-  ensurePrivateDirectory(aoDir, '.ao directory');
-  ensurePrivateDirectory(stateDir, 'concurrency state directory');
   return {
     projectRoot,
+    aoDir,
     stateDir,
     ledgerPath: join(stateDir, 'ao-concurrency.json'),
     lockPath: join(stateDir, 'ao-concurrency.lock'),
     reclaimPath: join(stateDir, 'ao-concurrency.reclaim'),
   };
+}
+
+function ensureLedgerDirectories(paths) {
+  ensurePrivateDirectory(paths.aoDir, '.ao directory');
+  ensurePrivateDirectory(paths.stateDir, 'concurrency state directory');
+}
+
+function assertCurrentOwner(stat, path, label) {
+  if (typeof process.getuid === 'function' && stat.uid !== process.getuid()) {
+    throw new Error(`${label} (${path}) has the wrong owner`);
+  }
+}
+
+function contentError(message, artifact) {
+  const error = new Error(message);
+  error.code = LEDGER_CONTENT_ERROR;
+  error.artifact = artifact;
+  return error;
+}
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function stateUnavailableError(paths, cause) {
+  if (cause?.code === CONCURRENCY_STATE_ERROR) return cause;
+  const detail = cause?.message || String(cause);
+  const error = new Error(
+    `concurrency state unavailable (state: ${paths.stateDir}; ledger: ${paths.ledgerPath}): `
+    + `${detail}. Remediation: restore owner-only access (0700 directories, 0600 single-link `
+    + `regular files), repair or remove the unsafe artifact, then retry`,
+  );
+  error.code = CONCURRENCY_STATE_ERROR;
+  error.cause = cause;
+  return error;
 }
 
 function readSafeJson(path, label, maxBytes) {
@@ -223,7 +273,10 @@ function normalizeEntry(entry) {
   if (!PROVIDERS.has(entry.provider) || !Number.isFinite(Date.parse(entry.startedAt))) {
     throw new Error('concurrency ledger entry provider or timestamp is invalid');
   }
-  const kind = entry.kind ?? 'hook';
+  // Only the genuinely absent legacy-v1 field defaults to a hook. An explicit
+  // null is corrupt content: treating it as a hook would let hook-release and
+  // hook-TTL semantics steal a durable team reservation.
+  const kind = hasOwn(entry, 'kind') ? entry.kind : 'hook';
   if (kind !== 'hook' && kind !== 'team') {
     throw new Error('concurrency ledger entry kind is invalid');
   }
@@ -237,34 +290,357 @@ function normalizeEntry(entry) {
       || (entry.ownerStartId != null && typeof entry.ownerStartId !== 'string')) {
       throw new Error('concurrency ledger team entry is invalid');
     }
+    if ((entry.recoveredUntil != null
+      && !Number.isFinite(Date.parse(entry.recoveredUntil)))
+      || (entry.sourceEntryId != null
+        && (typeof entry.sourceEntryId !== 'string' || entry.sourceEntryId.length === 0))) {
+      throw new Error('concurrency ledger recovered team entry is invalid');
+    }
   }
   return { ...entry, kind };
 }
 
-function readLedger(paths) {
-  if (!existsSync(paths.ledgerPath)) {
-    return { schemaVersion: CONCURRENCY_SCHEMA_VERSION, activeTasks: [], queue: [] };
-  }
-  const parsed = readSafeJson(paths.ledgerPath, 'concurrency ledger', MAX_LEDGER_BYTES);
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)
-    || (parsed.schemaVersion != null && parsed.schemaVersion !== CONCURRENCY_SCHEMA_VERSION)
-    || !Array.isArray(parsed.activeTasks)
-    || (parsed.queue != null && !Array.isArray(parsed.queue))) {
-    throw new Error('concurrency ledger is malformed');
+function normalizeRecovery(recovery) {
+  if (!recovery || typeof recovery !== 'object' || Array.isArray(recovery)
+    || recovery.kind !== 'corrupt-ledger'
+    || typeof recovery.reason !== 'string' || recovery.reason.length === 0
+    || !Number.isFinite(Date.parse(recovery.quarantinedAt))
+    || !Number.isFinite(Date.parse(recovery.unresolvedUntil))
+    || typeof recovery.quarantineFile !== 'string'
+    || basename(recovery.quarantineFile) !== recovery.quarantineFile
+    || !recovery.quarantineFile.startsWith('ao-concurrency.json.corrupt-')
+    || !Array.isArray(recovery.unresolvedArtifacts)
+    || recovery.unresolvedArtifacts.some(item => typeof item !== 'string'
+      || basename(item) !== item)) {
+    throw new Error('concurrency ledger recovery metadata is invalid');
   }
   return {
-    schemaVersion: CONCURRENCY_SCHEMA_VERSION,
-    activeTasks: parsed.activeTasks.map(normalizeEntry),
-    queue: parsed.queue || [],
+    kind: 'corrupt-ledger',
+    reason: recovery.reason,
+    quarantinedAt: recovery.quarantinedAt,
+    unresolvedUntil: recovery.unresolvedUntil,
+    quarantineFile: recovery.quarantineFile,
+    unresolvedArtifacts: [...recovery.unresolvedArtifacts],
   };
 }
 
-function writeLedger(paths, state) {
-  atomicWriteFileSync(paths.ledgerPath, JSON.stringify({
+function emptyLedger() {
+  return { schemaVersion: CONCURRENCY_SCHEMA_VERSION, activeTasks: [], queue: [] };
+}
+
+function serializeLedger(state) {
+  // Compact JSON is canonical for this high-churn bounded ledger. Besides
+  // reducing write volume, it avoids turning a valid compact legacy artifact
+  // into an oversized pretty-printed replacement during migration.
+  const serialized = JSON.stringify({
     schemaVersion: CONCURRENCY_SCHEMA_VERSION,
     activeTasks: state.activeTasks,
     queue: state.queue || [],
-  }, null, 2), { mode: 0o600, durable: true });
+    ...(state.recovery ? { recovery: state.recovery } : {}),
+  });
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_LEDGER_BYTES) {
+    throw new Error(`concurrency ledger serialization exceeds ${MAX_LEDGER_BYTES} bytes`);
+  }
+  return serialized;
+}
+
+function parseLedgerArtifact(artifact) {
+  if (!Buffer.from(artifact.text, 'utf8').equals(artifact.bytes)) {
+    throw contentError('concurrency ledger is not valid UTF-8', artifact);
+  }
+  let parsed;
+  try { parsed = JSON.parse(artifact.text); }
+  catch { throw contentError('concurrency ledger contains malformed JSON', artifact); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw contentError('concurrency ledger schema is malformed', artifact);
+  }
+  const hasSchemaVersion = hasOwn(parsed, 'schemaVersion');
+  if (hasSchemaVersion && !Number.isSafeInteger(parsed.schemaVersion)) {
+    // Only concrete integer versions participate in the compatibility
+    // boundary. A string/boolean/fractional/unsafe-integer value is damaged
+    // schema content, not a future format whose semantics must be preserved.
+    throw contentError('concurrency ledger schemaVersion is malformed', artifact);
+  }
+  const schemaVersion = hasSchemaVersion
+    ? parsed.schemaVersion
+    : LEGACY_CONCURRENCY_SCHEMA_VERSION;
+  if (schemaVersion !== LEGACY_CONCURRENCY_SCHEMA_VERSION
+    && schemaVersion !== CONCURRENCY_SCHEMA_VERSION) {
+    // An unknown version may carry admission semantics this reader cannot
+    // preserve. Leave the artifact untouched and block instead of quarantining
+    // it as corruption and eventually treating it as empty.
+    throw new Error(
+      `concurrency ledger schemaVersion ${String(schemaVersion)} is unsupported; `
+      + `supported versions are ${LEGACY_CONCURRENCY_SCHEMA_VERSION} and `
+      + `${CONCURRENCY_SCHEMA_VERSION}`,
+    );
+  }
+  const hasQueue = hasOwn(parsed, 'queue');
+  if (!Array.isArray(parsed.activeTasks)
+    || (hasQueue && !Array.isArray(parsed.queue))) {
+    throw contentError('concurrency ledger schema is malformed', artifact);
+  }
+  const hasRecovery = hasOwn(parsed, 'recovery');
+  if (schemaVersion === LEGACY_CONCURRENCY_SCHEMA_VERSION && hasRecovery) {
+    // Recovery metadata was never part of the published v1 contract. Accepting
+    // it would recreate the mixed-version bypass that v2 exists to prevent.
+    throw new Error('concurrency ledger v1 contains unsupported recovery metadata');
+  }
+  try {
+    return {
+      state: {
+        schemaVersion: CONCURRENCY_SCHEMA_VERSION,
+        activeTasks: parsed.activeTasks.map(normalizeEntry),
+        queue: hasQueue ? parsed.queue : [],
+        ...(schemaVersion === CONCURRENCY_SCHEMA_VERSION && hasRecovery
+          ? { recovery: normalizeRecovery(parsed.recovery) }
+          : {}),
+      },
+      needsMigration: schemaVersion !== CONCURRENCY_SCHEMA_VERSION
+        || !hasQueue
+        || parsed.activeTasks.some(entry => entry && !hasOwn(entry, 'kind')),
+    };
+  } catch (error) {
+    throw contentError(error?.message || 'concurrency ledger content is malformed', artifact);
+  }
+}
+
+function writeLedger(paths, state) {
+  atomicWriteFileSync(paths.ledgerPath, serializeLedger(state), { mode: 0o600, durable: true });
+}
+
+function durableQuarantineCopy(paths, artifact) {
+  revalidateRegularArtifact(
+    paths.ledgerPath,
+    artifact.stat,
+    `concurrency ledger (${paths.ledgerPath})`,
+    MAX_LEDGER_BYTES,
+    { allowEmpty: true, generationPolicy: 'full' },
+  );
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const quarantinePath = `${paths.ledgerPath}.corrupt-${Date.now()}-${randomUUID()}`;
+    try {
+      const quarantineStat = writeExclusiveRegularArtifact(
+        quarantinePath,
+        `concurrency ledger quarantine (${quarantinePath})`,
+        artifact.bytes,
+        MAX_LEDGER_BYTES,
+        { allowEmpty: true },
+      );
+      assertCurrentOwner(quarantineStat, quarantinePath, 'concurrency ledger quarantine');
+      let fd;
+      if (process.platform !== 'win32') {
+        fd = openSync(paths.stateDir, 'r');
+        try { fsyncSync(fd); } finally { closeSync(fd); }
+      }
+      const current = revalidateRegularArtifact(
+        paths.ledgerPath,
+        artifact.stat,
+        `concurrency ledger (${paths.ledgerPath})`,
+        MAX_LEDGER_BYTES,
+        { allowEmpty: true, generationPolicy: 'full' },
+      );
+      assertCurrentOwner(current, paths.ledgerPath, 'concurrency ledger');
+      return quarantinePath;
+    } catch (error) {
+      if (error?.code === 'EEXIST') continue;
+      throw error;
+    }
+  }
+  throw new Error(`unable to allocate a collision-safe quarantine in ${paths.stateDir}`);
+}
+
+function durableTeamRecovery(paths, unresolvedUntil) {
+  const activeTasks = [];
+  const unresolved = new Set();
+  const seenEntryIds = new Set();
+  const stateFiles = readdirSync(paths.stateDir, { withFileTypes: true })
+    .filter(item => item.name.startsWith('team-') && item.name.endsWith('.json'));
+
+  for (const item of stateFiles) {
+    const teamName = item.name.slice('team-'.length, -'.json'.length);
+    const teamPath = join(paths.stateDir, item.name);
+    if (!SAFE_TEAM_NAME.test(teamName) || !item.isFile() || item.isSymbolicLink()) {
+      throw new Error(`durable team state (${teamPath}) is unsafe`);
+    }
+    const artifact = readRegularArtifact(teamPath, `durable team state (${teamPath})`,
+      MAX_TEAM_STATE_BYTES, { allowEmpty: true, generationPolicy: 'full' });
+    assertCurrentOwner(artifact.stat, teamPath, 'durable team state');
+    let team;
+    try { team = JSON.parse(artifact.text); }
+    catch {
+      unresolved.add(item.name);
+      continue;
+    }
+    if (!team || typeof team !== 'object' || Array.isArray(team)
+      || team.teamName !== teamName || !/^[a-f0-9]{16}$/.test(team.runId || '')
+      || !Array.isArray(team.workers)) {
+      unresolved.add(item.name);
+      continue;
+    }
+
+    const possibleWorkers = team.workers.filter(worker => {
+      if (!worker || typeof worker !== 'object' || typeof worker.status !== 'string') {
+        unresolved.add(item.name);
+        return false;
+      }
+      if (TERMINAL_WORKER_STATUSES.has(worker.status)) return false;
+      if (worker._concurrencyReleasedAt != null) {
+        if (Number.isFinite(Date.parse(worker._concurrencyReleasedAt))) return false;
+        unresolved.add(item.name);
+        return false;
+      }
+      return true;
+    });
+    if (possibleWorkers.length === 0) continue;
+
+    const reservation = team._concurrencyReservation;
+    if (!reservation || typeof reservation !== 'object'
+      || typeof reservation.reservationId !== 'string' || reservation.reservationId.length === 0
+      || !Array.isArray(reservation.entryIds)
+      || !Number.isFinite(Date.parse(reservation.reservedAt))) {
+      unresolved.add(item.name);
+      continue;
+    }
+
+    for (const worker of possibleWorkers) {
+      const sourceEntryId = worker._concurrencyEntryId;
+      if (typeof sourceEntryId !== 'string' || sourceEntryId.length === 0
+        || sourceEntryId.length > 200 || !reservation.entryIds.includes(sourceEntryId)
+        || !PROVIDERS.has(worker.type) || typeof worker.name !== 'string'
+        || worker.name.length === 0) {
+        unresolved.add(item.name);
+        continue;
+      }
+      const workerIndex = team.workers.indexOf(worker);
+      const handle = worker._handle && typeof worker._handle === 'object' ? worker._handle : {};
+      const supervisorOwner = Number.isInteger(handle.supervisorPid) && handle.supervisorPid > 1;
+      const directOwner = Number.isInteger(handle.pid) && handle.pid > 1;
+      const ownerPid = supervisorOwner ? handle.supervisorPid
+        : (directOwner ? handle.pid : (process.pid > 1 ? process.pid : Number.MAX_SAFE_INTEGER));
+      const ownerStartId = supervisorOwner ? handle.supervisorStartId
+        : (directOwner ? handle.startId : readProcStartId(ownerPid));
+      const duplicate = seenEntryIds.has(sourceEntryId);
+      const entry = {
+        id: duplicate ? `recovered-${randomUUID()}` : sourceEntryId,
+        reservationId: reservation.reservationId,
+        kind: 'team',
+        provider: worker.type,
+        model: worker.model || worker.subagent_type || worker.type,
+        startedAt: Number.isFinite(Date.parse(worker.startedAt))
+          ? worker.startedAt : reservation.reservedAt,
+        ownerPid,
+        ownerStartId: ownerStartId || null,
+        teamName,
+        runId: team.runId,
+        workerName: worker.name,
+        workerIndex,
+        recoveredUntil: unresolvedUntil,
+        ...(duplicate ? { sourceEntryId } : {}),
+      };
+      try {
+        activeTasks.push(normalizeEntry(entry));
+        seenEntryIds.add(sourceEntryId);
+      } catch {
+        unresolved.add(item.name);
+      }
+    }
+  }
+  return { activeTasks, unresolvedArtifacts: [...unresolved].slice(0, 64) };
+}
+
+function recoveredTeamIdentity(entry) {
+  return JSON.stringify([
+    entry.teamName,
+    entry.runId,
+    entry.workerIndex,
+    entry.workerName,
+    entry.sourceEntryId || entry.id,
+  ]);
+}
+
+function mergeRecoveredTeamEntries(state, recoveredEntries) {
+  const existingByIdentity = new Map();
+  const occupiedIds = new Set(state.activeTasks.map(entry => entry.id));
+  for (const entry of state.activeTasks) {
+    if (entry.kind === 'team' && entry.recoveredUntil) {
+      existingByIdentity.set(recoveredTeamIdentity(entry), entry);
+    }
+  }
+
+  for (const candidate of recoveredEntries) {
+    const identity = recoveredTeamIdentity(candidate);
+    const existing = existingByIdentity.get(identity);
+    if (existing) {
+      // Refresh liveness-derived fields while retaining the stable ledger ID
+      // that exact release paths may already hold.
+      const stableId = existing.id;
+      Object.assign(existing, candidate, { id: stableId });
+      continue;
+    }
+
+    let recovered = candidate;
+    if (occupiedIds.has(recovered.id)) {
+      recovered = {
+        ...recovered,
+        id: `recovered-${randomUUID()}`,
+        sourceEntryId: recovered.sourceEntryId || recovered.id,
+      };
+    }
+    state.activeTasks.push(recovered);
+    occupiedIds.add(recovered.id);
+    existingByIdentity.set(recoveredTeamIdentity(recovered), recovered);
+  }
+}
+
+function recoverCorruptLedger(paths, error, now) {
+  const artifact = error.artifact;
+  assertCurrentOwner(artifact.stat, paths.ledgerPath, 'concurrency ledger');
+  const unresolvedUntil = new Date(now + STALE_HOOK_MS).toISOString();
+  // Scan before replacing the live artifact. Filesystem/permission failures
+  // therefore leave the corrupt ledger in place and admission remains blocked.
+  const durable = durableTeamRecovery(paths, unresolvedUntil);
+  const quarantinePath = durableQuarantineCopy(paths, artifact);
+  const state = {
+    schemaVersion: CONCURRENCY_SCHEMA_VERSION,
+    activeTasks: durable.activeTasks,
+    queue: [],
+    recovery: {
+      kind: 'corrupt-ledger',
+      reason: error.message,
+      quarantinedAt: new Date(now).toISOString(),
+      unresolvedUntil,
+      quarantineFile: basename(quarantinePath),
+      unresolvedArtifacts: durable.unresolvedArtifacts,
+    },
+  };
+  // The collision-safe quarantine is durable before this atomic replacement.
+  writeLedger(paths, state);
+  return state;
+}
+
+function readLedger(paths, now) {
+  const artifact = readRegularArtifact(
+    paths.ledgerPath,
+    `concurrency ledger (${paths.ledgerPath})`,
+    MAX_LEDGER_BYTES,
+    { allowMissing: true, allowEmpty: true, generationPolicy: 'full' },
+  );
+  if (!artifact.present) {
+    return { state: emptyLedger(), present: false, needsMigration: false };
+  }
+  assertCurrentOwner(artifact.stat, paths.ledgerPath, 'concurrency ledger');
+  try {
+    const parsed = parseLedgerArtifact(artifact);
+    return { ...parsed, present: true };
+  } catch (error) {
+    if (error?.code !== LEDGER_CONTENT_ERROR) throw error;
+    return {
+      state: recoverCorruptLedger(paths, error, now),
+      present: true,
+      needsMigration: false,
+    };
+  }
 }
 
 function readDurableTeamLiveness(paths, entry) {
@@ -278,7 +654,8 @@ function readDurableTeamLiveness(paths, entry) {
     || !Array.isArray(team.workers)) return { state: 'unknown' };
   if (team.runId !== entry.runId) return { state: 'superseded' };
   const worker = team.workers[entry.workerIndex];
-  if (worker?._concurrencyEntryId !== entry.id || worker?.name !== entry.workerName) {
+  if (worker?._concurrencyEntryId !== (entry.sourceEntryId || entry.id)
+    || worker?.name !== entry.workerName) {
     return { state: 'unknown' };
   }
   if (!worker || typeof worker.status !== 'string') return { state: 'unknown' };
@@ -330,11 +707,21 @@ function shouldReclaimEntry(paths, entry, now) {
   // window its owner identity protects it. A missing durable team is reclaimed
   // only when that exact owner generation is provably gone; elapsed wall time
   // alone can never steal capacity from a legitimately slow launch.
+  if (entry.recoveredUntil) return now >= Date.parse(entry.recoveredUntil);
   return processDefinitelyGone(entry.ownerPid, entry.ownerStartId || null);
 }
 
 function pruneStaleEntries(paths, state, now) {
   state.activeTasks = state.activeTasks.filter(entry => !shouldReclaimEntry(paths, entry, now));
+  if (state.recovery && now >= Date.parse(state.recovery.unresolvedUntil)) {
+    // Team state can become durable (or be repaired) after the first corrupt-
+    // ledger scan. Refresh it at the boundary before removing the global
+    // unknown-reservation barrier, otherwise a still-running detached worker
+    // can disappear from accounting exactly when admission reopens.
+    const durable = durableTeamRecovery(paths, state.recovery.unresolvedUntil);
+    mergeRecoveredTeamEntries(state, durable.activeTasks);
+    delete state.recovery;
+  }
 }
 
 function countEntries(activeTasks) {
@@ -346,18 +733,40 @@ function countEntries(activeTasks) {
   return counts;
 }
 
+function recoveryBlock(state, paths) {
+  if (!state.recovery) return null;
+  const quarantinePath = join(paths.stateDir, state.recovery.quarantineFile);
+  return {
+    ok: false,
+    unsafe: true,
+    errors: [
+      `${state.recovery.reason}; recovery barrier blocks admission until `
+      + `${state.recovery.unresolvedUntil} (state: ${paths.stateDir}; ledger: ${paths.ledgerPath}; `
+      + `quarantine: ${quarantinePath}). Remediation: inspect durable team state and the `
+      + `quarantine, then wait for the stale window or repair the state before retrying`,
+    ],
+  };
+}
+
 function withLockedLedger(cwd, options, operation) {
   const paths = ledgerPaths(cwd);
-  const lock = acquireLedgerLock(paths, options);
+  let lock;
   try {
-    const state = readLedger(paths);
+    ensureLedgerDirectories(paths);
+    lock = acquireLedgerLock(paths, options);
     const now = Number.isFinite(options?.now) ? options.now : Date.now();
+    const loaded = readLedger(paths, now);
+    const state = loaded.state;
+    const before = serializeLedger(state);
     pruneStaleEntries(paths, state, now);
     const result = operation(state, paths, now);
-    writeLedger(paths, state);
+    const after = serializeLedger(state);
+    if (loaded.needsMigration || before !== after) writeLedger(paths, state);
     return result;
+  } catch (error) {
+    throw stateUnavailableError(paths, error);
   } finally {
-    releaseLedgerLock(paths, lock);
+    if (lock) releaseLedgerLock(paths, lock);
   }
 }
 
@@ -391,7 +800,8 @@ export function loadConcurrencyLimits(options = {}) {
 
 export function readActiveConcurrencyCounts(cwd, options = {}) {
   try {
-    return withLockedLedger(cwd, options, state => countEntries(state.activeTasks));
+    return withLockedLedger(cwd, options,
+      state => (state.recovery ? infinityCounts() : countEntries(state.activeTasks)));
   } catch {
     // A malformed, unsafe, or locked counter cannot safely authorize work.
     return infinityCounts();
@@ -427,7 +837,9 @@ export function validateWorkerBatchConcurrency(workers, options = {}) {
 /** Atomically admit and reserve one ledger entry per detached worker. */
 export function reserveWorkerBatchConcurrency(cwd, workers, options = {}) {
   try {
-    return withLockedLedger(cwd, options, (state, _paths, now) => {
+    return withLockedLedger(cwd, options, (state, paths, now) => {
+      const recovery = recoveryBlock(state, paths);
+      if (recovery) return recovery;
       const actual = countEntries(state.activeTasks);
       const supplied = options.active || null;
       const active = supplied

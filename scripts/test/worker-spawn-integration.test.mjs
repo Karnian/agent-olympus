@@ -145,7 +145,7 @@ function makeWorkspace(allow = ['Bash(*)', 'Write(*)']) {
   );
 
   // Isolated .ao so wisdom writes don't pollute the repo
-  mkdirSync(join(cwd, '.ao'), { recursive: true });
+  mkdirSync(join(cwd, '.ao'), { recursive: true, mode: 0o700 });
 
   return {
     cwd,
@@ -203,6 +203,27 @@ test('spawnTeam rejects a malformed preallocated generation before launch', asyn
     );
     assert.equal(calls.codexExecSpawn.length, 0);
     assert.equal(existsSync(join(ws.cwd, '.ao', 'state', 'team-preallocated-invalid.json')), false);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('spawnTeam creates owner-private concurrency directories when .ao is absent', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    rmSync(join(ws.cwd, '.ao'), { recursive: true, force: true });
+    const { spawnSupervisor } = makeFakeAdapters();
+    await spawnTeam(
+      'private-state',
+      [{ type: 'claude', name: 'c1', prompt: 'do it' }],
+      ws.cwd,
+      { hasClaudeCli: true },
+      { spawnSupervisor },
+    );
+    if (process.platform !== 'win32') {
+      assert.equal(statSync(join(ws.cwd, '.ao')).mode & 0o777, 0o700);
+      assert.equal(statSync(join(ws.cwd, '.ao', 'state')).mode & 0o777, 0o700);
+    }
   } finally {
     ws.cleanup();
   }

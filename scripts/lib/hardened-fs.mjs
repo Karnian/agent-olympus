@@ -207,6 +207,9 @@ export function validateRegularArtifact(stat, label, maxBytes, { allowEmpty = fa
  * @param {'object'|'object-size'|'object-mode'|'full'} [options.generationPolicy='full']
  * @param {()=>unknown} [options.revalidateContext] Re-proves bound ancestry
  * after the descriptor read and before returning data.
+ * @returns {{present:boolean,text:string,bytes:Buffer,stat:object|null}} The
+ * decoded text plus the exact validated bytes for callers that must preserve
+ * malformed encodings without a lossy UTF-8 round trip.
  */
 export function readRegularArtifact(path, label, maxBytes, {
   allowMissing = false,
@@ -218,7 +221,9 @@ export function readRegularArtifact(path, label, maxBytes, {
   if (revalidateContext) revalidateContext();
   const pathStat = lstatOrMissing(path);
   if (!pathStat) {
-    if (allowMissing) return { present: false, text: '', stat: null };
+    if (allowMissing) {
+      return { present: false, text: '', bytes: Buffer.alloc(0), stat: null };
+    }
     throw hardenedFsViolation(`${label} is missing`);
   }
   validateRegularArtifact(pathStat, label, maxBytes, { allowEmpty });
@@ -242,7 +247,10 @@ export function readRegularArtifact(path, label, maxBytes, {
       throw hardenedFsViolation(`${label} changed during read`);
     }
     if (revalidateContext) revalidateContext();
-    return { present: true, text: buffer.toString('utf8'), stat: after };
+    // Keep the validated original bytes alongside the decoded convenience
+    // string. Forensic/quarantine callers must not round-trip malformed UTF-8
+    // through replacement characters.
+    return { present: true, text: buffer.toString('utf8'), bytes: buffer, stat: after };
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -404,9 +412,14 @@ export function readRegularArtifactRange(path, label, maxBytes, {
   }
 }
 
-export function writeExclusiveRegularArtifact(path, label, content, maxBytes) {
-  const bytes = Buffer.from(content, 'utf8');
-  if (bytes.length <= 0 || bytes.length > maxBytes) {
+/** Exclusively create a durable private artifact from a UTF-8 string or exact Buffer bytes. */
+export function writeExclusiveRegularArtifact(path, label, content, maxBytes, {
+  allowEmpty = false,
+} = {}) {
+  const bytes = Buffer.isBuffer(content)
+    ? Buffer.from(content)
+    : Buffer.from(content, 'utf8');
+  if ((!allowEmpty && bytes.length <= 0) || bytes.length > maxBytes) {
     throw hardenedFsViolation(`${label} exceeds its size bound`);
   }
   let fd;
@@ -427,7 +440,7 @@ export function writeExclusiveRegularArtifact(path, label, content, maxBytes) {
     }
     fsyncSync(fd);
     const persisted = fstatSync(fd);
-    validateRegularArtifact(persisted, label, maxBytes);
+    validateRegularArtifact(persisted, label, maxBytes, { allowEmpty });
     if (!sameFileGeneration(opened, persisted, 'object-mode') || persisted.size !== bytes.length) {
       throw hardenedFsViolation(`${label} was not durable`);
     }

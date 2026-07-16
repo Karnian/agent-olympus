@@ -142,14 +142,13 @@ describe('concurrency-release: no existing state file', () => {
     assert.deepEqual(output, {});
   });
 
-  it('creates the state file with empty activeTasks', () => {
+  it('does not create a state file for a no-op release', () => {
     runHook(
       { tool_name: 'Task', tool_input: { subagent_type: 'agent-olympus:executor' } },
       tmpDir,
     );
-    assert.ok(existsSync(stateFilePath(tmpDir)), 'state file should be created');
-    const state = readState(tmpDir);
-    assert.ok(Array.isArray(state.activeTasks), 'activeTasks should be an array');
+    assert.equal(existsSync(stateFilePath(tmpDir)), false,
+      'a missing ledger should remain missing after a no-op release');
   });
 });
 
