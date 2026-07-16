@@ -22,6 +22,7 @@ import { promises as fs, mkdirSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
+import { AO_REVIEW_V1_CONTRACT } from '../lib/review-contract.mjs';
 
 const REPO_ROOT = path.resolve(new URL('.', import.meta.url).pathname, '..', '..');
 
@@ -53,7 +54,7 @@ describe('review-router: routed reviewer output contract', () => {
       const example = JSON.parse(exampleMatch[1]);
       assert.deepEqual(
         Object.keys(example),
-        ['schemaVersion', 'reviewer', 'reviewDigest', 'verdict', 'findings', 'escalations'],
+        AO_REVIEW_V1_CONTRACT.required,
       );
       assert.equal(example.schemaVersion, 1);
       assert.equal(example.reviewer, reviewer);
@@ -63,7 +64,7 @@ describe('review-router: routed reviewer output contract', () => {
       assert.match(example.findings[0].severity, /^(critical|high|medium|low|info)$/);
       assert.deepEqual(
         Object.keys(example.escalations[0]),
-        ['additionalReviewer', 'reason'],
+        AO_REVIEW_V1_CONTRACT.escalationRequired,
       );
     });
   }
@@ -83,8 +84,20 @@ describe('review-router: loadRoutingConfig', () => {
     );
     assert.equal(cfg.reviewResultContract.name, 'AO_REVIEW_V1');
     assert.equal(cfg.reviewResultContract.schemaVersion, 1);
-    assert.ok(cfg.reviewResultContract.required.includes('reviewDigest'));
-    assert.deepEqual(cfg.reviewResultContract.escalationRequired, ['additionalReviewer', 'reason']);
+    for (const field of ['verdicts', 'required', 'findingRequired', 'escalationRequired']) {
+      assert.deepEqual(
+        cfg.reviewResultContract[field],
+        AO_REVIEW_V1_CONTRACT[field],
+        `config reviewResultContract.${field} drifted from parser contract`,
+      );
+    }
+  });
+
+  it('exports a deeply frozen authoritative AO_REVIEW_V1 contract', () => {
+    assert.equal(Object.isFrozen(AO_REVIEW_V1_CONTRACT), true);
+    for (const field of ['verdicts', 'required', 'findingRequired', 'escalationRequired']) {
+      assert.equal(Object.isFrozen(AO_REVIEW_V1_CONTRACT[field]), true, field);
+    }
   });
 
   it('returns {} when config missing', async () => {
@@ -116,7 +129,7 @@ describe('review-router: routeReviewers basic scopes', () => {
     );
     assert.deepEqual(
       r.reviewResultContract.verdicts,
-      ['APPROVE', 'REVISE', 'REJECT', 'BLOCKED'],
+      AO_REVIEW_V1_CONTRACT.verdicts,
     );
   });
 

@@ -84,6 +84,7 @@ object, with no Markdown fence and no surrounding prose:
 - Finding severity must be `critical`, `high`, `medium`, `low`, or `info`;
   confidence must be a number from 0 through 1. Use a repo-relative `file` and a positive
   integer `line` when available; otherwise use `null` for that field.
+- `line` must be `null` whenever `file` is `null`.
 - Use empty arrays when there are no findings or escalations. Every non-`APPROVE`
   verdict, including `BLOCKED`, must include at least one finding that explains
   the actionable issue or missing evidence. `BLOCKED` means required review

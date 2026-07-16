@@ -21,6 +21,7 @@
 
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { AO_REVIEW_V1_CONTRACT } from './review-contract.mjs';
 
 const CONFIG_REL = 'config/review-routing.jsonc';
 const AUTONOMY_REL = '.ao/autonomy.json';
@@ -60,28 +61,7 @@ const REVIEW_POLICY_PATHS = new Set([
   'skills/atlas/SKILL.md',
 ]);
 
-const DEFAULT_REVIEW_RESULT_CONTRACT = Object.freeze({
-  name: 'AO_REVIEW_V1',
-  schemaVersion: 1,
-  verdicts: Object.freeze(['APPROVE', 'REVISE', 'REJECT', 'BLOCKED']),
-  required: Object.freeze([
-    'schemaVersion',
-    'reviewer',
-    'reviewDigest',
-    'verdict',
-    'findings',
-    'escalations',
-  ]),
-  findingRequired: Object.freeze([
-    'severity',
-    'confidence',
-    'file',
-    'line',
-    'evidence',
-    'recommendation',
-  ]),
-  escalationRequired: Object.freeze(['additionalReviewer', 'reason']),
-});
+const DEFAULT_REVIEW_RESULT_CONTRACT = AO_REVIEW_V1_CONTRACT;
 
 function approvalReviewerSet(config = {}) {
   const builtins = new Set(BUILTIN_APPROVAL_REVIEWERS);
@@ -397,8 +377,8 @@ export function handleEscalation(currentSet, flag, options = {}) {
   const validObject = flag !== null && typeof flag === 'object' && !Array.isArray(flag);
   const validType = validObject && (flag.type === undefined || flag.type === 'RE-REVIEW-REQUESTED');
   const allowedFields = flag?.type === undefined
-    ? ['additionalReviewer', 'reason']
-    : ['type', 'additionalReviewer', 'reason'];
+    ? AO_REVIEW_V1_CONTRACT.escalationRequired
+    : ['type', ...AO_REVIEW_V1_CONTRACT.escalationRequired];
   const exactFields = validObject && Object.keys(flag).every((field) => allowedFields.includes(field));
   const safeTarget = typeof flag?.additionalReviewer === 'string'
     && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(flag.additionalReviewer);

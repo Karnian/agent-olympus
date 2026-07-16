@@ -1,16 +1,14 @@
 import { spawn as nodeSpawn } from 'child_process';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { buildCodexExecArgs } from './codex-approval.mjs';
-import { codexVersionMeta, meetsMinimum } from './cli-version.mjs';
+import { codexVersionMeta } from './cli-version.mjs';
+import { requireCodexCapability } from './codex-version-gate.mjs';
 import { classifyCodexDiagnostic } from './codex-error-classifier.mjs';
 
 /** Valid resolved permission levels (mirrors codex-approval VALID_LEVELS). */
 const VALID_SPAWN_LEVELS = new Set(['suggest', 'auto-edit', 'full-auto']);
 const CODEX_EXEC_VERSION_NOTE =
   'codex {version} predates the 0.142.5 security fix (WebSocket payloads written to trace logs); upgrade recommended';
-const IGNORE_USER_CONFIG_MIN_VERSION = '0.122.0';
-const IGNORE_RULES_MIN_VERSION = '0.143.0';
-const STRICT_CONFIG_MIN_VERSION = '0.143.0';
 
 /**
  * @typedef {Object} CodexHandle
@@ -222,43 +220,13 @@ function spawnCodexProcess(args, prompt, opts = {}) {
   const workerMeta = probeCodexWorkerMeta(codexPath, opts);
 
   if (opts.ignoreUserConfig === true) {
-    if (
-      workerMeta.codexVersion === null
-      || !meetsMinimum(workerMeta.codexVersion, IGNORE_USER_CONFIG_MIN_VERSION)
-    ) {
-      const detected = workerMeta.codexVersion || 'unknown';
-      throw new Error(
-        `--no-mcp requires Codex >=${IGNORE_USER_CONFIG_MIN_VERSION} `
-        + `(--ignore-user-config support); detected ${detected}. `
-        + 'Upgrade with: npm install -g @openai/codex@latest',
-      );
-    }
+    requireCodexCapability(workerMeta.codexVersion, 'ignoreUserConfig');
   }
   if (opts.ignoreRules === true) {
-    if (
-      workerMeta.codexVersion === null
-      || !meetsMinimum(workerMeta.codexVersion, IGNORE_RULES_MIN_VERSION)
-    ) {
-      const detected = workerMeta.codexVersion || 'unknown';
-      throw new Error(
-        `read-only rule isolation requires Codex >=${IGNORE_RULES_MIN_VERSION} `
-        + `(--ignore-rules support); detected ${detected}. `
-        + 'Upgrade with: npm install -g @openai/codex@latest',
-      );
-    }
+    requireCodexCapability(workerMeta.codexVersion, 'ignoreRules');
   }
   if (opts.strictConfig === true) {
-    if (
-      workerMeta.codexVersion === null
-      || !meetsMinimum(workerMeta.codexVersion, STRICT_CONFIG_MIN_VERSION)
-    ) {
-      const detected = workerMeta.codexVersion || 'unknown';
-      throw new Error(
-        `strict validator config requires Codex >=${STRICT_CONFIG_MIN_VERSION} `
-        + `(--strict-config support); detected ${detected}. `
-        + 'Upgrade with: npm install -g @openai/codex@latest',
-      );
-    }
+    requireCodexCapability(workerMeta.codexVersion, 'strictConfig');
   }
 
   const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;

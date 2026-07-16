@@ -120,6 +120,19 @@ describe('AO_REVIEW_V1 contract', () => {
     }));
   });
 
+  it('requires line to be null whenever file is null', () => {
+    const finding = JSON.parse(result('code-reviewer', 'REVISE')).findings[0];
+    assert.throws(
+      () => parse(result('code-reviewer', 'REVISE', {
+        findings: [{ ...finding, file: null, line: 42 }],
+      })),
+      /line must be null when file is null/,
+    );
+    assert.doesNotThrow(() => parse(result('code-reviewer', 'REVISE', {
+      findings: [{ ...finding, file: null, line: null }],
+    })));
+  });
+
   it('requires escalations to target the active routed allowlist', () => {
     const escalation = [{ additionalReviewer: 'security-reviewer', reason: 'credential flow changed' }];
     const raw = result('code-reviewer', 'REVISE', { escalations: escalation });

@@ -2,11 +2,10 @@ import path from 'node:path';
 
 export const REVIEW_SCHEMA_VERSION = 1;
 
-const VERDICTS = new Set(['APPROVE', 'REVISE', 'REJECT', 'BLOCKED']);
-const SEVERITIES = new Set(['critical', 'high', 'medium', 'low', 'info']);
-const REVIEWER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-const REVIEW_DIGEST = /^[0-9a-f]{64}$/;
-const RESULT_FIELDS = Object.freeze([
+export const REVIEW_CONTRACT_NAME = 'AO_REVIEW_V1';
+export const REVIEW_VERDICTS = Object.freeze(['APPROVE', 'REVISE', 'REJECT', 'BLOCKED']);
+export const REVIEW_SEVERITIES = Object.freeze(['critical', 'high', 'medium', 'low', 'info']);
+export const REVIEW_RESULT_FIELDS = Object.freeze([
   'schemaVersion',
   'reviewer',
   'reviewDigest',
@@ -14,7 +13,7 @@ const RESULT_FIELDS = Object.freeze([
   'findings',
   'escalations',
 ]);
-const FINDING_FIELDS = Object.freeze([
+export const REVIEW_FINDING_FIELDS = Object.freeze([
   'severity',
   'confidence',
   'file',
@@ -22,7 +21,21 @@ const FINDING_FIELDS = Object.freeze([
   'evidence',
   'recommendation',
 ]);
-const ESCALATION_FIELDS = Object.freeze(['additionalReviewer', 'reason']);
+export const REVIEW_ESCALATION_FIELDS = Object.freeze(['additionalReviewer', 'reason']);
+
+export const AO_REVIEW_V1_CONTRACT = Object.freeze({
+  name: REVIEW_CONTRACT_NAME,
+  schemaVersion: REVIEW_SCHEMA_VERSION,
+  verdicts: REVIEW_VERDICTS,
+  required: REVIEW_RESULT_FIELDS,
+  findingRequired: REVIEW_FINDING_FIELDS,
+  escalationRequired: REVIEW_ESCALATION_FIELDS,
+});
+
+const VERDICTS = new Set(REVIEW_VERDICTS);
+const SEVERITIES = new Set(REVIEW_SEVERITIES);
+const REVIEWER_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const REVIEW_DIGEST = /^[0-9a-f]{64}$/;
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -134,7 +147,7 @@ function validateFinding(finding, index, errors, diffPathSet) {
     errors.push(`${prefix} must be an object`);
     return;
   }
-  validateExactFields(finding, FINDING_FIELDS, prefix, errors);
+  validateExactFields(finding, REVIEW_FINDING_FIELDS, prefix, errors);
   if (!SEVERITIES.has(finding.severity)) {
     errors.push(`${prefix}.severity is invalid`);
   }
@@ -175,7 +188,7 @@ export function parseReviewResult(rawOutput, options = {}) {
   if (!isPlainObject(result)) throw new Error('review output must be a JSON object');
 
   const errors = [];
-  validateExactFields(result, RESULT_FIELDS, 'result', errors);
+  validateExactFields(result, REVIEW_RESULT_FIELDS, 'result', errors);
   const diffPathSet = validateReviewPackageDiffPaths(options.reviewPackage, errors);
   const allowedReviewers = validateAllowedReviewers(options.allowedReviewers, errors);
   const expectedReviewDigest = validateExpectedReviewDigest(options, errors);
@@ -212,7 +225,12 @@ export function parseReviewResult(rawOutput, options = {}) {
         errors.push(`escalations[${index}] is invalid`);
         return;
       }
-      validateExactFields(escalation, ESCALATION_FIELDS, `escalations[${index}]`, errors);
+      validateExactFields(
+        escalation,
+        REVIEW_ESCALATION_FIELDS,
+        `escalations[${index}]`,
+        errors,
+      );
       if (!nonEmptyString(escalation.additionalReviewer)
         || !REVIEWER_NAME.test(escalation.additionalReviewer)
         || !nonEmptyString(escalation.reason)) {

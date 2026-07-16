@@ -7,6 +7,8 @@ import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { resolveGeminiBinary } from './gemini-binary.mjs';
 import { createGeminiReadOnlySettings } from './gemini-readonly.mjs';
 import { resolveCodexApproval, buildCodexExecArgs } from './codex-approval.mjs';
+import { codexVersionMeta } from './cli-version.mjs';
+import { requireCodexCapability } from './codex-version-gate.mjs';
 import { resolveGeminiApproval, geminiApprovalFlag } from './gemini-approval.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
 
@@ -60,6 +62,31 @@ function nameIdentityHash(name) {
 
 function teamSessionPrefix(teamName) {
   return `${SESSION_PREFIX}-${sanitizeName(teamName)}-${nameIdentityHash(teamName)}`;
+}
+
+function legacyTeamSessionName(teamName, workerName) {
+  return `${SESSION_PREFIX}-${sanitizeName(teamName)}-${sanitizeName(workerName)}`;
+}
+
+/**
+ * Match current and legacy sessions only by exact names reconstructed from
+ * durable worker identities.
+ *
+ * Prefix matching is unsafe across naming generations: the current prefix for
+ * team `alpha` can also prefix a legacy session whose team name embeds
+ * `alpha`'s hash. Without worker names we therefore claim no team-scoped
+ * sessions. The old format remains inherently ambiguous if distinct original
+ * team/worker identities sanitize to the exact same pair.
+ */
+function teamSessionMatcher(teamName, workerNames) {
+  const names = (Array.isArray(workerNames) ? workerNames : [])
+    .filter(name => typeof name === 'string' && name.length > 0);
+  const currentNames = new Set(names.map(name => sessionName(teamName, name)));
+  const legacyNames = new Set(
+    names.map(name => legacyTeamSessionName(teamName, name)),
+  );
+
+  return session => currentNames.has(session) || legacyNames.has(session);
 }
 
 /**
@@ -337,27 +364,31 @@ export function capturePane(sessionName, lines = 80) {
   }
 }
 
-export function killSession(name) {
+export function killSession(name, opts = {}) {
   try {
-    execFileSync(resolveBinary('tmux'), ['kill-session', '-t', name], { stdio: 'pipe' });
+    const exec = opts.execFileSync || execFileSync;
+    const tmux = opts.tmuxBinary || resolveBinary('tmux');
+    exec(tmux, ['kill-session', '-t', name], { stdio: 'pipe' });
     return true;
   } catch {
     return false;
   }
 }
 
-export function killTeamSessions(teamName) {
-  const prefix = `${teamSessionPrefix(teamName)}-`;
+export function killTeamSessions(teamName, opts = {}) {
+  const matchesTeam = teamSessionMatcher(teamName, opts.workerNames);
   try {
-    const sessions = execFileSync(resolveBinary('tmux'), ['list-sessions', '-F', '#{session_name}'], {
+    const exec = opts.execFileSync || execFileSync;
+    const tmux = opts.tmuxBinary || resolveBinary('tmux');
+    const sessions = exec(tmux, ['list-sessions', '-F', '#{session_name}'], {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim().split('\n');
 
     let killed = 0;
     for (const s of sessions) {
-      if (s.startsWith(prefix)) {
-        killSession(s);
+      if (matchesTeam(s)) {
+        killSession(s, { execFileSync: exec, tmuxBinary: tmux });
         killed++;
       }
     }
@@ -367,19 +398,21 @@ export function killTeamSessions(teamName) {
   }
 }
 
-export function listTeamSessions(teamName) {
-  const prefix = teamName
-    ? `${teamSessionPrefix(teamName)}-`
-    : SESSION_PREFIX;
+export function listTeamSessions(teamName, opts = {}) {
+  const matchesTeam = teamName
+    ? teamSessionMatcher(teamName, opts.workerNames)
+    : session => session.startsWith(`${SESSION_PREFIX}-`);
 
   try {
-    const sessions = execFileSync(resolveBinary('tmux'), ['list-sessions', '-F', '#{session_name}:#{session_created}'], {
+    const exec = opts.execFileSync || execFileSync;
+    const tmux = opts.tmuxBinary || resolveBinary('tmux');
+    const sessions = exec(tmux, ['list-sessions', '-F', '#{session_name}:#{session_created}'], {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim().split('\n');
 
     return sessions
-      .filter(s => s.startsWith(prefix))
+      .filter(s => matchesTeam(s.split(':', 1)[0]))
       .map(s => {
         const [name, created] = s.split(':');
         return { name, createdAt: parseInt(created) * 1000 };
@@ -442,12 +475,27 @@ function withExitMarker(cliCommand, safeFile, nonce, extraCleanupFiles = []) {
 }
 
 export function buildWorkerCommand(worker, opts = {}) {
+  // Read-only tmux uses flags that were introduced in Codex 0.143. Gate them
+  // before writing the prompt so an unsupported/unknown CLI leaves no temp
+  // artifact behind. The same authoritative checks guard the direct adapter.
+  let codexPath = null;
+  if (worker.type === 'codex' && worker.readOnly === true) {
+    codexPath = opts.codexBinary || resolveBinary('codex');
+    const meta = codexVersionMeta(codexPath, { versionProbe: opts.versionProbe });
+    requireCodexCapability(meta.codexVersion, 'ignoreRules');
+    requireCodexCapability(meta.codexVersion, 'strictConfig');
+    requireCodexCapability(meta.codexVersion, 'ignoreUserConfig');
+  }
+
   // Write the prompt to a temp file to avoid shell injection via inline quoting.
   // The command reads the file contents and passes them to the CLI via stdin
   // where possible, or via a subshell cat when the CLI only accepts a positional
   // argument. The temp file is removed and an exit-status sentinel emitted by
   // withExitMarker() once the CLI returns.
-  const promptFile = writePromptFile(worker.prompt);
+  const promptFileWriter = typeof opts.promptFileWriter === 'function'
+    ? opts.promptFileWriter
+    : writePromptFile;
+  const promptFile = promptFileWriter(worker.prompt);
   const safeFile = sanitizeForShellArg(promptFile);
   // Per-invocation hex nonce (from the caller) scopes the exit sentinel so
   // worker output can't forge a completion. Omitted → legacy unscoped marker.
@@ -469,7 +517,8 @@ export function buildWorkerCommand(worker, opts = {}) {
       const isolatedExec = worker.readOnly === true
         ? ' --ignore-user-config --ignore-rules --skip-git-repo-check --ephemeral'
         : '';
-      return withExitMarker(`"${resolveBinary('codex')}" ${codexArgs}${isolationOverrides} exec${isolatedExec} "$(cat "${safeFile}")"`, safeFile, exitNonce);
+      codexPath ||= opts.codexBinary || resolveBinary('codex');
+      return withExitMarker(`"${codexPath}" ${codexArgs}${isolationOverrides} exec${isolatedExec} -- "$(cat "${safeFile}")"`, safeFile, exitNonce);
     }
     case 'gemini': {
       // Mirror Claude's permission level to Gemini approval mode
@@ -499,8 +548,8 @@ export function buildWorkerCommand(worker, opts = {}) {
     default:
       return withExitMarker(
         worker.readOnly === true
-          ? `"${resolveBinary('claude')}" --print --bare --no-session-persistence --permission-mode plan --allowedTools Read Glob Grep "$(cat "${safeFile}")"`
-          : `"${resolveBinary('claude')}" --print "$(cat "${safeFile}")"`,
+          ? `"${resolveBinary('claude')}" --print --bare --no-session-persistence --permission-mode plan --allowedTools Read,Glob,Grep -- "$(cat "${safeFile}")"`
+          : `"${resolveBinary('claude')}" --print -- "$(cat "${safeFile}")"`,
         safeFile,
         exitNonce,
       );

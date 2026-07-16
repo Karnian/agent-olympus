@@ -18,6 +18,7 @@ export { DEFAULT_ROUTING_CONFIG };
 const CONFIDENCE_EXEMPT_CATEGORIES = new Set([
   'external-model',
   'design-review',
+  'code-review',
   'security-review',
   'test-authoring',
   'product-planning',
@@ -120,6 +121,7 @@ function buildRoutingAdvice(category, entry, confidence) {
   const adviceByCategory = {
     'visual-engineering': 'Visual/UI task detected. Designer agent with Gemini team worker is optimal for CSS, components, and layout work.',
     'design-review': 'Design review detected. Read-only Aphrodite review with a Sonnet-class model is recommended.',
+    'code-review': 'Claude-only code review detected. Route to the internal read-only Code Reviewer instead of an external-model query or mutation worker.',
     'security-review': 'Security review detected. Route to the dedicated read-only Security Reviewer with a Sonnet-class model.',
     'test-authoring': 'Test-authoring request detected. Route to the Test Engineer for test strategy, implementation, and execution.',
     'product-planning': 'Product planning detected. Route to Hermes, matching the /plan path for PRDs, product specs, and reverse specs.',

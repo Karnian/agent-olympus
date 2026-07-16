@@ -220,6 +220,11 @@ describe('intent-gate: intent classification produces routing context', () => {
       expectCategory: 'design-review',
     },
     {
+      label: 'code-review from an explicit Claude reviewer',
+      prompt: 'ask Claude to cross-review this change',
+      expectCategory: 'code-review',
+    },
+    {
       label: 'security-review from exact Korean security review prompt',
       prompt: '보안 리뷰해줘',
       expectCategory: 'security-review',
@@ -257,9 +262,29 @@ describe('intent-gate: intent classification produces routing context', () => {
 
   it('keeps UserPromptSubmit advice aligned with review and mutation-capable routes', () => {
     const design = runHook({ prompt: 'review the UI', cwd: tmpDir }, { cwd: tmpDir });
+    const codeReview = runHook({ prompt: 'ask Claude to cross-review this change', cwd: tmpDir }, { cwd: tmpDir });
     const mutation = runHook({ prompt: 'optimize this slow database query', cwd: tmpDir }, { cwd: tmpDir });
     assert.match(design.hookSpecificOutput?.additionalContext ?? '', /Aphrodite/);
+    assert.match(codeReview.hookSpecificOutput?.additionalContext ?? '', /read-only code-reviewer/i);
+    assert.doesNotMatch(codeReview.hookSpecificOutput?.additionalContext ?? '', /No strong intent signal|default model selection/i);
     assert.match(mutation.hookSpecificOutput?.additionalContext ?? '', /Hephaestus/);
+  });
+
+  it('keeps external-review UserPromptSubmit advice aligned with /ask routing', () => {
+    const prompts = [
+      'ask Codex to cross-review this change',
+      'use Gemini to review this change',
+      'Codex and Claude cross-review this change',
+      '교차 검증 해줘',
+    ];
+
+    for (const prompt of prompts) {
+      const output = runHook({ prompt, cwd: tmpDir }, { cwd: tmpDir });
+      const context = output.hookSpecificOutput?.additionalContext ?? '';
+      assert.match(context, /\[INTENT: external-model\b/, prompt);
+      assert.match(context, /\/ask/, prompt);
+      assert.doesNotMatch(context, /read-only code-reviewer/i, prompt);
+    }
   });
 
   it('keeps specialist and product-planning advice aligned with model routing', () => {

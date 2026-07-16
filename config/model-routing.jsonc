@@ -3,7 +3,7 @@
 // Changes here override the built-in defaults in scripts/lib/model-router.mjs.
 //
 // Route keys match intent categories from scripts/lib/intent-patterns.mjs:
-//   visual-engineering | design-review | security-review | test-authoring | product-planning | deep | deep-mutation | quick | writing | artistry | planning | external-model | unknown
+//   visual-engineering | design-review | code-review | security-review | test-authoring | product-planning | deep | deep-mutation | quick | writing | artistry | planning | external-model | unknown
 //
 // Model aliases: "opus" | "sonnet" | "haiku"  (resolved at runtime by Claude Code)
 // Agent aliases: any agent available via the Skill tool  (agent-olympus:<name>)
@@ -34,6 +34,15 @@
       "model": "sonnet",
       "fallbackChain": ["sonnet", "haiku"],
       "teamWorkerType": "gemini"
+    },
+
+    // Explicit Claude-only cross-review stays inside the read-only approval
+    // boundary instead of invoking /ask or a mutation-capable executor.
+    "code-review": {
+      "agent": "agent-olympus:code-reviewer",
+      "model": "sonnet",
+      "fallbackChain": ["sonnet", "opus"],
+      "teamWorkerType": null
     },
 
     // Explicit security review/audit requests

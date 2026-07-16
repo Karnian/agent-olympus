@@ -48,6 +48,15 @@ export const INTENT_CATEGORIES = {
     weight: 1.2,
   },
 
+  // Selected only by the provider-aware Claude review override below. A
+  // generic code review must not become mutation-capable merely because the
+  // requested reviewer is the host model rather than an external provider.
+  'code-review': {
+    patterns: [],
+    keywords: [],
+    weight: 1.3,
+  },
+
   // These specialist categories are selected by exact action overrides below.
   // Keeping them in the score map makes persisted intent state and routing
   // configuration share one complete category vocabulary.
@@ -202,7 +211,7 @@ export const INTENT_CATEGORIES = {
       // Korean: 코덱스한테 물어봐, 제미니한테 물어봐, 교차 리뷰, 상호 리뷰
       /(?:코덱스|codex)\s*(?:한테|에게|로|와|과)?\s*(?:물어|질문|리뷰|검토|분석|확인)/u,
       /(?:제미니|gemini)\s*(?:한테|에게|로|와|과)?\s*(?:물어|질문|리뷰|검토|분석|확인)/u,
-      /(?:교차\s*리뷰|상호\s*리뷰|교차\s*검토|상호\s*검토|크로스\s*리뷰|크로스\s*체크)/u,
+      /(?:교차\s*(?:리뷰|검토|검증)|상호\s*(?:리뷰|검토|검증)|크로스\s*(?:리뷰|체크))/u,
       // Japanese: Codexに聞いて, Geminiに聞いて, クロスレビュー (case-insensitive for Latin)
       /(?:codex|コデックス)(?:に|で)(?:聞|確認|レビュー|分析)/iu,
       /(?:gemini|ジェミニ)(?:に|で)(?:聞|確認|レビュー|分析)/iu,
@@ -219,6 +228,62 @@ export const INTENT_CATEGORIES = {
     weight: 1.5,
   },
 };
+
+const EXTERNAL_PROVIDER_REVIEW_ACTIONS = Object.freeze([
+  /\b(?:(?:codex|gemini)\s+(?:and|&)\s+claude(?:\s+code)?|claude(?:\s+code)?\s+(?:and|&)\s+(?:codex|gemini))\b[^.!?\n]{0,60}\b(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b/i,
+  /\b(?:ask|consult)\s+(?:the\s+)?(?:codex|gemini)\b[^.!?\n]{0,60}\b(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b/i,
+  /(?:^|[.!?;]\s*)(?:please\s+)?use\s+(?:the\s+)?(?:codex|gemini)\b[^.!?\n]{0,60}\b(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b/i,
+  /\b(?:can|could|would|will)\s+you\s+(?:please\s+)?use\s+(?:the\s+)?(?:codex|gemini)\b[^.!?\n]{0,60}\b(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b/i,
+  /\b(?:want|need)\s+(?:you\s+)?to\s+use\s+(?:the\s+)?(?:codex|gemini)\b[^.!?\n]{0,60}\b(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b/i,
+  /\b(?:codex|gemini)\b\s*(?:,|:|-)?\s*(?:please\s+)?(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b/i,
+  /\b(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b[^.!?\n]{0,60}\b(?:with|using|via|as)\s+(?:the\s+)?(?:codex|gemini)\b/i,
+  /\b(?:with|using|via|as)\s+(?:the\s+)?(?:codex|gemini)\b[^.!?\n]{0,60}\b(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b/i,
+  /\b(?:have|get)\b[^.!?\n]{0,60}\b(?:reviewed|checked|analy[sz]ed|verified)\s+by\s+(?:the\s+)?(?:codex|gemini)\b/i,
+  /(?:코덱스|codex|제미니|gemini)(?:를|을)?\s*(?:로|에게|한테|와|과|랑|이랑|가|이)[^.!?\n]{0,40}(?:교차\s*(?:리뷰|검토|검증)|리뷰|검토|검증|분석|확인)/iu,
+  /(?:교차\s*(?:리뷰|검토|검증)|리뷰|검토|검증|분석|확인)[^.!?\n]{0,40}(?:코덱스|codex|제미니|gemini)(?:를|을)?\s*(?:로|에게|한테)/iu,
+]);
+
+const CLAUDE_REVIEW_ACTIONS = Object.freeze([
+  /\bask\s+claude(?:\s+code)?\b[^.!?\n]{0,60}\b(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b/i,
+  /\bclaude(?:\s+code)?\b\s*(?:,|:|-)?\s*(?:please\s+)?(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b/i,
+  /\b(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b[^.!?\n]{0,60}\b(?:with|using|via|as)\s+claude(?:\s+code)?\b/i,
+  /\b(?:with|using|via|as)\s+claude(?:\s+code)?\b[^.!?\n]{0,60}\b(?:review|check|analy[sz]e|verify|cross[ -]?(?:review|validate|check))\b/i,
+  /\b(?:have|get)\b[^.!?\n]{0,60}\b(?:reviewed|checked|analy[sz]ed|verified)\s+by\s+claude(?:\s+code)?\b/i,
+  /(?:클로드|claude)(?:를|을)?(?:\s*코드)?\s*(?:로|에게|한테|가|이)[^.!?\n]{0,40}(?:교차\s*(?:리뷰|검토|검증)|리뷰|검토|검증|분석|확인)/iu,
+  /(?:교차\s*(?:리뷰|검토|검증)|리뷰|검토|검증|분석|확인)[^.!?\n]{0,40}(?:클로드|claude)(?:\s*코드)?(?:를|을)?\s*(?:로|에게|한테)/iu,
+]);
+
+// A provider name may describe where an artifact or earlier finding came
+// from, rather than who should perform the next action. Keep those provenance
+// forms out of provider routing so a local review stays read-only and a request
+// to apply existing findings remains mutation-capable.
+const PROVIDER_REVIEW_PROVENANCE = Object.freeze([
+  /\b(?:from|in|per|according\s+to|based\s+on)\s+(?:the\s+)?(?:claude|codex|gemini)(?:'s)?\s+(?:review|findings?|feedback|recommendations?)\b/i,
+  /\b(?:claude|codex|gemini)(?:'s)?\s+(?:review|findings?|feedback|recommendations?)\b[^.!?\n]{0,40}\b(?:found|identified|reported|recommended|suggested|noted|says?)\b/i,
+  /\b(?:found|identified|reported|recommended|suggested|noted)\s+by\s+(?:the\s+)?(?:claude|codex|gemini)(?:'s)?\s+(?:review|reviewer)?\b/i,
+  /\b(?:authored|generated|produced|written|created|made|suggested|recommended|reviewed|checked|analy[sz]ed|verified)\s+by\s+(?:the\s+)?(?:claude|codex|gemini)\b/i,
+  /\b(?:patch|output|result|code|change|suggestion|recommendation|feedback|artifact)\b[^.!?\n]{0,30}\bby\s+(?:the\s+)?(?:claude|codex|gemini)\b/i,
+  /\b(?:we|i)\s+use\s+(?:the\s+)?(?:claude|codex|gemini)\b/i,
+  /(?:클로드|claude|코덱스|codex|제미니|gemini)(?:가|이)\s*(?:리뷰|검토|검증|분석|확인)(?:한|했던)/iu,
+  /(?:클로드|claude|코덱스|codex|제미니|gemini)(?:의)?\s*(?:리뷰|검토|검증|분석|확인)\s*(?:결과|내용|피드백|권고|에서)/iu,
+  /(?:클로드|claude|코덱스|codex|제미니|gemini)(?:를|을)?\s*(?:로|가|이)\s*(?:만든|생성한|작성한|구현한|제안한)/iu,
+]);
+
+const PROVIDER_PROVENANCE_MUTATION_ACTIONS = Object.freeze([
+  /(?:^|[.!?]\s*)\s*(?:please\s+)?(?:fix|implement|apply|update|address|resolve|rewrite|change)\b/i,
+  /[,;]\s*(?:then\s+)?(?:please\s+)?(?:fix|implement)\b/i,
+  /\b(?:and|then)\s+(?:please\s+)?(?:fix|implement|apply|update|address|resolve|rewrite|change)\b/i,
+  /\bplease\s+(?:fix|implement|apply|update|address|resolve|rewrite|change)\b/i,
+  /\b(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:fix|implement|apply|update|address|resolve|rewrite|change)\b/i,
+  /\b(?:want|need)\s+(?:you\s+)?to\s+(?:fix|implement|apply|update|address|resolve|rewrite|change)\b/i,
+  /^(?:ask\s+)?(?:claude|codex|gemini)(?:\s+code)?\s*(?:,|:|-)?\s*(?:to\s+)?(?:please\s+)?(?:fix|implement|apply|update|address|resolve|rewrite|change)\b/i,
+  /(?:수정|변경|구현|반영|적용|해결)(?:해|하|해줘|해주세요|해\s*줘|하고|하여|해서)|고쳐/u,
+]);
+
+const GENERIC_REVIEW_ACTIONS = Object.freeze([
+  /\b(?:review|check|analy[sz]e|verify)\b/i,
+  /(?:리뷰|검토|검증|분석|확인)(?:을|를|해|하|해줘|해주세요)?/u,
+]);
 
 // Exact review verbs outrank broad visual nouns ("UI", "design"). Keep this
 // narrow so implementation requests such as "build a UI" remain visual work.
@@ -350,10 +415,48 @@ export function classifyIntent(text) {
     scores[category] = Math.round(score * 100) / 100;
   }
 
-  // Hard override: explicit external-model requests always win.
+  const hasExternalProviderReviewAction = EXTERNAL_PROVIDER_REVIEW_ACTIONS
+    .some(pattern => pattern.test(clean));
+  const hasClaudeReviewAction = CLAUDE_REVIEW_ACTIONS.some(pattern => pattern.test(clean));
+  const hasProviderReviewProvenance = PROVIDER_REVIEW_PROVENANCE
+    .some(pattern => pattern.test(clean));
+  const hasProvenanceMutationAction = PROVIDER_PROVENANCE_MUTATION_ACTIONS
+    .some(pattern => pattern.test(clean));
+  const hasGenericReviewAction = GENERIC_REVIEW_ACTIONS.some(pattern => pattern.test(clean));
+
+  if ((hasProviderReviewProvenance
+      || hasExternalProviderReviewAction
+      || hasClaudeReviewAction)
+    && hasProvenanceMutationAction) {
+    scores['external-model'] = 0;
+    scores['code-review'] = 0;
+    return {
+      category: scores.deep > 0 ? 'deep-mutation' : 'quick',
+      confidence: 0.7,
+      scores,
+    };
+  }
+
+  if (hasProviderReviewProvenance && hasGenericReviewAction) {
+    scores['external-model'] = 0;
+    scores['code-review'] = Math.max(scores['code-review'], INTENT_CATEGORIES['code-review'].weight);
+    return { category: 'code-review', confidence: 0.7, scores };
+  }
+
+  // Claude is the host model, not an external /ask provider. Keep Claude-only
+  // review requests on a read-only in-process reviewer. An explicit Codex or
+  // Gemini actor always wins for mixed-provider requests.
+  if (!hasExternalProviderReviewAction && hasClaudeReviewAction) {
+    scores['external-model'] = 0;
+    scores['code-review'] = Math.max(scores['code-review'], INTENT_CATEGORIES['code-review'].weight);
+    return { category: 'code-review', confidence: 0.7, scores };
+  }
+
+  // Hard override: explicit external-model requests always win. Providerless
+  // cross-review keeps the historical external-model default.
   // "ask codex to review this complex auth refactor" should route to /ask,
   // not to 'deep' because 'auth refactor' scored higher in that bucket.
-  if (scores['external-model'] > 0) {
+  if (scores['external-model'] > 0 || hasExternalProviderReviewAction) {
     return {
       category: 'external-model',
       // Explicit provider syntax is decisive even when many technical nouns

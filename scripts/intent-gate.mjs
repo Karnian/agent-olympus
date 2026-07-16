@@ -126,6 +126,7 @@ function buildAdvice(category, confidence, directory) {
   const adviceMap = {
     'visual-engineering': 'Consider using the designer agent or Gemini for visual/UI tasks. Sonnet-class model recommended.',
     'design-review': 'Design review detected. Use the read-only Aphrodite reviewer rather than an implementation agent.',
+    'code-review': 'Claude-only or provider-authored code review detected. Use the internal read-only code-reviewer rather than /ask or a mutation-capable implementation agent.',
     'security-review': 'Security review detected. Use the dedicated read-only security-reviewer agent.',
     'test-authoring': 'Test-authoring request detected. Use the test-engineer agent for test strategy, implementation, and execution.',
     'product-planning': 'Product planning detected. Use /plan, which invokes Hermes for PRDs, product specs, and reverse specs.',

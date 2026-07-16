@@ -20,6 +20,7 @@ export const DEFAULT_ROUTING_CONFIG = {
   routes: {
     'visual-engineering': { agent: 'agent-olympus:designer', model: 'sonnet', fallbackChain: ['sonnet', 'haiku'], teamWorkerType: 'gemini' },
     'design-review':      { agent: 'agent-olympus:aphrodite', model: 'sonnet', fallbackChain: ['sonnet', 'haiku'], teamWorkerType: 'gemini' },
+    'code-review':        { agent: 'agent-olympus:code-reviewer', model: 'sonnet', fallbackChain: ['sonnet', 'opus'], teamWorkerType: null },
     'security-review':    { agent: 'agent-olympus:security-reviewer', model: 'sonnet', fallbackChain: ['sonnet', 'opus'], teamWorkerType: null },
     'test-authoring':     { agent: 'agent-olympus:test-engineer', model: 'sonnet', fallbackChain: ['sonnet', 'opus'], teamWorkerType: null },
     'product-planning':   { agent: 'agent-olympus:hermes', model: 'opus', fallbackChain: ['opus', 'sonnet'], teamWorkerType: null },

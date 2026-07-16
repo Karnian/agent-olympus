@@ -46,11 +46,48 @@ const {
   parseStreamJsonEvents,
   mapClaudeCliError,
   classifyResultEvent,
+  _buildSpawnArgs,
   monitor,
   spawn,
   collect,
   shutdown,
 } = await import('../../scripts/lib/claude-cli.mjs');
+
+// ─── CLI argv composition ───────────────────────────────────────────────────
+
+describe('_buildSpawnArgs', () => {
+  it('encodes allowedTools as one value and terminates options before the prompt', () => {
+    const prompt = 'review the current tree';
+    const args = _buildSpawnArgs(prompt, {
+      permissionMode: 'plan',
+      allowedTools: ['Read', 'Glob', 'Grep'],
+    });
+    const allowedIndex = args.indexOf('--allowedTools');
+
+    assert.ok(allowedIndex >= 0);
+    assert.equal(args[allowedIndex + 1], 'Read,Glob,Grep');
+    assert.equal(args.filter(value => value === 'Read,Glob,Grep').length, 1);
+    assert.deepEqual(args.slice(-2), ['--', prompt]);
+    assert.equal(allowedIndex + 2, args.length - 2,
+      'minimal allowed-tools argv needs no optional flag between its value and --');
+  });
+
+  it('keeps all optional flags before the end-of-options marker', () => {
+    const prompt = '--prompt-that-looks-like-an-option';
+    const args = _buildSpawnArgs(prompt, {
+      permissionMode: 'plan',
+      allowedTools: ['Read'],
+      systemPrompt: 'system',
+      appendSystemPrompt: 'append',
+      maxBudgetUsd: 1.5,
+      model: 'sonnet',
+    });
+
+    assert.deepEqual(args.slice(-2), ['--', prompt]);
+    assert.ok(args.indexOf('--max-budget-usd') < args.indexOf('--'));
+    assert.equal(args.filter(value => value === '--').length, 1);
+  });
+});
 
 // ─── parseStreamJsonEvents ───────────────────────────────────────────────────
 

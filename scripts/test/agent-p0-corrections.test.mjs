@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { AO_REVIEW_V1_CONTRACT, parseReviewResult } from '../lib/review-contract.mjs';
 
 const testDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(testDir, '../..');
@@ -11,17 +12,52 @@ async function readAgent(name) {
   return fs.readFile(path.join(repoRoot, 'agents', `${name}.md`), 'utf8');
 }
 
-function parseAoReviewExample(source) {
-  const sectionStart = source.indexOf('## AO_REVIEW_V1 Routed Mode');
+function parseAoReviewExamples(source) {
+  const sectionStart = source.indexOf('AO_REVIEW_V1');
   assert.notEqual(sectionStart, -1, 'missing AO_REVIEW_V1 section');
 
   const section = source.slice(sectionStart);
-  const match = section.match(/```json\n([\s\S]*?)\n```/);
-  assert.ok(match, 'missing AO_REVIEW_V1 JSON example');
-  return JSON.parse(match[1]);
+  const examples = [...section.matchAll(/```json\n([\s\S]*?)\n```/g)]
+    .map(match => JSON.parse(match[1]));
+  assert.ok(examples.length > 0, 'missing AO_REVIEW_V1 JSON example');
+  return examples;
+}
+
+function parseAoReviewExample(source) {
+  return parseAoReviewExamples(source)[0];
 }
 
 describe('P0 agent definition corrections', () => {
+  it('parser-backs every routed reviewer example and documents file/line coupling', async () => {
+    const digest = 'a'.repeat(64);
+    const reviewers = ['architect', 'code-reviewer', 'aphrodite', 'security-reviewer', 'themis'];
+
+    for (const reviewer of reviewers) {
+      const source = await readAgent(reviewer);
+      assert.ok(
+        source.includes('`line` must be `null` whenever `file` is `null`.'),
+        `${reviewer}: missing exact file/line coupling sentence`,
+      );
+
+      for (const [index, example] of parseAoReviewExamples(source).entries()) {
+        example.reviewDigest = digest;
+        const diffPaths = example.findings
+          .map(finding => finding.file)
+          .filter(file => file !== null);
+
+        assert.doesNotThrow(() => parseReviewResult(JSON.stringify(example), {
+          expectedReviewer: reviewer,
+          expectedReviewDigest: digest,
+          allowedReviewers: reviewers,
+          reviewPackage: {
+            diffPaths,
+            reviewDigest: { algorithm: 'sha256', value: digest },
+          },
+        }), `${reviewer} example ${index}: documented AO_REVIEW_V1 must satisfy the real parser`);
+      }
+    }
+  });
+
   it('gives each routed reviewer the exact AO_REVIEW_V1 envelope', async () => {
     for (const reviewer of ['themis', 'aphrodite', 'security-reviewer']) {
       const source = await readAgent(reviewer);
@@ -29,7 +65,7 @@ describe('P0 agent definition corrections', () => {
 
       assert.deepEqual(
         Object.keys(example),
-        ['schemaVersion', 'reviewer', 'reviewDigest', 'verdict', 'findings', 'escalations'],
+        AO_REVIEW_V1_CONTRACT.required,
         `${reviewer}: AO_REVIEW_V1 top-level keys drifted`,
       );
       assert.equal(example.schemaVersion, 1);
@@ -42,7 +78,7 @@ describe('P0 agent definition corrections', () => {
       assert.equal(example.findings.length, 1, `${reviewer}: contract example needs one finding`);
       assert.deepEqual(
         Object.keys(example.findings[0]),
-        ['severity', 'confidence', 'file', 'line', 'evidence', 'recommendation'],
+        AO_REVIEW_V1_CONTRACT.findingRequired,
         `${reviewer}: AO_REVIEW_V1 finding keys drifted`,
       );
       assert.ok(example.findings[0].confidence >= 0 && example.findings[0].confidence <= 1);
