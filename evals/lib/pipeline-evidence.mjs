@@ -50,6 +50,41 @@ const ATHENA_INTEGRATE_OUTPUT_KEYS = [
   'worktreeDigest', 'verificationPassed', 'integrationCommit',
 ];
 const ATHENA_COMPLETE_OUTPUT_KEYS = ['teamSlug', 'worktreeDigest', 'cleanupState'];
+const PHASE_STATUS_VALUES = new Set(['pending', 'in_progress', 'completed', 'skipped', 'failed']);
+const SUMMARY_STATUS_VALUES = new Set(['running', 'completed']);
+const SUMMARY_RESULT_VALUES = new Set(['success', 'failure']);
+const KNOWN_EVENT_TYPES = new Set([
+  'checkpoint_cleared',
+  'checkpoint_saved',
+  'ci_fix_candidate',
+  'ci_fix_started',
+  'ci_head_target',
+  'handoff_resumed',
+  'human_ship_approval',
+  'native_team_created',
+  'native_team_deleted',
+  'native_team_shutdown_complete',
+  'native_teammate_spawned',
+  'phase_transition',
+  'pipeline_phase_completed',
+  'pipeline_phase_failed',
+  'pipeline_phase_outputs_recorded',
+  'run_finalized',
+  'ship_intent',
+  'subagent_completed',
+  'user_task_update',
+  'verification_result',
+  'warning',
+  'worker_completed',
+  'worker_failed',
+  'worker_spawned',
+]);
+const GUARD_COUNTER_CAPS = new Map([
+  ['iterations', 15],
+  ['reviewRounds', 3],
+  ['ci-cycles', 2],
+  ['monitor-iterations', 10],
+]);
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -251,6 +286,128 @@ function activePointerPath(workdir, orchestrator) {
   return path.join(workdir, '.ao', 'state', `ao-active-run-${orchestrator}.json`);
 }
 
+function normalizedStructuralValue(value, allowed) {
+  if (value === undefined) return null;
+  return allowed.has(value) ? value : 'unknown';
+}
+
+/**
+ * Best-effort diagnostics for a run that still owns its active pointer.
+ *
+ * Every file is read through the same bounded, no-follow reader used by the
+ * evidence gate. Only fixed-schema structural values leave this function;
+ * task text, outputs, event detail, error samples, and arbitrary keys never do.
+ */
+function activeRunDiagnostics(handle) {
+  const diagnostics = {
+    artifactReads: {
+      pipeline: false,
+      summary: false,
+      events: false,
+      guard: false,
+    },
+    pipeline: {
+      attempt: null,
+      phaseStatuses: {},
+    },
+    summary: {
+      status: null,
+      result: null,
+    },
+    lastEvent: null,
+    guardCounterCounts: {},
+  };
+
+  try {
+    const sequence = getPhaseSequence(handle.orchestrator);
+    const knownPhases = new Set(sequence.map((phase) => phase.id));
+
+    const pipelineFile = readRegularFile(handle.pipelinePath, MAX_PIPELINE_BYTES);
+    diagnostics.artifactReads.pipeline = pipelineFile.ok;
+    if (pipelineFile.ok) {
+      const parsed = parseJson(pipelineFile.buffer, 'pipeline.json');
+      const ledger = parsed.ok ? parsed.value : null;
+      if (ledger?.schemaVersion === 1
+        && ledger.runId === handle.pipelineRunId
+        && ledger.orchestrator === handle.orchestrator) {
+        if (Number.isInteger(ledger.attempt) && ledger.attempt >= 1 && ledger.attempt <= 15) {
+          diagnostics.pipeline.attempt = ledger.attempt;
+        }
+        if (isPlainObject(ledger.phases)) {
+          for (const { id } of sequence) {
+            const entry = ledger.phases[id];
+            if (!isPlainObject(entry) || !Object.hasOwn(entry, 'status')) continue;
+            diagnostics.pipeline.phaseStatuses[id] = normalizedStructuralValue(
+              entry.status,
+              PHASE_STATUS_VALUES,
+            );
+          }
+        }
+      }
+    }
+
+    const summaryFile = readRegularFile(path.join(handle.runDir, 'summary.json'), MAX_SUMMARY_BYTES);
+    diagnostics.artifactReads.summary = summaryFile.ok;
+    if (summaryFile.ok) {
+      const parsed = parseJson(summaryFile.buffer, 'summary.json');
+      const summary = parsed.ok ? parsed.value : null;
+      if (summary?.runId === handle.pipelineRunId
+        && summary.orchestrator === handle.orchestrator
+        && summary.task === handle.taskDescription) {
+        diagnostics.summary.status = normalizedStructuralValue(
+          summary.status,
+          SUMMARY_STATUS_VALUES,
+        );
+        diagnostics.summary.result = normalizedStructuralValue(
+          summary.result,
+          SUMMARY_RESULT_VALUES,
+        );
+      }
+    }
+
+    const eventsFile = readRegularFile(path.join(handle.runDir, 'events.jsonl'), MAX_EVENTS_BYTES);
+    diagnostics.artifactReads.events = eventsFile.ok;
+    if (eventsFile.ok) {
+      const text = eventsFile.buffer.toString('utf-8').trimEnd();
+      if (text !== '') {
+        const lastLine = text.slice(text.lastIndexOf('\n') + 1).replace(/\r$/, '');
+        try {
+          const event = JSON.parse(lastLine);
+          if (isPlainObject(event)) {
+            diagnostics.lastEvent = {
+              type: KNOWN_EVENT_TYPES.has(event.type) ? event.type : 'unknown',
+              phase: knownPhases.has(event.phase) ? event.phase : null,
+            };
+          } else {
+            diagnostics.lastEvent = { type: 'invalid', phase: null };
+          }
+        } catch {
+          diagnostics.lastEvent = { type: 'invalid', phase: null };
+        }
+      }
+    }
+
+    const guardFile = readRegularFile(path.join(handle.runDir, 'loop-guard.json'), MAX_GUARD_BYTES);
+    diagnostics.artifactReads.guard = guardFile.ok;
+    if (guardFile.ok) {
+      const parsed = parseJson(guardFile.buffer, 'loop-guard.json');
+      const guard = parsed.ok ? parsed.value : null;
+      if (guard?.schemaVersion === 1 && isPlainObject(guard.counters)) {
+        for (const [name, cap] of GUARD_COUNTER_CAPS) {
+          const count = guard.counters[name]?.count;
+          if (Number.isSafeInteger(count) && count >= 0 && count <= cap) {
+            diagnostics.guardCounterCounts[name] = count;
+          }
+        }
+      }
+    }
+  } catch {
+    // Diagnostics must never alter the active-pointer failure gate.
+  }
+
+  return diagnostics;
+}
+
 /**
  * Pre-allocate the production Atlas/Athena run identity in the isolated trial.
  * The orchestrator must adopt this active-run pointer and finalize the same run.
@@ -361,7 +518,12 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
   }
 
   if (existsNoFollow(activePointerPath(handle.workdir, handle.orchestrator))) {
-    return fail(handle, 'active-run-not-finalized', 'The orchestrator left its active-run pointer behind.');
+    return fail(
+      handle,
+      'active-run-not-finalized',
+      'The orchestrator left its active-run pointer behind.',
+      { diagnostics: activeRunDiagnostics(handle) },
+    );
   }
 
   const pipelineFile = readRegularFile(handle.pipelinePath, MAX_PIPELINE_BYTES);

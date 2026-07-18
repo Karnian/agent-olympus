@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const VALID_TRACKS = new Set(['all', 'regression', 'capability']);
-const TASK_KEYS = new Set([
+const REQUIRED_TASK_KEYS = new Set([
   'schemaVersion',
   'id',
   'track',
@@ -21,8 +21,15 @@ const TASK_KEYS = new Set([
   'modelTier',
   'k',
 ]);
+const TASK_KEYS = new Set([...REQUIRED_TASK_KEYS, 'agent', 'maxBudgetUsd']);
 const TASK_TRACKS = new Set(['regression', 'capability']);
-const ORCHESTRATORS = new Set(['atlas', 'athena', 'solo']);
+const ORCHESTRATORS = new Set(['atlas', 'athena', 'solo', 'agent']);
+const AGENT_NAMES = new Set([
+  'atlas', 'athena', 'metis', 'prometheus', 'momus', 'hermes', 'executor',
+  'designer', 'aphrodite', 'test-engineer', 'debugger', 'architect',
+  'security-reviewer', 'code-reviewer', 'explore', 'writer', 'hephaestus',
+  'ask', 'themis',
+]);
 const SAFE_MODEL_SELECTOR = /^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/;
 const EVAL_LIB_DIR = path.dirname(fileURLToPath(import.meta.url));
 const EVALS_DIR = path.dirname(EVAL_LIB_DIR);
@@ -56,7 +63,7 @@ export function validateTaskDefinition(task) {
   }
   const errors = [];
   const keys = Object.keys(task);
-  for (const key of TASK_KEYS) {
+  for (const key of REQUIRED_TASK_KEYS) {
     if (!Object.hasOwn(task, key)) errors.push(`${key} is required`);
   }
   for (const key of keys) {
@@ -65,7 +72,25 @@ export function validateTaskDefinition(task) {
   if (task.schemaVersion !== 1) errors.push('schemaVersion must be 1');
   if (typeof task.id !== 'string' || task.id.trim() === '') errors.push('id must be a non-empty string');
   if (!TASK_TRACKS.has(task.track)) errors.push('track must be one of: regression, capability');
-  if (!ORCHESTRATORS.has(task.orchestrator)) errors.push('orchestrator must be one of: atlas, athena, solo');
+  if (!ORCHESTRATORS.has(task.orchestrator)) {
+    errors.push('orchestrator must be one of: atlas, athena, solo, agent');
+  }
+  if (task.orchestrator === 'agent') {
+    if (!Object.hasOwn(task, 'agent')) errors.push('agent is required when orchestrator is agent');
+    else if (!AGENT_NAMES.has(task.agent)) errors.push('agent must name a bundled Agent Olympus agent');
+    if (task.track !== 'capability') errors.push('direct-agent tasks must use capability track');
+    if (!Object.hasOwn(task, 'maxBudgetUsd')) {
+      errors.push('maxBudgetUsd is required when orchestrator is agent');
+    }
+  } else if (Object.hasOwn(task, 'agent')) {
+    errors.push('agent is only allowed when orchestrator is agent');
+  }
+  if (Object.hasOwn(task, 'maxBudgetUsd')
+    && (!Number.isFinite(task.maxBudgetUsd)
+      || task.maxBudgetUsd <= 0
+      || task.maxBudgetUsd > 100)) {
+    errors.push('maxBudgetUsd must be a finite number greater than 0 and at most 100');
+  }
   if (typeof task.prompt !== 'string' || task.prompt.trim() === '') errors.push('prompt must be a non-empty string');
   if (typeof task.difficulty !== 'string') errors.push('difficulty must be a string');
   if (!Number.isInteger(task.timeoutMs) || task.timeoutMs < 1) errors.push('timeoutMs must be a positive integer');
@@ -101,7 +126,7 @@ function fingerprintFiles(domain, files) {
   const hash = createHash('sha256');
   hash.update(`${domain}\0`);
   for (const file of [...files].sort((a, b) => a.relativePath.localeCompare(b.relativePath))) {
-    const content = readFileSync(file.absolutePath);
+    const content = file.content ?? readFileSync(file.absolutePath);
     hash.update(file.relativePath);
     hash.update('\0');
     hash.update(String(content.length));
@@ -215,6 +240,39 @@ export function collectPipelineProtocolFiles({
 export function fingerprintBenchmark(taskDir) {
   return fingerprintFiles('agent-olympus-eval-benchmark-v3', [
     ...taskFiles(path.resolve(taskDir)),
+    ...GRADER_RUNTIME_FILES.map((name) => ({
+      absolutePath: path.join(EVAL_LIB_DIR, name),
+      relativePath: `grader-runtime/${name}`,
+    })),
+  ]);
+}
+
+/**
+ * Hash the treatment-neutral task fixture for paired persona comparisons.
+ *
+ * The task id and selected agent identify an experimental arm, so they remain
+ * in `fingerprintBenchmark()` but are deliberately excluded here. All other
+ * prompt/behavior fields plus the seed, grader, and grader runtime must match
+ * before two arms can claim an apples-to-apples fixture. Route, model, timeout,
+ * k, and budget are treatment/measurement provenance, not fixture identity.
+ */
+export function fingerprintComparableFixture(taskDir) {
+  const resolvedTaskDir = path.resolve(taskDir);
+  const task = validateTaskDefinition(JSON.parse(
+    readFileSync(path.join(resolvedTaskDir, 'task.json'), 'utf-8'),
+  ));
+  const neutralContract = {
+    schemaVersion: task.schemaVersion,
+    track: task.track,
+    prompt: task.prompt,
+    difficulty: task.difficulty,
+  };
+  return fingerprintFiles('agent-olympus-eval-comparable-fixture-v1', [
+    {
+      relativePath: 'task-contract.json',
+      content: Buffer.from(JSON.stringify(neutralContract), 'utf-8'),
+    },
+    ...taskFiles(resolvedTaskDir).filter((file) => file.relativePath !== 'task.json'),
     ...GRADER_RUNTIME_FILES.map((name) => ({
       absolutePath: path.join(EVAL_LIB_DIR, name),
       relativePath: `grader-runtime/${name}`,

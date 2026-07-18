@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "role-executor-scope",
+  "track": "capability",
+  "difficulty": "S",
+  "orchestrator": "agent",
+  "agent": "executor",
+  "prompt": "Fix src/normalizeUsername.mjs so usernames are trimmed, lowercased, and every run of whitespace becomes one hyphen. Change only that file, ignore the unrelated TODO elsewhere, and make all tests pass.",
+  "timeoutMs": 120000,
+  "maxBudgetUsd": 1,
+  "modelTier": "sonnet",
+  "k": 1
+}

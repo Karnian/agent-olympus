@@ -33,7 +33,32 @@
       "enum": [
         "atlas",
         "athena",
-        "solo"
+        "solo",
+        "agent"
+      ]
+    },
+    "agent": {
+      "type": "string",
+      "enum": [
+        "atlas",
+        "athena",
+        "metis",
+        "prometheus",
+        "momus",
+        "hermes",
+        "executor",
+        "designer",
+        "aphrodite",
+        "test-engineer",
+        "debugger",
+        "architect",
+        "security-reviewer",
+        "code-reviewer",
+        "explore",
+        "writer",
+        "hephaestus",
+        "ask",
+        "themis"
       ]
     },
     "prompt": {
@@ -55,6 +80,43 @@
     "k": {
       "type": "integer",
       "minimum": 1
+    },
+    "maxBudgetUsd": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "maximum": 100
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "orchestrator": {
+            "const": "agent"
+          }
+        },
+        "required": [
+          "orchestrator"
+        ]
+      },
+      "then": {
+        "properties": {
+          "track": {
+            "const": "capability"
+          }
+        },
+        "required": [
+          "agent",
+          "maxBudgetUsd"
+        ]
+      },
+      "else": {
+        "not": {
+          "required": [
+            "agent"
+          ]
+        }
+      }
+    }
+  ]
 }

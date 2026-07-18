@@ -38,6 +38,18 @@ differ:
 - Athena live eval now uses its production phase-runner/finalization contract,
   including its distinct spawn/monitor/integrate recovery phases. It remains an
   operator-only path and is not executed by public CI.
+- Direct specialist evaluation now uses Claude's plugin-agent route
+  (`--agent agent-olympus:<name>`) with a hook-free staged snapshot,
+  project-only settings, and a plain task prompt. The solo control uses safe
+  mode with no plugin. Exact agent, prompt/plugin hashes, CLI version, resolved
+  model IDs, effective budget, cost, duration, and treatment consistency are
+  retained as provenance. Headless runs also disable prompt-suggestion messages,
+  pin effort to `high`, and retain reported fast-mode/speed/service-tier state.
+- Every live task requires a positive per-trial provider cap. Live suites also
+  require explicit k and aggregate caps, reject unsafe projected schedules
+  before spawning, and stop on an over-cap or unreported-cost child. Independent
+  outcome fields remain visible when route, trajectory, provenance, or budget
+  makes the overall verdict fail.
 - Regression uses pass^k as its gate. Capability uses pass@k and is report-only,
   including the single-task CLI exit contract.
 - HU-17 now supplies explicit terminal-failure markers and a local
@@ -67,8 +79,8 @@ Historical pre-HU-01 baseline: `evals/` was absent and `scripts/` had no
 ## Goal
 
 A **zero-dependency, Node-built-in** eval harness that:
-1. Runs the orchestrators (Atlas / Athena / solo) headless over a fixed **golden
-   task set**.
+1. Runs the orchestrators (Atlas / Athena / solo) and individual plugin agents
+   headless over a fixed **golden task set**.
 2. Requires a finalized production pipeline ledger for supported live Atlas and Athena runs,
    proving that the selected orchestrator exercised its required cooperative
    protocol instead of merely returning a successful provider event.
@@ -85,7 +97,13 @@ A **zero-dependency, Node-built-in** eval harness that:
 ## ⚠️ Codex critique (2026-06-17 cross-review) — read before building
 
 **The weakest link is headless orchestrator execution, and HU-06 is a prerequisite, not a sibling.**
-This spec assumes `claude -p "/atlas …"` reproduces real Olympus orchestrator behavior — but
+This historical critique assumed `claude -p "/atlas …"`; the implemented live
+harness now uses the required plugin namespace, `claude -p
+"/agent-olympus:atlas …"`. With that invocation corrected, the remaining point
+still applies: even a correctly loaded `skills/atlas/SKILL.md` is a prose
+protocol whose compliance must be proven by the durable pipeline evidence.
+
+The spec assumes the namespaced invocation reproduces real Olympus orchestrator behavior — but
 `skills/atlas/SKILL.md` is a **prose protocol** (non-interactive confirmations, pseudo-code
 imports, `Output` directives, phase jumps), not an executable state machine. As written, the CI
 grader risks measuring *"how faithfully Claude followed that prose on that run"* rather than the
@@ -119,7 +137,7 @@ evals/
       grader.mjs         # export async function grade(workdir) -> { pass:boolean, checks:[{name,pass,detail}] }
   run.mjs                # the runner (drives orchestrator headless, k trials, scores)
   lib/
-    orchestrate.mjs      # headless invocation of /atlas|/athena|solo via `claude -p`
+    orchestrate.mjs      # namespaced Atlas/Athena skill invocation; plain-prompt solo control
     score.mjs            # pass@k / pass^k math + track rollups
   results/
     <runId>/
@@ -184,8 +202,9 @@ Each grader is deterministic and **self-contained** (no network, no model):
 ### Output & trend
 - `summary.json` carries per-task `pass^k`, per-track rollup, **real token cost**
   (HU-03), pipeline-evidence policy/trust rollups, and `delta_vs_baseline`.
-- A `node evals/report.mjs --trend` rolls `results/*/summary.json` into a
-  release-over-release quality line (the cross-run trend Olympus lacks today).
+- A `node evals/report.mjs --trend` rolls `results/*/summary.json` into
+  release-over-release track lines plus persona-specific direct-agent series
+  with outcome, overall verdict, cost/latency/turns, and treatment provenance.
 - Eval `summary.json` and `results.jsonl` outputs use atomic full-file writes.
   Production run artifacts inspected by the verifier use the bounded no-follow
   `run-artifacts.mjs`/`hardened-fs.mjs` contract, but attestation parsing remains

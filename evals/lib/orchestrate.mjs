@@ -9,9 +9,22 @@ const SHUTDOWN_GRACE_MS = 5000;
 const REPO_ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const VALID_STATUSES = new Set(['completed', 'failed', 'timeout']);
 const SAFE_MODEL_SELECTOR = /^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/;
+const SAFE_AGENT_SELECTOR = /^[a-z][a-z0-9-]{0,63}$/;
+const PLUGIN_NAMESPACE = 'agent-olympus';
 
 function normalizeTimeoutMs(value) {
   return Number.isFinite(value) && value >= 0 ? value : DEFAULT_TIMEOUT_MS;
+}
+
+function normalizeMaxBudgetUsd(value, { required = false } = {}) {
+  if (value === undefined || value === null) {
+    if (required) throw new Error('Direct-agent live runs require maxBudgetUsd');
+    return null;
+  }
+  if (!Number.isFinite(value) || value <= 0 || value > 100) {
+    throw new Error(`Unsafe Claude max budget: ${String(value)}`);
+  }
+  return value;
 }
 
 function normalizeStatus(status, fallback = 'completed') {
@@ -29,7 +42,7 @@ function normalizeModelTier(value) {
   return modelTier;
 }
 
-function buildLiveEnv(cwd) {
+function buildLiveEnv(cwd, orchestrator) {
   const env = { ...process.env, PWD: resolve(cwd) };
   // The live worker needs provider credentials, but inherited shell/package
   // location hints can point straight back to the source repository that owns
@@ -43,6 +56,11 @@ function buildLiveEnv(cwd) {
     'CLAUDE_PROJECT_DIR',
     'CLAUDE_PLUGIN_ROOT',
   ]) delete env[key];
+  delete env.DISABLE_AO;
+  // Direct persona and solo-control measurements must not receive the
+  // production intent/model router's role recommendation. Their staged plugin
+  // also omits hooks; this remains a defense-in-depth guard.
+  if (orchestrator === 'agent' || orchestrator === 'solo') env.DISABLE_AO = '1';
   return env;
 }
 
@@ -126,21 +144,97 @@ async function runFixture({ fixture, cwd }) {
   };
 }
 
-function buildClaudeArgs({ orchestrator, prompt, pluginDir, modelTier }) {
+function buildClaudeArgs({
+  orchestrator,
+  agentName,
+  prompt,
+  pluginDir,
+  modelTier,
+  maxBudgetUsd,
+}) {
+  let invocation;
+  if (orchestrator === 'atlas' || orchestrator === 'athena') {
+    // Skills loaded from --plugin-dir are always namespaced by the plugin
+    // manifest name. An unnamespaced `/atlas` is not the Agent Olympus skill;
+    // Claude can treat the remainder as an ordinary prompt and produce a
+    // functionally correct patch without any orchestration evidence.
+    invocation = `/${PLUGIN_NAMESPACE}:${orchestrator} ${prompt}`;
+  } else if (orchestrator === 'solo') {
+    // Solo is the control arm, not a plugin skill or slash command.
+    invocation = prompt;
+  } else if (orchestrator === 'agent') {
+    if (!SAFE_AGENT_SELECTOR.test(String(agentName ?? ''))) {
+      throw new Error(`Unsafe Agent Olympus agent selector: ${String(agentName)}`);
+    }
+    // --agent activates the persona's system prompt and tool restrictions for
+    // the whole isolated session. The user task remains an ordinary prompt.
+    invocation = prompt;
+  } else {
+    throw new Error(`Unsupported live orchestrator: ${String(orchestrator)}`);
+  }
+  const effectiveMaxBudgetUsd = normalizeMaxBudgetUsd(maxBudgetUsd, {
+    required: orchestrator === 'agent',
+  });
   return [
     '-p',
-    `/${orchestrator} ${prompt}`,
+    invocation,
     '--output-format',
     'stream-json',
     '--verbose',
     '--permission-mode',
     'bypassPermissions',
     '--no-session-persistence',
+    '--prompt-suggestions',
+    'false',
+    '--effort',
+    'high',
     '--model',
     modelTier,
-    '--plugin-dir',
-    pluginDir,
+    ...(effectiveMaxBudgetUsd === null
+      ? []
+      : ['--max-budget-usd', String(effectiveMaxBudgetUsd)]),
+    ...(orchestrator === 'agent'
+      ? ['--agent', `${PLUGIN_NAMESPACE}:${agentName}`]
+      : []),
+    ...(orchestrator === 'solo'
+      ? ['--safe-mode']
+      : ['--setting-sources', 'project', '--plugin-dir', pluginDir]),
   ];
+}
+
+function invocationMetadata({ orchestrator, agentName, modelTier, maxBudgetUsd }) {
+  const directAgent = orchestrator === 'agent';
+  const skill = orchestrator === 'atlas' || orchestrator === 'athena';
+  return {
+    route: directAgent ? 'direct-agent' : skill ? 'plugin-skill' : 'plain-control',
+    target: directAgent
+      ? `${PLUGIN_NAMESPACE}:${agentName}`
+      : skill
+        ? `/${PLUGIN_NAMESPACE}:${orchestrator}`
+        : 'plain-prompt',
+    promptMode: skill ? 'namespaced-skill-command' : 'plain',
+    pluginHooksEnabled: skill,
+    customizationBoundary: skill || directAgent ? 'project-settings-only' : 'safe-mode',
+    promptSuggestions: false,
+    effort: 'high',
+    modelSelector: modelTier,
+    maxBudgetUsd: maxBudgetUsd ?? null,
+  };
+}
+
+function observedModels(events, resultEvent) {
+  const models = new Set();
+  for (const event of events) {
+    if (typeof event?.model === 'string' && SAFE_MODEL_SELECTOR.test(event.model)) {
+      models.add(event.model);
+    }
+  }
+  if (resultEvent?.modelUsage && typeof resultEvent.modelUsage === 'object') {
+    for (const model of Object.keys(resultEvent.modelUsage)) {
+      if (SAFE_MODEL_SELECTOR.test(model)) models.add(model);
+    }
+  }
+  return [...models].sort().slice(0, 16);
 }
 
 function killChild(child, signal) {
@@ -205,7 +299,17 @@ function parseTerminalStream(stdout) {
   return { events, malformedLines, resultEvent, finalEvent, resultCategory };
 }
 
-function parseLiveResult({ stdout, stderr, timedOut, exitCode, signal, error, args, modelTier }) {
+function parseLiveResult({
+  stdout,
+  stderr,
+  timedOut,
+  exitCode,
+  signal,
+  error,
+  args,
+  modelTier,
+  invocation,
+}) {
   const parsed = parseTerminalStream(stdout);
   const finalEvent = error ? errorToEvent(error) : parsed.finalEvent;
   // Exit 0 is insufficient. A successful live run has exactly one result event,
@@ -220,6 +324,10 @@ function parseLiveResult({ stdout, stderr, timedOut, exitCode, signal, error, ar
     status,
     finalEvent,
     usage: parsed.resultEvent?.usage ?? null,
+    invocation: {
+      ...invocation,
+      observedModels: observedModels(parsed.events, parsed.resultEvent),
+    },
     timedOut,
     raw: {
       argv: ['claude', ...args],
@@ -238,10 +346,12 @@ function parseLiveResult({ stdout, stderr, timedOut, exitCode, signal, error, ar
 
 async function runLive({
   orchestrator,
+  agentName,
   prompt,
   cwd,
   timeoutMs,
   modelTier,
+  maxBudgetUsd,
   pluginDir,
   spawn,
 }) {
@@ -251,16 +361,24 @@ async function runLive({
   const effectiveModelTier = normalizeModelTier(modelTier);
   const args = buildClaudeArgs({
     orchestrator,
+    agentName,
     prompt,
     pluginDir: effectivePluginDir,
     modelTier: effectiveModelTier,
+    maxBudgetUsd,
+  });
+  const invocation = invocationMetadata({
+    orchestrator,
+    agentName,
+    modelTier: effectiveModelTier,
+    maxBudgetUsd: normalizeMaxBudgetUsd(maxBudgetUsd, { required: orchestrator === 'agent' }),
   });
 
   let child;
   try {
     child = spawn('claude', args, {
       cwd,
-      env: buildLiveEnv(cwd),
+      env: buildLiveEnv(cwd, orchestrator),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true,
     });
@@ -274,6 +392,7 @@ async function runLive({
       error,
       args,
       modelTier: effectiveModelTier,
+      invocation,
     });
   }
 
@@ -300,6 +419,7 @@ async function runLive({
         error,
         args,
         modelTier: effectiveModelTier,
+        invocation,
       }));
     };
 
@@ -337,11 +457,13 @@ async function runLive({
  * with this repository loaded as the plugin directory and without --bare.
  *
  * @param {object} params
- * @param {'atlas'|'athena'|'solo'} params.orchestrator Orchestrator command.
+ * @param {'atlas'|'athena'|'solo'|'agent'} params.orchestrator Execution target kind.
+ * @param {string} [params.agentName] Bundled agent name when orchestrator is `agent`.
  * @param {string} params.prompt Prompt to pass to the orchestrator.
  * @param {string} params.cwd Trial working directory.
  * @param {number} [params.timeoutMs=600000] Timeout in milliseconds.
  * @param {string} [params.modelTier='sonnet'] Claude model selector, also persisted for reporting.
+ * @param {number} [params.maxBudgetUsd] Per-trial Claude budget; required for direct agents.
  * @param {string} [params.pluginDir] Plugin directory for live Claude runs.
  * @param {Function} [params.spawn] Injectable child_process.spawn-compatible function.
  * @param {Function|object|string} [params.fixture] Deterministic fixture descriptor.
@@ -349,10 +471,12 @@ async function runLive({
  */
 export async function runOrchestrator({
   orchestrator,
+  agentName,
   prompt,
   cwd,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   modelTier = 'sonnet',
+  maxBudgetUsd,
   pluginDir,
   spawn = nodeSpawn,
   fixture,
@@ -364,10 +488,12 @@ export async function runOrchestrator({
 
     return await runLive({
       orchestrator,
+      agentName,
       prompt,
       cwd,
       timeoutMs,
       modelTier,
+      maxBudgetUsd,
       pluginDir,
       spawn,
     });

@@ -61,13 +61,13 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **레이어드 Opus-skew 감소** *(v1.1.0+)*: 서브에이전트별 모델 사용 로깅(`ao-model-usage.jsonl`, schemaVersion:1) 측정 + 기본 Sonnet/Haiku로 routing하고 입증된 필요시에만 Opus로 escalation하는 routing 파이프라인. `node scripts/usage-report.mjs`로 요약
 - **런타임 permission_mode 캡처 + `/ask codex` read-only 폴백** *(v1.1.6, v1.5.1 이후 경화)*: SessionStart + UserPromptSubmit 훅은 권한 근거가 아닌 세션 식별/진단만 `.ao/state/ao-runtime-permissions.json`에 기록하고, 짧게 유효한 권한 grant는 workspace 밖 `~/.cache/agent-olympus/runtime-permissions/<canonical-cwd-sha256>.json`에 저장. 경화된 현재 세션 + capture-ID가 모두 일치해야 승급하며 30분 후 만료되고 SessionEnd에서 폐기됨. 안전성을 증명하지 못하면 settings-only로 폴백(Windows도 ACL 소유권을 증명할 때까지 settings-only). settings ⇧ runtime은 deny/ask/managed-policy를 거치는 **upgrade-only** 병합을 유지. 별개로 `/ask codex`는 suggest 티어에서 Codex `read-only` 샌드박스(`-s read-only -a never`)와 시스템 프롬프트 가드 + `git status --porcelain` post-check를 사용. `node scripts/diagnose-sandbox.mjs --explain-permissions`로 bound layer 확인 가능. #67/#68/#69 해결
 - **분리형 워커 슈퍼바이저** *(v1.2.0)*: 어댑터 팀 워커(codex-exec/appserver, claude-cli, gemini-exec/acp)가 더 이상 in-process로 실행되지 않음 — `spawnTeam`이 워커마다 분리된(detached) 슈퍼바이저를 띄워 어댑터를 소유하고 완료/실패/출력을 디스크에 기록하므로, fresh-process-per-poll 오케스트레이터(`monitorTeam`/`collectResults`/`shutdownTeam`)가 프로세스 경계 너머로 결과를 관측 가능(이전엔 영원히 `running`에 멈춰 있었음). run 단위 스냅샷(schemaVersion:1) + PID 시작시간 identity 기반 crash/재사용 감지, supervisor-first 셧다운 + 고아 그룹 reap, SessionEnd run 단위 보호, 프롬프트 포함 매니페스트 scrub. P1–P6 단계로 진행, 코덱스 교차리뷰 4라운드
-- **HU-01 P2/P3 평가 하네스** *(v1.5.0)*: vendored 회귀/역량 과제 6개를 `k=3`, `pass^k`/`pass@k`, 토큰 집계, 선언/측정 baseline, benchmark/protocol fingerprint, 추세 보고서로 평가. CI는 hermetic GREEN/RED fixture만 실행하며, 비용이 드는 live Atlas/Athena 실행은 운영자가 명시적으로 선택할 때만 수행
+- **HU-01 P2/P3 평가 하네스** *(v1.5.0+)*: vendored 회귀/역량 과제 8개를 `pass^k`/`pass@k`, 토큰·provider 비용 집계, 선언/측정 baseline, benchmark/protocol/treatment provenance, 에이전트별 추세 보고서로 평가. CI는 hermetic GREEN/RED fixture만 실행하며, 비용이 드는 Atlas/Athena/직접 에이전트 live 실행은 운영자가 명시적인 예산과 함께 선택할 때만 수행
 - **제한된 provider failover** *(v1.5.0)*: 소진된 Codex 워커를 가능하면 Gemini로, 최종적으로 native Claude로 전환. provider별 새 retry budget, generation-bound identity, 결정론적 child team, 영속 completion output을 사용하며, 인증된 Claude output 유실 시 완료 작업을 조용히 재실행하지 않고 fail-closed
 - **크래시 안전 event-backed run** *(v1.5.0)*: active-run CAS, phase evidence, finalization lock, terminal-failure marker, Athena generation adoption으로 resume/restart를 fail-closed 처리. no-follow 경화 I/O는 torn run-event JSONL 레코드를 건너뛰고 뒤의 정상 이벤트를 보존하며, append tail만 검증하고, ABA fence를 완화하지 않은 채 확실히 죽은 recovery claimant를 안전하게 재선출
 - **정제된 failed-run 피드백 루프** *(v1.5.0)*: SessionEnd가 독립 검증한 session-linked terminal task failure만 metadata/digest로 큐잉. 후보 승인과 task 연결은 사람이 수행하며 prompt, error text, path, diff, evidence payload, provider output은 큐에 기록하지 않음
 - **취소 가능한 shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`)보다 영속 user no-ship 후속 지시가 우선하며, push/PR은 repository·base·branch·remote HEAD identity에 바인딩. CI는 정확히 push된 SHA의 모든 workflow를 집계하고 crash recovery의 fix candidate를 단일 failed run과 attempt에 연결
 - **Codex MCP 복구 + `--no-mcp`** *(v1.5.1)*: `/ask`가 exec/tmux 어댑터에서 레코드 순서대로 MCP 인증 실패를 분류. Codex 전용 `--no-mcp`는 설정된 MCP server를 포함한 user-level config 전체를 건너뛰며, 인증과 명시적 CLI override는 유지하고 Codex 버전이 불명확하거나 미지원이면 fail-closed
-- **3220개 단위 테스트**: 현재 개발 트리 기준 `node:test` 기반 128개 파일의 종합 테스트 스위트 (배포된 v1.5.1 기준선: 108개 파일, 2858개 테스트)
+- **3239개 단위 테스트**: 현재 개발 트리 기준 `node:test` 기반 128개 파일의 종합 테스트 스위트 (배포된 v1.5.1 기준선: 108개 파일, 2858개 테스트)
 - **페일-세이프 아키텍처**: 훅은 보통 오류 시 개방하지만, 안전하지 않거나 읽을 수 없거나 해소되지 않은 동시성 상태에서는 승인을 차단
 
 ## 설치
@@ -590,7 +590,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## 테스트
 
-`node:test` 기반 테스트 스위트(현재 개발 트리 128개 파일, 3220개 테스트; 배포된 v1.5.1 기준선 108개 파일, 2858개 테스트)가 핵심 훅 라이브러리를 커버합니다:
+`node:test` 기반 테스트 스위트(현재 개발 트리 128개 파일, 3239개 테스트; 배포된 v1.5.1 기준선 108개 파일, 2858개 테스트)가 핵심 훅 라이브러리를 커버합니다:
 
 ```bash
 npm test

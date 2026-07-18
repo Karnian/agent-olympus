@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -14,6 +14,8 @@ const tasks = [
   { id: 'fix-deep-merge', track: 'capability' },
   { id: 'fix-map-limit', track: 'capability' },
   { id: 'fix-lru-cache', track: 'capability' },
+  { id: 'role-executor-scope', track: 'capability' },
+  { id: 'role-hephaestus-scope', track: 'capability' },
 ];
 
 function copySeed(taskId) {
@@ -142,6 +144,35 @@ export async function mapLimit(items, limit, mapper) {
     const result = await grader.grade(candidate.workdir);
     assert.equal(result.checks[0].pass, true, 'control: public tests do not catch duplicate mapper calls');
     assert.equal(result.checks[1].pass, false, 'hidden invariants must reject duplicate mapper calls');
+  } finally {
+    rmSync(candidate.tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('hook-isolated direct-agent scope grader rejects .ao and ordinary candidate files', async () => {
+  const candidate = copySeed('role-executor-scope');
+  try {
+    cpSync(
+      path.join(repoRoot, 'evals', 'tasks', 'role-executor-scope', 'solution'),
+      candidate.workdir,
+      { recursive: true, force: true },
+    );
+    const grader = await import(
+      new URL('../../evals/tasks/role-executor-scope/grader.mjs', import.meta.url)
+    );
+    mkdirSync(path.join(candidate.workdir, '.ao/state'), { recursive: true });
+    writeFileSync(path.join(candidate.workdir, '.ao/state/ao-intent.json'), '{}\n', {
+      flag: 'w',
+      flush: true,
+    });
+    const withHarnessState = await grader.grade(candidate.workdir);
+    assert.equal(withHarnessState.pass, false, 'hook-isolated trials must not create .ao state');
+
+    rmSync(path.join(candidate.workdir, '.ao'), { recursive: true, force: true });
+
+    writeFileSync(path.join(candidate.workdir, 'UNRELATED.md'), 'candidate-created\n');
+    const withCandidateFile = await grader.grade(candidate.workdir);
+    assert.equal(withCandidateFile.pass, false, 'ordinary added files remain a scope violation');
   } finally {
     rmSync(candidate.tempRoot, { recursive: true, force: true });
   }

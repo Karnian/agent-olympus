@@ -21,7 +21,9 @@ import { passAtK, passHatK, rollupByTrack } from '../../evals/lib/score.mjs';
 import {
   collectPipelineProtocolFiles,
   fingerprintBenchmark,
+  fingerprintComparableFixture,
   fingerprintPipelineProtocol,
+  validateTaskDefinition,
 } from '../../evals/lib/tasks.mjs';
 import { aggregateTokenUsage, runEval } from '../../evals/run.mjs';
 import { createFinalizedEvalPipelineFixture } from './helpers/eval-pipeline-fixture.mjs';
@@ -29,6 +31,8 @@ import { createFinalizedEvalPipelineFixture } from './helpers/eval-pipeline-fixt
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const SAMPLE_TASK = path.join(REPO_ROOT, 'evals/tasks/_sample');
 const REGRESSION_TASK = path.join(REPO_ROOT, 'evals/tasks/fix-failing-test');
+const EXECUTOR_ROLE_TASK = path.join(REPO_ROOT, 'evals/tasks/role-executor-scope');
+const HEPHAESTUS_ROLE_TASK = path.join(REPO_ROOT, 'evals/tasks/role-hephaestus-scope');
 
 function makeTmpDir(prefix = 'ao-eval-engine-test-') {
   return mkdtempSync(path.join(tmpdir(), prefix));
@@ -42,6 +46,16 @@ function completeFakeLiveChild(child, cwd, resultEvent = {
   type: 'result',
   subtype: 'success',
   is_error: false,
+  duration_ms: 10,
+  total_cost_usd: 0.01,
+  fast_mode_state: 'off',
+  usage: {
+    input_tokens: 1,
+    output_tokens: 1,
+    speed: 'standard',
+    service_tier: 'standard',
+  },
+  modelUsage: { 'claude-sonnet-test': {} },
 }) {
   process.nextTick(() => {
     void createFinalizedEvalPipelineFixture(cwd).then(() => {
@@ -114,11 +128,15 @@ test('runOrchestrator live path builds branch-accurate claude argv without --bar
     assert.equal(Object.hasOwn(calls[0].opts.env, 'OLDPWD'), false);
     assert.equal(Object.hasOwn(calls[0].opts.env, 'INIT_CWD'), false);
     assert.equal(Object.hasOwn(calls[0].opts.env, 'CLAUDE_PLUGIN_ROOT'), false);
+    assert.equal(Object.hasOwn(calls[0].opts.env, 'DISABLE_AO'), false);
     assert.equal(calls[0].args[0], '-p');
-    assert.equal(calls[0].args[1], '/atlas do the thing');
+    assert.equal(calls[0].args[1], '/agent-olympus:atlas do the thing');
     assert.equal(calls[0].args.includes('--plugin-dir'), true);
+    assert.equal(calls[0].args[calls[0].args.indexOf('--setting-sources') + 1], 'project');
     assert.equal(calls[0].args[calls[0].args.indexOf('--plugin-dir') + 1], pluginDir);
     assert.equal(calls[0].args.includes('--model'), true);
+    assert.equal(calls[0].args[calls[0].args.indexOf('--prompt-suggestions') + 1], 'false');
+    assert.equal(calls[0].args[calls[0].args.indexOf('--effort') + 1], 'high');
     assert.equal(calls[0].args[calls[0].args.indexOf('--model') + 1], 'opus');
     assert.equal(result.raw.modelTier, 'opus');
     assert.equal(calls[0].args.includes('--bare'), false);
@@ -126,6 +144,161 @@ test('runOrchestrator live path builds branch-accurate claude argv without --bar
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test('runOrchestrator solo control uses a plain prompt instead of a nonexistent plugin command', async () => {
+  const cwd = makeTmpDir();
+  const calls = [];
+  try {
+    const result = await runOrchestrator({
+      orchestrator: 'solo',
+      prompt: 'do the thing without orchestration',
+      cwd,
+      spawn: (command, args) => {
+        calls.push({ command, args });
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.kill = () => true;
+        process.nextTick(() => {
+          child.stdout.end(`${JSON.stringify({
+            type: 'result', subtype: 'success', is_error: false,
+          })}\n`);
+          child.emit('close', 0, null);
+        });
+        return child;
+      },
+    });
+
+    assert.equal(result.status, 'completed');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].args[1], 'do the thing without orchestration');
+    assert.equal(calls[0].args[1].startsWith('/solo'), false);
+    assert.equal(calls[0].args.includes('--safe-mode'), true);
+    assert.equal(calls[0].args.includes('--plugin-dir'), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('runOrchestrator direct-agent path selects a namespaced plugin agent safely', async () => {
+  const cwd = makeTmpDir();
+  const calls = [];
+  try {
+    const spawn = (command, args, opts) => {
+      calls.push({ command, args, opts });
+      const child = new EventEmitter();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = () => true;
+      process.nextTick(() => {
+        child.stdout.end(`${JSON.stringify({
+          type: 'result', subtype: 'success', is_error: false,
+        })}\n`);
+        child.emit('close', 0, null);
+      });
+      return child;
+    };
+    const result = await runOrchestrator({
+      orchestrator: 'agent',
+      agentName: 'executor',
+      prompt: 'make the bounded change',
+      cwd,
+      modelTier: 'sonnet',
+      maxBudgetUsd: 1,
+      spawn,
+    });
+
+    assert.equal(result.status, 'completed');
+    assert.equal(calls[0].args[1], 'make the bounded change');
+    assert.equal(calls[0].args[calls[0].args.indexOf('--agent') + 1], 'agent-olympus:executor');
+    assert.equal(calls[0].args[calls[0].args.indexOf('--model') + 1], 'sonnet');
+    assert.equal(calls[0].args[calls[0].args.indexOf('--max-budget-usd') + 1], '1');
+    assert.equal(calls[0].args[calls[0].args.indexOf('--setting-sources') + 1], 'project');
+    assert.equal(calls[0].opts.env.DISABLE_AO, '1');
+    assert.deepEqual(result.invocation, {
+      route: 'direct-agent',
+      target: 'agent-olympus:executor',
+      promptMode: 'plain',
+      pluginHooksEnabled: false,
+      customizationBoundary: 'project-settings-only',
+      promptSuggestions: false,
+      effort: 'high',
+      modelSelector: 'sonnet',
+      maxBudgetUsd: 1,
+      observedModels: [],
+    });
+
+    let unbudgetedSpawned = false;
+    const unbudgeted = await runOrchestrator({
+      orchestrator: 'agent',
+      agentName: 'executor',
+      prompt: 'ignored',
+      cwd,
+      spawn: () => { unbudgetedSpawned = true; },
+    });
+    assert.equal(unbudgeted.status, 'failed');
+    assert.match(unbudgeted.finalEvent.message, /require maxBudgetUsd/);
+    assert.equal(unbudgetedSpawned, false);
+
+    let unsafeSpawned = false;
+    const unsafe = await runOrchestrator({
+      orchestrator: 'agent',
+      agentName: '--help',
+      prompt: 'ignored',
+      cwd,
+      spawn: () => { unsafeSpawned = true; },
+    });
+    assert.equal(unsafe.status, 'failed');
+    assert.match(unsafe.finalEvent.message, /Unsafe Agent Olympus agent selector/);
+    assert.equal(unsafeSpawned, false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('direct-agent task definitions are capability-only and name bundled agents', () => {
+  const base = readJson(path.join(SAMPLE_TASK, 'task.json'));
+  assert.equal(validateTaskDefinition(base), base, 'existing tasks remain valid');
+
+  const valid = {
+    ...base,
+    track: 'capability',
+    orchestrator: 'agent',
+    agent: 'executor',
+    maxBudgetUsd: 1,
+  };
+  assert.equal(validateTaskDefinition(valid), valid);
+  assert.throws(
+    () => validateTaskDefinition({ ...valid, agent: undefined }),
+    /bundled Agent Olympus agent/,
+  );
+  const missing = { ...valid };
+  delete missing.agent;
+  assert.throws(() => validateTaskDefinition(missing), /agent is required/);
+  const unbudgeted = { ...valid };
+  delete unbudgeted.maxBudgetUsd;
+  assert.throws(() => validateTaskDefinition(unbudgeted), /maxBudgetUsd is required/);
+  assert.throws(
+    () => validateTaskDefinition({ ...valid, maxBudgetUsd: 0 }),
+    /maxBudgetUsd must be a finite number/,
+  );
+  assert.throws(
+    () => validateTaskDefinition({ ...valid, agent: '--help' }),
+    /bundled Agent Olympus agent/,
+  );
+  assert.throws(
+    () => validateTaskDefinition({ ...valid, agent: 'other-plugin:executor' }),
+    /bundled Agent Olympus agent/,
+  );
+  assert.throws(
+    () => validateTaskDefinition({ ...valid, track: 'regression' }),
+    /direct-agent tasks must use capability track/,
+  );
+  assert.throws(
+    () => validateTaskDefinition({ ...base, agent: 'executor' }),
+    /agent is only allowed when orchestrator is agent/,
+  );
 });
 
 test('runOrchestrator rejects option-shaped model selectors before spawn', async () => {
@@ -320,6 +493,8 @@ test('runEval live path uses and cleans a plugin snapshot without eval oracles',
         type: 'result',
         subtype: 'success',
         is_error: false,
+        duration_ms: 10,
+        total_cost_usd: 0.01,
         usage: { input_tokens: 1, output_tokens: 1 },
       });
       return child;
@@ -327,6 +502,7 @@ test('runEval live path uses and cleans a plugin snapshot without eval oracles',
 
     const result = await runEval(REGRESSION_TASK, {
       live: true,
+      maxBudgetUsd: 1,
       k: 2,
       pluginDir: pluginSource,
       resultsDir,
@@ -338,6 +514,246 @@ test('runEval live path uses and cleans a plugin snapshot without eval oracles',
     assert.equal(stagedPluginDirs.length, 2);
     assert.equal(new Set(stagedPluginDirs).size, 2);
     assert.equal(stagedPluginDirs.every((pluginDir) => !existsSync(pluginDir)), true);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('runEval direct-agent live path preserves target identity and makes pipeline evidence N/A', async () => {
+  const tempRoot = makeTmpDir('ao-eval-direct-agent-');
+  const taskDir = path.join(tempRoot, 'task');
+  const pluginSource = path.join(tempRoot, 'plugin-source');
+  cpSync(SAMPLE_TASK, taskDir, { recursive: true });
+  mkdirSync(path.join(pluginSource, '.claude-plugin'), { recursive: true });
+  mkdirSync(path.join(pluginSource, 'agents'), { recursive: true });
+  mkdirSync(path.join(pluginSource, 'hooks'), { recursive: true });
+  writeFileSync(
+    path.join(pluginSource, '.claude-plugin/plugin.json'),
+    '{"name":"agent-olympus"}\n',
+  );
+  writeFileSync(path.join(pluginSource, 'agents/executor.md'), '---\nname: executor\n---\n');
+  writeFileSync(path.join(pluginSource, 'hooks/hooks.json'), '{"hooks":{}}\n');
+  const task = readJson(path.join(taskDir, 'task.json'));
+  writeFileSync(path.join(taskDir, 'task.json'), `${JSON.stringify({
+    ...task,
+    id: 'direct-agent-sample',
+    track: 'capability',
+    orchestrator: 'agent',
+    agent: 'executor',
+    maxBudgetUsd: 1,
+  }, null, 2)}\n`);
+  const resultsDir = path.join(tempRoot, 'results');
+  const calls = [];
+
+  try {
+    const result = await runEval(taskDir, {
+      live: true,
+      k: 1,
+      runId: 'direct-agent-live',
+      resultsDir,
+      pluginDir: pluginSource,
+      claudeCliVersion: '2.1.209',
+      spawn: (_command, args, options) => {
+        calls.push(args);
+        const stagedPluginDir = args[args.indexOf('--plugin-dir') + 1];
+        assert.equal(existsSync(path.join(stagedPluginDir, 'agents/executor.md')), true);
+        assert.equal(existsSync(path.join(stagedPluginDir, 'hooks')), false);
+        assert.equal(options.env.DISABLE_AO, '1');
+        writeFileSync(path.join(options.cwd, 'marker.txt'), 'fixed\n');
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.kill = () => true;
+        process.nextTick(() => {
+          child.stdout.end(`${JSON.stringify({
+            type: 'result',
+            subtype: 'success',
+            is_error: false,
+            duration_ms: 25,
+            total_cost_usd: 0.01,
+            fast_mode_state: 'off',
+            usage: {
+              input_tokens: 2,
+              output_tokens: 1,
+              speed: 'standard',
+              service_tier: 'standard',
+            },
+            modelUsage: { 'claude-sonnet-test': { inputTokens: 2, outputTokens: 1 } },
+          })}\n`);
+          child.emit('close', 0, null);
+        });
+        return child;
+      },
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][calls[0].indexOf('--agent') + 1], 'agent-olympus:executor');
+    assert.equal(calls[0][calls[0].indexOf('--prompt-suggestions') + 1], 'false');
+    assert.equal(calls[0][calls[0].indexOf('--effort') + 1], 'high');
+    assert.equal(calls[0][calls[0].indexOf('--max-budget-usd') + 1], '1');
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.results[0].agent, 'executor');
+    assert.equal(result.results[0].pipelineEvidence.required, false);
+    assert.equal(result.results[0].pipelineEvidence.reason, 'agent-orchestrator');
+    assert.equal(result.results[0].claudeCliVersion, '2.1.209');
+    assert.match(result.results[0].pluginProvenance.fingerprint, /^[a-f0-9]{64}$/);
+    assert.match(result.results[0].pluginProvenance.targetPromptFingerprint, /^[a-f0-9]{64}$/);
+    assert.equal(result.results[0].pluginProvenance.hooksIncluded, false);
+    assert.equal(result.results[0].orchestration.invocation.target, 'agent-olympus:executor');
+    assert.equal(result.results[0].orchestration.invocation.promptSuggestions, false);
+    assert.equal(result.results[0].orchestration.invocation.effort, 'high');
+    assert.deepEqual(
+      result.results[0].orchestration.invocation.observedModels,
+      ['claude-sonnet-test'],
+    );
+    assert.equal(result.results[0].provenanceComplete, true);
+    assert.equal(result.results[0].outcomePass, true);
+    assert.equal(result.summary.agent, 'executor');
+    assert.equal(result.summary.claudeCliVersion, '2.1.209');
+    assert.equal(result.summary.pluginProvenance.hooksIncluded, false);
+    assert.deepEqual(result.summary.providerRuntime, {
+      effort: 'high',
+      efforts: ['high'],
+      fastModeStates: ['off'],
+      usageSpeeds: ['standard'],
+      serviceTiers: ['standard'],
+    });
+    assert.equal(
+      result.summary.pluginProvenance.targetPromptFingerprint,
+      result.results[0].pluginProvenance.targetPromptFingerprint,
+    );
+    assert.equal(result.summary.tasks[0].agent, 'executor');
+    assert.equal(result.summary.trials[0].agent, 'executor');
+    assert.equal(result.summary.pipelineEvidence.required, false);
+
+    const incomplete = await runEval(taskDir, {
+      live: true,
+      k: 1,
+      runId: 'direct-agent-incomplete-provenance',
+      resultsDir,
+      pluginDir: pluginSource,
+      claudeCliVersion: '2.1.209',
+      spawn: (_command, _args, options) => {
+        writeFileSync(path.join(options.cwd, 'marker.txt'), 'fixed\n');
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.kill = () => true;
+        process.nextTick(() => {
+          child.stdout.end(`${JSON.stringify({
+            type: 'result', subtype: 'success', is_error: false,
+            duration_ms: 25,
+            fast_mode_state: 'off',
+            usage: { input_tokens: 1, output_tokens: 1, speed: 'standard' },
+            modelUsage: { 'claude-sonnet-test': { inputTokens: 1, outputTokens: 1 } },
+          })}\n`);
+          child.emit('close', 0, null);
+        });
+        return child;
+      },
+    });
+    assert.equal(incomplete.exitCode, 1);
+    assert.equal(incomplete.results[0].checks.some((check) => (
+      check.name === 'direct-agent-provenance' && check.pass === false
+    )), true);
+    assert.match(
+      incomplete.results[0].checks.find((check) => check.name === 'direct-agent-provenance').detail,
+      /service-tier/,
+    );
+    assert.equal(incomplete.results[0].checks.some((check) => (
+      check.name === 'marker.txt contains fixed' && check.pass === true
+    )), true, 'a green task outcome cannot hide incomplete live provenance');
+    assert.equal(incomplete.results[0].outcomePass, true);
+    assert.equal(incomplete.summary.outcomePassAtK, true);
+    assert.equal(incomplete.summary.budgetCompliant, false);
+    assert.equal(incomplete.results[0].checks.some((check) => (
+      check.name === 'trial-budget-compliance'
+      && check.pass === false
+      && /did not report trial cost/.test(check.detail)
+    )), true);
+
+    let consistencyTrial = 0;
+    const mixedTreatment = await runEval(taskDir, {
+      live: true,
+      k: 2,
+      runId: 'direct-agent-mixed-treatment',
+      resultsDir,
+      pluginDir: pluginSource,
+      claudeCliVersion: '2.1.209',
+      spawn: (_command, _args, options) => {
+        consistencyTrial += 1;
+        writeFileSync(path.join(options.cwd, 'marker.txt'), 'fixed\n');
+        if (consistencyTrial === 1) {
+          writeFileSync(
+            path.join(pluginSource, 'agents/executor.md'),
+            '---\nname: executor\n---\nchanged between trials\n',
+          );
+        }
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.kill = () => true;
+        process.nextTick(() => {
+          child.stdout.end(`${JSON.stringify({
+            type: 'result', subtype: 'success', is_error: false,
+            duration_ms: 10, total_cost_usd: 0.01,
+            usage: { input_tokens: 1, output_tokens: 1 },
+            modelUsage: { 'claude-sonnet-test': {} },
+          })}\n`);
+          child.emit('close', 0, null);
+        });
+        return child;
+      },
+    });
+    assert.equal(mixedTreatment.exitCode, 1);
+    assert.equal(mixedTreatment.summary.provenanceComplete, false);
+    assert.equal(mixedTreatment.results.every((trialResult) => (
+      trialResult.checks.some((check) => (
+        check.name === 'direct-agent-treatment-consistency' && check.pass === false
+      ))
+    )), true);
+
+    let overBudgetCalls = 0;
+    const overBudget = await runEval(taskDir, {
+      live: true,
+      k: 2,
+      runId: 'direct-agent-budget-stop',
+      resultsDir,
+      pluginDir: pluginSource,
+      claudeCliVersion: '2.1.209',
+      spawn: (_command, _args, options) => {
+        overBudgetCalls += 1;
+        writeFileSync(path.join(options.cwd, 'marker.txt'), 'fixed\n');
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.kill = () => true;
+        process.nextTick(() => {
+          child.stdout.end(`${JSON.stringify({
+            type: 'result', subtype: 'success', is_error: false,
+            duration_ms: 10, total_cost_usd: 1.01,
+            usage: { input_tokens: 1, output_tokens: 1 },
+            modelUsage: { 'claude-sonnet-test': {} },
+          })}\n`);
+          child.emit('close', 0, null);
+        });
+        return child;
+      },
+    });
+    assert.equal(overBudgetCalls, 1, 'an overshoot must stop scheduling later trials');
+    assert.equal(overBudget.exitCode, 1);
+    assert.equal(overBudget.summary.budgetCompliant, false);
+    assert.equal(overBudget.summary.completedTrials, 1);
+    assert.equal(overBudget.summary.outcomePassAtK, true);
+    assert.equal(overBudget.summary.outcomePassHatK, false);
+    assert.equal(overBudget.summary.passAtK, false);
+    assert.equal(overBudget.results[0].outcomePass, true);
+    assert.equal(overBudget.results[0].checks.some((check) => (
+      check.name === 'trial-budget-compliance' && check.pass === false
+    )), true);
+    assert.equal(overBudget.results[0].checks.some((check) => (
+      check.name === 'run-budget-compliance' && check.pass === false
+    )), true);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
@@ -579,6 +995,56 @@ test('benchmark and pipeline protocol fingerprints are independent identities', 
   }
 });
 
+test('direct-agent target identity changes the benchmark fingerprint', () => {
+  const tmpRoot = makeTmpDir();
+  const copiedTask = path.join(tmpRoot, 'task');
+  try {
+    cpSync(SAMPLE_TASK, copiedTask, { recursive: true });
+    const taskPath = path.join(copiedTask, 'task.json');
+    const task = readJson(taskPath);
+    writeFileSync(taskPath, `${JSON.stringify({
+      ...task,
+      track: 'capability',
+      orchestrator: 'agent',
+      agent: 'executor',
+      maxBudgetUsd: 1,
+    }, null, 2)}\n`);
+    const executorFingerprint = fingerprintBenchmark(copiedTask);
+    const executorFixtureFingerprint = fingerprintComparableFixture(copiedTask);
+    const hephaestusTask = { ...readJson(taskPath), agent: 'hephaestus' };
+    writeFileSync(taskPath, `${JSON.stringify(hephaestusTask, null, 2)}\n`);
+    const hephaestusFingerprint = fingerprintBenchmark(copiedTask);
+    const hephaestusFixtureFingerprint = fingerprintComparableFixture(copiedTask);
+    assert.notEqual(hephaestusFingerprint, executorFingerprint);
+    assert.equal(hephaestusFixtureFingerprint, executorFixtureFingerprint);
+
+    const soloControl = { ...hephaestusTask, orchestrator: 'solo' };
+    delete soloControl.agent;
+    delete soloControl.maxBudgetUsd;
+    writeFileSync(taskPath, `${JSON.stringify(soloControl, null, 2)}\n`);
+    assert.equal(fingerprintComparableFixture(copiedTask), executorFixtureFingerprint);
+
+    writeFileSync(taskPath, `${JSON.stringify({
+      ...soloControl,
+      prompt: `${hephaestusTask.prompt} Different treatment.`,
+    }, null, 2)}\n`);
+    assert.notEqual(fingerprintComparableFixture(copiedTask), executorFixtureFingerprint);
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('Executor and Hephaestus paired arms share one comparable fixture', () => {
+  const executor = readJson(path.join(EXECUTOR_ROLE_TASK, 'task.json'));
+  const hephaestus = readJson(path.join(HEPHAESTUS_ROLE_TASK, 'task.json'));
+  assert.equal(executor.prompt, hephaestus.prompt);
+  assert.equal(
+    fingerprintComparableFixture(EXECUTOR_ROLE_TASK),
+    fingerprintComparableFixture(HEPHAESTUS_ROLE_TASK),
+  );
+  assert.notEqual(fingerprintBenchmark(EXECUTOR_ROLE_TASK), fingerprintBenchmark(HEPHAESTUS_ROLE_TASK));
+});
+
 test('pipeline protocol fingerprint follows local import closure without hashing SUT files', () => {
   const tmpRoot = makeTmpDir();
   const repoRoot = path.join(tmpRoot, 'repo');
@@ -639,7 +1105,9 @@ test('runEval separates measured-baseline deltas, declared targets, and protocol
   try {
     const pluginSource = path.join(tmpRoot, 'plugin-source');
     mkdirSync(path.join(pluginSource, '.claude-plugin'), { recursive: true });
+    mkdirSync(path.join(pluginSource, 'skills/atlas'), { recursive: true });
     writeFileSync(path.join(pluginSource, '.claude-plugin/plugin.json'), '{"name":"fixture"}\n');
+    writeFileSync(path.join(pluginSource, 'skills/atlas/SKILL.md'), '# Atlas fixture\n');
     const fakeLiveSpawn = (_command, _args, options) => {
       cpSync(path.join(REGRESSION_TASK, 'solution'), options.cwd, { recursive: true, force: true });
       const child = new EventEmitter();
@@ -649,13 +1117,18 @@ test('runEval separates measured-baseline deltas, declared targets, and protocol
       completeFakeLiveChild(child, options.cwd);
       return child;
     };
+    const liveCommon = {
+      pluginDir: pluginSource,
+      spawn: fakeLiveSpawn,
+      claudeCliVersion: '2.1.209',
+      maxBudgetUsd: 1,
+    };
     const declaredTarget = await runEval(REGRESSION_TASK, {
+      ...liveCommon,
       live: true,
       k: 3,
       runId: 'declared-target-k3',
       resultsDir: path.join(tmpRoot, 'results'),
-      pluginDir: pluginSource,
-      spawn: fakeLiveSpawn,
     });
     assert.equal(declaredTarget.summary.delta_vs_baseline, null);
     assert.equal(declaredTarget.summary.delta_vs_target, 0);
@@ -673,16 +1146,21 @@ test('runEval separates measured-baseline deltas, declared targets, and protocol
       runId: 'trusted-sonnet-run',
       measuredAt: '2026-07-12T00:00:00.000Z',
       modelTier: 'sonnet',
+      claudeCliVersion: declaredTarget.summary.claudeCliVersion,
+      pluginFingerprint: declaredTarget.summary.pluginProvenance.fingerprint,
+      targetPromptFingerprint: declaredTarget.summary.pluginProvenance.targetPromptFingerprint,
+      observedModels: declaredTarget.summary.observedModels,
+      maxBudgetUsd: declaredTarget.summary.maxBudgetUsd,
+      providerRuntime: declaredTarget.summary.providerRuntime,
     };
     writeFileSync(baselinePath, `${JSON.stringify(liveBaseline, null, 2)}\n`);
     const comparable = await runEval(REGRESSION_TASK, {
+      ...liveCommon,
       live: true,
       k: 3,
       runId: 'baseline-k3',
       resultsDir: path.join(tmpRoot, 'results'),
       baselinePath,
-      pluginDir: pluginSource,
-      spawn: fakeLiveSpawn,
     });
     assert.equal(comparable.summary.delta_vs_baseline, 0);
     assert.equal(comparable.summary.delta_vs_target, null);
@@ -692,13 +1170,12 @@ test('runEval separates measured-baseline deltas, declared targets, and protocol
     assert.equal(comparable.summary.baselineComparison.provenance.source, 'live');
 
     const incomparable = await runEval(REGRESSION_TASK, {
+      ...liveCommon,
       live: true,
       k: 1,
       runId: 'baseline-k1',
       resultsDir: path.join(tmpRoot, 'results'),
       baselinePath,
-      pluginDir: pluginSource,
-      spawn: fakeLiveSpawn,
     });
     assert.equal(incomparable.summary.delta_vs_baseline, null);
     assert.equal(incomparable.summary.baselineComparison.comparable, false);
@@ -709,13 +1186,12 @@ test('runEval separates measured-baseline deltas, declared targets, and protocol
     protocolMismatchBaseline.tasks['fix-failing-test'].pipelineProtocolFingerprint = 'f'.repeat(64);
     writeFileSync(protocolMismatchPath, `${JSON.stringify(protocolMismatchBaseline, null, 2)}\n`);
     const protocolMismatch = await runEval(REGRESSION_TASK, {
+      ...liveCommon,
       live: true,
       k: 3,
       runId: 'baseline-protocol-mismatch',
       resultsDir: path.join(tmpRoot, 'results'),
       baselinePath: protocolMismatchPath,
-      pluginDir: pluginSource,
-      spawn: fakeLiveSpawn,
     });
     assert.equal(protocolMismatch.summary.delta_vs_baseline, 0, 'outcomes remain comparable');
     assert.equal(protocolMismatch.summary.baselineComparison.comparable, true);
@@ -731,16 +1207,51 @@ test('runEval separates measured-baseline deltas, declared targets, and protocol
     modelMismatchBaseline.tasks['fix-failing-test'].modelTier = 'opus';
     writeFileSync(modelMismatchPath, `${JSON.stringify(modelMismatchBaseline, null, 2)}\n`);
     const modelMismatch = await runEval(REGRESSION_TASK, {
+      ...liveCommon,
       live: true,
       k: 3,
       runId: 'baseline-model-mismatch',
       resultsDir: path.join(tmpRoot, 'results'),
       baselinePath: modelMismatchPath,
-      pluginDir: pluginSource,
-      spawn: fakeLiveSpawn,
     });
     assert.equal(modelMismatch.summary.delta_vs_baseline, null);
     assert.equal(modelMismatch.summary.baselineComparison.reason, 'model-tier-mismatch');
+
+    const budgetMismatchPath = path.join(tmpRoot, 'budget-mismatch-baseline.json');
+    const budgetMismatchBaseline = structuredClone(liveBaseline);
+    budgetMismatchBaseline.tasks['fix-failing-test'].maxBudgetUsd = 0.5;
+    writeFileSync(budgetMismatchPath, `${JSON.stringify(budgetMismatchBaseline, null, 2)}\n`);
+    const budgetMismatch = await runEval(REGRESSION_TASK, {
+      ...liveCommon,
+      live: true,
+      k: 3,
+      runId: 'baseline-budget-mismatch',
+      resultsDir: path.join(tmpRoot, 'results'),
+      baselinePath: budgetMismatchPath,
+    });
+    assert.equal(budgetMismatch.summary.delta_vs_baseline, null);
+    assert.equal(budgetMismatch.summary.baselineComparison.reason, 'max-budget-mismatch');
+
+    const providerRuntimeMismatchPath = path.join(tmpRoot, 'provider-runtime-mismatch-baseline.json');
+    const providerRuntimeMismatchBaseline = structuredClone(liveBaseline);
+    providerRuntimeMismatchBaseline.tasks['fix-failing-test'].providerRuntime.usageSpeeds = ['priority'];
+    writeFileSync(
+      providerRuntimeMismatchPath,
+      `${JSON.stringify(providerRuntimeMismatchBaseline, null, 2)}\n`,
+    );
+    const providerRuntimeMismatch = await runEval(REGRESSION_TASK, {
+      ...liveCommon,
+      live: true,
+      k: 3,
+      runId: 'baseline-provider-runtime-mismatch',
+      resultsDir: path.join(tmpRoot, 'results'),
+      baselinePath: providerRuntimeMismatchPath,
+    });
+    assert.equal(providerRuntimeMismatch.summary.delta_vs_baseline, null);
+    assert.equal(
+      providerRuntimeMismatch.summary.baselineComparison.reason,
+      'provider-runtime-mismatch',
+    );
 
     const fixture = await runEval(REGRESSION_TASK, {
       fixture: 'solution',

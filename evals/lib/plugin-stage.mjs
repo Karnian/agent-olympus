@@ -13,6 +13,7 @@ import {
   rmSync,
   writeSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -44,32 +45,36 @@ function assertWithin(root, candidate, label) {
   }
 }
 
-function isExcluded(relativePath) {
+function isExcluded(relativePath, includeHooks) {
   const components = relativePath.split(path.sep);
   if (!ALLOWED_ROOT_ENTRIES.has(components[0])) return true;
+  if (!includeHooks && components[0] === 'hooks') return true;
   // Runtime hook/adapter code is required, but its repository tests are not
   // part of the installed plugin and can leak fixture-specific knowledge.
   return components[0] === 'scripts' && components[1] === 'test';
 }
 
-function copyRegularFile(sourcePath, destinationPath, sourceMode) {
+function copyRegularFile(sourcePath, destinationPath) {
   const noFollow = constants.O_NOFOLLOW ?? 0;
   let sourceFd;
   let destinationFd;
 
   try {
     sourceFd = openSync(sourcePath, constants.O_RDONLY | noFollow);
-    if (!fstatSync(sourceFd).isFile()) {
+    const sourceStats = fstatSync(sourceFd);
+    if (!sourceStats.isFile()) {
       throw new Error(`Refusing to stage non-regular file: ${sourcePath}`);
     }
 
-    const destinationMode = (sourceMode & 0o111) === 0 ? 0o600 : 0o700;
+    const destinationMode = (sourceStats.mode & 0o111) === 0 ? 0o600 : 0o700;
     destinationFd = openSync(
       destinationPath,
       constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
       destinationMode,
     );
 
+    const contentHash = createHash('sha256');
+    let size = 0;
     const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
     while (true) {
       const bytesRead = readSync(sourceFd, buffer, 0, buffer.length, null);
@@ -81,21 +86,47 @@ function copyRegularFile(sourcePath, destinationPath, sourceMode) {
         if (bytesWritten === 0) throw new Error(`Unable to copy file: ${sourcePath}`);
         offset += bytesWritten;
       }
+      contentHash.update(buffer.subarray(0, bytesRead));
+      size += bytesRead;
     }
     chmodSync(destinationPath, destinationMode);
+    return {
+      contentFingerprint: contentHash.digest('hex'),
+      mode: destinationMode,
+      size,
+    };
   } finally {
     if (destinationFd !== undefined) closeSync(destinationFd);
     if (sourceFd !== undefined) closeSync(sourceFd);
   }
 }
 
-function copyTree(sourceRoot, destinationRoot, relativeDir = '') {
+function toPosixPath(relativePath) {
+  return relativePath.split(path.sep).join(path.posix.sep);
+}
+
+function fingerprintStagedFiles(files) {
+  const hash = createHash('sha256');
+  hash.update('agent-olympus-eval-plugin-snapshot-v1\0');
+  for (const file of files) {
+    hash.update(JSON.stringify([
+      file.relativePath,
+      file.mode.toString(8).padStart(4, '0'),
+      file.size,
+      file.contentFingerprint,
+    ]));
+    hash.update('\n');
+  }
+  return hash.digest('hex');
+}
+
+function copyTree(sourceRoot, destinationRoot, options, relativeDir = '') {
   const sourceDir = path.join(sourceRoot, relativeDir);
   const entries = readdirSync(sourceDir).sort();
 
   for (const name of entries) {
     const relativePath = path.join(relativeDir, name);
-    if (isExcluded(relativePath)) continue;
+    if (isExcluded(relativePath, options.includeHooks)) continue;
 
     const sourcePath = path.join(sourceRoot, relativePath);
     const destinationPath = path.join(destinationRoot, relativePath);
@@ -113,14 +144,18 @@ function copyTree(sourceRoot, destinationRoot, relativeDir = '') {
     if (stats.isDirectory()) {
       mkdirSync(destinationPath, { mode: 0o700 });
       chmodSync(destinationPath, 0o700);
-      copyTree(sourceRoot, destinationRoot, relativePath);
+      copyTree(sourceRoot, destinationRoot, options, relativePath);
       continue;
     }
 
     if (!stats.isFile()) {
       throw new Error(`Refusing to stage non-regular entry: ${relativePath}`);
     }
-    copyRegularFile(sourcePath, destinationPath, stats.mode);
+    const copied = copyRegularFile(sourcePath, destinationPath);
+    options.files.push({
+      relativePath: toPosixPath(relativePath),
+      ...copied,
+    });
   }
 }
 
@@ -135,12 +170,16 @@ function copyTree(sourceRoot, destinationRoot, relativeDir = '') {
  * tree mutation.
  *
  * @param {string} sourcePluginDir Plugin repository to snapshot.
- * @param {{tempParent?: string}} [options] Optional existing temp parent.
- * @returns {{pluginDir:string,tempRoot:string,cleanup:() => void}}
+ * @param {{tempParent?: string,includeHooks?: boolean}} [options] Snapshot options.
+ * @returns {{pluginDir:string,tempRoot:string,cleanup:() => void,fingerprint:string,fileFingerprints:Readonly<Record<string,string>>}}
  */
 export function stagePluginSnapshot(sourcePluginDir, options = {}) {
   if (typeof sourcePluginDir !== 'string' || sourcePluginDir.trim() === '') {
     throw new TypeError('sourcePluginDir must be a non-empty string');
+  }
+  const includeHooks = options.includeHooks ?? true;
+  if (typeof includeHooks !== 'boolean') {
+    throw new TypeError('includeHooks must be a boolean');
   }
 
   const requestedRoot = path.resolve(sourcePluginDir);
@@ -174,8 +213,21 @@ export function stagePluginSnapshot(sourcePluginDir, options = {}) {
     chmodSync(tempRoot, 0o700);
     mkdirSync(pluginDir, { mode: 0o700 });
     chmodSync(pluginDir, 0o700);
-    copyTree(sourceRoot, pluginDir);
-    return { pluginDir, tempRoot, cleanup };
+    const files = [];
+    copyTree(sourceRoot, pluginDir, { includeHooks, files });
+    files.sort((a, b) => (
+      a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0
+    ));
+    const fileFingerprints = Object.freeze(Object.fromEntries(
+      files.map(file => [file.relativePath, file.contentFingerprint]),
+    ));
+    return {
+      pluginDir,
+      tempRoot,
+      cleanup,
+      fingerprint: fingerprintStagedFiles(files),
+      fileFingerprints,
+    };
   } catch (error) {
     cleanup();
     throw error;

@@ -96,7 +96,7 @@ agent-olympus/
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (current tree: 3220 tests, 128 files; published v1.5.1 baseline: 2858/108)
+│   ├── test/                     — node:test unit tests (current tree: 3239 tests, 128 files; published v1.5.1 baseline: 2858/108)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (13 categories + unknown fallback, multilingual)
@@ -190,7 +190,7 @@ Follow [docs/development.md](docs/development.md) when adding agents, skills, ho
 
 ## Testing
 
-Run the current 3220-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the current 3239-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 

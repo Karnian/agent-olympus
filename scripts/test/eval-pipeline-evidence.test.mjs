@@ -73,7 +73,13 @@ function fakeLiveSpawn({ pipeline = true, solution = true, orchestrator = 'atlas
     process.nextTick(() => {
       void (async () => {
         if (pipeline) await createFinalizedEvalPipelineFixture(options.cwd, orchestrator);
-        child.stdout.end(`${JSON.stringify({ type: 'result', subtype: 'success', is_error: false })}\n`);
+        child.stdout.end(`${JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          duration_ms: 10,
+          total_cost_usd: 0.01,
+        })}\n`);
         child.emit('close', 0, null);
       })().catch((error) => child.emit('error', error));
     });
@@ -222,6 +228,137 @@ test('missing finalization cannot reuse a pre-allocated active run as success', 
   const evidence = verifyPipelineEvidence(handle);
   assert.equal(evidence.pass, false);
   assert.equal(evidence.reason, 'active-run-not-finalized');
+  assert.deepEqual(evidence.diagnostics, {
+    artifactReads: {
+      pipeline: false,
+      summary: true,
+      events: false,
+      guard: false,
+    },
+    pipeline: {
+      attempt: null,
+      phaseStatuses: {},
+    },
+    summary: {
+      status: 'running',
+      result: null,
+    },
+    lastEvent: null,
+    guardCounterCounts: {},
+  });
+});
+
+test('active-run diagnostics expose only bounded structural progress', (t) => {
+  const cwd = tempDir(t, 'ao-eval-pipeline-active-diagnostics-');
+  const handle = begin(cwd);
+  const secret = 'PRIVATE prompt output /tmp/private-worktree raw-command';
+
+  writeFileSync(handle.pipelinePath, JSON.stringify({
+    schemaVersion: 1,
+    runId: handle.pipelineRunId,
+    orchestrator: 'atlas',
+    attempt: 2,
+    phases: {
+      triage: { status: 'completed', outputs: { prompt: secret } },
+      execute: { status: 'in_progress', reason: secret },
+      forged: { status: secret },
+    },
+    prompt: secret,
+  }));
+
+  const summaryPath = path.join(handle.runDir, 'summary.json');
+  const summary = json(summaryPath);
+  summary.result = 'failure';
+  summary.output = secret;
+  writeFileSync(summaryPath, JSON.stringify(summary));
+
+  writeFileSync(path.join(handle.runDir, 'events.jsonl'), `${JSON.stringify({
+    type: 'subagent_completed',
+    phase: 'review',
+    prompt: secret,
+    detail: { output: secret, command: secret, path: cwd },
+  })}\n`);
+  writeFileSync(path.join(handle.runDir, 'loop-guard.json'), JSON.stringify({
+    schemaVersion: 1,
+    counters: {
+      iterations: { count: 2, sample: secret },
+      reviewRounds: { count: 1, sample: secret },
+      [secret]: { count: 3 },
+    },
+    errors: { private: { count: 1, sample: secret } },
+  }));
+
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.pass, false);
+  assert.equal(evidence.reason, 'active-run-not-finalized');
+  assert.deepEqual(evidence.diagnostics, {
+    artifactReads: {
+      pipeline: true,
+      summary: true,
+      events: true,
+      guard: true,
+    },
+    pipeline: {
+      attempt: 2,
+      phaseStatuses: {
+        triage: 'completed',
+        execute: 'in_progress',
+      },
+    },
+    summary: {
+      status: 'running',
+      result: 'failure',
+    },
+    lastEvent: {
+      type: 'subagent_completed',
+      phase: 'review',
+    },
+    guardCounterCounts: {
+      iterations: 2,
+      reviewRounds: 1,
+    },
+  });
+  const rendered = JSON.stringify(evidence);
+  assert.equal(rendered.includes(secret), false);
+  assert.equal(rendered.includes(cwd), false);
+  assert.ok(Buffer.byteLength(JSON.stringify(evidence.diagnostics), 'utf-8') < 2_048);
+});
+
+test('active-run diagnostics normalize arbitrary structural strings', (t) => {
+  const cwd = tempDir(t, 'ao-eval-pipeline-active-normalized-');
+  const handle = begin(cwd);
+  const secret = 'PRIVATE-STRUCTURAL-VALUE';
+
+  writeFileSync(handle.pipelinePath, JSON.stringify({
+    schemaVersion: 1,
+    runId: handle.pipelineRunId,
+    orchestrator: 'atlas',
+    attempt: 1,
+    phases: { triage: { status: secret } },
+  }));
+  const summaryPath = path.join(handle.runDir, 'summary.json');
+  const summary = json(summaryPath);
+  summary.status = secret;
+  summary.result = secret;
+  writeFileSync(summaryPath, JSON.stringify(summary));
+  writeFileSync(path.join(handle.runDir, 'events.jsonl'), `${JSON.stringify({
+    type: secret,
+    phase: secret,
+    detail: { prompt: secret },
+  })}\n`);
+  writeFileSync(path.join(handle.runDir, 'loop-guard.json'), JSON.stringify({
+    schemaVersion: 1,
+    counters: { iterations: { count: secret } },
+    errors: {},
+  }));
+
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.reason, 'active-run-not-finalized');
+  assert.equal(evidence.diagnostics.pipeline.phaseStatuses.triage, 'unknown');
+  assert.deepEqual(evidence.diagnostics.summary, { status: 'unknown', result: 'unknown' });
+  assert.deepEqual(evidence.diagnostics.lastEvent, { type: 'unknown', phase: null });
+  assert.deepEqual(evidence.diagnostics.guardCounterCounts, {});
+  assert.equal(JSON.stringify(evidence).includes(secret), false);
 });
 
 test('a finalized summary cannot report a non-success result', async (t) => {
@@ -409,6 +546,7 @@ test('runEval fails provider-success + grader-green when pipeline evidence is ab
   const root = tempDir(t, 'ao-eval-pipeline-integration-red-');
   const result = await runEval(REGRESSION_TASK, {
     live: true,
+    maxBudgetUsd: 1,
     k: 1,
     runId: 'pipeline-missing',
     resultsDir: path.join(root, 'results'),
@@ -424,6 +562,7 @@ test('runEval passes only when provider, pipeline, and independent grader all pa
   const root = tempDir(t, 'ao-eval-pipeline-integration-green-');
   const result = await runEval(REGRESSION_TASK, {
     live: true,
+    maxBudgetUsd: 1,
     k: 1,
     runId: 'pipeline-green',
     resultsDir: path.join(root, 'results'),
@@ -448,6 +587,7 @@ test('runEval accepts a valid Athena provider, pipeline, and grader result', asy
   writeFileSync(taskPath, `${JSON.stringify(task, null, 2)}\n`);
   const result = await runEval(taskDir, {
     live: true,
+    maxBudgetUsd: 1,
     k: 1,
     runId: 'pipeline-athena-green',
     resultsDir: path.join(root, 'results'),

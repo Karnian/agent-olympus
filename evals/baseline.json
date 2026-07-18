@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "track": "regression",
   "k": 3,
   "tasks": {
@@ -12,7 +12,13 @@
       "modelTier": null,
       "orchestrator": "atlas",
       "benchmarkFingerprint": "c9922302b1bf5f76ac00e8d4b11e543a7378279037973f345e1a3fa022fcc877",
-      "pipelineProtocolFingerprint": "e35882d1eaac685b4625c2de4f96f914f75e5aa296b7a0b4c73e094b74480580"
+      "pipelineProtocolFingerprint": "ee81b6a36d0c97c6aa4341657f0aa745bd1f1e1355dfe7eebc030f6745bc211d",
+      "claudeCliVersion": null,
+      "pluginFingerprint": null,
+      "targetPromptFingerprint": null,
+      "observedModels": null,
+      "maxBudgetUsd": null,
+      "providerRuntime": null
     },
     "fix-null-deref": {
       "k": 3,
@@ -23,7 +29,13 @@
       "modelTier": null,
       "orchestrator": "atlas",
       "benchmarkFingerprint": "d5ee4959a359c22ea2713101afac3dfea0519223720f076492f605865495874c",
-      "pipelineProtocolFingerprint": "e35882d1eaac685b4625c2de4f96f914f75e5aa296b7a0b4c73e094b74480580"
+      "pipelineProtocolFingerprint": "ee81b6a36d0c97c6aa4341657f0aa745bd1f1e1355dfe7eebc030f6745bc211d",
+      "claudeCliVersion": null,
+      "pluginFingerprint": null,
+      "targetPromptFingerprint": null,
+      "observedModels": null,
+      "maxBudgetUsd": null,
+      "providerRuntime": null
     },
     "fix-off-by-one": {
       "k": 3,
@@ -34,7 +46,13 @@
       "modelTier": null,
       "orchestrator": "atlas",
       "benchmarkFingerprint": "0c9b17cc3fb036a6a4b2e5c254502ff6c3fe5c12a1ec5fb4bfe6ba214629bdd2",
-      "pipelineProtocolFingerprint": "e35882d1eaac685b4625c2de4f96f914f75e5aa296b7a0b4c73e094b74480580"
+      "pipelineProtocolFingerprint": "ee81b6a36d0c97c6aa4341657f0aa745bd1f1e1355dfe7eebc030f6745bc211d",
+      "claudeCliVersion": null,
+      "pluginFingerprint": null,
+      "targetPromptFingerprint": null,
+      "observedModels": null,
+      "maxBudgetUsd": null,
+      "providerRuntime": null
     }
   }
 }

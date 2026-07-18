@@ -19,8 +19,8 @@ spawn a real, unsupervised orchestrator run. Choose a mode:
 node evals/run.mjs --task evals/tasks/fix-failing-test --fixture solution
 # Hermetic: no-op orchestrator, seed stays broken → RED
 node evals/run.mjs --task evals/tasks/fix-failing-test --fixture none
-# LIVE operator run: spawn the real orchestrator (see caveat below)
-node evals/run.mjs --task evals/tasks/fix-failing-test --live
+# LIVE operator run: every provider call requires an explicit/task cap
+node evals/run.mjs --task evals/tasks/fix-failing-test --live --k 1 --max-budget-usd 1
 ```
 
 The engine self-test also uses the sample fixture task
@@ -39,12 +39,31 @@ IDs, and aggregates task verdicts, track rollups, and tokens. Suite baseline
 refresh is intentionally rejected because task-by-task writes would not be
 atomic as a set.
 
-Each real task runs at `k=3`. Regression track rollups use `passHatK`
+Paid suites require an explicit `--track` plus all three controls up front:
+explicit `--k`, a per-trial `--max-budget-usd`, and a conservative
+`--max-total-budget-usd` at least as
+large as `taskCount * k * perTrialCap`. The suite rejects an insufficient
+aggregate cap before spawning, passes the per-trial cap to every child run,
+and stops scheduling if a child exceeds its cap, omits cost evidence, or the
+aggregate cap is reached. The provider cap is enforced by Claude inside a
+trial; reported cost is checked between trials and tasks.
+
+Regression tasks and established capability benchmarks run at `k=3`.
+New direct-agent wiring tasks default to `k=1`; an operator must explicitly
+request `--k 3` after the route, provenance, grader, and budget controls pass.
+Regression track rollups use `passHatK`
 (all-trials reliability), while capability track rollups use `passAtK`
 (at least one successful trial). Raw JSONL trial rows retain their individual
 `pass` verdicts. Fixture runs always report zero
 aggregate tokens and `null` raw usage; they must not be used to claim provider
 cost or live reliability.
+
+Live results keep the independent grader verdict (`outcomePass`,
+`outcomePassAtK`, and `outcomePassHatK`) separate from the overall
+`pass`/`passAtK`/`passHatK` verdict. The latter also requires the applicable
+route, pipeline, provenance, treatment-consistency, and budget gates. A
+functionally correct patch therefore remains visible when an orchestration or
+efficiency axis fails, without being reported as an overall success.
 
 `task.json.modelTier` is passed to Claude as `--model <tier>` for live runs and
 is persisted on trial, task, suite, and trend records. Model selectors are
@@ -52,6 +71,21 @@ restricted to option-safe model names so task metadata cannot inject CLI flags.
 Task metadata is enforced with the same exact required-key contract as the
 checked-in JSON schema; unknown or missing fields fail instead of silently
 falling back to another model, timeout, or k.
+
+Individual plugin agents use `orchestrator: "agent"` plus a bundled bare agent
+name, for example `"agent": "executor"`. The live runner sends the task as a
+plain prompt and activates the persona with
+`--agent agent-olympus:executor`. Direct-agent tasks are capability-only: the
+committed regression baseline currently compares orchestrators, not individual
+agent targets. The bare name is validated against the 19 agents shipped by this
+plugin, so task metadata cannot select another plugin or inject a CLI option.
+Each direct trial stages a hook-free plugin snapshot, restricts Claude settings
+to the isolated project, and sets `DISABLE_AO=1` as defense in depth so the
+production intent/model router cannot contaminate the persona treatment. The
+`solo` control uses Claude safe mode with no plugin snapshot. Atlas/Athena keep
+their staged hooks because hook behavior is part of those product paths. All
+headless arms disable prompt-suggestion messages, pin effort to `high`, and
+record resolved models plus reported fast-mode, speed, and service-tier state.
 
 ## Task Contract
 
@@ -94,16 +128,22 @@ node evals/verify-baseline.mjs
 
 ## Manual live comparison and baseline refresh
 
-The real `claude -p /atlas` path requires `--plugin-dir <repo>` so Claude loads
-this branch's Agent Olympus plugin. The existing `--bare` worker-adapter path
-does not load hooks or plugins, so it would not exercise `/atlas` correctly.
+The real `claude -p /agent-olympus:atlas` path requires `--plugin-dir <repo>` so
+Claude loads this branch's Agent Olympus plugin. Plugin skills are namespaced;
+an unqualified `/atlas` does not invoke the skill loaded by `--plugin-dir`. The
+existing `--bare` worker-adapter path does not load hooks or plugins, so it
+would not exercise `/agent-olympus:atlas` correctly. The `solo` control arm is
+sent as a plain prompt because it is not a plugin skill.
 
 Live orchestration is an operator-only or private nightly action. Run each
 regression task explicitly with `--live`, then inspect `summary.json`.
-Before each Claude trial, the runner copies only runtime plugin roots
+Before each Atlas/Athena Claude trial, the runner copies only runtime plugin roots
 (`.claude-plugin/`, agents, skills, hooks, scripts excluding tests, config, and
-schemas) into a fresh private temporary snapshot; `summary.json` records this as
-`oracleIsolation: "staged-plugin-best-effort"`. This reduces accidental access
+schemas) into a fresh private temporary snapshot. Direct-agent snapshots copy
+the same runtime surface except the root hook tree; solo copies no plugin.
+`summary.json` records the route-specific mode as
+`staged-plugin-best-effort`, `staged-plugin-hook-free`, or
+`safe-mode-no-plugin`. This reduces accidental access
 to reference solutions and graders, but `bypassPermissions` is not an OS
 sandbox, so the snapshot is not a security boundary against a malicious agent.
 
@@ -121,6 +161,12 @@ following symlinks, size-bounded, and required to have been written during the
 trial. Fixture runs record pipeline evidence as not applicable and never
 satisfy this live-only gate.
 
+Direct-agent and solo-control trials deliberately record pipeline evidence as
+not applicable. They measure the selected persona's bounded task outcome, not
+Atlas/Athena phase-protocol compliance. The target agent is retained on every
+trial, task summary, and run summary so two persona results cannot collapse
+into an indistinguishable `orchestrator: "agent"` bucket.
+
 Athena uses its own production phase sequence and recovery phases
 (`spawn`/`monitor`/`integrate`). The evidence verifier applies the Athena phase
 contract and requires monitor-loop authority instead of treating it as an Atlas
@@ -136,9 +182,10 @@ the project can claim adversarially tamper-resistant trajectory evidence.
 
 `delta_vs_baseline` is a measured-outcome comparison. It is `-1`, `0`, or `1`
 only for a live run whose k exactly matches both the baseline's root k and that
-task's k, whose orchestrator and `modelTier` match, and whose
-`benchmarkFingerprint` matches. That fingerprint covers `task.json`, `seed/`,
-`grader.mjs`, and the shared grader-isolation runtime.
+task's k, whose orchestrator, `modelTier`, Claude CLI version, resolved model
+IDs, effective per-trial budget, staged-plugin hash, and target prompt hash
+match, and whose `benchmarkFingerprint` matches. That fingerprint covers
+`task.json`, `seed/`, `grader.mjs`, and the shared grader-isolation runtime.
 
 The measurement machinery has a separate `pipelineProtocolFingerprint` over
 the live harness, pipeline-evidence policy, and production
@@ -163,10 +210,12 @@ populate `delta_vs_baseline`; machine output reports `baseline-unmeasured`,
 preserves the null live provenance, and puts the goal-relative result in the
 separate `delta_vs_target` field. Each task records `source`, `runId`,
 `measuredAt`, `modelTier`, `orchestrator`, `benchmarkFingerprint`, and
-`pipelineProtocolFingerprint`, so targets cannot masquerade as a measured LKG.
+`pipelineProtocolFingerprint`; measured entries additionally require Claude
+CLI, plugin/prompt, resolved-model, and effective-budget provenance. Targets
+cannot masquerade as a measured LKG.
 
 After reviewing a trusted live run, refresh that task's committed baseline with
-the same command plus `--update-baseline`. Refresh is rejected for capability
+the same capped command plus `--update-baseline`. Refresh is rejected for capability
 tasks, failed runs, fixture runs, ambiguous `--live`+`--fixture` invocations,
 unknown tasks, or a `k` that differs from the committed baseline. Review the
 resulting `evals/baseline.json` diff before committing it.
@@ -186,11 +235,19 @@ also carries `k`/`ks`, a track-level `benchmarkFingerprint`, and the observed
 `pipelineProtocolFingerprint` set. Compare outcomes only when benchmark fields
 match, and require review when protocol identities differ.
 
+Direct-agent runs also produce one chronological series per persona. Each
+point retains independent outcome and overall verdicts, completed/k counts,
+reported cost/duration/turns, per-trial and scheduled budget caps, resolved
+models, effort/runtime state, Claude CLI version, and
+benchmark/plugin/prompt/protocol fingerprints.
+This prevents Executor and Hephaestus results on the same fixture from being
+collapsed into a generic `orchestrator: "agent"` series.
+
 Local run artifacts under `evals/results/` are gitignored so live output cannot
 be swept into an automatic WIP commit.
 
-Supported Atlas and Athena live evals burn real tokens and run unsupervised.
-Neither path is run by CI or this repository's test suite.
+Supported Atlas, Athena, and direct-agent live evals burn real tokens and run
+unsupervised. None of these paths is run by CI or this repository's test suite.
 
 ## Failed-run candidate feedback loop (HU-17)
 

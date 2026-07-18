@@ -13,12 +13,19 @@ const EVALS_DIR = path.join(REPO_ROOT, 'evals');
 const WORKFLOW_PATH = path.join(REPO_ROOT, '.github/workflows/evals.yml');
 const GITIGNORE_PATH = path.join(REPO_ROOT, '.gitignore');
 const PACKAGE_PATH = path.join(REPO_ROOT, 'package.json');
+const PROVIDER_RUNTIME = Object.freeze({
+  effort: 'high',
+  efforts: Object.freeze(['high']),
+  fastModeStates: Object.freeze(['off']),
+  usageSpeeds: Object.freeze(['standard']),
+  serviceTiers: Object.freeze(['standard']),
+});
 
 test('baseline matches schema-level rules and every regression task at the same k', () => {
   const baseline = readBaseline(path.join(EVALS_DIR, 'baseline.json'), { required: true });
   assert.deepEqual(validateBaseline(baseline), []);
   assert.deepEqual(verifyBaselineIntegrity(), {
-    schemaVersion: 1,
+    schemaVersion: 2,
     tasks: 3,
     k: 3,
     protocolReviewRequired: [],
@@ -43,12 +50,18 @@ test('baseline integrity preserves a measured LKG protocol identity and reports 
       runId: 'historical-live-run',
       measuredAt: '2026-07-12T00:00:00.000Z',
       modelTier: 'sonnet',
+      claudeCliVersion: '2.1.209',
+      pluginFingerprint: 'a'.repeat(64),
+      targetPromptFingerprint: 'b'.repeat(64),
+      observedModels: ['claude-sonnet-test'],
+      maxBudgetUsd: 1,
+      providerRuntime: structuredClone(PROVIDER_RUNTIME),
       pipelineProtocolFingerprint: 'f'.repeat(64),
     };
     writeFileSync(baselinePath, `${JSON.stringify(baseline, null, 2)}\n`);
 
     assert.deepEqual(verifyBaselineIntegrity({ baselinePath }), {
-      schemaVersion: 1,
+      schemaVersion: 2,
       tasks: 3,
       k: 3,
       protocolReviewRequired: ['fix-failing-test'],
@@ -60,6 +73,33 @@ test('baseline integrity preserves a measured LKG protocol identity and reports 
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test('live baseline model provenance must be unique and sorted', () => {
+  const baseline = readBaseline(path.join(EVALS_DIR, 'baseline.json'), { required: true });
+  const makeLive = (observedModels) => ({
+    ...structuredClone(baseline),
+    tasks: {
+      ...structuredClone(baseline.tasks),
+      'fix-failing-test': {
+        ...baseline.tasks['fix-failing-test'],
+        source: 'live',
+        runId: 'model-provenance-test',
+        measuredAt: '2026-07-18T00:00:00.000Z',
+        modelTier: 'sonnet',
+        claudeCliVersion: '2.1.209',
+        pluginFingerprint: 'a'.repeat(64),
+        targetPromptFingerprint: 'b'.repeat(64),
+        observedModels,
+        maxBudgetUsd: 1,
+        providerRuntime: structuredClone(PROVIDER_RUNTIME),
+      },
+    },
+  });
+
+  assert.match(validateBaseline(makeLive(['model-a', 'model-a'])).join('; '), /unique, sorted/);
+  assert.match(validateBaseline(makeLive(['model-b', 'model-a'])).join('; '), /unique, sorted/);
+  assert.deepEqual(validateBaseline(makeLive(['model-a', 'model-b'])), []);
 });
 
 test('baseline refresh preserves last-known-good and fixture runs cannot update it', async () => {
@@ -79,6 +119,12 @@ test('baseline refresh preserves last-known-good and fixture runs cannot update 
       orchestrator: 'atlas',
       benchmarkFingerprint: originalEntry.benchmarkFingerprint,
       pipelineProtocolFingerprint: originalEntry.pipelineProtocolFingerprint,
+      claudeCliVersion: '2.1.209',
+      pluginFingerprint: 'a'.repeat(64),
+      targetPromptFingerprint: 'b'.repeat(64),
+      observedModels: ['claude-sonnet-test'],
+      maxBudgetUsd: 1,
+      providerRuntime: structuredClone(PROVIDER_RUNTIME),
     });
     assert.deepEqual(readBaseline(baselinePath, { required: true }).tasks['fix-failing-test'], {
       k: 3,
@@ -90,6 +136,12 @@ test('baseline refresh preserves last-known-good and fixture runs cannot update 
       orchestrator: 'atlas',
       benchmarkFingerprint: originalEntry.benchmarkFingerprint,
       pipelineProtocolFingerprint: originalEntry.pipelineProtocolFingerprint,
+      claudeCliVersion: '2.1.209',
+      pluginFingerprint: 'a'.repeat(64),
+      targetPromptFingerprint: 'b'.repeat(64),
+      observedModels: ['claude-sonnet-test'],
+      maxBudgetUsd: 1,
+      providerRuntime: structuredClone(PROVIDER_RUNTIME),
     });
     await assert.rejects(
       () => updateBaselineTask(baselinePath, {
@@ -155,6 +207,12 @@ test('concurrent baseline refreshes fail explicitly instead of losing an update'
     orchestrator: 'atlas',
     benchmarkFingerprint: baseline.tasks[taskId].benchmarkFingerprint,
     pipelineProtocolFingerprint: baseline.tasks[taskId].pipelineProtocolFingerprint,
+    claudeCliVersion: '2.1.209',
+    pluginFingerprint: 'a'.repeat(64),
+    targetPromptFingerprint: 'b'.repeat(64),
+    observedModels: ['claude-sonnet-test'],
+    maxBudgetUsd: 1,
+    providerRuntime: structuredClone(PROVIDER_RUNTIME),
   });
   try {
     const settled = await Promise.allSettled([
