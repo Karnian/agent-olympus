@@ -50,9 +50,12 @@ global one without accidental concatenation.
 
 - `"never"` — do not update the changelog or tech-debt tracker, push, create a
   PR, or start CI watching. Leave the branch ready for the user to ship.
-- `"ask"` — require an actual human approval from an interactive channel before
-  push/PR. In a headless or unattended run, notify when `notify.onBlocked` is
-  enabled, then skip shipping and CI without pushing.
+- `"ask"` — express the intent to require human approval before push/PR. The
+  current code-owned Atlas runtime has no host-attested approval-receipt
+  channel, so it fails closed with `ship-approval-unattested`, leaves the
+  branch local, and hands shipping to the user. Interactive availability does
+  not change this behavior; a candidate-written event claiming an
+  `AskUserQuestion` answer is not authorization.
 - `"auto"` — push and create a PR automatically after preflight succeeds.
 
 An explicit no-push/no-PR constraint in the original task or any user follow-up
@@ -66,11 +69,27 @@ the durable anchor; the best-effort `events.jsonl` copy is audit-only. A missing
 torn, malformed, identity-mismatched, or anchor-mismatched task ledger stops
 the run before release side effects. Policy is re-read on every resume and
 immediately before each push or PR mutation, so a follow-up after finalize still
-revokes shipping. The skill protocol accepts only an interactive
-`AskUserQuestion` result as approval, records it, re-reads it before mutation,
-and forbids model-generated prose or self-approval. The ledger provides durable
-run identity, not cryptographic user-origin attestation, so `"ask"` is a
-cooperative runtime trust boundary; headless and unattended runs always halt.
+revokes shipping. On the current code-owned Atlas path, the candidate can write
+the same run events that record approval, so neither a `human_ship_approval`
+event, a caller-authored `source: "AskUserQuestion"` field, nor model-generated
+prose proves that the host displayed a prompt and a human selected an answer.
+Until the host provides a nonce-bound receipt that Atlas can verify, `"ask"`
+always stops before outward release side effects and requires manual shipping.
+The durable ledger supports revocation and run identity, but it is not
+cryptographic user-origin attestation.
+
+Before any Atlas shipping action, `complete-finalize` creates the exact commit
+envelope that the final reviewers approved. It invokes a fixed, trusted Git
+binary through normal `git commit`, so repository commit hooks run with the
+user's toolchain `PATH`; ambient `GIT_*` and GitHub repository selectors remain
+filtered. The author and committer are the explicit
+`Agent Olympus <agent-olympus@localhost>` automation identity, the UTC timestamp
+and message are reviewer-bound, and any hook or setting that changes the tree or
+metadata makes finalization fail closed before push. This automation envelope is
+intentionally unsigned (`--no-gpg-sign`), because a signature header cannot be
+known before final review. Repositories that require signed commits must use a
+manual shipping path; supporting signatures requires a future commit-before-final-
+review protocol rather than weakening the exact metadata check.
 
 `ship.autoPush` is deprecated but remains validated for compatibility. Within
 a valid config layer that omits `ship.mode`, legacy `autoPush: true` maps to

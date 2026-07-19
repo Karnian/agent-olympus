@@ -6,7 +6,7 @@ Run `node scripts/check-agents-size.mjs` to verify `AGENTS.md` stays under the 2
 ## Testing
 
 ```bash
-# Run unit tests (current tree: 3239 tests, 128 files; published v1.5.1 baseline: 2858/108)
+# Run unit tests (current tree: 3357 tests, 134 files; published v1.5.1 baseline: 2858/108)
 npm test
 
 # Or invoke the cross-platform Node test enumerator directly

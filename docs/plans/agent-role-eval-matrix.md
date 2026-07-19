@@ -1,6 +1,6 @@
 # 19-Agent Role Evaluation Plan
 
-**Status:** in progress — direct-agent runner and Executor/Hephaestus first pair implemented
+**Status:** in progress — 19/19 free contracts pass; first shared live pair passes; Atlas runtime remediation is locally green, with the live smoke still inconclusive after a timeout and an external rate limit
 
 **Scope:** all 19 Agent Olympus agents; deterministic CI contracts plus operator-only live evaluation
 
@@ -14,6 +14,89 @@ Measure whether each agent adds role-specific value, not merely whether Claude c
 4. **Efficiency** — cost, latency, turns, and tool use stay within the declared budget.
 
 A run is release-eligible only when every required axis passes. A good patch cannot hide a missing orchestration pipeline, and a well-formed report cannot hide a failed task.
+
+## July 19, 2026 audit evidence
+
+The provider-free contract track now covers the exact 19-agent inventory. It
+validates frontmatter, model/tool declarations, namespace hygiene, read-only
+mutation boundaries, and the documented `AO_REVIEW_V1`, `AO_SPEC_V1`, and
+`STAGE_VERDICT` examples through the production parsers. All 19 contracts pass.
+
+Nine prompt-only boundary corrections were made where behavior could be proven
+from the current caller, parser, or tool surface: Metis, Prometheus, Test
+Engineer, Debugger, Architect, Code Reviewer, Explore, Writer, and Ask. These
+changes narrow ownership or make an existing executable path explicit; they do
+not claim a stochastic performance gain.
+
+The first same-fixture live pair is valid:
+
+| Run | Agent | Outcome / scope | Duration | Reported cost |
+|---|---|---|---:|---:|
+| `eval-1784407210658-bb80c144` | Executor | PASS / PASS | 15.724 s | $0.0399930 |
+| `eval-1784407240944-393e8dd1` | Hephaestus | PASS / PASS | 17.004 s | $0.0457392 |
+
+Both agents fixed the same difficulty-S fixture and touched only the allowed
+source file. This `k=1` result shows no Hephaestus advantage on the small task;
+it is insufficient to merge or remove either role. The next meaningful
+comparison is a shared M/L cross-module fixture at `k=3`. An earlier Executor
+call (`eval-1784407122191-a06021a4`, $0.0771096) exposed a grader newline bug;
+it is excluded from agent comparison. Total July 19 live spend through this
+pair is $0.1628418, including that diagnostic call.
+
+Atlas now has a code-owned, allowlisted phase runtime instead of relying on the
+model to imitate pseudo-code from a long prompt. The namespaced skill bootstrap
+creates or adopts exactly one run, phase transitions go through a fixed CLI,
+and a skill-scoped Stop hook blocks an early successful exit. The detailed
+legacy behavior is retained as non-executable reference material while the
+control loop stays concise.
+
+Two post-remediation Atlas live smokes both fixed the seeded bug and advanced
+the production ledger through `triage → execute → verify → review`. Neither is
+a pipeline PASS:
+
+| Run | Functional result | Pipeline cut | Terminal condition | Reported cost |
+|---|---|---|---|---:|
+| `eval-1784409287157-73beedaa` | PASS | `review` in progress; attempt 1, review round 1 | 120 s process timeout | unavailable |
+| `eval-1784409517549-aed214fe` | PASS | `review` in progress; attempt 1, review round 1 | provider `rate_limited` before the 180 s timeout | unavailable |
+
+The first run revealed that generic JavaScript fell through to the five-reviewer
+fallback. A deterministic `generic-js-ts` route now selects Code Reviewer only,
+and the Atlas smoke timeout is 180 seconds. The second run exercised that
+configuration but was cut off by the provider rate limit, so it is recorded as
+external/inconclusive rather than a passing baseline or another runtime defect.
+Neither interrupted call emitted terminal usage/cost evidence. Each invocation
+had a hard `$1` Claude CLI cap; therefore the two-call exposure ceiling is `$2`,
+and the July 19 exposure ceiling including the exact direct-agent spend is
+`$2.1628418`. A third paid call is deferred until the provider limit resets.
+The final local patch also prevents the global WIP Stop hook from committing an
+incomplete Atlas tree. The final local hardening also binds review and
+final-review approval to code-owned verification generations, the immutable
+review base, the authoritative all-passing PRD, and the real clean Git
+HEAD/tree/commit. Those interactions are now part of protocol fingerprint
+`21d396e6b5ff7c523c5db4b73913a1df6088d1c36a828c97455f5c14a5f04a6f`.
+Consequently, the next live smoke starts a new comparable protocol series.
+
+This remains a cooperative, `candidate-asserted` evidence boundary. Reviewer
+rosters/result maps, `subagent_completed` events, and verification
+`verifiedBy` labels come from the candidate-writable trial tree. The verifier
+recomputes routing and checks schema, PRD, generation, review-digest, Git-tree,
+phase, and timestamp consistency, but the host does not attest that any named
+reviewer or verifier subagent was actually called or authored a record. A
+future Atlas pipeline PASS would therefore establish only
+protocol/tree/evidence consistency. An overall eval PASS would additionally
+require the separately graded task outcome; neither verdict establishes an
+individual agent's invocation or performance. Role-performance claims still
+require the direct-agent live track (or future host-attested telemetry).
+
+Current disposition across all 19 agents:
+
+| Disposition | Agents | Action |
+|---|---|---|
+| Runtime P0 | Atlas | Bootstrap/runtime/Stop enforcement implemented and locally verified; retain P0 until a post-rate-limit namespaced live pipeline PASS |
+| Deferred runtime P1 | Athena | Apply the proven Atlas pattern only after Atlas smoke passes; preserve native-team recovery semantics |
+| Boundary corrected | Metis, Prometheus, Test Engineer, Debugger, Architect, Code Reviewer, Explore, Writer, Ask | Keep corrections and add role-specific live fixtures |
+| Live validation first | Designer, Aphrodite | Verify current Preview/browser tool availability and shared UI fixture before changing tools or prompts |
+| Keep current prompt | Hermes, Momus, Executor, Hephaestus, Security Reviewer, Themis | Do not change model tier or merge roles without shared-fixture `k=3` evidence |
 
 ## July 18, 2026 smoke evidence
 
@@ -171,7 +254,7 @@ Add Explore; Metis/Hermes/Prometheus/Momus; Code/Architect/Security reviewers; A
 
 ### Phase 3 — namespaced orchestrators
 
-1. Re-run Atlas `fix-failing-test` with `/agent-olympus:atlas`, `k=1`.
+1. Re-run Atlas `fix-failing-test` with `/agent-olympus:atlas`, `k=1`, after the provider rate limit resets.
 2. Do not expand the Atlas suite until outcome **and** production pipeline evidence pass in the same trial.
 3. Add one medium Atlas task, then one Athena parallel/integration task.
 4. Move to `k=3` only after the relevant `k=1` protocol smoke passes and the operator approves the printed budget.
@@ -184,7 +267,7 @@ Run the four shared-fixture ablations at `k=3`, establish measured live baseline
 
 - No live call is implicit. Every live run requires `--live` plus a task-declared or explicit per-trial budget. A live suite additionally requires explicit `--track`, `--k`, `--max-budget-usd`, and `--max-total-budget-usd`; it rejects an underfunded aggregate cap before spawning.
 - Phase 1 first tranche defaults to `k=1`, 120 seconds per trial, **$1 reported-cost ceiling per trial and $4 aggregate ceiling**. A completed over-cap trial keeps its outcome but fails the efficiency axis and stops scheduling further trials.
-- Atlas smoke defaults to 120 seconds and a $1 aggregate ceiling. Athena and any multi-worker task require a separate explicit budget; initial default ceiling is $5 and 600 seconds.
+- Atlas regression treatments pin `modelTier: opus` to match the Atlas skill, use 180 seconds, and retain a $1 aggregate ceiling. The original Sonnet metadata and 120-second ceiling were retired after the code-owned pipeline selected Opus, reached review with a green task, and timed out before finalization. Athena and any multi-worker task require a separate explicit budget; initial default ceiling is $5 and 600 seconds.
 - The provider reports cost only during/after a call, so the harness passes Claude its per-call cap, verifies reported cost between trials/tasks, and uses the process timeout inside a trial. Missing cost evidence fails closed and stops later scheduling. The harness must never claim it can stop an in-flight call at an exact dollar value.
 - `k=3`, real Codex/Gemini calls, capability suites, and ablations each require a separate opt-in. The fake-adapter Ask task is the default.
 - After five valid trials for a task class, replace provisional ceilings only through a reviewed change using observed p95 cost/latency. Record budget breaches separately from functional failures.
