@@ -220,7 +220,7 @@ describe('AO_CONSENSUS_ASSIGNMENT_PLAN_V1', () => {
 
 describe('consensus-plan skill integration contract', () => {
   const skill = readFileSync(path.join(ROOT, 'skills/consensus-plan/SKILL.md'), 'utf8');
-  const atlas = readFileSync(path.join(ROOT, 'skills/atlas/SKILL.md'), 'utf8');
+  const atlas = readFileSync(path.join(ROOT, 'skills/atlas/reference.md'), 'utf8');
   const athena = readFileSync(path.join(ROOT, 'skills/athena/SKILL.md'), 'utf8');
 
   it('returns an assignment-only contract and forbids authoritative PRD writes', () => {

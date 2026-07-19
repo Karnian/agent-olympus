@@ -26,7 +26,6 @@ const UNCHANGED_FILES = {
     'Modify only src/normalizeUsername.mjs.',
     'Do not edit tests, package metadata, or src/legacySlug.mjs.',
     '',
-    '',
   ].join('\n'),
   'package.json': [
     '{',

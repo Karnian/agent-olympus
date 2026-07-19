@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   cpSync,
   chmodSync,
@@ -459,12 +459,59 @@ function resolveFixture(fixture, taskDir) {
   };
 }
 
-function targetPromptRelativePath(task) {
-  if (task.orchestrator === 'agent') return `agents/${task.agent}.md`;
-  if (task.orchestrator === 'atlas' || task.orchestrator === 'athena') {
-    return `skills/${task.orchestrator}/SKILL.md`;
+function targetPromptRelativePaths(task) {
+  if (task.orchestrator === 'agent') return [`agents/${task.agent}.md`];
+  if (task.orchestrator === 'atlas') {
+    return ['skills/atlas/SKILL.md', 'skills/atlas/reference.md'];
   }
-  return null;
+  if (task.orchestrator === 'athena') {
+    return ['skills/athena/SKILL.md', 'skills/atlas/reference.md'];
+  }
+  return [];
+}
+
+/**
+ * Bind an eval treatment to every prompt resource the selected route may load.
+ * Progressive-disclosure prompt resources use a domain-separated composite
+ * identity. The historical single-file fallback is available only when a
+ * caller explicitly marks a non-live minimal fixture.
+ */
+export function fingerprintTargetPrompt(task, fileFingerprints, options = {}) {
+  const paths = targetPromptRelativePaths(task);
+  const targetPromptPath = paths[0] ?? null;
+  if (!targetPromptPath) {
+    return {
+      targetPromptPath: null,
+      targetPromptFingerprint: null,
+      missingTargetPromptPaths: [],
+    };
+  }
+  const missingTargetPromptPaths = paths.filter(
+    relativePath => !fileFingerprints?.[relativePath],
+  );
+  const primaryFingerprint = fileFingerprints?.[targetPromptPath] ?? null;
+  if (!primaryFingerprint) {
+    return { targetPromptPath, targetPromptFingerprint: null, missingTargetPromptPaths };
+  }
+  if (missingTargetPromptPaths.length > 0 && options.allowLegacySingleFile !== true) {
+    return { targetPromptPath, targetPromptFingerprint: null, missingTargetPromptPaths };
+  }
+  const present = paths
+    .map((relativePath) => [relativePath, fileFingerprints?.[relativePath] ?? null])
+    .filter(([, fingerprint]) => fingerprint !== null);
+  if (present.length === 1) {
+    return { targetPromptPath, targetPromptFingerprint: primaryFingerprint, missingTargetPromptPaths };
+  }
+  const hash = createHash('sha256');
+  hash.update('agent-olympus-eval-target-prompt-v2\0');
+  for (const [relativePath, fingerprint] of present) {
+    hash.update(`${relativePath}\0${fingerprint}\0`);
+  }
+  return {
+    targetPromptPath,
+    targetPromptFingerprint: hash.digest('hex'),
+    missingTargetPromptPaths,
+  };
 }
 
 function oracleIsolationMode(task, live) {
@@ -616,6 +663,7 @@ export async function runEval(taskPath, opts = {}) {
           orchestrator: task.orchestrator,
           evalRunId: runId,
           taskId: task.id,
+          taskPrompt: task.prompt,
           trial,
         })
         : null;
@@ -634,12 +682,20 @@ export async function runEval(taskPath, opts = {}) {
       let pluginProvenance = null;
       try {
         if (stagedPlugin) {
-          const targetPromptPath = targetPromptRelativePath(task);
-          const targetPromptFingerprint = targetPromptPath
-            ? stagedPlugin.fileFingerprints[targetPromptPath] ?? null
-            : null;
-          if (task.orchestrator === 'agent' && !targetPromptFingerprint) {
-            throw new Error(`Staged plugin is missing direct-agent prompt: ${targetPromptPath}`);
+          const {
+            targetPromptPath,
+            targetPromptFingerprint,
+            missingTargetPromptPaths,
+          } = fingerprintTargetPrompt(
+            task,
+            stagedPlugin.fileFingerprints,
+          );
+          if (['agent', 'atlas', 'athena'].includes(task.orchestrator)
+            && !targetPromptFingerprint) {
+            const missing = missingTargetPromptPaths.length > 0
+              ? missingTargetPromptPaths.join(', ')
+              : targetPromptPath;
+            throw new Error(`Staged plugin is missing target prompt resource(s): ${missing}`);
           }
           pluginProvenance = {
             fingerprint: stagedPlugin.fingerprint,

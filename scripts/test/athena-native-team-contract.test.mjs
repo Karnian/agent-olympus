@@ -63,6 +63,10 @@ test('every TaskList call uses the current zero-argument API', () => {
 test('native adoption is bound to the originating Claude session', () => {
   assert.match(
     skill,
+    /import\s*\{[^}]*\bbindRunToCurrentSession\b[^}]*\}\s*from\s*['"][^'"]*run-artifacts\.mjs['"]/s,
+  );
+  assert.match(
+    skill,
     /import\s*\{[^}]*\bgetCurrentSessionId\b[^}]*\bgetSession\b[^}]*\bisSessionAlive\b[^}]*\}\s*from\s*['"][^'"]*session-registry\.mjs['"]/s,
   );
   assert.match(
@@ -74,6 +78,8 @@ test('native adoption is bound to the originating Claude session', () => {
   assert.match(skill, /originSession\?\.sessionId\s*===\s*originSessionId[\s\S]*?isSessionAlive\(originSessionId\)/);
   assert.match(skill, /proven:[\s\S]*?currentSessionId\s*===\s*originSessionId[\s\S]*?runtimeMatches\s*&&\s*registryMatches/);
   assert.match(skill, /const nativeSessionRequired\s*=\s*plannedSpawnPath\s*===\s*['"]native-or-mixed['"]/);
+  assert.match(skill, /nativeSessionRequired\s*&&\s*!getRun\(runId\)\.summary\?\.sessionId[\s\S]*?bindRunToCurrentSession\(runId\)[\s\S]*?!adoptedSession\.ok/,
+    'a harness-preallocated sessionless run must bind to the live Claude session before native launch');
   assert.match(skill, /expectedSpawn\s*=\s*\{[\s\S]*?nativeSessionId,/);
   assert.match(skill, /spawnCheckpointPayload\s*=\s*\{[\s\S]*?nativeSessionId,/);
   assert.match(skill, /persistedSpawn\?\.nativeSessionId\s*===\s*nativeSessionId[\s\S]*?spawnCheckpoint\?\.nativeSessionId\s*===\s*nativeSessionId/);

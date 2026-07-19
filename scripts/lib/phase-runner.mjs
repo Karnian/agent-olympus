@@ -48,7 +48,12 @@ import {
   requireSafeDirectory,
   validateRegularArtifact,
 } from './hardened-fs.mjs';
-import { bindRunFinalizationPaths } from './run-artifacts.mjs';
+import {
+  bindRunFinalizationPaths,
+  finalizeRun,
+  persistRunExecutionPrdSnapshot,
+} from './run-artifacts.mjs';
+import { readExecutionPrd } from './execution-prd-store.mjs';
 import {
   acquireRunFinalizationLock,
   holdsRunFinalizationLock,
@@ -71,6 +76,7 @@ export const FINAL_REVIEW_CAP = 3;
 export const SCHEMA_VERSION = 1;
 
 const LOG_FILE_NAME = 'pipeline.json';
+const REATTEMPT_INTENT_SCHEMA_VERSION = 1;
 const OUTPUTS_CAP_BYTES = 4096;
 const PIPELINE_MAX_BYTES = 1024 * 1024;
 const EVENTS_MAX_BYTES = 16 * 1024 * 1024;
@@ -79,11 +85,14 @@ const FAILURE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const SAFE_RUN_ID = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const TERMINAL_STATUSES = new Set(['completed', 'skipped']);
 const VALID_STATUSES = new Set(['pending', 'in_progress', 'completed', 'skipped', 'failed']);
+const ATTEMPT_BOUND_LOOP_KEYS = new Set(['review', 'final-review']);
 const REWIND_REASONS = Object.freeze({
   atlas: Object.freeze({
     plan: new Set(['light_mode_rewind']),
-    execute: new Set(['quality_fail']),
-    verify: new Set(['quality_fail', 'review_reject', 'final_review_reject']),
+    execute: new Set(['quality_fail', 'light_mode_reexec']),
+    verify: new Set([
+      'quality_fail', 'review_reject', 'final_review_reject', 'light_mode_reexec',
+    ]),
   }),
   athena: Object.freeze({
     plan: new Set(['light_mode_rewind']),
@@ -573,6 +582,84 @@ function normalizeStatus(status) {
   return VALID_STATUSES.has(status) ? status : 'pending';
 }
 
+function canonicalReopen(orchestrator, reopen) {
+  if (!Array.isArray(reopen)) return [];
+  const requested = new Set(reopen.filter(value => typeof value === 'string'));
+  return getPhaseSequence(orchestrator)
+    .map(({ id }) => id)
+    .filter(id => requested.has(id));
+}
+
+function isValidPendingReattempt(pending, ledger) {
+  if (pending === undefined) return true;
+  if (!isPlainObject(pending)
+    || pending.schemaVersion !== REATTEMPT_INTENT_SCHEMA_VERSION
+    || pending.runId !== ledger.runId
+    || pending.orchestrator !== ledger.orchestrator
+    || typeof pending.reason !== 'string'
+    || pending.reason.length > 64
+    || typeof pending.currentPhase !== 'string'
+    || !Number.isInteger(pending.baseAttempt)
+    || pending.baseAttempt < 1
+    || !Number.isInteger(pending.targetAttempt)
+    || pending.baseAttempt !== ledger.attempt
+    || pending.targetAttempt !== pending.baseAttempt + 1
+    || pending.targetAttempt > DEFAULT_ITERATION_CAP
+    || !Array.isArray(pending.reopen)
+    || pending.reopen.length < 1) return false;
+
+  const canonical = canonicalReopen(ledger.orchestrator, pending.reopen);
+  if (canonical.length !== pending.reopen.length
+    || canonical.some((phaseId, index) => phaseId !== pending.reopen[index])) return false;
+  if (!descriptorById(ledger.orchestrator, pending.currentPhase)) return false;
+  const current = firstNonTerminal(ledger);
+  if (!current || current.id !== pending.currentPhase) return false;
+  const sequence = getPhaseSequence(ledger.orchestrator);
+  const currentIndex = sequence.findIndex(({ id }) => id === current.id);
+  if (!pending.reopen.every(phaseId => {
+    const targetIndex = sequence.findIndex(({ id }) => id === phaseId);
+    const status = ledger.phases[phaseId]?.status || 'pending';
+    return targetIndex >= 0 && targetIndex <= currentIndex
+      && (TERMINAL_STATUSES.has(status) || phaseId === current.id);
+  })) return false;
+
+  if (pending.reason === 'quality_fail') {
+    return Number.isInteger(pending.qualityBaseCount)
+      && pending.qualityBaseCount >= 0
+      && pending.qualityBaseCount < QUALITY_CAP;
+  }
+  return !Object.hasOwn(pending, 'qualityBaseCount');
+}
+
+function isValidReattemptReceipt(receipt, ledger) {
+  if (receipt === undefined) return true;
+  if (!isPlainObject(receipt)
+    || receipt.schemaVersion !== REATTEMPT_INTENT_SCHEMA_VERSION
+    || receipt.runId !== ledger.runId
+    || receipt.orchestrator !== ledger.orchestrator
+    || typeof receipt.reason !== 'string'
+    || receipt.reason.length > 64
+    || typeof receipt.currentPhase !== 'string'
+    || !Number.isInteger(receipt.baseAttempt)
+    || receipt.baseAttempt < 1
+    || !Number.isInteger(receipt.targetAttempt)
+    || receipt.targetAttempt !== receipt.baseAttempt + 1
+    || receipt.targetAttempt > ledger.attempt
+    || receipt.targetAttempt > DEFAULT_ITERATION_CAP
+    || !Array.isArray(receipt.reopen)
+    || receipt.reopen.length < 1) return false;
+  const canonical = canonicalReopen(ledger.orchestrator, receipt.reopen);
+  if (canonical.length !== receipt.reopen.length
+    || canonical.some((phaseId, index) => phaseId !== receipt.reopen[index])) return false;
+  if (!descriptorById(ledger.orchestrator, receipt.currentPhase)) return false;
+  if (receipt.reason === 'quality_fail') {
+    return Number.isInteger(receipt.qualityBaseCount)
+      && receipt.qualityBaseCount >= 0
+      && receipt.qualityBaseCount < QUALITY_CAP;
+  }
+  return !Object.hasOwn(receipt, 'qualityBaseCount');
+}
+
 function hasCoherentPhaseOrder(parsed) {
   const sequence = getPhaseSequence(parsed.orchestrator);
   const firstNonTerminalIndex = sequence.findIndex(({ id }) => (
@@ -616,6 +703,8 @@ export function validatePipelineLedgerIdentity(parsed, expected = {}) {
       return isPlainObject(entry) && VALID_STATUSES.has(entry.status);
     });
     if (!phasesValid) return false;
+    if (!isValidPendingReattempt(parsed.pendingReattempt, parsed)) return false;
+    if (!isValidReattemptReceipt(parsed.reattemptReceipt, parsed)) return false;
     return expected.requireOrdered !== false ? hasCoherentPhaseOrder(parsed) : true;
   } catch {
     return false;
@@ -644,6 +733,12 @@ function normalizeLedger(parsed, fallbackOrchestrator, expectedRunId = null) {
     updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : nowIso(),
     attempt: (typeof parsed.attempt === 'number' && Number.isFinite(parsed.attempt)) ? parsed.attempt : 0,
     phases: {},
+    ...(isPlainObject(parsed.pendingReattempt)
+      ? { pendingReattempt: structuredClone(parsed.pendingReattempt) }
+      : {}),
+    ...(isPlainObject(parsed.reattemptReceipt)
+      ? { reattemptReceipt: structuredClone(parsed.reattemptReceipt) }
+      : {}),
   };
   const rawPhases = isPlainObject(parsed.phases) ? parsed.phases : {};
   for (const desc of getPhaseSequence(orchestrator)) {
@@ -849,6 +944,20 @@ function loopCounterSpec(orchestrator, key) {
   return null;
 }
 
+function completionLoopKey(orchestrator, desc) {
+  if (!desc) return null;
+  return desc.loopGuard || (desc.id === 'finalize' ? 'final-review' : null);
+}
+
+function currentAttemptHasLoopTick(prior, key, counter) {
+  if (!Number.isInteger(counter?.count)
+    || !Number.isInteger(counter?.cap)
+    || counter.count < 1
+    || counter.count > counter.cap) return false;
+  if (!ATTEMPT_BOUND_LOOP_KEYS.has(key)) return true;
+  return Number.isInteger(prior?.attempts) && counter.count === prior.attempts;
+}
+
 /**
  * Return the code-defined phase sequence for an orchestrator.
  *
@@ -931,7 +1040,10 @@ export function initPipeline(runId, orchestrator, opts = {}) {
  *
  * @param {string} runId
  * @param {string} phaseId
- * @param {{ cwd?: string }} [opts]
+ * @param {{ cwd?: string, _validateEntry?: Function }} [opts]
+ * @param {Function} [opts._validateEntry] Trusted synchronous callback invoked
+ * while the run transition lock is held, after current-phase validation and
+ * before the phase is entered or resumed.
  * @returns {{ proceed: boolean, skip: boolean, reason?: string, status: string, degraded: boolean }}
  */
 export function enterPhase(runId, phaseId, opts = {}) {
@@ -977,6 +1089,23 @@ export function enterPhase(runId, phaseId, opts = {}) {
         status: entry.status,
         degraded: false,
       };
+    }
+
+    if (opts._validateEntry !== undefined) {
+      if (typeof opts._validateEntry !== 'function') {
+        return { proceed: false, skip: false, reason: 'invalid-entry-boundary', status: entry.status, degraded: false };
+      }
+      const validation = opts._validateEntry(Object.freeze({
+        runId,
+        orchestrator: ledger.orchestrator,
+        phaseId,
+        phaseAttempt: typeof entry.attempts === 'number' ? entry.attempts : 0,
+        pipeline: Object.freeze(structuredClone(ledger)),
+        _runLockOwner: transitionLock.owner,
+      }));
+      if (validation && typeof validation.then === 'function') {
+        return { proceed: false, skip: false, reason: 'async-entry-boundary-denied', status: entry.status, degraded: false };
+      }
     }
 
     if (desc.onResume === 'recover' && (entry.status === 'in_progress' || entry.status === 'failed')) {
@@ -1040,12 +1169,249 @@ export function beginAttempt(runId, opts = {}) {
   }
 }
 
+function writeReattemptLedger(context, ledger, stage, opts) {
+  if (opts._writeReattemptLedger === undefined) return writeLedger(context, ledger);
+  if (typeof opts._writeReattemptLedger !== 'function') return false;
+  try {
+    return opts._writeReattemptLedger(
+      Object.freeze({ stage, pipeline: Object.freeze(structuredClone(ledger)) }),
+      () => writeLedger(context, ledger),
+    ) === true;
+  } catch {
+    return false;
+  }
+}
+
+function afterReattemptBoundary(opts, boundary) {
+  if (opts._afterReattemptBoundary === undefined) return;
+  if (typeof opts._afterReattemptBoundary !== 'function') {
+    throw new TypeError('invalid reattempt durability callback');
+  }
+  opts._afterReattemptBoundary(boundary);
+}
+
+function matchingPendingRequest(pending, requested, reason) {
+  return pending.reason === reason
+    && pending.reopen.length === requested.length
+    && pending.reopen.every((phaseId, index) => phaseId === requested[index]);
+}
+
+function replayCommittedReattempt(context, runId, ledger, requested, reason) {
+  const receipt = ledger.reattemptReceipt;
+  if (!isPlainObject(receipt)
+    || !isValidReattemptReceipt(receipt, ledger)
+    || ledger.attempt !== receipt.targetAttempt) return null;
+  const current = firstNonTerminal(ledger);
+  const firstReopened = receipt.reopen[0];
+  const entry = ledger.phases[firstReopened];
+  if (current?.id !== firstReopened
+    || !['pending', 'in_progress'].includes(entry?.status)
+    || (receipt.reason && entry.reason !== receipt.reason)) return null;
+  if (!matchingPendingRequest(receipt, requested, reason)) {
+    return entry.status === 'pending'
+      ? {
+          ...blockedAttempt(ledger, true),
+          reopened: [],
+          reason: 'committed-reattempt-conflict',
+        }
+      : null;
+  }
+
+  assertSafeLoopGuard(context);
+  const iteration = getCounter(runId, 'iterations', {
+    cwd: context.cwd,
+    cap: DEFAULT_ITERATION_CAP,
+  });
+  assertSafeLoopGuard(context);
+  if (iteration.count !== receipt.targetAttempt) {
+    return {
+      allowed: false,
+      count: iteration.count,
+      cap: iteration.cap,
+      reopened: [],
+      degraded: true,
+      reason: 'committed-reattempt-counter-conflict',
+    };
+  }
+  let quality = null;
+  if (receipt.reason === 'quality_fail') {
+    assertSafeLoopGuard(context);
+    quality = getCounter(runId, 'quality-cycles', {
+      cwd: context.cwd,
+      cap: QUALITY_CAP,
+    });
+    assertSafeLoopGuard(context);
+    if (quality.count !== receipt.qualityBaseCount + 1) {
+      return {
+        allowed: false,
+        count: iteration.count,
+        cap: iteration.cap,
+        qualityCount: quality.count,
+        qualityCap: quality.cap,
+        reopened: [],
+        degraded: true,
+        reason: 'committed-reattempt-counter-conflict',
+      };
+    }
+  }
+  return {
+    allowed: true,
+    count: receipt.targetAttempt,
+    cap: DEFAULT_ITERATION_CAP,
+    ...(quality ? { qualityCount: quality.count, qualityCap: quality.cap } : {}),
+    reopened: [...receipt.reopen],
+    reused: true,
+    degraded: false,
+  };
+}
+
+function reconcilePendingCounter(context, runId, name, cap, baseCount, targetCount) {
+  assertSafeLoopGuard(context);
+  const before = getCounter(runId, name, { cwd: context.cwd, cap });
+  assertSafeLoopGuard(context);
+  if (!Number.isInteger(before.count)
+    || before.count < 0
+    || before.count > before.cap
+    || (before.count !== baseCount && before.count !== targetCount)) {
+    return { ok: false, counter: before, consumed: false, reason: 'counter-conflict' };
+  }
+  if (before.count === targetCount) {
+    return { ok: true, counter: before, consumed: false };
+  }
+  const registered = name === 'iterations'
+    ? registerIteration(runId, { cwd: context.cwd, cap })
+    : registerCounter(runId, name, { cwd: context.cwd, cap });
+  assertSafeLoopGuard(context);
+  const after = getCounter(runId, name, { cwd: context.cwd, cap });
+  assertSafeLoopGuard(context);
+  if (registered.allowed !== true
+    || registered.degraded === true
+    || after.count !== targetCount) {
+    return { ok: false, counter: after, consumed: true, reason: 'counter-write-failed' };
+  }
+  return { ok: true, counter: after, consumed: true };
+}
+
+function reconcilePendingReattempt(context, runId, ledger, requested, reason, opts) {
+  const pending = ledger.pendingReattempt;
+  if (!isValidPendingReattempt(pending, ledger)
+    || !matchingPendingRequest(pending, requested, reason)) {
+    return {
+      ...blockedAttempt(ledger, true),
+      reopened: [],
+      reason: 'pending-reattempt-conflict',
+    };
+  }
+
+  let quality = null;
+  if (pending.reason === 'quality_fail') {
+    quality = reconcilePendingCounter(
+      context,
+      runId,
+      'quality-cycles',
+      QUALITY_CAP,
+      pending.qualityBaseCount,
+      pending.qualityBaseCount + 1,
+    );
+    if (!quality.ok) {
+      return {
+        allowed: false,
+        count: pending.baseAttempt,
+        cap: DEFAULT_ITERATION_CAP,
+        qualityCount: quality.counter.count,
+        qualityCap: quality.counter.cap,
+        reopened: [],
+        degraded: true,
+        reason: quality.reason,
+      };
+    }
+    if (quality.consumed) afterReattemptBoundary(opts, 'quality');
+  }
+
+  const iteration = reconcilePendingCounter(
+    context,
+    runId,
+    'iterations',
+    DEFAULT_ITERATION_CAP,
+    pending.baseAttempt,
+    pending.targetAttempt,
+  );
+  if (!iteration.ok) {
+    return {
+      allowed: false,
+      count: iteration.counter.count,
+      cap: iteration.counter.cap,
+      ...(quality
+        ? { qualityCount: quality.counter.count, qualityCap: quality.counter.cap }
+        : {}),
+      reopened: [],
+      degraded: true,
+      reason: iteration.reason,
+    };
+  }
+  if (iteration.consumed) afterReattemptBoundary(opts, 'iteration');
+
+  const sequence = getPhaseSequence(ledger.orchestrator);
+  const rewindIndex = Math.min(...pending.reopen.map(phaseId => (
+    sequence.findIndex(desc => desc.id === phaseId)
+  )));
+  const reopened = [];
+  // Rewinding invalidates the whole tail, including the currently in-progress
+  // review. Keeping it in_progress would leave touched work after the new
+  // current phase and let a later failure cut become ambiguous.
+  for (let index = rewindIndex; index < sequence.length; index += 1) {
+    const phaseId = sequence[index].id;
+    const prior = ledger.phases[phaseId] || { status: 'pending' };
+    ledger.phases[phaseId] = {
+      status: 'pending',
+      ...(typeof prior.attempts === 'number' ? { attempts: prior.attempts } : {}),
+      ...(pending.reason ? { reason: pending.reason } : {}),
+    };
+    if (pending.reopen.includes(phaseId)) reopened.push(phaseId);
+  }
+  ledger.attempt = pending.targetAttempt;
+  ledger.reattemptReceipt = structuredClone(pending);
+  delete ledger.pendingReattempt;
+  const committed = writeReattemptLedger(context, ledger, 'commit', opts);
+  if (!committed) {
+    return {
+      allowed: false,
+      count: pending.targetAttempt,
+      cap: DEFAULT_ITERATION_CAP,
+      ...(quality
+        ? { qualityCount: quality.counter.count, qualityCap: quality.counter.cap }
+        : {}),
+      reopened: [],
+      degraded: true,
+      reason: 'pipeline-commit-failed',
+    };
+  }
+  return {
+    allowed: true,
+    count: pending.targetAttempt,
+    cap: DEFAULT_ITERATION_CAP,
+    ...(quality
+      ? { qualityCount: quality.counter.count, qualityCap: quality.counter.cap }
+      : {}),
+    reopened,
+    degraded: false,
+  };
+}
+
 /**
- * Atomically tick the outer attempt cap and reopen the requested phases.
+ * Crash-safely tick the outer attempt cap and reopen the requested phases.
+ * A durable pending intent makes the quality counter, iteration counter, and
+ * pipeline rewind replayable as one logical transition.
  *
  * @param {string} runId
  * @param {{ reopen?: string[], reason?: string }} request
- * @param {{ cwd?: string }} [opts]
+ * @param {{ cwd?: string, _beforeRewind?: Function, _afterReattemptBoundary?: Function, _writeReattemptLedger?: Function }} [opts]
+ * @param {Function} [opts._beforeRewind] Trusted synchronous callback invoked
+ * only after traversal and cap preflight succeed, while the run transition
+ * lock is held, and before the durable intent or either cap is mutated.
+ * @param {Function} [opts._afterReattemptBoundary] Test-only synchronous fault
+ * seam invoked after a newly consumed durable counter boundary.
+ * @param {Function} [opts._writeReattemptLedger] Test-only pipeline writer seam.
  * @returns {{ allowed: boolean, count: number, cap: number, reopened: string[], degraded: boolean }}
  */
 export function reattempt(runId, request = {}, opts = {}) {
@@ -1053,6 +1419,14 @@ export function reattempt(runId, request = {}, opts = {}) {
   try {
     const cwd = opts.cwd || process.cwd();
     if (!runId) return { ...failOpenAttempt(), reopened: [] };
+    if ((opts._beforeRewind !== undefined && typeof opts._beforeRewind !== 'function')
+      || (opts._afterReattemptBoundary !== undefined
+        && typeof opts._afterReattemptBoundary !== 'function')
+      || (opts._writeReattemptLedger !== undefined
+        && typeof opts._writeReattemptLedger !== 'function')
+      || (request.reason !== undefined && typeof request.reason !== 'string')) {
+      return { ...blockedAttempt(null, true), reopened: [] };
+    }
     const context = phaseRunContext(runId, cwd, opts);
     transitionLock = takeRunTransitionLock(context);
     if (runHasTerminalArtifact(context)) return { ...blockedAttempt(null, false), reopened: [] };
@@ -1061,10 +1435,24 @@ export function reattempt(runId, request = {}, opts = {}) {
       return { ...failOpenAttempt(), reopened: [] };
     }
     const sequence = getPhaseSequence(ledger.orchestrator);
-    const current = firstNonTerminal(ledger);
-    const requested = Array.isArray(request.reopen)
+    const uniqueRequested = Array.isArray(request.reopen)
       ? [...new Set(request.reopen)]
       : [];
+    const requested = canonicalReopen(ledger.orchestrator, uniqueRequested);
+    const reason = request.reason || '';
+    if (requested.length !== uniqueRequested.length) {
+      return { ...blockedAttempt(ledger, false), reopened: [] };
+    }
+
+    if (ledger.pendingReattempt) {
+      return reconcilePendingReattempt(context, runId, ledger, requested, reason, opts);
+    }
+    const committedReplay = replayCommittedReattempt(
+      context, runId, ledger, requested, reason,
+    );
+    if (committedReplay) return committedReplay;
+
+    const current = firstNonTerminal(ledger);
     const currentIndex = current
       ? sequence.findIndex(desc => desc.id === current.id)
       : -1;
@@ -1077,30 +1465,92 @@ export function reattempt(runId, request = {}, opts = {}) {
       });
     if (!validRewind) return { ...blockedAttempt(ledger, false), reopened: [] };
 
-    assertSafeLoopGuard(context);
-    const r = registerIteration(runId, { cwd: context.cwd });
-    assertSafeLoopGuard(context);
-    if (!r.allowed) return { ...r, reopened: [] };
-    const reopened = [];
-    const rewindIndex = Math.min(...requested.map(phaseId => (
-      sequence.findIndex(desc => desc.id === phaseId)
-    )));
-    // Rewinding invalidates the whole tail, including the currently in-progress
-    // review. Keeping it in_progress would leave touched work after the new
-    // current phase and let a later failure cut become ambiguous.
-    for (let index = rewindIndex; index < sequence.length; index += 1) {
-      const phaseId = sequence[index].id;
-      const prior = ledger.phases[phaseId] || { status: 'pending' };
-      ledger.phases[phaseId] = {
-        status: 'pending',
-        ...(typeof prior.attempts === 'number' ? { attempts: prior.attempts } : {}),
-        ...(request.reason ? { reason: request.reason } : {}),
-      };
-      if (requested.includes(phaseId)) reopened.push(phaseId);
+    const currentDesc = descriptorById(ledger.orchestrator, current.id);
+    const currentLoopKey = normalizeLoopKey(completionLoopKey(ledger.orchestrator, currentDesc));
+    if (currentLoopKey && ATTEMPT_BOUND_LOOP_KEYS.has(currentLoopKey)) {
+      const spec = loopCounterSpec(ledger.orchestrator, currentLoopKey);
+      assertSafeLoopGuard(context);
+      const counter = getCounter(runId, spec.name, { cwd: context.cwd, cap: spec.cap });
+      assertSafeLoopGuard(context);
+      if (!currentAttemptHasLoopTick(ledger.phases[current.id], currentLoopKey, counter)) {
+        return { ...blockedAttempt(ledger, false), reopened: [] };
+      }
     }
-    ledger.attempt = r.count;
-    const ok = writeLedger(context, ledger);
-    return { ...r, reopened, degraded: r.degraded || readDegraded || !ok };
+
+    assertSafeLoopGuard(context);
+    const preflight = getCounter(runId, 'iterations', {
+      cwd: context.cwd,
+      cap: DEFAULT_ITERATION_CAP,
+    });
+    assertSafeLoopGuard(context);
+    if (preflight.count !== ledger.attempt || preflight.count >= preflight.cap) {
+      return {
+        allowed: false,
+        count: preflight.count,
+        cap: preflight.cap,
+        reopened: [],
+        degraded: preflight.count !== ledger.attempt,
+      };
+    }
+    let qualityPreflight = null;
+    if (reason === 'quality_fail') {
+      assertSafeLoopGuard(context);
+      qualityPreflight = getCounter(runId, 'quality-cycles', {
+        cwd: context.cwd,
+        cap: QUALITY_CAP,
+      });
+      assertSafeLoopGuard(context);
+      if (!qualityPreflight
+        || !Number.isInteger(qualityPreflight.count)
+        || qualityPreflight.count < 0
+        || qualityPreflight.count >= qualityPreflight.cap) {
+        return {
+          allowed: false,
+          count: preflight.count,
+          cap: preflight.cap,
+          qualityCount: qualityPreflight?.count ?? 0,
+          qualityCap: qualityPreflight?.cap ?? QUALITY_CAP,
+          reopened: [],
+          degraded: !qualityPreflight,
+        };
+      }
+    }
+    if (opts._beforeRewind) {
+      opts._beforeRewind(Object.freeze({
+        runId,
+        orchestrator: ledger.orchestrator,
+        currentPhase: current.id,
+        reopen: Object.freeze([...requested]),
+        reason,
+        nextAttempt: preflight.count + 1,
+      }));
+    }
+
+    ledger.pendingReattempt = {
+      schemaVersion: REATTEMPT_INTENT_SCHEMA_VERSION,
+      runId: ledger.runId || runId,
+      orchestrator: ledger.orchestrator,
+      reason,
+      currentPhase: current.id,
+      reopen: [...requested],
+      baseAttempt: preflight.count,
+      targetAttempt: preflight.count + 1,
+      ...(qualityPreflight ? { qualityBaseCount: qualityPreflight.count } : {}),
+    };
+    if (!writeReattemptLedger(context, ledger, 'prepare', opts)) {
+      return {
+        allowed: false,
+        count: preflight.count,
+        cap: preflight.cap,
+        ...(qualityPreflight
+          ? { qualityCount: qualityPreflight.count, qualityCap: qualityPreflight.cap }
+          : {}),
+        reopened: [],
+        degraded: true,
+        reason: 'reattempt-intent-write-failed',
+      };
+    }
+    return reconcilePendingReattempt(context, runId, ledger, requested, reason, opts);
   } catch (error) {
     if (isUnsafePath(error)) return { ...blockedAttempt(null, false), reopened: [] };
     return { allowed: false, count: 0, cap: DEFAULT_ITERATION_CAP, reopened: [], degraded: true };
@@ -1146,6 +1596,23 @@ export function loopTick(runId, keyOrPhaseId, opts = {}) {
       return { allowed: false, ...existing, degraded: false, reason: 'phase-not-in-progress' };
     }
     assertSafeLoopGuard(context);
+    const prior = ledger.phases[spec.phaseId];
+    if (ATTEMPT_BOUND_LOOP_KEYS.has(key)) {
+      const existing = getCounter(runId, spec.name, { cwd: context.cwd, cap: spec.cap });
+      assertSafeLoopGuard(context);
+      if (!Number.isInteger(prior?.attempts) || prior.attempts < 1
+        || !Number.isInteger(existing.count)
+        || existing.count < 0
+        || existing.count > existing.cap) {
+        return { allowed: false, ...existing, degraded: false, reason: 'attempt-counter-invalid' };
+      }
+      if (existing.count === prior.attempts) {
+        return { allowed: true, ...existing, reused: true, degraded: false };
+      }
+      if (existing.count !== prior.attempts - 1) {
+        return { allowed: false, ...existing, degraded: false, reason: 'attempt-counter-mismatch' };
+      }
+    }
     let result;
     if (key === 'review') result = registerReviewRound(runId, { cwd: context.cwd });
     else if (key === 'final-review') {
@@ -1159,6 +1626,11 @@ export function loopTick(runId, keyOrPhaseId, opts = {}) {
     else if (key === 'quality') result = registerCounter(runId, 'quality-cycles', { cwd: context.cwd, cap: QUALITY_CAP });
     if (result) {
       assertSafeLoopGuard(context);
+      if (ATTEMPT_BOUND_LOOP_KEYS.has(key)
+        && result.allowed === true
+        && result.count !== prior.attempts) {
+        return { ...result, allowed: false, degraded: true, reason: 'attempt-counter-write-mismatch' };
+      }
       return result;
     }
     return { allowed: true, count: 0, cap: 0, degraded: true };
@@ -1167,6 +1639,158 @@ export function loopTick(runId, keyOrPhaseId, opts = {}) {
       return { allowed: false, count: 0, cap: 0, degraded: false, reason: 'unsafe-run-path' };
     }
     return { allowed: false, count: 0, cap: 0, degraded: true };
+  } finally {
+    releaseRunTransitionLock(transitionLock);
+  }
+}
+
+/**
+ * Run one synchronous trusted boundary while proving that the exact current
+ * phase attempt has consumed its code-owned review tick. The proof and the
+ * callback share the run transition lock, so a concurrent rewind cannot make
+ * a stale approval current between the check and its persistence.
+ *
+ * This boundary is intentionally limited to attempt-bound review loops. The
+ * quality loop is enforced by completePhase(), while monitor/CI are ordinary
+ * bounded work loops rather than approval capabilities.
+ *
+ * @param {string} runId
+ * @param {string} phaseId
+ * @param {'review'|'final-review'} keyOrPhaseId
+ * @param {Function} operation trusted synchronous callback
+ * @param {{ cwd?: string, base?: string, trustedRoot?: string }} [opts]
+ * @returns {{ok:boolean,result?:*,reason?:string,degraded:boolean}}
+ */
+export function withCurrentPhaseLoopTick(
+  runId,
+  phaseId,
+  keyOrPhaseId,
+  operation,
+  opts = {},
+) {
+  let transitionLock = null;
+  try {
+    const cwd = opts.cwd || process.cwd();
+    if (!runId || !phaseId || typeof operation !== 'function') {
+      return { ok: false, reason: 'invalid-loop-boundary', degraded: false };
+    }
+    const context = phaseRunContext(runId, cwd, opts);
+    transitionLock = takeRunTransitionLock(context);
+    if (runHasTerminalArtifact(context)) {
+      return { ok: false, reason: 'run-terminal', degraded: false };
+    }
+    const { ledger, degraded } = readLedgerWithStatus(context, runId);
+    if (degraded || !isKnownLedger(ledger)) {
+      return { ok: false, reason: 'pipeline-unavailable', degraded: true };
+    }
+    const key = normalizeLoopKey(keyOrPhaseId);
+    const spec = loopCounterSpec(ledger.orchestrator, key);
+    const prior = ledger.phases[phaseId];
+    if (!['review', 'final-review'].includes(key)
+      || !spec
+      || spec.phaseId !== phaseId
+      || currentPhaseId(ledger) !== phaseId
+      || prior?.status !== 'in_progress') {
+      return { ok: false, reason: 'phase-loop-mismatch', degraded: false };
+    }
+    assertSafeLoopGuard(context);
+    const counter = getCounter(runId, spec.name, { cwd: context.cwd, cap: spec.cap });
+    assertSafeLoopGuard(context);
+    if (!currentAttemptHasLoopTick(prior, key, counter)) {
+      return { ok: false, reason: 'phase-loop-tick-required', degraded: false };
+    }
+    const result = operation(Object.freeze({
+      runId,
+      orchestrator: ledger.orchestrator,
+      phaseId,
+      phaseAttempt: prior.attempts,
+      loopKey: key,
+      loopCount: counter.count,
+      pipeline: Object.freeze(structuredClone(ledger)),
+      _runLockOwner: transitionLock.owner,
+    }));
+    if (result && typeof result.then === 'function') {
+      return { ok: false, reason: 'async-loop-boundary-denied', degraded: false };
+    }
+    return { ok: true, result, degraded: false };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: isUnsafePath(error) ? 'unsafe-run-path' : 'loop-boundary-operation-failed',
+      degraded: !isUnsafePath(error),
+    };
+  } finally {
+    releaseRunTransitionLock(transitionLock);
+  }
+}
+
+/**
+ * Inspect whether the current phase's loop marker is already sufficient for
+ * completion and whether another code-owned tick is meaningful. Review,
+ * final-review, and quality expose one idempotent marker per phase attempt;
+ * monitor and CI remain genuine bounded multi-cycle loops.
+ *
+ * @param {string} runId
+ * @param {string} keyOrPhaseId
+ * @param {{ cwd?: string, base?: string, trustedRoot?: string }} [opts]
+ * @returns {{ok:boolean,key?:string,phaseId?:string,count?:number,cap?:number,phaseAttempt?:number,satisfied?:boolean,canTick?:boolean,reason?:string,degraded:boolean}}
+ */
+export function inspectCurrentPhaseLoop(runId, keyOrPhaseId, opts = {}) {
+  let transitionLock = null;
+  try {
+    const cwd = opts.cwd || process.cwd();
+    if (!runId) return { ok: false, reason: 'invalid-loop-boundary', degraded: false };
+    const context = phaseRunContext(runId, cwd, opts);
+    transitionLock = takeRunTransitionLock(context);
+    if (runHasTerminalArtifact(context)) {
+      return { ok: false, reason: 'run-terminal', degraded: false };
+    }
+    const { ledger, degraded } = readLedgerWithStatus(context, runId);
+    if (degraded || !isKnownLedger(ledger)) {
+      return { ok: false, reason: 'pipeline-unavailable', degraded: true };
+    }
+    let key = normalizeLoopKey(keyOrPhaseId);
+    if (!key && keyOrPhaseId) {
+      key = normalizeLoopKey(descriptorById(ledger.orchestrator, keyOrPhaseId)?.loopGuard);
+    }
+    const spec = loopCounterSpec(ledger.orchestrator, key);
+    const prior = spec ? ledger.phases[spec.phaseId] : null;
+    if (!spec
+      || currentPhaseId(ledger) !== spec.phaseId
+      || prior?.status !== 'in_progress') {
+      return { ok: false, reason: 'phase-loop-mismatch', degraded: false };
+    }
+    assertSafeLoopGuard(context);
+    const counter = getCounter(runId, spec.name, { cwd: context.cwd, cap: spec.cap });
+    assertSafeLoopGuard(context);
+    const attemptBound = ATTEMPT_BOUND_LOOP_KEYS.has(key);
+    const phaseAttempt = Number.isInteger(prior.attempts) ? prior.attempts : 0;
+    const counterValid = Number.isInteger(counter.count)
+      && Number.isInteger(counter.cap)
+      && counter.count >= 0
+      && counter.count <= counter.cap;
+    const satisfied = counterValid && currentAttemptHasLoopTick(prior, key, counter);
+    const canTick = counterValid && counter.count < counter.cap && (
+      attemptBound ? counter.count === phaseAttempt - 1 : true
+    );
+    return {
+      ok: counterValid,
+      key,
+      phaseId: spec.phaseId,
+      count: counter.count,
+      cap: counter.cap,
+      phaseAttempt,
+      satisfied,
+      canTick,
+      ...(counterValid ? {} : { reason: 'loop-counter-invalid' }),
+      degraded: false,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: isUnsafePath(error) ? 'unsafe-run-path' : 'loop-inspection-failed',
+      degraded: !isUnsafePath(error),
+    };
   } finally {
     releaseRunTransitionLock(transitionLock);
   }
@@ -1343,7 +1967,11 @@ export function recordPhaseOutputs(runId, phaseId, outputs, opts = {}) {
  * @param {string} runId
  * @param {string} phaseId
  * @param {object} [outputs]
- * @param {{ cwd?: string, sessionId?: string, saveCheckpoint?: boolean, _saveCheckpoint?: Function, checkpointData?: object }} [opts]
+ * @param {{ cwd?: string, sessionId?: string, saveCheckpoint?: boolean, _saveCheckpoint?: Function, checkpointData?: object, _deriveOutputs?: Function }} [opts]
+ * @param {Function} [opts._deriveOutputs] Trusted synchronous evidence callback
+ * invoked after phase/loop validation while the run transition lock is held.
+ * It must return the bounded outputs that become authoritative for completion;
+ * caller-supplied outputs and this callback are mutually exclusive.
  * @returns {Promise<{ ok: boolean, next: string|null, checkpointDegraded: boolean, degraded: boolean }>}
  */
 export async function completePhase(runId, phaseId, outputs = undefined, opts = {}) {
@@ -1385,28 +2013,43 @@ export async function completePhase(runId, phaseId, outputs = undefined, opts = 
         degraded: false,
       };
     }
-    if (desc.loopGuard) {
-      const spec = loopCounterSpec(ledger.orchestrator, normalizeLoopKey(desc.loopGuard));
+    const requiredLoopKey = completionLoopKey(ledger.orchestrator, desc);
+    if (requiredLoopKey) {
+      const normalizedLoopKey = normalizeLoopKey(requiredLoopKey);
+      const spec = loopCounterSpec(ledger.orchestrator, normalizedLoopKey);
       if (spec) assertSafeLoopGuard(context);
       const counter = spec ? getCounter(runId, spec.name, { cwd: context.cwd, cap: spec.cap }) : { count: 0 };
       if (spec) assertSafeLoopGuard(context);
-      const everyReviewAttemptWasTicked = desc.id !== 'review'
-        || (Number.isInteger(prior.attempts) && counter.count === prior.attempts);
-      if (!spec || counter.count < 1 || !everyReviewAttemptWasTicked) {
+      if (!spec || !currentAttemptHasLoopTick(prior, normalizedLoopKey, counter)) {
         return { ok: false, next: phaseId, checkpointDegraded: false, degraded: false };
       }
+    }
+    let completionOutputs = outputs;
+    if (opts._deriveOutputs !== undefined) {
+      if (outputs !== undefined || typeof opts._deriveOutputs !== 'function') {
+        return { ok: false, next: phaseId, checkpointDegraded: false, degraded: false };
+      }
+      completionOutputs = opts._deriveOutputs(Object.freeze({
+        runId,
+        orchestrator: ledger.orchestrator,
+        phaseId,
+        attempt: ledger.attempt,
+        phaseAttempt: prior.attempts,
+        phaseStartedAt: prior.startedAt,
+        _runLockOwner: transitionLock.owner,
+      }));
     }
     const hasRecoveryOutputs = isPlainObject(prior.outputs);
     const mergedOutputs = {
       ...(hasRecoveryOutputs ? prior.outputs : {}),
-      ...(isPlainObject(outputs) ? outputs : {}),
+      ...(isPlainObject(completionOutputs) ? completionOutputs : {}),
     };
-    const hasCompletionOutputs = isPlainObject(outputs);
+    const hasCompletionOutputs = isPlainObject(completionOutputs);
     const requiresStrictOutputs = desc.onResume === 'recover' &&
       (hasRecoveryOutputs || hasCompletionOutputs);
     const tinyOutputs = requiresStrictOutputs
       ? sanitizeRecoveryOutputs(mergedOutputs)
-      : sanitizeOutputs(outputs);
+      : sanitizeOutputs(completionOutputs);
     if (requiresStrictOutputs && !tinyOutputs) {
       return { ok: false, next: null, checkpointDegraded: false, degraded: false };
     }
@@ -1488,7 +2131,10 @@ export async function completePhase(runId, phaseId, outputs = undefined, opts = 
  * @param {string} runId
  * @param {string} phaseId
  * @param {string} reason
- * @param {{ cwd?: string }} [opts]
+ * @param {{ cwd?: string, _validateSkip?: Function }} [opts]
+ * @param {Function} [opts._validateSkip] Trusted synchronous callback invoked
+ * after traversal and reason validation while the transition lock is held and
+ * before the skip is persisted.
  * @returns {{ ok: boolean, next: string|null, degraded: boolean }}
  */
 export function skipPhase(runId, phaseId, reason, opts = {}) {
@@ -1511,6 +2157,22 @@ export function skipPhase(runId, phaseId, reason, opts = {}) {
     const skipReason = typeof reason === 'string' ? reason.trim() : '';
     if (!skipReason || !desc.skippableWhen.includes(skipReason)) {
       return { ok: false, next: phaseId, degraded: false };
+    }
+    if (opts._validateSkip !== undefined) {
+      if (typeof opts._validateSkip !== 'function') {
+        return { ok: false, next: phaseId, degraded: false };
+      }
+      const validation = opts._validateSkip(Object.freeze({
+        runId,
+        orchestrator: ledger.orchestrator,
+        phaseId,
+        reason: skipReason,
+        pipeline: Object.freeze(structuredClone(ledger)),
+        _runLockOwner: transitionLock.owner,
+      }));
+      if (validation && typeof validation.then === 'function') {
+        return { ok: false, next: phaseId, degraded: false };
+      }
     }
     ledger.phases[phaseId] = {
       ...(ledger.phases[phaseId] || {}),
@@ -1628,7 +2290,8 @@ export function isComplete(runId, opts = {}) {
     const context = phaseRunContext(runId, cwd, opts, { allowMissing: true });
     if (!context) return false;
     const { ledger, degraded } = readLedgerWithStatus(context, runId);
-    if (degraded || !isKnownLedger(ledger) || ledger.attempt < 1) return false;
+    if (degraded || !isKnownLedger(ledger) || ledger.attempt < 1
+      || Object.hasOwn(ledger, 'pendingReattempt')) return false;
     assertSafeLoopGuard(context);
     const iterations = getCounter(runId, 'iterations', { cwd: context.cwd, cap: DEFAULT_ITERATION_CAP });
     assertSafeLoopGuard(context);
@@ -1637,12 +2300,16 @@ export function isComplete(runId, opts = {}) {
       const entry = ledger.phases[desc.id] || { status: 'pending' };
       if (entry.status === 'completed') {
         if (!Number.isInteger(entry.attempts) || entry.attempts < 1) return false;
-        if (desc.loopGuard) {
-          const spec = loopCounterSpec(ledger.orchestrator, normalizeLoopKey(desc.loopGuard));
+        const requiredLoopKey = completionLoopKey(ledger.orchestrator, desc);
+        if (requiredLoopKey) {
+          const normalizedLoopKey = normalizeLoopKey(requiredLoopKey);
+          const spec = loopCounterSpec(ledger.orchestrator, normalizedLoopKey);
           if (spec) assertSafeLoopGuard(context);
-          const count = spec ? getCounter(runId, spec.name, { cwd: context.cwd, cap: spec.cap }).count : 0;
+          const counter = spec
+            ? getCounter(runId, spec.name, { cwd: context.cwd, cap: spec.cap })
+            : { count: 0, cap: 0 };
           if (spec) assertSafeLoopGuard(context);
-          if (!spec || count < 1 || (desc.id === 'review' && count !== entry.attempts)) return false;
+          if (!spec || !currentAttemptHasLoopTick(entry, normalizedLoopKey, counter)) return false;
         }
         continue;
       }
@@ -1654,5 +2321,164 @@ export function isComplete(runId, opts = {}) {
     return getPhaseSequence(ledger.orchestrator).length > 0;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Finalize a successful run while holding the same run lock used to prove the
+ * pipeline is complete. This closes the check/finalize race and also replays
+ * finalizeRun's idempotent event/pointer repair for an already-completed
+ * success summary.
+ *
+ * @param {string} runId
+ * @param {{ cwd?: string, base?: string, stateDir?: string, trustedRoot?: string, _validateCompletion?: Function }} [opts]
+ * @param {Function} [opts._validateCompletion] Trusted synchronous final-tree
+ * validator invoked after pipeline completeness is proven and while the same
+ * run transition lock is held. Returning false or throwing denies finalization.
+ * @returns {{ok:boolean,idempotent?:boolean,reason?:string,degraded:boolean}}
+ */
+export function finalizeCompletedPipeline(runId, opts = {}) {
+  let transitionLock = null;
+  try {
+    const cwd = opts.cwd || process.cwd();
+    const context = phaseRunContext(runId, cwd, opts);
+    transitionLock = takeRunTransitionLock(context);
+    if (assertArtifactSafe(
+      context,
+      'terminal-failure.json',
+      'terminal failure marker',
+      PIPELINE_MAX_BYTES,
+    )) {
+      return { ok: false, reason: 'terminal-failure-published', degraded: false };
+    }
+
+    const summaryArtifact = readArtifactText(
+      context,
+      'summary.json',
+      'run summary',
+      PIPELINE_MAX_BYTES,
+    );
+    let summary;
+    try { summary = JSON.parse(summaryArtifact.text); }
+    catch { return { ok: false, reason: 'run-summary-invalid', degraded: true }; }
+    if (summary?.runId !== runId
+      || !['atlas', 'athena'].includes(summary?.orchestrator)
+      || !['running', 'completed'].includes(summary?.status)) {
+      return { ok: false, reason: 'run-summary-invalid', degraded: false };
+    }
+    if (summary.status === 'completed' && summary.result !== 'success') {
+      return { ok: false, reason: 'completed-run-is-not-success', degraded: false };
+    }
+    if (!isComplete(runId, {
+      cwd: context.cwd,
+      base: context.base,
+      trustedRoot: context.trustedRoot,
+    })) {
+      return { ok: false, reason: 'pipeline-incomplete', degraded: false };
+    }
+
+    // A completed-success summary is the durable commit point. Replays exist
+    // only to repair a missing run_finalized event or stale active pointer;
+    // consulting today's mutable checkout here could permanently strand that
+    // documented crash window after unrelated later work begins.
+    let atlasPrdRecord = null;
+    if (summary.status === 'running' && summary.orchestrator === 'atlas') {
+      try {
+        atlasPrdRecord = readExecutionPrd({
+          cwd: context.cwd,
+          trustedRoot: context.trustedRoot,
+          orchestrator: 'atlas',
+        });
+      } catch {
+        return { ok: false, reason: 'execution-prd-snapshot-unavailable', degraded: false };
+      }
+    }
+    if (summary.status === 'running' && opts._validateCompletion !== undefined) {
+      if (typeof opts._validateCompletion !== 'function') {
+        return { ok: false, reason: 'completion-validator-invalid', degraded: false };
+      }
+      const { ledger, degraded } = readLedgerWithStatus(context, runId);
+      const finalizeOutputs = ledger.phases?.finalize?.outputs;
+      if (degraded || !isKnownLedger(ledger) || !isPlainObject(finalizeOutputs)) {
+        return { ok: false, reason: 'completion-evidence-unavailable', degraded: false };
+      }
+      let validation;
+      try {
+        validation = opts._validateCompletion(Object.freeze({
+          runId,
+          orchestrator: ledger.orchestrator,
+          finalizeOutputs: Object.freeze({ ...finalizeOutputs }),
+          _runLockOwner: transitionLock.owner,
+        }));
+      } catch {
+        return { ok: false, reason: 'completion-evidence-invalid', degraded: false };
+      }
+      if (validation && typeof validation.then === 'function') {
+        return { ok: false, reason: 'async-completion-validator-denied', degraded: false };
+      }
+      if (validation === false) {
+        return { ok: false, reason: 'completion-evidence-invalid', degraded: false };
+      }
+    }
+    if (atlasPrdRecord !== null) {
+      let currentPrd;
+      try {
+        currentPrd = readExecutionPrd({
+          cwd: context.cwd,
+          trustedRoot: context.trustedRoot,
+          orchestrator: 'atlas',
+        });
+      } catch {
+        return { ok: false, reason: 'execution-prd-changed-during-finalization', degraded: false };
+      }
+      if (currentPrd.generation !== atlasPrdRecord.generation) {
+        return { ok: false, reason: 'execution-prd-changed-during-finalization', degraded: false };
+      }
+      const snapshotted = persistRunExecutionPrdSnapshot(runId, {
+        prd: currentPrd.prd,
+        generation: currentPrd.generation,
+      }, {
+        base: context.base,
+        trustedRoot: context.trustedRoot,
+        _runLockOwner: transitionLock.owner,
+      });
+      if (!snapshotted.ok) {
+        return { ok: false, reason: 'execution-prd-snapshot-unavailable', degraded: false };
+      }
+      try {
+        const afterSnapshot = readExecutionPrd({
+          cwd: context.cwd,
+          trustedRoot: context.trustedRoot,
+          orchestrator: 'atlas',
+        });
+        if (afterSnapshot.generation !== currentPrd.generation) {
+          return { ok: false, reason: 'execution-prd-changed-during-finalization', degraded: false };
+        }
+      } catch {
+        return { ok: false, reason: 'execution-prd-changed-during-finalization', degraded: false };
+      }
+    }
+
+    const finalized = finalizeRun(runId, { result: 'success' }, {
+      base: context.base,
+      stateDir: opts.stateDir || join(context.cwd, '.ao', 'state'),
+      trustedRoot: context.trustedRoot,
+      _finalizationLockOwner: transitionLock.owner,
+    });
+    return finalized?.ok === true
+      ? { ...finalized, degraded: false }
+      : {
+          ok: false,
+          reason: finalized?.reason || 'run-finalization-failed',
+          degraded: false,
+        };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: isUnsafePath(error) ? 'unsafe-run-path' : 'run-finalization-failed',
+      degraded: !isUnsafePath(error),
+    };
+  } finally {
+    releaseRunTransitionLock(transitionLock);
   }
 }

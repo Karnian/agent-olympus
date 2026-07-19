@@ -181,7 +181,7 @@ test('generation-aware append rejects wrong tree, story, pre-start time, and sta
   });
 });
 
-test('an open generation can be superseded only by exact ID after the review tree changes', async () => {
+test('an open generation can be superseded only by exact ID, including on an unchanged tree', async () => {
   await withRun(async ({ base, runId }) => {
     const started = beginVerificationGeneration(runId, {
       reviewTreeOid: REVIEW_TREE,
@@ -214,6 +214,22 @@ test('an open generation can be superseded only by exact ID after the review tre
     assert.equal(superseded.supersededGenerationId, started.generation.generationId);
     assert.notEqual(superseded.generation.generationId, started.generation.generationId);
     assert.equal(superseded.generation.reviewTreeOid, OTHER_TREE);
+
+    const sameTreeSuperseded = beginVerificationGeneration(runId, {
+      reviewTreeOid: OTHER_TREE,
+      storyIds: ['US-001'],
+      phase: 'final-review',
+    }, { base, supersedeGenerationId: superseded.generation.generationId });
+    assert.equal(sameTreeSuperseded.ok, true, sameTreeSuperseded.reason);
+    assert.equal(
+      sameTreeSuperseded.supersededGenerationId,
+      superseded.generation.generationId,
+    );
+    assert.notEqual(
+      sameTreeSuperseded.generation.generationId,
+      superseded.generation.generationId,
+    );
+    assert.equal(sameTreeSuperseded.generation.reviewTreeOid, OTHER_TREE);
   });
 });
 

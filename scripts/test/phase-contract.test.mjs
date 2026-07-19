@@ -34,7 +34,10 @@ function assertShipSafetyContract(skill, orchestrator) {
     'the current user-authored request must be captured on every invocation');
   assert.match(skill, /appendUserTaskUpdate,[\s\S]*?getUserTaskUpdates/,
     'shipping policy must use the strict atomic task-update ledger API');
-  assert.match(skill, /const appendedTaskUpdate\s*=\s*appendUserTaskUpdate\(runId,\s*current(?:Atlas|Athena)Request,\s*\{[\s\S]*?allowCreate:\s*created(?:Atlas|Athena)Run\s*!==\s*null/,
+  const appendPattern = orchestrator === 'athena'
+    ? /const appendedTaskUpdate\s*=\s*appendUserTaskUpdate\(runId,\s*currentAthenaRequest,\s*\{[\s\S]*?allowCreate:\s*athenaAdmission\.created\s*===\s*true/
+    : /const appendedTaskUpdate\s*=\s*appendUserTaskUpdate\(runId,\s*currentAtlasRequest,\s*\{[\s\S]*?allowCreate:\s*createdAtlasRun\s*!==\s*null/;
+  assert.match(skill, appendPattern,
     'the current request must be atomically appended, with creation allowed only for a new run');
   assert.match(skill, /!appendedTaskUpdate\.ok[\s\S]*?appendedTaskUpdate\.updates\?\.at\(-1\)\?\.task[\s\S]*?throw new Error/,
     'a lost or mismatched follow-up append must fail closed');
@@ -62,11 +65,20 @@ function assertShipSafetyContract(skill, orchestrator) {
   assert.doesNotMatch(skill, /hasInteractiveUserChannel|userApprovedPush/,
     'shipping must not rely on model-populated approval booleans');
   assert.match(skill, /orchestrator model answering its own y\/n prompt is not user approval/i);
-  assert.match(skill, /structured `AskUserQuestion` result/);
+  if (orchestrator === 'atlas') {
+    assert.match(skill, /host displayed `AskUserQuestion`[\s\S]*?fails closed[\s\S]*?ship\.mode:"ask"/i,
+      'Atlas ask mode must fail closed until the host can attest approval');
+  } else {
+    assert.match(skill, /structured `AskUserQuestion` result/);
+  }
   assert.match(skill, /noShip\s*\|\|\s*config\.ship\.updateChangelog\s*===\s*false/);
   assert.match(skill, /noShip\s*\|\|\s*config\.ship\.updateTechDebtTracker\s*===\s*false/);
   assert.match(skill, /ship\.mode:\s*["']never["'][\s\S]*?suppresses this release side effect/i);
-  assert.match(skill, /unattended\/headless[\s\S]*?halt shipping without a push/i);
+  if (orchestrator === 'atlas') {
+    assert.match(skill, /ship\.mode:"ask"[\s\S]*?keep the branch[\s\S]*?local for manual shipping/i);
+  } else {
+    assert.match(skill, /unattended\/headless[\s\S]*?halt shipping without a push/i);
+  }
   assert.match(skill, /config\.notify\.onBlocked/);
   assert.ok(
     skill.includes(
@@ -75,7 +87,11 @@ function assertShipSafetyContract(skill, orchestrator) {
     'headless ask must emit the documented blocked notification',
   );
   assert.match(skill, /shipMode\s*===\s*['"]auto['"]/);
-  assert.match(skill, /shipMode\s*===\s*['"]ask['"]\s*&&\s*durableHumanApproval\s*===\s*true/);
+  if (orchestrator === 'atlas') {
+    assert.doesNotMatch(skill, /shipMode\s*===\s*['"]ask['"]\s*&&\s*durableHumanApproval\s*===\s*true/);
+  } else {
+    assert.match(skill, /shipMode\s*===\s*['"]ask['"]\s*&&\s*durableHumanApproval\s*===\s*true/);
+  }
   assert.match(skill, /branch ready: <branchName> — push\/PR은 사용자가 직접/);
 
   const policyResolution = skill.indexOf('resolveRunShipMode(config, readDurableTaskBrief(action))');
@@ -104,33 +120,23 @@ function assertShipSafetyContract(skill, orchestrator) {
   const phase6 = skill.slice(phase6Start, phase6End);
   assert.match(phase6, /refreshRunShipPolicy\(['"]ship phase entry['"]\)[\s\S]*?getPipelineState\(runId\)\.phases\.ship/,
     'ship policy must be recomputed on every resume even when finalize is terminal');
-  assert.match(phase6, /const requireShippingNotRevoked\s*=\s*action\s*=>[\s\S]*?refreshRunShipPolicy\(action\)[\s\S]*?const requireCurrentShippingAuthorization\s*=\s*action\s*=>[\s\S]*?shipMode\s*===\s*['"]ask['"][\s\S]*?!durableHumanApproval[\s\S]*?requirePinnedRepository\(action\)/,
-    'every outward ship action must re-read policy and enforce current approval');
-
-  assert.match(phase6, /AskUserQuestion\(\{\s*questions:\s*\[\{/s,
-    'ask mode must use the real structured question schema');
-  assert.match(phase6, /approvalResponse\?\.answers\?\.\[approvalQuestion\]/,
-    'approval must come from the returned question-to-answer map');
-  assert.match(phase6, /hasOwnProperty\.call\(approvalResponse,\s*['"]afkTimeoutMs['"]\)/,
-    'AFK auto-resolution must not count as a human response');
-  assert.match(phase6, /selectedAnswer\s*===\s*['"]Approve shipping['"]/,
-    'only the exact affirmative option may approve shipping');
-  assert.match(phase6, /type:\s*['"]human_ship_approval['"]/);
-  assert.match(phase6, /source:\s*['"]AskUserQuestion['"][\s\S]*?decision:\s*['"]approved['"][\s\S]*?branchName,[\s\S]*?baseBranch,[\s\S]*?headCommit,[\s\S]*?repoIdentity,/,
-    'human approval must bind branch, base, HEAD, and repository identity');
-  assert.match(phase6, /matchesCurrentHumanApproval[\s\S]*?repositoryIdentitiesEqual\(event\?\.detail\?\.repoIdentity,\s*repoIdentity\)/,
-    'durable approval re-read must compare repository identity');
-  assert.ok(
-    (phase6.match(/getRun\(runId\)\.events\.some\(matchesCurrentHumanApproval\)/g) || []).length >= 2,
-    'approval must be checked from artifacts before asking and re-read after append',
-  );
-  const exactApproval = phase6.indexOf("selectedAnswer === 'Approve shipping'");
-  const approvalRepoReread = phase6.indexOf("requirePinnedRepository('shipping approval recording')", exactApproval);
-  const approvalWrite = phase6.indexOf('addEvent(runId, {', approvalRepoReread);
-  const approvalReread = phase6.indexOf('getRun(runId).events.some(matchesCurrentHumanApproval)', approvalWrite);
-  assert.ok(exactApproval >= 0 && exactApproval < approvalRepoReread
-    && approvalRepoReread < approvalWrite && approvalWrite < approvalReread,
-  'the exact human answer must precede repository revalidation, artifact append, and durable re-read');
+  if (orchestrator === 'atlas') {
+    assert.match(phase6, /const requireShippingNotRevoked\s*=\s*action\s*=>[\s\S]*?refreshRunShipPolicy\(action\)[\s\S]*?const requireCurrentShippingAuthorization\s*=\s*action\s*=>[\s\S]*?shipMode\s*!==\s*['"]auto['"][\s\S]*?host-attested approval receipt[\s\S]*?requirePinnedRepository\(action\)/,
+      'every Atlas outward action must re-read policy and require auto mode');
+    assert.doesNotMatch(phase6, /AskUserQuestion\(\{\s*questions:/,
+      'candidate-owned Atlas shipping must not mint its own human approval');
+    assert.doesNotMatch(phase6, /type:\s*['"]human_ship_approval['"]/,
+      'candidate-authored run events must not authorize Atlas shipping');
+    assert.match(phase6, /const shippingApproved\s*=\s*shipMode\s*===\s*['"]auto['"]\s*;/);
+  } else {
+    assert.match(phase6, /const requireShippingNotRevoked\s*=\s*action\s*=>[\s\S]*?refreshRunShipPolicy\(action\)[\s\S]*?const requireCurrentShippingAuthorization\s*=\s*action\s*=>[\s\S]*?shipMode\s*===\s*['"]ask['"][\s\S]*?!durableHumanApproval[\s\S]*?requirePinnedRepository\(action\)/,
+      'every outward ship action must re-read policy and enforce current approval');
+    assert.match(phase6, /AskUserQuestion\(\{\s*questions:\s*\[\{/s);
+    assert.match(phase6, /approvalResponse\?\.answers\?\.\[approvalQuestion\]/);
+    assert.match(phase6, /hasOwnProperty\.call\(approvalResponse,\s*['"]afkTimeoutMs['"]\)/);
+    assert.match(phase6, /selectedAnswer\s*===\s*['"]Approve shipping['"]/);
+    assert.match(phase6, /type:\s*['"]human_ship_approval['"]/);
+  }
 
   assert.equal(
     (phase6.match(/\bpreflightCheck\(\{\s*cwd,\s*baseBranch:\s*observedBaseBranch\s*\}\)/g) || []).length,
@@ -171,12 +177,14 @@ function assertShipSafetyContract(skill, orchestrator) {
   const identityMatcher = phase6.indexOf('const matchesObservedShipIdentity = detail =>', intentScan);
   const intentWrite = phase6.indexOf("type: 'ship_intent'", recoveryIdentityGuard);
   const intentReread = phase6.indexOf('const durableIntentEvents = getRun(runId).events.filter', intentWrite);
-  const approvalAsk = phase6.indexOf('const approvalResponse = await AskUserQuestion({', intentReread);
   assert.ok(intentScan >= 0 && duplicateIntentGuard > intentScan
     && identityMatcher > intentScan && recoveryIdentityGuard > identityMatcher
-    && intentWrite > recoveryIdentityGuard && intentReread > intentWrite
-    && approvalAsk > intentReread,
-  'one immutable durable ship intent must be recovered or appended and re-read before approval');
+    && intentWrite > recoveryIdentityGuard && intentReread > intentWrite,
+  'one immutable durable ship intent must be recovered or appended and re-read before outward actions');
+  if (orchestrator !== 'atlas') {
+    const approvalAsk = phase6.indexOf('const approvalResponse = await AskUserQuestion({', intentReread);
+    assert.ok(approvalAsk > intentReread, 'Athena must ask only after durable intent re-read');
+  }
   assert.equal((phase6.match(/type:\s*['"]ship_intent['"]/g) || []).length, 1,
     'there must be exactly one ship-intent append site, never a replacement site');
   assert.match(phase6, /const proposedShipIntent\s*=\s*\{\s*branchName:\s*observedBranchName,\s*baseBranch:\s*observedBaseBranch,\s*headCommit:\s*observedHeadCommit,\s*repoIdentity:\s*preflight\.repoIdentity,\s*\}[\s\S]*?type:\s*['"]ship_intent['"][\s\S]*?detail:\s*proposedShipIntent/,
@@ -278,8 +286,40 @@ function assertShipSafetyContract(skill, orchestrator) {
     'one runner CI attempt must poll for the configured timeout window');
   assert.match(ci, /requirePinnedRepository\(['"]CI polling['"]\)[\s\S]*?assertCurrentCITarget\(['"]CI polling['"]\)[\s\S]*?watchCI\(\{[\s\S]*?cwd,[\s\S]*?repository:\s*repoIdentity\.repository,[\s\S]*?branch:\s*branchName,[\s\S]*?expectedHeadSha:\s*expectedCIHeadCommit,[\s\S]*?maxCycles:\s*ciPollCycles/,
     'every CI poll must bind cwd, repository, branch, and exact durable HEAD');
-  assert.match(ci, /requirePinnedRepository\(['"]CI failed-log fetch['"]\)[\s\S]*?assertCurrentCITarget\(['"]CI failed-log fetch['"]\)[\s\S]*?getFailedLogs\(\{[\s\S]*?cwd,[\s\S]*?repository:\s*repoIdentity\.repository,[\s\S]*?runId:\s*ciResult\.runId/,
+  const failedLogFetchContract = orchestrator === 'atlas'
+    ? /requirePinnedRepository\(['"]CI failed-log fetch['"]\)[\s\S]*?assertCurrentCITarget\(['"]CI failed-log fetch['"]\)[\s\S]*?getFailedLogs\(\{[\s\S]*?cwd,[\s\S]*?repository:\s*repoIdentity\.repository,[\s\S]*?runId:\s*failureRunId/
+    : /requirePinnedRepository\(['"]CI failed-log fetch['"]\)[\s\S]*?assertCurrentCITarget\(['"]CI failed-log fetch['"]\)[\s\S]*?getFailedLogs\(\{[\s\S]*?cwd,[\s\S]*?repository:\s*repoIdentity\.repository,[\s\S]*?runId:\s*ciResult\.runId/;
+  assert.match(ci, failedLogFetchContract,
     'failed logs must come from the pinned repository and current CI target');
+  if (orchestrator === 'atlas') {
+    assert.match(ci, /assertRemoteCITarget\(['"]CI polling['"]\)[\s\S]*?watchCI\(\{[\s\S]*?assertRemoteCITarget\(['"]CI poll result['"]\)/,
+      'Atlas must bind the remote HEAD before and after polling');
+    assert.match(ci, /type:\s*['"]ci_quality_failure['"][\s\S]*?sourceHeadCommit:\s*expectedCIHeadCommit,[\s\S]*?failureRunId,/,
+      'Atlas must durably identify the exact failed CI target before rewinding');
+    const failedLogsRead = ci.indexOf('const failedLogs = getFailedLogs({');
+    const qualityReattempt = ci.indexOf('enterCIQualityRevalidation(persistedFailures[0])', failedLogsRead);
+    const revalidationReturn = ci.indexOf("return { resumePhase: 'execute', ciFailureLogs };", qualityReattempt);
+    const ciCompletion = ci.indexOf("completePhase(runId, 'ci'", revalidationReturn);
+    assert.ok(failedLogsRead >= 0 && qualityReattempt > failedLogsRead
+      && revalidationReturn > qualityReattempt && ciCompletion > revalidationReturn,
+    'failed CI must rewind to execute before CI completion and before any repair');
+    assert.match(ci, /retry\.result\?\.reopened\?\.includes\(['"]execute['"]\)[\s\S]*?retry\.result\?\.reopened\?\.includes\(['"]verify['"]\)/,
+      'the code-owned quality rewind must reopen execute and verify');
+    assert.doesNotMatch(ci, /pushOrConfirmCIFix|pushCIFix|ci_fix_candidate|ci_fix_started/,
+      'Atlas CI must not retain the post-approval direct-fix path');
+    assert.doesNotMatch(ci, /execFileSync\(['"]git['"],\s*\[\s*['"](?:commit|push)['"]/,
+      'Atlas CI must not commit or push a tree that has not traversed fresh review');
+    assert.doesNotMatch(ci, /AskUserQuestion\(/,
+      'Atlas CI must not self-attest a shipping approval');
+    assert.match(ci, /assertRemoteCITarget\(['"]CI completion['"]\)[\s\S]*?completePhase\(runId,\s*['"]ci['"]/,
+      'a non-failing CI result must revalidate the remote HEAD before completion');
+    assert.match(skill, /Never claim a PR exists on a[\s\S]*?no-ship, declined, headless, preflight-failed, or PR-failed path/);
+    assert.ok(
+      skill.includes(`--orchestrator ${orchestrator} --body "N/N stories passed. branch ready: <branchName> — push/PR은 사용자가 직접"`),
+      'completion notification must preserve the branch-ready outcome when no PR exists',
+    );
+    return;
+  }
   assert.match(ci, /requirePinnedRepository\(['"]CI fixer launch['"]\)[\s\S]*?assertCurrentCITarget\(['"]CI fixer launch['"]\)/,
     'repository and checkout identity must be revalidated before a fixer starts');
   assert.match(ci, /type:\s*['"]ci_fix_started['"][\s\S]*?sourceHeadCommit:\s*expectedCIHeadCommit,[\s\S]*?failureRunId:\s*ciResult\.runId,[\s\S]*?startedEvents\.length\s*!==\s*startedCountBefore\s*\+\s*1[\s\S]*?!matchesCIFixStarted\(appendedStart\)/,
@@ -458,51 +498,75 @@ const ATHENA_MARKERS = [
   'run-finalize', 'terminal-failure-ingestion',
 ];
 
-describe('atlas SKILL.md phase-runner contract', () => {
-  const skill = readSkill('skills/atlas/SKILL.md');
+describe('Atlas retained behavioral reference contract', () => {
+  const skill = readSkill('skills/atlas/reference.md');
   const phaseIds = getPhaseSequence('atlas').map(p => p.id);
 
-  test('imports the phase-runner (and the runner is the loop-guard owner)', () => {
-    assert.match(skill, /from\s+['"][^'"]*phase-runner\.mjs['"]/, 'must import phase-runner.mjs');
-  });
-
-  test('run creation failure stops before pipeline initialization', () => {
-    assert.match(skill, /const createdAtlasRun\s*=\s*activeAtlasRunId\s*\?\s*null\s*:\s*createRun\(['"]atlas['"]/);
-    assert.match(skill, /createdAtlasRun\s*&&\s*!createdAtlasRun\.ok[\s\S]*?throw new Error/);
-    assert.match(skill, /const runId\s*=\s*activeAtlasRunId\s*\|\|\s*createdAtlasRun\.runId/);
-    assert.ok(
-      skill.indexOf('createdAtlasRun && !createdAtlasRun.ok') < skill.indexOf("initPipeline(runId, 'atlas')"),
-      'create failure must stop before initPipeline',
+  test('keeps the retained reference behind the fixed runtime authority', () => {
+    assert.doesNotMatch(skill, /from\s+['"][^'"]*phase-runner\.mjs['"]/);
+    assert.doesNotMatch(
+      skill,
+      /\b(?:initPipeline|enterPhase|completePhase|skipPhase|loopTick|beginAttempt|reopenPhase|recordPhaseError|getPipelineState|isComplete|finalizeCompletedPipeline)\b/,
     );
-    assert.match(skill, /const pipelineInit\s*=\s*initPipeline\(runId,\s*['"]atlas['"]\)/);
-    assert.match(skill, /!pipelineInit\.ok\s*\|\|\s*pipelineInit\.degraded[\s\S]*?throw new Error/);
-    assert.match(skill, /Restart[\s\S]*?cancelled\/user_cancelled[\s\S]*?active pointer was cleared/);
+    assert.doesNotMatch(skill, /\b(?:createRun|getActiveRunId|admitOrchestratorRun)\b/);
+    assert.doesNotMatch(
+      skill,
+      /\b(?:runtimeBootstrapStatus|runtimeIsComplete|createdAtlasRun)\b/,
+      'the retained reference must not invent runtime symbols that the fixed CLI does not expose',
+    );
+    assert.match(skill, /runtimeEnter\(runId, phase\)[\s\S]*?orchestrator-runtime\.mjs enter atlas/);
+    assert.match(skill, /runtimeCompleteCi\(runId\)[\s\S]*?complete-ci atlas/);
+    assert.match(
+      skill,
+      /bootstrapStatus\s*=\s*runtimeStatus\(runId\)[\s\S]*?bootstrapStatus\.currentPhase[\s\S]*?bootstrapStatus\.nextAction/,
+      'resume must use fields returned by the fixed status command',
+    );
+    assert.match(
+      skill,
+      /bootstrapRunDisposition\s*!==\s*['"]created['"]/,
+      'fresh/adopted behavior must stay bound to the code-owned bootstrap disposition',
+    );
   });
 
-  test('every atlas phase has enterPhase + completePhase wiring', () => {
+  test('run creation and cross-orchestrator admission stay in the bootstrap', () => {
+    const bootstrap = readSkill('scripts/orchestrator-skill-init.mjs');
+    assert.match(bootstrap, /admitOrchestratorRun\(/);
+    assert.match(bootstrap, /expectedRunId/);
+    assert.match(bootstrap, /admission[\s\S]*?ok[\s\S]*?return/);
+    assert.match(skill, /exact `runId` injected by the bootstrap hook after cross-orchestrator admission/);
+    assert.match(skill, /Restart[\s\S]*?later fresh `\/atlas` invocation[\s\S]*?bootstrap admission lock/);
+  });
+
+  test('every atlas phase uses fixed-runtime enter and completion notation', () => {
     for (const id of phaseIds) {
-      assert.ok(callsPhaseFn(skill, 'enterPhase', id), `missing enterPhase('${id}')`);
-      assert.ok(callsPhaseFn(skill, 'completePhase', id), `missing completePhase('${id}')`);
+      assert.ok(callsPhaseFn(skill, 'runtimeEnter', id), `missing runtimeEnter('${id}')`);
+      if (id === 'finalize') {
+        assert.match(skill, /runtimeCompleteFinalize\(\s*runId\s*,/,
+          'finalize must use the code-owned reviewed-commit boundary');
+      } else if (id !== 'ci') {
+        assert.ok(callsPhaseFn(skill, 'runtimeComplete', id), `missing runtimeComplete('${id}')`);
+      }
     }
+    assert.match(skill, /runtimeCompleteCi\(runId\)/);
   });
 
-  test('outer attempt loop uses beginAttempt + reattempt (the 15-cap chokepoint)', () => {
-    assert.match(skill, /beginAttempt\(/, 'missing beginAttempt(');
-    assert.match(skill, /reattempt\(/, 'missing reattempt(');
+  test('outer attempt loop uses fixed runtime attempt + reattempt', () => {
+    assert.match(skill, /runtimeAttempt\(/);
+    assert.match(skill, /runtimeReattempt\(/);
   });
 
   test('loop phases tick the right bounded counters', () => {
-    assert.ok(callsLoopTick(skill, 'review'), "missing loopTick(_,'review')");
-    assert.ok(callsLoopTick(skill, 'quality'), "missing loopTick(_,'quality')");
-    assert.ok(callsLoopTick(skill, 'ci'), "missing loopTick(_,'ci')");
+    assert.match(skill, /runtimeTick\([^)]*['"]review['"]/);
+    assert.match(skill, /runtimeTick\([^)]*['"]ci['"]/);
+    assert.doesNotMatch(skill, /runtimeTick\([^)]*['"]quality['"]/);
   });
 
   test('verify fix loop records errors through the runner', () => {
-    assert.match(skill, /recordPhaseError\(/, 'missing recordPhaseError(');
+    assert.match(skill, /runtimeRecordError\(/);
   });
 
-  test('light-mode rewind goes through reopenPhase, keeping its own escalation cap', () => {
-    assert.match(skill, /reopenPhase\([^)]*light_mode_rewind/, "missing reopenPhase('plan',{reason:'light_mode_rewind'})");
+  test('light-mode rewind goes through the fixed policy-rewind command', () => {
+    assert.match(skill, /runtimePolicyRewind\([^)]*light_mode_rewind/);
     assert.match(skill, /registerEscalation\([^)]*light-mode-rewind/, 'must KEEP registerEscalation light-mode-rewind cap (not loop-guard)');
   });
 
@@ -527,9 +591,9 @@ describe('atlas SKILL.md phase-runner contract', () => {
   test('outer-attempt first-pass guard is a CONCRETE predicate (not a placeholder), preventing double-tick', () => {
     // Must test the ledger's attempt counter, not a prose comment, so a reattempt re-entry
     // (attempt>0) deterministically skips beginAttempt. (Codex HU-06.2 re-review finding.)
-    assert.match(skill, /getPipelineState\(runId\)\.attempt\s*===\s*0/,
-      'beginAttempt must be guarded by getPipelineState(runId).attempt === 0 (concrete first-pass test)');
-    assert.match(skill, /beginAttempt\(/, 'beginAttempt must still be called');
+    assert.match(skill, /runtimeStatus\(runId\)\.attempt\s*===\s*0/,
+      'runtime attempt must be guarded by fresh status attempt === 0');
+    assert.match(skill, /runtimeAttempt\(/);
   });
 
   test('light-mode rewind checks the escalation cap BEFORE reopening, on every path', () => {
@@ -540,30 +604,99 @@ describe('atlas SKILL.md phase-runner contract', () => {
       'the retroactive re-entry must reference the cap-checked rewind block (no unguarded reopenPhase)');
   });
 
-  test('quality-fail explicitly flips failed stories passes:false (else execute no-ops)', () => {
-    assert.match(skill, /setExecutionStoryPasses\([\s\S]*?<quality-failed story ids>[\s\S]*?false[\s\S]*?expectedGeneration:/,
-      'quality-fail must CAS-rollback failed stories passes:false through the hardened store');
+  test('quality-fail uses the code-owned reattempt boundary', () => {
+    assert.match(skill, /fixed runtime command `reattempt atlas <runId> quality_fail`[\s\S]*?atomically checks and consumes[\s\S]*?CAS-rolls every passing story[\s\S]*?passes:false/,
+      'quality-fail must let the fixed runtime own the budget, PRD rollback, and rewind');
   });
 
-  test('dynamic ship/ci skips use skipPhase, not enterPhase().skip', () => {
-    assert.match(skill, /skipPhase\(runId, 'ship'/, "ship's not-applicable path must call skipPhase('ship')");
-    assert.match(skill, /skipPhase\(runId, 'ci'/, "ci's not-applicable path must call skipPhase('ci')");
+  test('dynamic ship/ci skips use the policy-validating runtime command', () => {
+    assert.match(skill, /runtimeSkip\(runId, 'ship'/);
+    assert.match(skill, /runtimeSkip\(runId, 'ci'/);
   });
 
   test('ship safety contract gates release effects, approval, base detection, and CI', () => {
-    assertShipSafetyContract(skill, 'atlas');
+    const runtime = readSkill('scripts/orchestrator-runtime.mjs');
+    const concise = readSkill('skills/atlas/SKILL.md');
+    assert.match(runtime, /readDurableAtlasShipPolicy[\s\S]*?getUserTaskUpdates/);
+    assert.match(runtime, /ship-approval-unattested/);
+    assert.match(runtime, /validateAtlasShipSkip/);
+    assert.match(runtime, /validateAtlasCiSkip/);
+    assert.match(runtime, /completeAtlasCiPhase[\s\S]*?watchCI\(/);
+    assert.match(runtime, /context\.repoIdentity\.pushUrl/);
+    assert.match(runtime, /\['verify', 'review', 'finalize', 'ci'\]/);
+    assert.match(concise, /complete-ci atlas <runId>/);
   });
 
   test('completion finalizes the exact run only after the pipeline is complete', () => {
-    assert.match(skill, /import\s*\{[^}]*finalizeRun[^}]*\}\s*from\s*['"][^'"]*run-artifacts\.mjs['"]/s);
-    assert.match(skill, /isComplete\(runId\)/);
-    assert.match(skill, /finalizeRun\(runId,\s*\{\s*result:\s*['"]success['"]\s*\}\)/);
-    assert.match(skill, /getActiveRunId\(['"]atlas['"]\)\s*===\s*runId/);
+    assert.match(skill, /completionStatus\s*=\s*runtimeStatus\(runId\)[\s\S]*?completionStatus\.complete\s*!==\s*true/);
+    assert.match(skill, /runtimeCompleteFinalize\(\s*runId\s*,\s*finalReviewPackage\.reviewDigest\.value/);
+    assert.match(skill, /runtimeFinalize\(runId\)/);
+    assert.match(skill, /runtimeStatus\(runId\)[\s\S]*?runStatus\s*!==\s*['"]completed['"]/);
     assert.ok(
-      skill.lastIndexOf("completePhase(runId, 'complete')")
-        < skill.lastIndexOf("finalizeRun(runId, { result: 'success' })"),
-      'finalizeRun must run only after completePhase writes the terminal ledger',
+      skill.lastIndexOf("runtimeComplete(runId, 'complete')")
+        < skill.lastIndexOf('runtimeFinalize(runId)'),
+      'runtime finalize must run only after completion writes the terminal ledger',
     );
+    assert.ok(
+      skill.lastIndexOf('runtimeFinalize(runId)')
+        < skill.lastIndexOf('- Remove `.ao/prd.json`'),
+      'PRD cleanup must follow final tree/run validation',
+    );
+  });
+});
+
+describe('Atlas concise executable skill contract', () => {
+  const skill = readSkill('skills/atlas/SKILL.md');
+  const reference = readSkill('skills/atlas/reference.md');
+  const phaseAnchors = [
+    'triage', 'context', 'spec', 'plan', 'execute', 'verify',
+    'review', 'finalize', 'ship', 'ci', 'complete',
+  ];
+
+  test('uses progressive disclosure without weakening the executable control surface', () => {
+    assert.ok(skill.split('\n').length <= 500, 'Atlas SKILL.md must remain at most 500 lines');
+    assert.match(skill, /^---[\s\S]*?^argument-hint:/m);
+    assert.match(skill, /^---[\s\S]*?^model: opus$/m);
+    assert.match(skill, /^---[\s\S]*?^effort: high$/m);
+    assert.match(skill, /^\$ARGUMENTS$/m);
+    assert.equal((skill.match(/\[reference\.md\]\(reference\.md\)/g) || []).length, 1);
+    assert.match(skill, /\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/orchestrator-runtime\.mjs/);
+    assert.match(skill, /orchestrator-stop-gate\.mjs/);
+    assert.doesNotMatch(skill, /from\s+['"]\.\/scripts/);
+    assert.doesNotMatch(skill, /<Atlas_Orchestrator>/);
+    assert.match(reference, /non-executable/i);
+  });
+
+  test('pins one run and orders all code-owned transition commands', () => {
+    const commands = [
+      'status atlas', 'enter atlas', 'complete atlas', 'skip atlas',
+      'attempt atlas', 'tick atlas', 'record-error atlas', 'reattempt atlas',
+      'policy-rewind atlas', 'init-trivial-prd atlas', 'story-pass atlas',
+      'finalize atlas',
+    ];
+    let previous = -1;
+    for (const command of commands) {
+      const index = skill.indexOf(command);
+      assert.ok(index > previous, `missing or out-of-order runtime command: ${command}`);
+      previous = index;
+    }
+    assert.match(skill, /pin[\s\S]*runId/i);
+    assert.match(skill, /non-zero[\s\S]*hard stop/i);
+    assert.match(skill, /do not create another run/i);
+  });
+
+  test('retains ordered, grep-addressable phase sections in the reference', () => {
+    let previousEnd = -1;
+    for (const phase of phaseAnchors) {
+      const startMarker = `AO-PHASE:${phase}:start`;
+      const endMarker = `AO-PHASE:${phase}:end`;
+      assert.equal((reference.match(new RegExp(startMarker, 'g')) || []).length, 1, startMarker);
+      assert.equal((reference.match(new RegExp(endMarker, 'g')) || []).length, 1, endMarker);
+      const start = reference.indexOf(startMarker);
+      const end = reference.indexOf(endMarker);
+      assert.ok(start > previousEnd && end > start, `${phase} anchors must be ordered`);
+      previousEnd = end;
+    }
   });
 });
 
@@ -600,17 +733,24 @@ describe('athena SKILL.md phase-runner contract', () => {
   test('orphan checkpoint adoption requires artifact proof and exclusive pointer recovery', () => {
     assert.match(
       skill,
+      /import\s*\{\s*admitOrchestratorRun\s*\}\s*from\s*['"][^'"]*orchestrator-skill-init\.mjs['"]/,
+    );
+    assert.match(
+      skill,
       /import\s*\{\s*recoverOrphanedRun\s*\}\s*from\s*['"][^'"]*orphan-run-recovery\.mjs['"]/,
     );
     assert.match(
       skill,
-      /const orphanRecovery\s*=\s*!activeAthenaRunId\s*&&\s*pendingCheckpoint\?\.runId[\s\S]*?recoverOrphanedRun\(['"]athena['"],\s*pendingCheckpoint\.runId\)/,
+      /const initialAthenaAdmission\s*=\s*admitOrchestratorRun\(['"]athena['"][\s\S]*?createIfMissing:\s*false/,
     );
-    assert.match(skill, /!orphanRecovery\.ok\s*&&\s*!orphanRecovery\.canCreateNewRun/);
-    assert.match(skill, /const recoveredCheckpointRunId\s*=\s*orphanRecovery\?\.ok\s*\?/);
-    assert.match(skill, /const createdAthenaRun\s*=\s*\(activeAthenaRunId\s*\|\|\s*recoveredCheckpointRunId\)[\s\S]*?createRun\(['"]athena['"]/);
-    assert.match(skill, /createdAthenaRun\s*&&\s*!createdAthenaRun\.ok[\s\S]*?throw new Error/);
-    assert.match(skill, /activeAthenaRunId\s*\|\|\s*recoveredCheckpointRunId\s*\|\|\s*createdAthenaRun\.runId/);
+    assert.match(
+      skill,
+      /const athenaAdmission\s*=\s*admitOrchestratorRun\(['"]athena['"][\s\S]*?expectedRunId:\s*activeAthenaRunId[\s\S]*?recoverMissing:[\s\S]*?recoverOrphanedRun\(['"]athena['"],\s*pendingCheckpoint\.runId\)/,
+    );
+    assert.match(skill, /!athenaAdmission\.ok\s*\|\|\s*!athenaAdmission\.runId\s*\|\|\s*!athenaAdmission\.pointerGuard/);
+    assert.match(skill, /const runId\s*=\s*athenaAdmission\.runId/);
+    assert.match(skill, /athenaAdmission\.pointerGuard\.revalidate\(\{\s*required:\s*true\s*\}\)/);
+    assert.match(skill, /allowCreate:\s*athenaAdmission\.created\s*===\s*true/);
     assert.match(skill, /canCreateNewRun is true only for an exact terminal summary revalidated/);
     assert.match(skill, /missing run directory is not worker-liveness proof/);
     assert.match(skill, /absent run directory[\s\S]*?canCreateNewRun === false/);

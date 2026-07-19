@@ -46,6 +46,7 @@ import {
 const RUNS_BASE = join('.ao', 'artifacts', 'runs');
 const STATE_DIR = join('.ao', 'state');
 const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
+const SESSION_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/;
 const ORCHESTRATOR_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const MAX_SUMMARY_BYTES = 256 * 1024;
 const MAX_EVENTS_BYTES = 16 * 1024 * 1024;
@@ -54,8 +55,10 @@ const MAX_TASK_UPDATES = 1000;
 const MAX_POINTER_BYTES = 64 * 1024;
 const MAX_VERIFICATION_GENERATION_BYTES = 256 * 1024;
 const MAX_REVIEW_BASE_PIN_BYTES = 16 * 1024;
+const MAX_EXECUTION_PRD_SNAPSHOT_BYTES = 1024 * 1024;
 const VERIFICATION_GENERATION_FILE = 'verification-generation.json';
 const REVIEW_BASE_PIN_FILE = 'review-base.json';
+const EXECUTION_PRD_SNAPSHOT_FILE = 'execution-prd-snapshot.json';
 const VERIFICATION_GENERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const REVIEW_TREE_OID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const REVIEW_BASE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$/;
@@ -84,6 +87,16 @@ function canonicalTimestamp(value) {
   return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value
     ? timestamp
     : null;
+}
+
+function monotonicIsoTimestamp(floors = []) {
+  let timestamp = Date.now();
+  for (const floor of floors) {
+    const parsed = canonicalTimestamp(floor);
+    if (parsed === null) throw new Error('timestamp floor is not canonical');
+    timestamp = Math.max(timestamp, parsed);
+  }
+  return new Date(timestamp).toISOString();
 }
 
 /**
@@ -1016,6 +1029,271 @@ export function getRunReviewBasePin(runId, opts = {}) {
   }
 }
 
+function executionPrdSnapshotMaterial(snapshot) {
+  return {
+    schemaVersion: snapshot.schemaVersion,
+    runId: snapshot.runId,
+    orchestrator: snapshot.orchestrator,
+    prd: snapshot.prd,
+    generation: snapshot.generation,
+    snapshottedAt: snapshot.snapshottedAt,
+  };
+}
+
+function executionPrdSnapshotDigest(snapshot) {
+  return createHash('sha256')
+    .update(JSON.stringify(executionPrdSnapshotMaterial(snapshot)), 'utf8')
+    .digest('hex');
+}
+
+function normalizeExecutionPrdSnapshotInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || Object.keys(input).length !== 2
+    || !Object.hasOwn(input, 'prd')
+    || !Object.hasOwn(input, 'generation')
+    || !/^[0-9a-f]{64}$/.test(input.generation || '')) {
+    throw new Error('invalid execution PRD snapshot input');
+  }
+  let serialized;
+  let prd;
+  try {
+    serialized = JSON.stringify(input.prd);
+    prd = JSON.parse(serialized);
+  } catch {
+    throw new Error('execution PRD snapshot is not JSON serializable');
+  }
+  if (!prd || typeof prd !== 'object' || Array.isArray(prd)
+    || !Array.isArray(prd.userStories)
+    || prd.userStories.length === 0
+    || prd.userStories.length > 10_000
+    || prd.userStories.some(story => (
+      !story || typeof story !== 'object' || Array.isArray(story)
+      || !STORY_ID_PATTERN.test(story.id || '')
+      || story.passes !== true
+    ))
+    || new Set(prd.userStories.map(story => story.id)).size !== prd.userStories.length) {
+    throw new Error('execution PRD snapshot must contain completed unique stories');
+  }
+  const generation = createHash('sha256').update(serialized, 'utf8').digest('hex');
+  if (generation !== input.generation) {
+    throw new Error('execution PRD snapshot generation mismatch');
+  }
+  return { prd, generation };
+}
+
+function validateExecutionPrdSnapshot(snapshot, runId, now = Date.now()) {
+  const fields = [
+    'schemaVersion',
+    'runId',
+    'orchestrator',
+    'prd',
+    'generation',
+    'snapshottedAt',
+    'integrity',
+  ];
+  if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)
+    || Object.keys(snapshot).length !== fields.length
+    || fields.some(field => !Object.hasOwn(snapshot, field))
+    || snapshot.schemaVersion !== 1
+    || snapshot.runId !== runId
+    || snapshot.orchestrator !== 'atlas'
+    || !snapshot.integrity || typeof snapshot.integrity !== 'object'
+    || Array.isArray(snapshot.integrity)
+    || Object.keys(snapshot.integrity).length !== 2
+    || snapshot.integrity.algorithm !== 'sha256'
+    || !/^[0-9a-f]{64}$/.test(snapshot.integrity.value || '')) {
+    return false;
+  }
+  const snapshottedAt = canonicalTimestamp(snapshot.snapshottedAt);
+  if (snapshottedAt === null || snapshottedAt > now + 60_000) return false;
+  let normalized;
+  try {
+    normalized = normalizeExecutionPrdSnapshotInput({
+      prd: snapshot.prd,
+      generation: snapshot.generation,
+    });
+  } catch {
+    return false;
+  }
+  return JSON.stringify(normalized.prd) === JSON.stringify(snapshot.prd)
+    && snapshot.integrity.value === executionPrdSnapshotDigest(snapshot);
+}
+
+function readExecutionPrdSnapshot(paths, runId, { allowMissing = false } = {}) {
+  const artifact = readBoundRunArtifact(
+    paths,
+    EXECUTION_PRD_SNAPSHOT_FILE,
+    'execution PRD snapshot',
+    MAX_EXECUTION_PRD_SNAPSHOT_BYTES,
+    { allowMissing },
+  );
+  if (!artifact.present) return null;
+  let snapshot;
+  try { snapshot = JSON.parse(artifact.text); }
+  catch { throw new Error('execution PRD snapshot is invalid JSON'); }
+  if (!validateExecutionPrdSnapshot(snapshot, runId)) {
+    throw new Error('execution PRD snapshot is malformed');
+  }
+  return snapshot;
+}
+
+/**
+ * Persist the final authoritative Atlas execution PRD inside the immutable run
+ * artifact tree. The first valid snapshot wins; exact retries are idempotent
+ * and any later content/generation conflict fails closed.
+ */
+export function persistRunExecutionPrdSnapshot(runId, input, opts = {}) {
+  let mutation = null;
+  try {
+    const normalized = normalizeExecutionPrdSnapshotInput(input);
+    mutation = acquireRunningRunMutation(runId, opts);
+    if (mutation.summary.orchestrator !== 'atlas') {
+      return { ok: false, reason: 'execution-prd-snapshot-atlas-only' };
+    }
+    const paths = {
+      dir: mutation.dir,
+      revalidate: () => revalidateRunningRunMutation(mutation),
+    };
+    const existing = readExecutionPrdSnapshot(paths, runId, { allowMissing: true });
+    if (existing) {
+      if (existing.generation !== normalized.generation
+        || JSON.stringify(existing.prd) !== JSON.stringify(normalized.prd)) {
+        return { ok: false, reason: 'execution-prd-snapshot-conflict' };
+      }
+      return {
+        ok: true,
+        created: false,
+        snapshot: Object.freeze(structuredClone(existing)),
+      };
+    }
+
+    const snapshot = {
+      schemaVersion: 1,
+      runId,
+      orchestrator: 'atlas',
+      ...normalized,
+      snapshottedAt: new Date().toISOString(),
+    };
+    snapshot.integrity = {
+      algorithm: 'sha256',
+      value: executionPrdSnapshotDigest(snapshot),
+    };
+    const payload = JSON.stringify(snapshot, null, 2);
+    revalidateRunningRunMutation(mutation);
+    try {
+      writeExclusiveRegularArtifact(
+        join(mutation.dir, EXECUTION_PRD_SNAPSHOT_FILE),
+        'execution PRD snapshot',
+        payload,
+        MAX_EXECUTION_PRD_SNAPSHOT_BYTES,
+      );
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+    revalidateRunningRunMutation(mutation);
+    const persisted = readExecutionPrdSnapshot(paths, runId);
+    if (persisted.generation !== normalized.generation
+      || JSON.stringify(persisted.prd) !== JSON.stringify(normalized.prd)) {
+      return { ok: false, reason: 'execution-prd-snapshot-conflict' };
+    }
+    return {
+      ok: true,
+      created: true,
+      snapshot: Object.freeze(structuredClone(persisted)),
+    };
+  } catch (error) {
+    return { ok: false, reason: error?.message || 'execution-prd-snapshot-failed' };
+  } finally {
+    releaseRunningRunMutation(mutation);
+  }
+}
+
+/** Strictly read a finalized (or crash-pending) Atlas execution PRD snapshot. */
+export function getRunExecutionPrdSnapshot(runId, opts = {}) {
+  try {
+    const paths = bindRunReadPaths(runId, opts);
+    const summaryArtifact = readBoundRunArtifact(
+      paths,
+      'summary.json',
+      'run summary',
+      MAX_SUMMARY_BYTES,
+    );
+    let summary;
+    try { summary = JSON.parse(summaryArtifact.text); }
+    catch { throw new Error('run summary is invalid JSON'); }
+    if (!validateRunSummaryIdentity(summary, runId) || summary.orchestrator !== 'atlas') {
+      throw new Error('run summary identity is invalid');
+    }
+    const snapshot = readExecutionPrdSnapshot(paths, runId);
+    paths.revalidate();
+    return { ok: true, snapshot: Object.freeze(structuredClone(snapshot)) };
+  } catch (error) {
+    return { ok: false, reason: error?.message || 'execution-prd-snapshot-read-failed' };
+  }
+}
+
+/**
+ * Bind a still-running, sessionless preallocated run to the current Claude
+ * session. This is used when an external harness allocates the run before the
+ * Claude process exists. Existing bindings are immutable and conflicting or
+ * changing current-session pointers fail closed.
+ *
+ * @param {string} runId
+ * @param {object} [opts]
+ * @param {string} [opts.base]
+ * @param {string} [opts.stateDir]
+ * @param {string} [opts.sessionsBase]
+ * @param {string} [opts.trustedRoot]
+ * @returns {{ok:boolean,sessionId?:string,idempotent?:boolean,reason?:string}}
+ */
+export function bindRunToCurrentSession(runId, opts = {}) {
+  let mutation = null;
+  try {
+    const stateDir = resolve(opts.stateDir || STATE_DIR);
+    const sessionId = getCurrentSessionId({ stateBase: stateDir });
+    if (!SESSION_ID_PATTERN.test(sessionId || '')) {
+      return { ok: false, reason: 'current-session-unavailable' };
+    }
+    mutation = acquireRunningRunMutation(runId, opts);
+    if (mutation.summary.sessionId !== undefined) {
+      return mutation.summary.sessionId === sessionId
+        ? { ok: true, sessionId, idempotent: true }
+        : { ok: false, reason: 'run-session-conflict' };
+    }
+    const next = { ...mutation.summary, sessionId };
+    const payload = JSON.stringify(next, null, 2);
+    if (Buffer.byteLength(payload, 'utf8') > MAX_SUMMARY_BYTES) {
+      return { ok: false, reason: 'run-summary-too-large' };
+    }
+    revalidateRunningRunMutation(mutation);
+    atomicWriteFileSync(mutation.summaryPath, payload, { durable: true });
+    const persisted = readRegularArtifact(
+      mutation.summaryPath,
+      'run summary',
+      MAX_SUMMARY_BYTES,
+    );
+    let parsed;
+    try { parsed = JSON.parse(persisted.text); }
+    catch { return { ok: false, reason: 'run-session-persist-failed' }; }
+    if (parsed.sessionId !== sessionId
+      || !validateRunSummaryIdentity(parsed, runId)
+      || getCurrentSessionId({ stateBase: stateDir }) !== sessionId) {
+      return { ok: false, reason: 'current-session-changed' };
+    }
+    try {
+      linkRunToSession(runId, {
+        ...(opts.sessionsBase ? { base: opts.sessionsBase } : {}),
+        stateBase: stateDir,
+      });
+    } catch {}
+    return { ok: true, sessionId, idempotent: false };
+  } catch (error) {
+    return { ok: false, reason: error?.message || 'run-session-bind-failed' };
+  } finally {
+    releaseRunningRunMutation(mutation);
+  }
+}
+
 /**
  * Append a timestamped event to events.jsonl for the given run.
  *
@@ -1482,9 +1760,10 @@ function readStrictVerificationProgress(paths) {
  * Open or crash-resume a generation-bound final verification sweep. A single
  * current manifest makes historical records in verification.jsonl ineligible
  * for a later final review even when they name the same Git tree. A caller may
- * replace an open generation only by presenting its exact generation ID and a
- * different review tree through opts.supersedeGenerationId; this is the
- * explicit reattempt path after remediation mutates the filesystem snapshot.
+ * replace an open generation only by presenting its exact generation ID
+ * through opts.supersedeGenerationId. Replacement is also allowed when the Git
+ * identity is unchanged because the authoritative PRD generation or routing
+ * context may have changed after the binding was written.
  */
 export function beginVerificationGeneration(runId, input, opts = {}) {
   let mutation = null;
@@ -1497,11 +1776,10 @@ export function beginVerificationGeneration(runId, input, opts = {}) {
       const same = current.reviewTreeOid === normalized.reviewTreeOid
         && current.phase === normalized.phase
         && JSON.stringify(current.storyIds) === JSON.stringify(normalized.storyIds);
-      if (same) {
+      const explicitSupersede = opts.supersedeGenerationId === current.generationId;
+      if (same && !explicitSupersede) {
         return { ok: true, resumed: true, generation: Object.freeze(structuredClone(current)) };
       }
-      const explicitSupersede = opts.supersedeGenerationId === current.generationId
-        && current.reviewTreeOid !== normalized.reviewTreeOid;
       if (!explicitSupersede) {
         return {
           ok: false,
@@ -1517,7 +1795,7 @@ export function beginVerificationGeneration(runId, input, opts = {}) {
       generationId: randomUUID(),
       ...normalized,
       status: 'open',
-      startedAt: new Date().toISOString(),
+      startedAt: monotonicIsoTimestamp([mutation.summary.startedAt]),
     };
     const persisted = persistVerificationGeneration(mutation, manifest);
     return {
@@ -1626,7 +1904,10 @@ export function sealVerificationGeneration(runId, generationId, opts = {}) {
     const sealed = {
       ...current,
       status: 'sealed',
-      sealedAt: new Date().toISOString(),
+      sealedAt: monotonicIsoTimestamp([
+        current.startedAt,
+        ...records.map(record => record.timestamp),
+      ]),
       recordsDigest,
     };
     const persisted = persistVerificationGeneration(mutation, sealed);

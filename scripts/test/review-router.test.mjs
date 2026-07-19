@@ -242,6 +242,12 @@ describe('review-router: routeReviewers basic scopes', () => {
         'agents/code-reviewer.md',
         'agents/security-reviewer.md',
         'agents/themis.md',
+        'hooks/hooks.json',
+        'scripts/orchestrator-runtime.mjs',
+        'scripts/orchestrator-skill-init.mjs',
+        'scripts/orchestrator-stop-gate.mjs',
+        'scripts/stop-hook.mjs',
+        'scripts/lib/orchestrator-review-evidence.mjs',
         'scripts/lib/review-contract.mjs',
         'scripts/lib/review-package.mjs',
         'scripts/lib/review-router.mjs',
@@ -249,6 +255,7 @@ describe('review-router: routeReviewers basic scopes', () => {
         'scripts/lib/phase-runner.mjs',
         'skills/athena/SKILL.md',
         'skills/atlas/SKILL.md',
+        'skills/atlas/reference.md',
       ]) {
         const r = mod.routeReviewers({
           diffPaths: [policyPath],
@@ -311,6 +318,29 @@ describe('review-router: routeReviewers basic scopes', () => {
     assert.ok(r.reviewers.includes('themis'));
     assert.ok(r.reviewers.includes('code-reviewer'));
     assert.ok(!r.reviewers.includes('test-engineer'));
+  });
+
+  it('Generic JS/TS diff routes to the minimal code reviewer instead of full fallback', async () => {
+    const mod = await freshImport();
+    const r = mod.routeReviewers({
+      diffPaths: ['src/sum.mjs'],
+      diffContent: 'return a + b;',
+      baseDir: tmp,
+    });
+    assert.deepEqual(r.reviewers, ['code-reviewer']);
+    assert.deepEqual(r.matchedRules, ['generic-js-ts']);
+    assert.equal(r.warning, null);
+  });
+
+  it('orchestration runtime JS always adds the security reviewer', async () => {
+    const mod = await freshImport();
+    const r = mod.routeReviewers({
+      diffPaths: ['scripts/lib/permission-detect.mjs'],
+      diffContent: 'export function resolveMode(value) { return value; }',
+      baseDir: tmp,
+    });
+    assert.deepEqual(r.reviewers, ['code-reviewer', 'security-reviewer']);
+    assert.deepEqual(r.matchedRules, ['orchestration-runtime', 'generic-js-ts']);
   });
 
   it('Docs diff routes to code-reviewer, never writer', async () => {

@@ -63,6 +63,16 @@
       "reviewers": ["code-reviewer", "architect", "security-reviewer"]
     },
     {
+      "name": "orchestration-runtime",
+      "pathMatch": "^(scripts|hooks|evals)/.*\\.(ts|js|mjs|cjs)$",
+      "reviewers": ["code-reviewer", "security-reviewer"]
+    },
+    {
+      "name": "generic-js-ts",
+      "pathMatch": "\\.(ts|js|mjs|cjs)$",
+      "reviewers": ["code-reviewer"]
+    },
+    {
       "name": "infra",
       "pathMatch": "\\.(tf|tfvars|yaml|yml)$|^(terraform|infra|k8s|kubernetes|helm|ansible|.github/workflows)/|Dockerfile|docker-compose",
       "reviewers": ["architect", "security-reviewer", "code-reviewer"]

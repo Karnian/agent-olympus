@@ -52,13 +52,20 @@ const REVIEW_POLICY_PATHS = new Set([
   'agents/security-reviewer.md',
   'agents/themis.md',
   'config/review-routing.jsonc',
+  'hooks/hooks.json',
+  'scripts/orchestrator-runtime.mjs',
+  'scripts/orchestrator-skill-init.mjs',
+  'scripts/orchestrator-stop-gate.mjs',
+  'scripts/stop-hook.mjs',
   'scripts/lib/phase-runner.mjs',
+  'scripts/lib/orchestrator-review-evidence.mjs',
   'scripts/lib/review-contract.mjs',
   'scripts/lib/review-package.mjs',
   'scripts/lib/review-router.mjs',
   'scripts/lib/run-artifacts.mjs',
   'skills/athena/SKILL.md',
   'skills/atlas/SKILL.md',
+  'skills/atlas/reference.md',
 ]);
 
 const DEFAULT_REVIEW_RESULT_CONTRACT = AO_REVIEW_V1_CONTRACT;

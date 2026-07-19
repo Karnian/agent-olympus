@@ -6,8 +6,29 @@
  */
 
 import { execFileSync as nodeExecFileSync } from 'child_process';
+import {
+  resolveTrustedVcsBinary,
+  sanitizedVcsEnvironment,
+} from './trusted-vcs.mjs';
 
 let _execFileSync = nodeExecFileSync;
+
+function executable(command) {
+  return _execFileSync === nodeExecFileSync
+    ? resolveTrustedVcsBinary(command)
+    : command;
+}
+
+function commandOptions(command, cwd, extra = {}) {
+  return {
+    encoding: 'utf8',
+    cwd,
+    ...(_execFileSync === nodeExecFileSync
+      ? { env: sanitizedVcsEnvironment({ git: command === 'git' }) }
+      : {}),
+    ...extra,
+  };
+}
 
 /** @param {typeof nodeExecFileSync} fn */
 export function __setExecFileSyncForTest(fn) {
@@ -34,7 +55,11 @@ export function __resetForTest() {
 function run(cmd, args, cwd) {
   try {
     const repoCwd = typeof cwd === 'string' && cwd ? cwd : process.cwd();
-    return _execFileSync(cmd, args, { encoding: 'utf8', cwd: repoCwd }).trim();
+    return _execFileSync(
+      executable(cmd),
+      args,
+      commandOptions(cmd, repoCwd),
+    ).trim();
   } catch {
     return null;
   }
@@ -652,7 +677,7 @@ export function updateExistingPR({
     args.push('--repo', pinnedRepository);
 
     try {
-      _execFileSync('gh', args, { encoding: 'utf8', cwd: repoCwd });
+      _execFileSync(executable('gh'), args, commandOptions('gh', repoCwd));
     } catch (err) {
       const stderr = typeof err?.stderr === 'string' ? err.stderr.trim() : '';
       return {
@@ -722,7 +747,11 @@ export function createPR({
 
     let output;
     try {
-      output = _execFileSync('gh', args, { encoding: 'utf8', cwd: repoCwd }).trim();
+      output = _execFileSync(
+        executable('gh'),
+        args,
+        commandOptions('gh', repoCwd),
+      ).trim();
     } catch (err) {
       const message = err?.stderr?.trim() || err?.message || 'gh pr create failed';
       return { ok: false, error: message };

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   cpSync,
@@ -23,7 +24,10 @@ import {
   verifyPipelineEvidence,
 } from '../../evals/lib/pipeline-evidence.mjs';
 import { runEval } from '../../evals/run.mjs';
-import { createFinalizedEvalPipelineFixture } from './helpers/eval-pipeline-fixture.mjs';
+import {
+  createFinalizedEvalPipelineFixture,
+  invokeAtlasEvalBootstrap,
+} from './helpers/eval-pipeline-fixture.mjs';
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const REGRESSION_TASK = path.join(REPO_ROOT, 'evals/tasks/fix-failing-test');
@@ -40,12 +44,28 @@ function begin(cwd) {
     orchestrator: 'atlas',
     evalRunId: 'outer-eval',
     taskId: 'fixture-task',
+    taskPrompt: 'Fix the isolated fixture.',
     trial: 1,
   });
 }
 
 function json(filePath) {
   return JSON.parse(readFileSync(filePath, 'utf-8'));
+}
+
+function reviewBindingIntegrity(binding) {
+  return createHash('sha256').update(JSON.stringify({
+    schemaVersion: binding.schemaVersion,
+    runId: binding.runId,
+    phase: binding.phase,
+    generationId: binding.generationId,
+    reviewTreeOid: binding.reviewTreeOid,
+    finalCommitProposal: binding.finalCommitProposal,
+    storyIds: binding.storyIds,
+    prdGeneration: binding.prdGeneration,
+    route: binding.route,
+    boundAt: binding.boundAt,
+  }), 'utf8').digest('hex');
 }
 
 async function finalized(t) {
@@ -60,11 +80,18 @@ function makePlugin(root) {
   const pluginDir = path.join(root, 'plugin');
   mkdirSync(path.join(pluginDir, '.claude-plugin'), { recursive: true });
   writeFileSync(path.join(pluginDir, '.claude-plugin/plugin.json'), '{"name":"pipeline-evidence-test"}\n');
+  cpSync(path.join(REPO_ROOT, 'skills', 'atlas'), path.join(pluginDir, 'skills', 'atlas'), {
+    recursive: true,
+  });
+  cpSync(path.join(REPO_ROOT, 'skills', 'athena'), path.join(pluginDir, 'skills', 'athena'), {
+    recursive: true,
+  });
   return pluginDir;
 }
 
 function fakeLiveSpawn({ pipeline = true, solution = true, orchestrator = 'atlas' } = {}) {
   return (_command, _args, options) => {
+    if (pipeline && orchestrator === 'atlas') invokeAtlasEvalBootstrap(options.cwd);
     if (solution) cpSync(path.join(REGRESSION_TASK, 'solution'), options.cwd, { recursive: true, force: true });
     const child = new EventEmitter();
     child.stdout = new PassThrough();
@@ -98,7 +125,336 @@ test('valid finalized Atlas pipeline produces bounded cooperative evidence', asy
   assert.match(evidence.ledgerSha256, /^[a-f0-9]{64}$/);
   assert.match(evidence.summarySha256, /^[a-f0-9]{64}$/);
   assert.match(evidence.eventsSha256, /^[a-f0-9]{64}$/);
+  assert.match(evidence.atlasEvidence.reviewGenerationId, /^[a-f0-9-]{36}$/i);
+  assert.match(evidence.atlasEvidence.finalGenerationId, /^[a-f0-9-]{36}$/i);
+  assert.match(evidence.atlasEvidence.reviewDigest, /^[a-f0-9]{64}$/);
+  assert.match(evidence.atlasEvidence.finalReviewDigest, /^[a-f0-9]{64}$/);
+  assert.match(evidence.atlasEvidence.finalCommit, /^[a-f0-9]{40,64}$/);
+  assert.match(evidence.atlasEvidence.reviewApprovalSha256, /^[a-f0-9]{64}$/);
+  assert.match(evidence.atlasEvidence.reviewBindingSha256, /^[a-f0-9]{64}$/);
+  assert.match(evidence.atlasEvidence.finalReviewApprovalSha256, /^[a-f0-9]{64}$/);
+  assert.match(evidence.atlasEvidence.finalReviewBindingSha256, /^[a-f0-9]{64}$/);
+  assert.match(evidence.atlasEvidence.finalGenerationSha256, /^[a-f0-9]{64}$/);
+  assert.match(evidence.atlasEvidence.executionPrdSnapshotSha256, /^[a-f0-9]{64}$/);
   assert.equal(Object.hasOwn(evidence, 'workdir'), false);
+});
+
+test('a production quality reattempt reaches terminal evidence with one exact receipt', async (t) => {
+  const cwd = tempDir(t, 'ao-eval-pipeline-reattempt-');
+  const handle = begin(cwd);
+  assert.equal(handle.ready, true);
+  await createFinalizedEvalPipelineFixture(cwd, 'atlas', { qualityReattempt: true });
+
+  const ledger = json(handle.pipelinePath);
+  const guard = json(path.join(handle.runDir, 'loop-guard.json'));
+  assert.equal(Object.hasOwn(ledger, 'pendingReattempt'), false);
+  assert.deepEqual(ledger.reattemptReceipt, {
+    schemaVersion: 1,
+    runId: handle.pipelineRunId,
+    orchestrator: 'atlas',
+    reason: 'quality_fail',
+    currentPhase: 'verify',
+    reopen: ['execute', 'verify'],
+    baseAttempt: 1,
+    targetAttempt: 2,
+    qualityBaseCount: 0,
+  });
+  assert.equal(guard.counters.iterations.count, 2);
+  assert.equal(guard.counters['quality-cycles'].count, 1);
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.pass, true);
+  assert.equal(evidence.attempt, 2);
+});
+
+test('a terminal light-mode reexecution receipt matches the runtime reopen policy', async (t) => {
+  const cwd = tempDir(t, 'ao-eval-pipeline-light-reexec-');
+  const handle = begin(cwd);
+  await createFinalizedEvalPipelineFixture(cwd, 'atlas', { lightModeReattempt: true });
+
+  const ledger = json(handle.pipelinePath);
+  assert.deepEqual(ledger.reattemptReceipt, {
+    schemaVersion: 1,
+    runId: handle.pipelineRunId,
+    orchestrator: 'atlas',
+    reason: 'light_mode_reexec',
+    currentPhase: 'review',
+    reopen: ['execute', 'verify'],
+    baseAttempt: 1,
+    targetAttempt: 2,
+  });
+  assert.equal(ledger.phases.execute.status, 'completed');
+  assert.equal(ledger.phases.verify.status, 'completed');
+  assert.equal(ledger.phases.review.status, 'completed');
+  assert.equal(ledger.phases.review.attempts, 2);
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.pass, true);
+  assert.equal(evidence.attempt, 2);
+});
+
+test('light-mode receipt rejects forged current phase, reopen policy, or nonterminal source', async (t) => {
+  const cwd = tempDir(t, 'ao-eval-pipeline-light-reexec-forged-');
+  const handle = begin(cwd);
+  await createFinalizedEvalPipelineFixture(cwd, 'atlas', { lightModeReattempt: true });
+  const original = json(handle.pipelinePath);
+
+  for (const mutate of [
+    ledger => { ledger.reattemptReceipt.currentPhase = 'verify'; },
+    ledger => { ledger.reattemptReceipt.reopen = ['verify']; },
+    ledger => { ledger.phases.review.status = 'in_progress'; },
+  ]) {
+    const forged = structuredClone(original);
+    mutate(forged);
+    writeFileSync(handle.pipelinePath, JSON.stringify(forged));
+    assert.equal(verifyPipelineEvidence(handle).reason, 'reattempt-receipt-mismatch');
+  }
+});
+
+test('terminal evidence rejects pending, forged, and counter-mismatched reattempt records', async (t) => {
+  const cwd = tempDir(t, 'ao-eval-pipeline-reattempt-invalid-');
+  const handle = begin(cwd);
+  await createFinalizedEvalPipelineFixture(cwd, 'atlas', { qualityReattempt: true });
+  const originalLedger = json(handle.pipelinePath);
+  const originalGuard = json(path.join(handle.runDir, 'loop-guard.json'));
+
+  const pending = structuredClone(originalLedger);
+  pending.pendingReattempt = structuredClone(pending.reattemptReceipt);
+  writeFileSync(handle.pipelinePath, JSON.stringify(pending));
+  assert.equal(verifyPipelineEvidence(handle).reason, 'pending-reattempt-not-terminal');
+
+  for (const mutate of [
+    ledger => { ledger.reattemptReceipt.runId = 'atlas-forged-receipt'; },
+    ledger => { ledger.reattemptReceipt.orchestrator = 'athena'; },
+    ledger => { ledger.reattemptReceipt.targetAttempt = 3; },
+    ledger => { ledger.reattemptReceipt.reopen = ['verify']; },
+    ledger => { ledger.reattemptReceipt.untrusted = true; },
+  ]) {
+    const forged = structuredClone(originalLedger);
+    mutate(forged);
+    writeFileSync(handle.pipelinePath, JSON.stringify(forged));
+    assert.equal(verifyPipelineEvidence(handle).reason, 'reattempt-receipt-mismatch');
+  }
+
+  writeFileSync(handle.pipelinePath, JSON.stringify(originalLedger));
+  const mismatchedGuard = structuredClone(originalGuard);
+  mismatchedGuard.counters['quality-cycles'].count = 2;
+  writeFileSync(path.join(handle.runDir, 'loop-guard.json'), JSON.stringify(mismatchedGuard));
+  assert.equal(verifyPipelineEvidence(handle).reason, 'quality-guard-mismatch');
+});
+
+test('valid finalized Atlas evidence survives cleanup of the live PRD', async (t) => {
+  const { cwd, handle } = await finalized(t);
+  assert.doesNotThrow(() => json(path.join(handle.runDir, 'execution-prd-snapshot.json')));
+  unlinkSync(path.join(cwd, '.ao', 'prd.json'));
+
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.pass, true);
+  assert.match(evidence.atlasEvidence.executionPrdSnapshotSha256, /^[a-f0-9]{64}$/);
+});
+
+test('post-cleanup Atlas evidence still rejects stale PRD generations and tree changes', async (t) => {
+  const { cwd, handle } = await finalized(t);
+  unlinkSync(path.join(cwd, '.ao', 'prd.json'));
+  const ledger = json(handle.pipelinePath);
+  const finalApproval = json(path.join(
+    handle.runDir,
+    `review-approval-final-review-${ledger.phases.finalize.outputs.finalReviewDigest}.json`,
+  ));
+  const bindingPath = path.join(
+    handle.runDir,
+    `review-verification-final-review-${finalApproval.generationId}.json`,
+  );
+  const originalBinding = readFileSync(bindingPath, 'utf8');
+  const staleBinding = JSON.parse(originalBinding);
+  staleBinding.prdGeneration = 'f'.repeat(64);
+  staleBinding.integrity.value = reviewBindingIntegrity(staleBinding);
+  writeFileSync(bindingPath, JSON.stringify(staleBinding));
+  assert.equal(verifyPipelineEvidence(handle).pass, false);
+
+  writeFileSync(bindingPath, originalBinding);
+  writeFileSync(path.join(cwd, 'post-cleanup-tree-change.txt'), 'not reviewed\n');
+  assert.equal(verifyPipelineEvidence(handle).pass, false);
+});
+
+test('Atlas evidence rejects a finalized fixture that bypassed the real slash bootstrap', async (t) => {
+  const cwd = tempDir(t, 'ao-eval-pipeline-no-bootstrap-');
+  const handle = begin(cwd);
+  assert.equal(handle.ready, true);
+  await createFinalizedEvalPipelineFixture(cwd, 'atlas', { skipBootstrap: true });
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.pass, false);
+  assert.equal(evidence.reason, 'task-invocation-provenance');
+});
+
+test('Atlas evidence rejects caller-invented phase digests without code-owned artifacts', async (t) => {
+  const { handle } = await finalized(t);
+  const ledger = json(handle.pipelinePath);
+  const invented = 'f'.repeat(64);
+  ledger.phases.verify.outputs.verificationReviewDigest = invented;
+  ledger.phases.review.outputs.approvedReviewDigest = invented;
+  writeFileSync(handle.pipelinePath, JSON.stringify(ledger));
+
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.pass, false);
+  assert.equal(evidence.reason, 'atlas-review-evidence');
+});
+
+test('Atlas evidence rejects tampered immutable review approval contents', async (t) => {
+  const { handle } = await finalized(t);
+  const ledger = json(handle.pipelinePath);
+  const approvalPath = path.join(
+    handle.runDir,
+    `review-approval-review-${ledger.phases.review.outputs.approvedReviewDigest}.json`,
+  );
+  const approval = json(approvalPath);
+  approval.results[0].verdict = 'REVISE';
+  writeFileSync(approvalPath, JSON.stringify(approval));
+
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.pass, false);
+  assert.equal(evidence.reason, 'atlas-review-evidence');
+});
+
+test('Atlas evidence rejects a forged final commit proposal even with recomputed binding integrity', async (t) => {
+  const { handle } = await finalized(t);
+  const ledger = json(handle.pipelinePath);
+  const approval = json(path.join(
+    handle.runDir,
+    `review-approval-final-review-${ledger.phases.finalize.outputs.finalReviewDigest}.json`,
+  ));
+  const bindingPath = path.join(
+    handle.runDir,
+    `review-verification-final-review-${approval.generationId}.json`,
+  );
+  const binding = json(bindingPath);
+  binding.finalCommitProposal.message = 'forged final commit message\n';
+  binding.integrity.value = reviewBindingIntegrity(binding);
+  writeFileSync(bindingPath, JSON.stringify(binding));
+
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.pass, false);
+  assert.equal(evidence.reason, 'atlas-final-review-evidence');
+});
+
+test('Atlas evidence rejects an authoritative PRD with an incomplete story', async (t) => {
+  const { cwd, handle } = await finalized(t);
+  const prdPath = path.join(cwd, '.ao', 'prd.json');
+  const prd = json(prdPath);
+  prd.userStories[0].passes = false;
+  writeFileSync(prdPath, JSON.stringify(prd));
+
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.pass, false);
+  assert.equal(evidence.reason, 'atlas-verification-evidence');
+});
+
+test('Atlas evidence rejects a caller-invented final commit even when shaped as an object id', async (t) => {
+  const { handle } = await finalized(t);
+  const ledger = json(handle.pipelinePath);
+  const forgedCommit = 'e'.repeat(40);
+  ledger.phases.finalize.outputs.finalCommit = forgedCommit;
+  ledger.phases.ship.outputs.headCommit = forgedCommit;
+  ledger.phases.ci.outputs.ciHeadCommit = forgedCommit;
+  writeFileSync(handle.pipelinePath, JSON.stringify(ledger));
+
+  const evidence = verifyPipelineEvidence(handle);
+  assert.equal(evidence.pass, false);
+  assert.equal(evidence.reason, 'atlas-final-git-evidence');
+});
+
+test('Atlas evidence rejects ship and CI commits that differ from finalize', async (t) => {
+  for (const [phase, field, reason] of [
+    ['ship', 'headCommit', 'atlas-ship-finalize-mismatch'],
+    ['ci', 'ciHeadCommit', 'atlas-ci-finalize-mismatch'],
+  ]) {
+    const cwd = tempDir(t, `ao-eval-pipeline-${phase}-binding-`);
+    const handle = begin(cwd);
+    await createFinalizedEvalPipelineFixture(cwd);
+    const ledger = json(handle.pipelinePath);
+    ledger.phases[phase].outputs[field] = 'd'.repeat(40);
+    writeFileSync(handle.pipelinePath, JSON.stringify(ledger));
+
+    const evidence = verifyPipelineEvidence(handle);
+    assert.equal(evidence.pass, false, phase);
+    assert.equal(evidence.reason, reason, phase);
+  }
+});
+
+test('Atlas evidence requires exact code-owned ship and CI output schemas', async (t) => {
+  for (const [phase, outputs, reason] of [
+    ['ship', (finalCommit) => ({ headCommit: finalCommit }), 'atlas-ship-evidence'],
+    ['ci', (finalCommit) => ({ ciHeadCommit: finalCommit, extra: 'forged' }), 'atlas-ci-evidence'],
+  ]) {
+    const cwd = tempDir(t, `ao-eval-pipeline-${phase}-schema-`);
+    const handle = begin(cwd);
+    await createFinalizedEvalPipelineFixture(cwd);
+    const ledger = json(handle.pipelinePath);
+    ledger.phases[phase].outputs = outputs(ledger.phases.finalize.outputs.finalCommit);
+    writeFileSync(handle.pipelinePath, JSON.stringify(ledger));
+
+    const evidence = verifyPipelineEvidence(handle);
+    assert.equal(evidence.pass, false, phase);
+    assert.equal(evidence.reason, reason, phase);
+  }
+});
+
+test('Atlas evidence binds ship and CI events to their final ledger outputs', async (t) => {
+  for (const phase of ['ship', 'ci']) {
+    const cwd = tempDir(t, `ao-eval-pipeline-${phase}-event-output-`);
+    const handle = begin(cwd);
+    await createFinalizedEvalPipelineFixture(cwd);
+    const eventsPath = path.join(handle.runDir, 'events.jsonl');
+    const events = readFileSync(eventsPath, 'utf8').trim().split('\n')
+      .map(line => JSON.parse(line));
+    const event = events.findLast(item => (
+      item.type === 'pipeline_phase_completed' && item.phase === phase
+    ));
+    event.detail.outputs = phase === 'ship'
+      ? { headCommit: 'd'.repeat(40) }
+      : { ciHeadCommit: 'd'.repeat(40) };
+    writeFileSync(eventsPath, `${events.map(item => JSON.stringify(item)).join('\n')}\n`);
+
+    const evidence = verifyPipelineEvidence(handle);
+    assert.equal(evidence.pass, false, phase);
+    assert.equal(evidence.reason, 'atlas-phase-event-output-mismatch', phase);
+  }
+});
+
+test('Atlas evidence binds CI skip semantics to the ship outcome', async (t) => {
+  const validCwd = tempDir(t, 'ao-eval-pipeline-valid-dynamic-skip-');
+  const validHandle = begin(validCwd);
+  await createFinalizedEvalPipelineFixture(validCwd, 'atlas', {
+    shipSkipReason: 'preflight-unavailable',
+    ciSkipReason: 'no-pr',
+  });
+  assert.equal(verifyPipelineEvidence(validHandle).pass, true);
+
+  const invalidCwd = tempDir(t, 'ao-eval-pipeline-invalid-dynamic-skip-');
+  const invalidHandle = begin(invalidCwd);
+  await createFinalizedEvalPipelineFixture(invalidCwd, 'atlas', {
+    ciSkipReason: 'no-pr',
+  });
+  const evidence = verifyPipelineEvidence(invalidHandle);
+  assert.equal(evidence.pass, false);
+  assert.equal(evidence.reason, 'ship-ci-outcome-mismatch');
+});
+
+test('Atlas evidence rejects dynamic skips that contradict durable ship and CI policy', async (t) => {
+  const askCwd = tempDir(t, 'ao-eval-pipeline-ask-preflight-skip-');
+  const askHandle = begin(askCwd);
+  await createFinalizedEvalPipelineFixture(askCwd, 'atlas', {
+    shipMode: 'ask',
+    shipSkipReason: 'preflight-unavailable',
+    ciSkipReason: 'no-pr',
+  });
+  assert.equal(verifyPipelineEvidence(askHandle).reason, 'ship-policy-evidence');
+
+  const ciCwd = tempDir(t, 'ao-eval-pipeline-enabled-watch-skip-');
+  const ciHandle = begin(ciCwd);
+  await createFinalizedEvalPipelineFixture(ciCwd, 'atlas', {
+    ciWatchEnabled: true,
+    ciSkipReason: 'watch-disabled',
+  });
+  assert.equal(verifyPipelineEvidence(ciHandle).reason, 'ci-policy-evidence');
 });
 
 test('production Atlas trivial skip timing remains valid evidence', async (t) => {
@@ -213,6 +569,46 @@ test('Athena evidence requires cleanup completion bound to spawn identity', asyn
   assert.equal(verifyPipelineEvidence(handle).reason, 'athena-cleanup-evidence');
 });
 
+test('Athena evidence requires production spawn and monitor identity fields', async (t) => {
+  for (const mutation of ['missing-prd-generation', 'missing-native-session']) {
+    const cwd = tempDir(t, `ao-eval-pipeline-athena-output-${mutation}-`);
+    const handle = beginPipelineEvidence({
+      workdir: cwd, orchestrator: 'athena', evalRunId: 'outer-eval', taskId: 'fixture-task', trial: 1,
+    });
+    await createFinalizedEvalPipelineFixture(cwd, 'athena');
+    const ledger = json(handle.pipelinePath);
+    const eventsPath = path.join(handle.runDir, 'events.jsonl');
+    const events = readFileSync(eventsPath, 'utf-8').trim().split('\n').map((line) => JSON.parse(line));
+    if (mutation === 'missing-prd-generation') {
+      delete ledger.phases.spawn.outputs.prdGeneration;
+      events.findLast((event) => event.type === 'pipeline_phase_completed' && event.phase === 'spawn')
+        .detail.outputs = ledger.phases.spawn.outputs;
+    } else {
+      delete ledger.phases.monitor.outputs.nativeSessionId;
+      events.findLast((event) => event.type === 'pipeline_phase_completed' && event.phase === 'monitor')
+        .detail.outputs = ledger.phases.monitor.outputs;
+    }
+    writeFileSync(handle.pipelinePath, JSON.stringify(ledger));
+    writeFileSync(eventsPath, `${events.map((event) => JSON.stringify(event)).join('\n')}\n`);
+    assert.equal(
+      verifyPipelineEvidence(handle).reason,
+      mutation === 'missing-prd-generation' ? 'athena-spawn-evidence' : 'athena-monitor-evidence',
+    );
+  }
+});
+
+test('Athena final-review evidence is bound to the exact finalize attempt', async (t) => {
+  const cwd = tempDir(t, 'ao-eval-pipeline-athena-final-review-');
+  const handle = beginPipelineEvidence({
+    workdir: cwd, orchestrator: 'athena', evalRunId: 'outer-eval', taskId: 'fixture-task', trial: 1,
+  });
+  await createFinalizedEvalPipelineFixture(cwd, 'athena');
+  const ledger = json(handle.pipelinePath);
+  ledger.phases.finalize.attempts = 2;
+  writeFileSync(handle.pipelinePath, JSON.stringify(ledger));
+  assert.equal(verifyPipelineEvidence(handle).reason, 'final-review-guard-mismatch');
+});
+
 test('pre-existing .ao state is rejected before a live provider can spawn', (t) => {
   const cwd = tempDir(t);
   mkdirSync(path.join(cwd, '.ao', 'state'), { recursive: true });
@@ -225,6 +621,10 @@ test('pre-existing .ao state is rejected before a live provider can spawn', (t) 
 test('missing finalization cannot reuse a pre-allocated active run as success', (t) => {
   const cwd = tempDir(t);
   const handle = begin(cwd);
+  const taskUpdates = json(path.join(handle.runDir, 'task-updates.json'));
+  assert.deepEqual(taskUpdates.updates.map((update) => update.task), [
+    'Fix the isolated fixture.',
+  ]);
   const evidence = verifyPipelineEvidence(handle);
   assert.equal(evidence.pass, false);
   assert.equal(evidence.reason, 'active-run-not-finalized');
@@ -232,7 +632,7 @@ test('missing finalization cannot reuse a pre-allocated active run as success', 
     artifactReads: {
       pipeline: false,
       summary: true,
-      events: false,
+      events: true,
       guard: false,
     },
     pipeline: {
@@ -243,7 +643,10 @@ test('missing finalization cannot reuse a pre-allocated active run as success', 
       status: 'running',
       result: null,
     },
-    lastEvent: null,
+    lastEvent: {
+      type: 'user_task_update',
+      phase: null,
+    },
     guardCounterCounts: {},
   });
 });
@@ -404,6 +807,14 @@ test('review evidence requires one guard tick for every recorded attempt', async
   assert.equal(evidence.reason, 'review-guard-mismatch');
 });
 
+test('final-review evidence is bound to the exact finalize attempt', async (t) => {
+  const finalReview = await finalized(t);
+  const finalLedger = json(finalReview.handle.pipelinePath);
+  finalLedger.phases.finalize.attempts = 2;
+  writeFileSync(finalReview.handle.pipelinePath, JSON.stringify(finalLedger));
+  assert.equal(verifyPipelineEvidence(finalReview.handle).reason, 'final-review-guard-mismatch');
+});
+
 test('missing, extra, corrupt, copied-run, and future-schema ledgers fail closed', async (t) => {
   for (const mutation of ['missing-phase', 'extra-phase', 'corrupt', 'copied-run', 'future']) {
     const cwd = tempDir(t, `ao-eval-pipeline-${mutation}-`);
@@ -447,8 +858,11 @@ test('phase completion events must preserve the final code-defined order', async
   const eventsPath = path.join(handle.runDir, 'events.jsonl');
   const events = readFileSync(eventsPath, 'utf-8').trim().split('\n').map((line) => JSON.parse(line));
   const completions = events.filter((event) => event.type === 'pipeline_phase_completed').reverse();
-  const finalizedEvent = events.find((event) => event.type === 'run_finalized');
-  writeFileSync(eventsPath, `${[...completions, finalizedEvent].map((event) => JSON.stringify(event)).join('\n')}\n`);
+  let completionIndex = 0;
+  const reordered = events.map((event) => (
+    event.type === 'pipeline_phase_completed' ? completions[completionIndex++] : event
+  ));
+  writeFileSync(eventsPath, `${reordered.map((event) => JSON.stringify(event)).join('\n')}\n`);
   const evidence = verifyPipelineEvidence(handle);
   assert.equal(evidence.pass, false);
   assert.equal(evidence.reason, 'phase-event-order-mismatch');

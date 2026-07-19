@@ -121,6 +121,20 @@ function writeCheckpoint(dir, orchestrator, phase) {
   );
 }
 
+function writeActiveAtlasRun(dir, runId = 'atlas-test-active') {
+  const stateDir = path.join(dir, '.ao', 'state');
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    path.join(stateDir, 'ao-active-run-atlas.json'),
+    JSON.stringify({
+      runId,
+      orchestrator: 'atlas',
+      startedAt: new Date().toISOString(),
+    }),
+    { encoding: 'utf-8', mode: 0o600 },
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Not a git repo
 // ---------------------------------------------------------------------------
@@ -195,6 +209,49 @@ describe('stop-hook: git repo with uncommitted changes — creates WIP commit', 
     runHook(tmpDir);
     const afterCount = commitCount(tmpDir);
     assert.equal(afterCount, beforeCount + 1, 'a WIP commit should have been created');
+  });
+});
+
+describe('stop-hook: active code-owned Atlas run', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    writeActiveAtlasRun(tmpDir);
+    writeFileSync(path.join(tmpDir, 'unreviewed.js'), 'export const pending = true;\n', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('does not auto-commit the incomplete unreviewed tree', () => {
+    const beforeCount = commitCount(tmpDir);
+    assert.deepEqual(runHook(tmpDir), {});
+    assert.equal(commitCount(tmpDir), beforeCount);
+    assert.match(
+      execSync('git status --porcelain', { cwd: tmpDir, encoding: 'utf-8' }),
+      /\?\? unreviewed\.js/,
+    );
+  });
+});
+
+describe('stop-hook: malformed Atlas active pointer', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    initGitRepo(tmpDir);
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(stateDir, 'ao-active-run-atlas.json'), '{malformed', {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    writeFileSync(path.join(tmpDir, 'unreviewed.js'), 'export const pending = true;\n', 'utf-8');
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('fails closed instead of treating an unreadable pointer as no active run', () => {
+    const beforeCount = commitCount(tmpDir);
+    assert.deepEqual(runHook(tmpDir), {});
+    assert.equal(commitCount(tmpDir), beforeCount);
   });
 });
 

@@ -11,7 +11,7 @@ function readRepoFile(path) {
 describe('provider-aware planning and Athena applicability', () => {
   it('Prometheus never invents Codex availability', () => {
     const prometheus = readRepoFile('agents/prometheus.md');
-    const atlas = readRepoFile('skills/atlas/SKILL.md');
+    const atlas = readRepoFile('skills/atlas/reference.md');
     assert.match(prometheus, /caller reports Codex available/);
     assert.match(prometheus, /never invent provider availability/);
     assert.doesNotMatch(prometheus, /Include Codex assignments for:/);
@@ -38,13 +38,15 @@ describe('provider-aware planning and Athena applicability', () => {
 describe('typed Hermes artifact integration', () => {
   const hermes = readRepoFile('agents/hermes.md');
   const orchestrators = [
-    ['atlas', readRepoFile('skills/atlas/SKILL.md')],
+    ['atlas', readRepoFile('skills/atlas/reference.md')],
     ['athena', readRepoFile('skills/athena/SKILL.md')],
   ];
 
   it('defines one strict AO_SPEC_V1 envelope', () => {
     assert.match(hermes, /OUTPUT_CONTRACT: AO_SPEC_V1/);
-    assert.match(hermes, /"verdict": "CREATE \| PASS \| UPDATE \| RECREATE"/);
+    assert.match(hermes, /"verdict": "CREATE"/);
+    assert.doesNotMatch(hermes, /"verdict": "CREATE \| PASS \| UPDATE \| RECREATE"/,
+      'the copyable JSON example must contain one production-valid verdict');
     assert.match(hermes, /PASS[^\n]*specMarkdown[^\n]*prd[^\n]*null/);
     for (const field of ['mode', 'scale', 'goals', 'nonGoals', 'constraints', 'risks', 'openQuestions']) {
       assert.match(hermes, new RegExp(`"${field}"`));
@@ -76,8 +78,10 @@ describe('typed Hermes artifact integration', () => {
 });
 
 describe('typed review-gate integration', () => {
+  const atlasRuntime = readRepoFile('scripts/orchestrator-runtime.mjs');
+  const atlasEvidence = readRepoFile('scripts/lib/orchestrator-review-evidence.mjs');
   const orchestrators = [
-    ['atlas', readRepoFile('skills/atlas/SKILL.md')],
+    ['atlas', readRepoFile('skills/atlas/reference.md')],
     ['athena', readRepoFile('skills/athena/SKILL.md')],
   ];
 
@@ -105,32 +109,44 @@ describe('typed review-gate integration', () => {
       assert.match(skill, /latest record for every story/);
       assert.doesNotMatch(skill, /git diff --name-only \$\{range\}/);
 
-      const storyPackage = skill.indexOf(
-        'const verificationGitEvidence = buildReviewPackage({ cwd, baseRef: pinnedReviewBaseCommit });',
-      );
-      const storyChecks = skill.indexOf(
-        'criteria checks and read-only validator now, against this snapshot',
-        storyPackage,
-      );
-      const storyPrePersistCurrent = skill.indexOf(
-        'assertReviewPackageCurrent(verificationGitEvidence, { cwd });',
-        storyChecks,
-      );
-      const storyWrite = skill.indexOf('const verificationWrite = addVerification(runId', storyPrePersistCurrent);
-      const storyPostPersistCurrent = skill.indexOf(
-        'assertReviewPackageCurrent(verificationGitEvidence, { cwd });',
-        storyPrePersistCurrent + 1,
-      );
-      assert.ok(storyPackage >= 0 && storyPackage < storyChecks
-        && storyChecks < storyPrePersistCurrent && storyPrePersistCurrent < storyWrite
-        && storyWrite < storyPostPersistCurrent);
+      if (name === 'atlas') {
+        assert.match(skill, /AO-CONTRACT:verification-evidence/);
+        assert.match(skill, /runtime `verification-start`/);
+        assert.match(skill, /runtime owns `reviewTreeOid`, generation ID,/);
+        assert.match(atlasRuntime, /startBoundVerification\(runId, phase/);
+        assert.match(atlasRuntime, /recordBoundVerification\(runId, generationId, record/);
+        assert.match(atlasRuntime, /approveBoundReview\(runId, phase, generationId, payload/);
+        assert.match(atlasEvidence, /assertReviewPackageCurrent\(gitEvidence, \{ cwd \}\)/);
+        assert.match(atlasEvidence, /addVerification\(runId, \{/);
+        assert.match(atlasEvidence, /assertReviewPackageCurrent\(persisted\.reviewPackage/);
+      } else {
+        const storyPackage = skill.indexOf(
+          'const verificationGitEvidence = buildReviewPackage({ cwd, baseRef: pinnedReviewBaseCommit });',
+        );
+        const storyChecks = skill.indexOf(
+          'criteria checks and read-only validator now, against this snapshot',
+          storyPackage,
+        );
+        const storyPrePersistCurrent = skill.indexOf(
+          'assertReviewPackageCurrent(verificationGitEvidence, { cwd });',
+          storyChecks,
+        );
+        const storyWrite = skill.indexOf('const verificationWrite = addVerification(runId', storyPrePersistCurrent);
+        const storyPostPersistCurrent = skill.indexOf(
+          'assertReviewPackageCurrent(verificationGitEvidence, { cwd });',
+          storyPrePersistCurrent + 1,
+        );
+        assert.ok(storyPackage >= 0 && storyPackage < storyChecks
+          && storyChecks < storyPrePersistCurrent && storyPrePersistCurrent < storyWrite
+          && storyWrite < storyPostPersistCurrent);
+      }
     });
   }
 });
 
 describe('post-mutation final review integration', () => {
   const orchestrators = [
-    ['atlas', readRepoFile('skills/atlas/SKILL.md'), 'verify'],
+    ['atlas', readRepoFile('skills/atlas/reference.md'), 'verify'],
     ['athena', readRepoFile('skills/athena/SKILL.md'), 'integrate'],
   ];
 
@@ -140,7 +156,12 @@ describe('post-mutation final review integration', () => {
       assert.match(skill, /upsertTechDebtTrackerRow\([\s\S]*?\{ runId, cwd \}/);
       assert.doesNotMatch(skill, /prependToChangelog\('CHANGELOG\.md'/);
       assert.doesNotMatch(skill, /echo "\| \$\(date[\s\S]*?>> docs\/exec-plans\/tech-debt-tracker\.md/);
-      assert.match(skill, /loopTick\(runId, 'final-review'\)/);
+      assert.match(
+        skill,
+        name === 'atlas'
+          ? /runtimeTick\(runId, 'final-review'\)/
+          : /loopTick\(runId, 'final-review'\)/,
+      );
       assert.match(skill, /const finalHandledEscalations = new Set\(\)/);
       assert.match(skill, /replace its stale escalating result in finalRawOutputsByName/);
       assert.match(
@@ -186,14 +207,25 @@ describe('post-mutation final review integration', () => {
         generationSeal,
       );
       const current = skill.indexOf('assertReviewPackageCurrent(finalReviewPackage', finalPackage);
-      const commit = skill.indexOf('Skill(skill="agent-olympus:git-master")', current);
-      const headTree = skill.indexOf('assertReviewPackageHeadTree(finalReviewPackage', commit);
+      const commit = name === 'atlas'
+        ? skill.indexOf('runtimeCompleteFinalize(', current)
+        : skill.indexOf('Skill(skill="agent-olympus:git-master")', current);
+      const headTree = name === 'atlas'
+        ? skill.indexOf('finalizedStatus = runtimeStatus(runId)', commit)
+        : skill.indexOf('assertReviewPackageHeadTree(finalReviewPackage', commit);
       assert.ok(cleanup >= 0 && cleanup < finalPackage && finalPackage < snapshotCurrent
         && snapshotCurrent < generationBegin && generationBegin < generationProgress
         && generationProgress < prePersistCurrent && prePersistCurrent < finalTreeBinding
         && finalTreeBinding < postPersistCurrent
         && postPersistCurrent < generationSeal && generationSeal < sealedRead
         && sealedRead < current && current < commit && commit < headTree);
+      if (name === 'atlas') {
+        assert.doesNotMatch(
+          skill.slice(current, skill.indexOf('<!-- AO-PHASE:finalize:end -->', current)),
+          /Skill\(skill="agent-olympus:git-master"\)/,
+          'Atlas finalization must commit only through the fixed runtime',
+        );
+      }
       assert.match(skill, /verificationGenerationId: finalGenerationId/);
       assert.match(skill, /verification: finalSealedGeneration\.records/);
       assert.match(skill, /currentReviewTreeOid !== finalGitEvidence\.reviewTreeOid/);
@@ -205,18 +237,29 @@ describe('post-mutation final review integration', () => {
 });
 
 describe('immutable review-base integration', () => {
+  const atlasEvidence = readRepoFile('scripts/lib/orchestrator-review-evidence.mjs');
+  const atlasRuntime = readRepoFile('scripts/orchestrator-runtime.mjs');
   const orchestrators = [
-    ['atlas', readRepoFile('skills/atlas/SKILL.md')],
+    ['atlas', readRepoFile('skills/atlas/reference.md')],
     ['athena', readRepoFile('skills/athena/SKILL.md')],
   ];
 
   for (const [name, skill] of orchestrators) {
     it(`${name} resolves once, persists the triage pin, and reuses only its commit`, () => {
-      assert.match(skill, /const persistedTriageOutputs = getPipelineState\(runId\)\.phases\.triage\?\.outputs/);
+      if (name === 'atlas') {
+        assert.doesNotMatch(skill, /getPipelineState\(runId\)/);
+        assert.match(skill, /bootstrapStatus\s*=\s*runtimeStatus\(runId\)/);
+        assert.match(skill, /fixed[\s\S]*?runtime independently re-resolves it and owns the immutable pin write/);
+        assert.doesNotMatch(skill, /pinRunReviewBase\(runId/);
+        assert.match(atlasRuntime, /function pinTriageReviewBase\([\s\S]*?pinRunReviewBase\(runId/);
+        assert.match(atlasRuntime, /review-base-evidence-mismatch/);
+      } else {
+        assert.match(skill, /const persistedTriageOutputs = getPipelineState\(runId\)\.phases\.triage\?\.outputs/);
+        assert.match(skill, /pinRunReviewBase\(runId, resolvedReviewBase\)/);
+        assert.match(skill, /pipeline replica disagrees with the immutable review-base pin/);
+      }
       assert.match(skill, /const durableReviewBase = getRunReviewBasePin\(runId\)/);
       assert.match(skill, /baseRef: pinnedReviewBase\.baseRefCommit/);
-      assert.match(skill, /pinRunReviewBase\(runId, resolvedReviewBase\)/);
-      assert.match(skill, /pipeline replica disagrees with the immutable review-base pin/);
       assert.match(skill, /resumed without a valid immutable review-base pin/);
       assert.match(skill, /reviewBaseRef: pinnedReviewBase\.baseRef/);
       assert.match(skill, /reviewBaseCommit: pinnedReviewBaseCommit/);
@@ -224,17 +267,25 @@ describe('immutable review-base integration', () => {
       assert.match(skill, /checkpointData: \{[\s\S]*?reviewBaseCommit: pinnedReviewBaseCommit/);
 
       const calls = [...skill.matchAll(/buildReviewPackage\(([^\n]*)\)/g)];
-      assert.ok(calls.length >= 4, `${name} should bind every review snapshot to the pin`);
+      assert.ok(
+        calls.length >= (name === 'atlas' ? 3 : 4),
+        `${name} should bind every documented review snapshot to the pin`,
+      );
       for (const call of calls) {
         assert.match(call[1], /baseRef: pinnedReviewBaseCommit/);
       }
       assert.doesNotMatch(skill, /buildReviewPackage\(\{ cwd \}\)/);
+      if (name === 'atlas') {
+        assert.match(atlasEvidence, /getRunReviewBasePin\(runId, runOpts\(opts\)\)/);
+        assert.match(atlasEvidence, /resolveReviewBase\(\{ cwd, baseRef: pin\.baseRefCommit \}\)/);
+        assert.match(atlasEvidence, /buildReviewPackage\(\{ cwd, baseRef: pin\.baseRefCommit \}\)/);
+      }
     });
   }
 });
 
 describe('execution PRD integration', () => {
-  const atlas = readRepoFile('skills/atlas/SKILL.md');
+  const atlas = readRepoFile('skills/atlas/reference.md');
   const athena = readRepoFile('skills/athena/SKILL.md');
 
   it('validates Atlas plans before completion and dispatch', () => {
@@ -289,7 +340,7 @@ describe('execution PRD integration', () => {
 
 describe('canonical external validation lifecycle', () => {
   const orchestrators = [
-    ['atlas', readRepoFile('skills/atlas/SKILL.md')],
+    ['atlas', readRepoFile('skills/atlas/reference.md')],
     ['athena', readRepoFile('skills/athena/SKILL.md')],
   ];
 
@@ -335,7 +386,7 @@ describe('canonical external validation lifecycle', () => {
 });
 
 describe('deterministic Claude execution context', () => {
-  const atlas = readRepoFile('skills/atlas/SKILL.md');
+  const atlas = readRepoFile('skills/atlas/reference.md');
   const athena = readRepoFile('skills/athena/SKILL.md');
   const athenaAgent = readRepoFile('agents/athena.md');
 

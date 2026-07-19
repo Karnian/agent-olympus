@@ -55,9 +55,10 @@ import {
   reopenPhase, getPipelineState, isComplete,
 } from './scripts/lib/phase-runner.mjs';
 import {
-  addEvent, appendUserTaskUpdate, createRun, finalizeRun, getActiveRunId,
+  addEvent, appendUserTaskUpdate, bindRunToCurrentSession, finalizeRun, getActiveRunId,
   getRun, getRunReviewBasePin, getUserTaskUpdates, pinRunReviewBase,
 } from './scripts/lib/run-artifacts.mjs';
+import { admitOrchestratorRun } from './scripts/orchestrator-skill-init.mjs';
 import { loadAutonomyConfig, resolveRunShipMode } from './scripts/lib/autonomy.mjs';
 import { recoverOrphanedRun } from './scripts/lib/orphan-run-recovery.mjs';
 import { loadCheckpoint, saveCheckpoint } from './scripts/lib/checkpoint.mjs';
@@ -73,27 +74,39 @@ if (typeof currentAthenaRequest !== 'string' || !currentAthenaRequest.trim()) {
   throw new Error('Athena current user request is unavailable; stop before creating or resuming a run');
 }
 const pendingCheckpoint = await loadCheckpoint('athena');
-const activeAthenaRunId = getActiveRunId('athena');
-const orphanRecovery = !activeAthenaRunId && pendingCheckpoint?.runId
-  ? recoverOrphanedRun('athena', pendingCheckpoint.runId)
-  : null;
-if (orphanRecovery && !orphanRecovery.ok && !orphanRecovery.canCreateNewRun) {
-  throw new Error(`Athena active-run recovery conflict: ${orphanRecovery.reason}; preserve all artifacts and stop`);
+const initialAthenaAdmission = admitOrchestratorRun('athena', currentAthenaRequest, {
+  cwd,
+  createIfMissing: false,
+});
+if (!initialAthenaAdmission.ok) {
+  throw new Error(`Athena orchestrator admission conflict: ${initialAthenaAdmission.reason}; preserve all artifacts and stop`);
+}
+const activeAthenaRunId = initialAthenaAdmission.runId;
+if (activeAthenaRunId && pendingCheckpoint?.runId
+  && pendingCheckpoint.runId !== activeAthenaRunId) {
+  throw new Error('Athena checkpoint belongs to a different active run; preserve both and stop');
 }
 // canCreateNewRun is true only for an exact terminal summary revalidated under
 // the transition lock. A missing run directory is not worker-liveness proof.
 // Unknown, absent, corrupt, linked, or identity-unproven evidence stops here;
 // no Task/Agent dispatch, adapter spawn, or native teammate launch may follow.
-const recoveredCheckpointRunId = orphanRecovery?.ok ? orphanRecovery.runId : null;
-const createdAthenaRun = (activeAthenaRunId || recoveredCheckpointRunId)
-  ? null
-  : createRun('athena', currentAthenaRequest);
-if (createdAthenaRun && !createdAthenaRun.ok) {
-  throw new Error(`Athena run creation failed: ${createdAthenaRun.reason}; preserve all artifacts and stop`);
+let orphanRecovery = null;
+const athenaAdmission = admitOrchestratorRun('athena', currentAthenaRequest, {
+  cwd,
+  expectedRunId: activeAthenaRunId,
+  // Recovery publishes an active pointer, so it executes inside the same
+  // project-global admission lock as a fresh Atlas/Athena claim.
+  recoverMissing: () => {
+    if (!pendingCheckpoint?.runId) return null;
+    orphanRecovery = recoverOrphanedRun('athena', pendingCheckpoint.runId);
+    return orphanRecovery;
+  },
+});
+if (!athenaAdmission.ok || !athenaAdmission.runId || !athenaAdmission.pointerGuard) {
+  throw new Error(`Athena orchestrator admission was not durably claimed: ${athenaAdmission.reason}; preserve all artifacts and stop`);
 }
-const runId = activeAthenaRunId
-  || recoveredCheckpointRunId
-  || createdAthenaRun.runId;
+const runId = athenaAdmission.runId;
+athenaAdmission.pointerGuard.revalidate({ required: true });
 // Native Claude teammates exist only inside the Claude session that launched
 // them. The project-scoped current-session pointer is conservative: a missing
 // pointer or a concurrent session that moved it makes native ownership
@@ -126,12 +139,13 @@ const readClaudeSessionBinding = () => {
 // strict task ledger before the pipeline can continue. The best-effort event
 // JSONL remains audit-only and is never a shipping-policy source.
 const appendedTaskUpdate = appendUserTaskUpdate(runId, currentAthenaRequest, {
-  allowCreate: createdAthenaRun !== null,
+  allowCreate: athenaAdmission.created === true,
 });
 if (!appendedTaskUpdate.ok
   || appendedTaskUpdate.updates?.at(-1)?.task !== currentAthenaRequest) {
   throw new Error('Athena current user request was not durably appended; preserve the run and stop');
 }
+athenaAdmission.pointerGuard.revalidate({ required: true });
 const readDurableTaskBrief = action => {
   const runRecord = getRun(runId);
   const strictUpdates = getUserTaskUpdates(runId);
@@ -168,13 +182,11 @@ const refreshRunShipPolicy = action => {
   return { configuredShipMode, taskForbidsShipping, shipMode, noShip };
 };
 refreshRunShipPolicy('pipeline resume');
-if (activeAthenaRunId && pendingCheckpoint?.runId && pendingCheckpoint.runId !== activeAthenaRunId) {
-  throw new Error('Athena checkpoint belongs to a different active run; preserve both and stop');
-}
 const pipelineInit = initPipeline(runId, 'athena');
 if (!pipelineInit.ok || pipelineInit.degraded) {
   throw new Error('Athena pipeline ledger is unavailable or corrupt; preserve all teams/worktrees and stop');
 }
+athenaAdmission.pointerGuard.revalidate({ required: true });
 const { resumePhase, resumePolicy } = pipelineInit;
 // On resume, jump to resumePhase. Earlier completed phases return skip:true;
 // recover phases return reason:'recover' and MUST reconcile persisted state.
@@ -229,7 +241,7 @@ jump to the runner's `resumePhase`; otherwise perform the team design below.
 #### Light-Mode Resolution (Phase 4, 2026-04-22) <!-- AO-CONTRACT:light-mode-resolution -->
 
 Identical pattern to Atlas — resolve mode before sub-agent spawning. See
-[skills/atlas/SKILL.md](../atlas/SKILL.md) "Light-Mode Resolution" for the
+[skills/atlas/reference.md](../atlas/reference.md) "Light-Mode Resolution" for the
 canonical code block (replace `[Atlas]` log prefixes with `[Athena]`).
 
 In Athena, `skipMomus` additionally wraps the Phase 2 momus validation
@@ -365,7 +377,7 @@ if (durableReviewBase.ok) {
     throw new Error('BLOCKED: Athena checkpoint disagrees with the immutable review-base pin');
   }
 } else {
-  if (!createdAthenaRun || triageGate.skip) {
+  if (!athenaAdmission.created || triageGate.skip) {
     throw new Error(`BLOCKED: Athena resumed without a valid immutable review-base pin (${durableReviewBase.reason})`);
   }
   const resolvedReviewBase = resolveReviewBase({ cwd });
@@ -682,7 +694,7 @@ Task(subagent_type="agent-olympus:prometheus", model="opus",
   - For every Claude worker choose one execution agentType from:
     executor, designer, test-engineer, debugger, hephaestus, writer
   - Define parallel vs sequential order
-  - Set acceptance criteria per task
+  - Map every immutable PRD acceptance criterion to task work and verification; do not add, remove, or rewrite criteria
   - Define handoff protocol: when Worker A finishes X, SendMessage to Worker B
   Spec: <contents of .ao/prd.json>
   Team design: <design>. Task: <user_request>
@@ -897,6 +909,12 @@ const plannedSpawnPath = adapterOnly
   : (hasNativeTeamTools ? 'native-or-mixed' : 'fallback-or-mixed');
 const recoverySpawnIdentity = getPipelineState(runId).phases.spawn?.outputs;
 const nativeSessionRequired = plannedSpawnPath === 'native-or-mixed';
+if (nativeSessionRequired && !getRun(runId).summary?.sessionId) {
+  const adoptedSession = bindRunToCurrentSession(runId);
+  if (!adoptedSession.ok) {
+    throw new Error(`Athena could not bind the preallocated run to this Claude session: ${adoptedSession.reason}`);
+  }
+}
 const spawnSessionBinding = readClaudeSessionBinding();
 if (nativeSessionRequired && !spawnSessionBinding.proven) {
   throw new Error(

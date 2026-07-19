@@ -9,6 +9,19 @@ The harness keeps two tracks separate:
 - `regression`: small tasks held at 100% `pass^k`; these form the committed baseline and hermetic CI proof.
 - `capability`: harder deterministic tasks used to measure progress; they are reported but do not gate CI.
 
+## Role contract audit (provider-free)
+
+`roles/manifest.json` pins the exact 19-agent inventory, namespaced invocation
+identity, model tier, effective tool declaration, read-only mutation boundary,
+and documented machine-output contracts. The static audit parses the real
+`agents/*.md` frontmatter and validates documented `AO_REVIEW_V1`, `AO_SPEC_V1`,
+and `STAGE_VERDICT` examples through the production parsers without invoking a
+model:
+
+```sh
+node --test scripts/test/eval-role-contracts.test.mjs
+```
+
 ## Run
 
 A bare `node evals/run.mjs --task <dir>` is **refused** — it will not silently
@@ -176,9 +189,22 @@ spawn multiple paid workers and is never exercised by CI.
 This evidence is deliberately labelled `trust: "candidate-asserted"`: it closes
 stale, missing, and accidental false-PASS paths for a cooperative orchestrator,
 but the live process can still write its own workdir under
-`bypassPermissions`. It is not cryptographic or OS-level attestation. HU-11
-must provide a candidate-inaccessible event channel and sandbox boundary before
-the project can claim adversarially tamper-resistant trajectory evidence.
+`bypassPermissions`. In particular, reviewer rosters/result maps,
+`subagent_completed` events, and verification records (including `verifiedBy`)
+are candidate-authored. The verifier recomputes the routed roster, parses the
+result schemas, and binds those records to the PRD, review digest, Git tree,
+generation, and phase ledger, but no candidate-inaccessible host channel proves
+that the named reviewer or verifier was actually invoked or authored the
+record.
+
+Consequently, a pipeline PASS means the candidate-asserted protocol, tree, and
+evidence records are mutually consistent under these checks. It is not proof
+of an individual agent's invocation or performance; those claims require the
+separate direct-agent live track (or future host-attested telemetry) and its
+independent outcome/role grading. This evidence is not cryptographic or
+OS-level attestation. HU-11 must provide a candidate-inaccessible event channel
+and sandbox boundary before the project can claim adversarially
+tamper-resistant trajectory evidence.
 
 `delta_vs_baseline` is a measured-outcome comparison. It is `-1`, `0`, or `1`
 only for a live run whose k exactly matches both the baseline's root k and that
@@ -186,11 +212,17 @@ task's k, whose orchestrator, `modelTier`, Claude CLI version, resolved model
 IDs, effective per-trial budget, staged-plugin hash, and target prompt hash
 match, and whose `benchmarkFingerprint` matches. That fingerprint covers
 `task.json`, `seed/`, `grader.mjs`, and the shared grader-isolation runtime.
+For Atlas, the target prompt identity is a domain-separated composite of the
+concise `skills/atlas/SKILL.md` and its progressive-disclosure
+`skills/atlas/reference.md`; minimal legacy test fixtures that omit the
+reference retain their single-file identity.
 
 The measurement machinery has a separate `pipelineProtocolFingerprint` over
 the live harness, pipeline-evidence policy, and production
-phase/loop-guard/run-artifact roots plus their repo-local relative-import
-closure. Builtins, packages, and unreferenced SUT files are excluded. A
+phase/loop-guard/run-artifact roots, the Atlas bootstrap/runtime/Stop gates,
+the interacting global Stop hook, and the installed hook registry, plus their
+repo-local relative-import closure.
+Builtins, packages, and unreferenced SUT files are excluded. A
 protocol-only change therefore does
 not erase an otherwise valid outcome delta. It sets
 `baselineComparison.protocolGate.passed: false` and

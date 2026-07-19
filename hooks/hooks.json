@@ -18,6 +18,28 @@
         ]
       }
     ],
+    "UserPromptExpansion": [
+      {
+        "matcher": "atlas",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-skill-init.mjs\" || node \"${CLAUDE_PLUGIN_ROOT}/scripts/run.cjs\" \"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-skill-init.mjs\"",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "agent-olympus:atlas",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-skill-init.mjs\" || node \"${CLAUDE_PLUGIN_ROOT}/scripts/run.cjs\" \"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-skill-init.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "matcher": "*",
@@ -37,6 +59,16 @@
       }
     ],
     "PreToolUse": [
+      {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-skill-init.mjs\" || node \"${CLAUDE_PLUGIN_ROOT}/scripts/run.cjs\" \"${CLAUDE_PLUGIN_ROOT}/scripts/orchestrator-skill-init.mjs\"",
+            "timeout": 5
+          }
+        ]
+      },
       {
         "matcher": "Task",
         "hooks": [

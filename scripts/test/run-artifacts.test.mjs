@@ -9,6 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   promises as fsp,
   chmodSync,
@@ -27,12 +28,14 @@ import {
   discoverActiveRun,
   addEvent,
   appendUserTaskUpdate,
+  bindRunToCurrentSession,
   addVerification,
   finalizeRun,
   getActiveRunId,
   listRuns,
   getRun,
   getRunVerificationsStrict,
+  getRunExecutionPrdSnapshot,
   getUserTaskUpdates,
   replayEvents,
   verifyStory,
@@ -40,7 +43,9 @@ import {
   checkVerificationGate,
   generateCompletionNotices,
   setActiveRunId,
+  persistRunExecutionPrdSnapshot,
 } from '../lib/run-artifacts.mjs';
+import { registerSession } from '../lib/session-registry.mjs';
 
 const RUN_ARTIFACTS_URL = new URL('../lib/run-artifacts.mjs', import.meta.url).href;
 
@@ -152,6 +157,43 @@ test('createRun: creates the run directory and writes initial summary.json', asy
   }
 });
 
+test('bindRunToCurrentSession: safely adopts a sessionless preallocated run once', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const base = path.join(tmpDir, '.ao', 'artifacts', 'runs');
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    const sessionsBase = path.join(tmpDir, '.ao', 'sessions');
+    const created = createRunArtifact('athena', 'preallocated task', {
+      base,
+      stateDir,
+      trustedRoot: tmpDir,
+    });
+    assert.equal(created.ok, true);
+    assert.equal(readJson(path.join(created.runDir, 'summary.json')).sessionId, undefined);
+
+    registerSession('session-live-1', { base: sessionsBase, stateBase: stateDir });
+    const bound = bindRunToCurrentSession(created.runId, {
+      base,
+      stateDir,
+      sessionsBase,
+      trustedRoot: tmpDir,
+    });
+    assert.deepEqual(bound, { ok: true, sessionId: 'session-live-1', idempotent: false });
+    assert.equal(readJson(path.join(created.runDir, 'summary.json')).sessionId, 'session-live-1');
+    assert.equal(bindRunToCurrentSession(created.runId, {
+      base, stateDir, sessionsBase, trustedRoot: tmpDir,
+    }).idempotent, true);
+
+    registerSession('session-live-2', { base: sessionsBase, stateBase: stateDir });
+    assert.equal(bindRunToCurrentSession(created.runId, {
+      base, stateDir, sessionsBase, trustedRoot: tmpDir,
+    }).reason, 'run-session-conflict');
+    assert.equal(readJson(path.join(created.runDir, 'summary.json')).sessionId, 'session-live-1');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
 test('createRun: explicit failure envelope rejects unsafe identities and ambiguous custom state', async () => {
   const tmpDir = await makeTmpDir();
   try {
@@ -197,6 +239,59 @@ test('createRun: safe custom orchestrator remains finalizable', async () => {
       stateDir,
       trustedRoot: tmpDir,
     }), { ok: true, idempotent: false });
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('Atlas execution PRD snapshot is immutable, generation-bound, and idempotent', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const base = path.join(tmpDir, 'runs');
+    const stateDir = path.join(tmpDir, 'state');
+    const created = createRunArtifact('atlas', 'snapshot final PRD', {
+      base,
+      stateDir,
+      trustedRoot: tmpDir,
+    });
+    assert.equal(created.ok, true);
+    const prd = {
+      projectName: 'snapshot-test',
+      userStories: [{ id: 'US-001', title: 'Done', passes: true }],
+    };
+    const generation = createHash('sha256')
+      .update(JSON.stringify(prd), 'utf8')
+      .digest('hex');
+    const first = persistRunExecutionPrdSnapshot(created.runId, { prd, generation }, {
+      base,
+      trustedRoot: tmpDir,
+    });
+    assert.equal(first.ok, true);
+    assert.equal(first.created, true);
+
+    const replay = persistRunExecutionPrdSnapshot(created.runId, { prd, generation }, {
+      base,
+      trustedRoot: tmpDir,
+    });
+    assert.equal(replay.ok, true);
+    assert.equal(replay.created, false);
+    assert.deepEqual(
+      getRunExecutionPrdSnapshot(created.runId, { base, trustedRoot: tmpDir }).snapshot.prd,
+      prd,
+    );
+
+    const conflictingPrd = structuredClone(prd);
+    conflictingPrd.userStories[0].title = 'Changed';
+    const conflictingGeneration = createHash('sha256')
+      .update(JSON.stringify(conflictingPrd), 'utf8')
+      .digest('hex');
+    assert.equal(
+      persistRunExecutionPrdSnapshot(created.runId, {
+        prd: conflictingPrd,
+        generation: conflictingGeneration,
+      }, { base, trustedRoot: tmpDir }).reason,
+      'execution-prd-snapshot-conflict',
+    );
   } finally {
     await removeTmpDir(tmpDir);
   }

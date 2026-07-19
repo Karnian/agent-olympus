@@ -6,7 +6,7 @@
  * ----------
  * The orchestration loop bounds — "max 15 total iterations", "same error 3x =
  * stop", "max 3 review rounds" — historically lived ONLY as prose in
- * skills/atlas/SKILL.md and agents/atlas.md and were self-enforced by the LLM
+ * skills/atlas/reference.md and agents/atlas.md and were self-enforced by the LLM
  * orchestrator. There was no code-level counter, so the termination guarantee
  * was prompt-dependent (an LLM that miscounts can loop indefinitely). The only
  * real code guard was `registerEscalation()` in stage-escalation.mjs, which
@@ -14,9 +14,9 @@
  *
  * This module yields a deterministic STOP result once consulted, and its
  * counters survive context compaction / fresh-process polling. It is still
- * cooperative: the orchestrator MUST consult it at the top of each loop
- * iteration. No hook enforces that call yet; a Stop/PreToolUse hook backstop is
- * possible future work.
+ * cooperative at this layer: the code-owned orchestrator runtime is the sole
+ * caller, and the Atlas Stop hook blocks premature termination while a run is
+ * active.
  *
  *   registerIteration(runId)              → { allowed, count, cap }
  *     Call once per outer orchestration iteration. allowed=false ⇒ the hard

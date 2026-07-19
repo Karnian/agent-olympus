@@ -19,7 +19,10 @@ function canonicalProviderLifecycle(source, skill) {
 
 for (const skill of ['atlas', 'athena']) {
   test(`${skill} provider fallback recipe consumes targetProvider and dispatches provider child teams`, () => {
-    const source = readFileSync(path.join(REPO_ROOT, `skills/${skill}/SKILL.md`), 'utf-8');
+    const source = readFileSync(path.join(
+      REPO_ROOT,
+      skill === 'atlas' ? 'skills/atlas/reference.md' : 'skills/athena/SKILL.md',
+    ), 'utf-8');
     const lifecycle = canonicalProviderLifecycle(source, skill);
     assert.match(lifecycle, /reassignProvider\(/);
     assert.match(lifecycle, /dispatchProviderFallback\(/);
@@ -57,7 +60,7 @@ for (const skill of ['atlas', 'athena']) {
 }
 
 test('atlas supervisor fallback is driven by persisted monitor status', () => {
-  const source = readFileSync(path.join(REPO_ROOT, 'skills/atlas/SKILL.md'), 'utf-8');
+  const source = readFileSync(path.join(REPO_ROOT, 'skills/atlas/reference.md'), 'utf-8');
   assert.match(source, /const status = monitorTeam\(teamSlug\)/);
   assert.match(source, /\(status\?\.workers \|\| \[\]\)\.filter\(\(worker\) => worker\.status === 'failed'\)/);
   assert.match(source, /failedWorker\.errorReason/);
@@ -66,7 +69,7 @@ test('atlas supervisor fallback is driven by persisted monitor status', () => {
 });
 
 test('atlas integrates committed external worktrees before terminal cleanup', () => {
-  const source = readFileSync(path.join(REPO_ROOT, 'skills/atlas/SKILL.md'), 'utf-8');
+  const source = readFileSync(path.join(REPO_ROOT, 'skills/atlas/reference.md'), 'utf-8');
   assert.match(source, /External worktrees must branch from a committed Atlas checkpoint/);
   assert.match(source, /model: undefined/);
   assert.match(source, /status', '--porcelain'/);

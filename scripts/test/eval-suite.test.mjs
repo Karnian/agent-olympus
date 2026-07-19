@@ -93,7 +93,7 @@ test('runSuite aggregates both tracks, trials, tokens, baseline deltas, and secu
     assert.equal(result.summary.passHatK, true);
     assert.equal(result.summary.passAtK, true);
     assert.equal(result.summary.regressionGatePassed, true);
-    assert.deepEqual(result.summary.modelTiers, ['sonnet']);
+    assert.deepEqual(result.summary.modelTiers, ['opus', 'sonnet']);
     assert.deepEqual(result.summary.tracks, [
       { track: 'capability', total: 5, passed: 5 },
       { track: 'regression', total: 3, passed: 3 },

@@ -25,14 +25,22 @@ import {
   fingerprintPipelineProtocol,
   validateTaskDefinition,
 } from '../../evals/lib/tasks.mjs';
-import { aggregateTokenUsage, runEval } from '../../evals/run.mjs';
-import { createFinalizedEvalPipelineFixture } from './helpers/eval-pipeline-fixture.mjs';
+import { aggregateTokenUsage, fingerprintTargetPrompt, runEval } from '../../evals/run.mjs';
+import {
+  createFinalizedEvalPipelineFixture,
+  invokeAtlasEvalBootstrap,
+} from './helpers/eval-pipeline-fixture.mjs';
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const SAMPLE_TASK = path.join(REPO_ROOT, 'evals/tasks/_sample');
 const REGRESSION_TASK = path.join(REPO_ROOT, 'evals/tasks/fix-failing-test');
 const EXECUTOR_ROLE_TASK = path.join(REPO_ROOT, 'evals/tasks/role-executor-scope');
 const HEPHAESTUS_ROLE_TASK = path.join(REPO_ROOT, 'evals/tasks/role-hephaestus-scope');
+const ATLAS_REGRESSION_TASKS = [
+  'fix-failing-test',
+  'fix-null-deref',
+  'fix-off-by-one',
+].map((id) => path.join(REPO_ROOT, 'evals', 'tasks', id));
 
 function makeTmpDir(prefix = 'ao-eval-engine-test-') {
   return mkdtempSync(path.join(tmpdir(), prefix));
@@ -57,6 +65,7 @@ function completeFakeLiveChild(child, cwd, resultEvent = {
   },
   modelUsage: { 'claude-sonnet-test': {} },
 }) {
+  invokeAtlasEvalBootstrap(cwd);
   process.nextTick(() => {
     void createFinalizedEvalPipelineFixture(cwd).then(() => {
       child.stdout.end(`${JSON.stringify(resultEvent)}\n`);
@@ -83,6 +92,17 @@ test('score helpers compute pass@k, pass^k, and track rollups', () => {
     { track: 'regression', total: 2, passed: 1 },
     { track: 'capability', total: 3, passed: 1 },
   ]);
+});
+
+test('Atlas regression treatments match the skill model and timeout contract', () => {
+  const skill = readFileSync(path.join(REPO_ROOT, 'skills/atlas/SKILL.md'), 'utf8');
+  assert.match(skill, /^model: opus$/m);
+  for (const taskDir of ATLAS_REGRESSION_TASKS) {
+    const task = readJson(path.join(taskDir, 'task.json'));
+    assert.equal(task.orchestrator, 'atlas');
+    assert.equal(task.modelTier, 'opus');
+    assert.equal(task.timeoutMs, 180_000);
+  }
 });
 
 test('runOrchestrator live path builds branch-accurate claude argv without --bare', async () => {
@@ -469,8 +489,11 @@ test('runEval live path uses and cleans a plugin snapshot without eval oracles',
   const pluginSource = path.join(tempRoot, 'plugin-source');
   const resultsDir = path.join(tempRoot, 'results');
   mkdirSync(path.join(pluginSource, '.claude-plugin'), { recursive: true });
+  mkdirSync(path.join(pluginSource, 'skills/atlas'), { recursive: true });
   mkdirSync(path.join(pluginSource, 'evals/tasks/demo/solution'), { recursive: true });
   writeFileSync(path.join(pluginSource, '.claude-plugin/plugin.json'), '{"name":"fixture"}\n');
+  writeFileSync(path.join(pluginSource, 'skills/atlas/SKILL.md'), '# Atlas fixture\n');
+  writeFileSync(path.join(pluginSource, 'skills/atlas/reference.md'), '# Atlas reference\n');
   writeFileSync(path.join(pluginSource, 'evals/tasks/demo/solution/oracle.txt'), 'secret\n');
   const stagedPluginDirs = [];
 
@@ -1034,6 +1057,95 @@ test('direct-agent target identity changes the benchmark fingerprint', () => {
   }
 });
 
+test('Atlas target prompt identity includes its progressive-disclosure reference', () => {
+  const skillFingerprint = 'a'.repeat(64);
+  const referenceFingerprint = 'b'.repeat(64);
+  const task = { orchestrator: 'atlas' };
+  const strict = fingerprintTargetPrompt(task, {
+    'skills/atlas/SKILL.md': skillFingerprint,
+  });
+  assert.equal(strict.targetPromptFingerprint, null);
+  assert.deepEqual(strict.missingTargetPromptPaths, ['skills/atlas/reference.md']);
+
+  const legacy = fingerprintTargetPrompt(task, {
+    'skills/atlas/SKILL.md': skillFingerprint,
+  }, { allowLegacySingleFile: true });
+  assert.equal(legacy.targetPromptFingerprint, skillFingerprint);
+
+  const composite = fingerprintTargetPrompt(task, {
+    'skills/atlas/SKILL.md': skillFingerprint,
+    'skills/atlas/reference.md': referenceFingerprint,
+  });
+  assert.match(composite.targetPromptFingerprint, /^[a-f0-9]{64}$/);
+  assert.notEqual(composite.targetPromptFingerprint, skillFingerprint);
+  assert.notEqual(
+    fingerprintTargetPrompt(task, {
+      'skills/atlas/SKILL.md': skillFingerprint,
+      'skills/atlas/reference.md': 'c'.repeat(64),
+    }).targetPromptFingerprint,
+    composite.targetPromptFingerprint,
+  );
+
+  assert.equal(
+    fingerprintTargetPrompt(
+      { orchestrator: 'agent', agent: 'executor' },
+      { 'agents/executor.md': skillFingerprint },
+    ).targetPromptFingerprint,
+    skillFingerprint,
+  );
+
+  const athenaStrict = fingerprintTargetPrompt({ orchestrator: 'athena' }, {
+    'skills/athena/SKILL.md': skillFingerprint,
+  });
+  assert.equal(athenaStrict.targetPromptFingerprint, null);
+  assert.deepEqual(athenaStrict.missingTargetPromptPaths, ['skills/atlas/reference.md']);
+});
+
+test('live Atlas and Athena evals reject incomplete target prompt resource sets', async () => {
+  const tmpRoot = makeTmpDir('ao-eval-prompt-resources-');
+  try {
+    for (const orchestrator of ['atlas', 'athena']) {
+      const taskDir = path.join(tmpRoot, `task-${orchestrator}`);
+      const pluginSource = path.join(tmpRoot, `plugin-${orchestrator}`);
+      cpSync(SAMPLE_TASK, taskDir, { recursive: true });
+      const taskPath = path.join(taskDir, 'task.json');
+      const task = readJson(taskPath);
+      writeFileSync(taskPath, `${JSON.stringify({
+        ...task,
+        id: `missing-${orchestrator}-prompt-resource`,
+        orchestrator,
+      }, null, 2)}\n`);
+      mkdirSync(path.join(pluginSource, '.claude-plugin'), { recursive: true });
+      mkdirSync(path.join(pluginSource, 'skills', orchestrator), { recursive: true });
+      writeFileSync(
+        path.join(pluginSource, '.claude-plugin', 'plugin.json'),
+        '{"name":"fixture"}\n',
+      );
+      writeFileSync(
+        path.join(pluginSource, 'skills', orchestrator, 'SKILL.md'),
+        `# ${orchestrator} fixture\n`,
+      );
+
+      await assert.rejects(
+        runEval(taskDir, {
+          live: true,
+          k: 1,
+          pluginDir: pluginSource,
+          resultsDir: path.join(tmpRoot, `results-${orchestrator}`),
+          maxBudgetUsd: 1,
+          claudeCliVersion: '2.1.209',
+          spawn: () => {
+            throw new Error('live spawn must not occur with missing prompt resources');
+          },
+        }),
+        /missing target prompt resource\(s\): skills\/atlas\/reference\.md/,
+      );
+    }
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
 test('Executor and Hephaestus paired arms share one comparable fixture', () => {
   const executor = readJson(path.join(EXECUTOR_ROLE_TASK, 'task.json'));
   const hephaestus = readJson(path.join(HEPHAESTUS_ROLE_TASK, 'task.json'));
@@ -1108,7 +1220,9 @@ test('runEval separates measured-baseline deltas, declared targets, and protocol
     mkdirSync(path.join(pluginSource, 'skills/atlas'), { recursive: true });
     writeFileSync(path.join(pluginSource, '.claude-plugin/plugin.json'), '{"name":"fixture"}\n');
     writeFileSync(path.join(pluginSource, 'skills/atlas/SKILL.md'), '# Atlas fixture\n');
+    writeFileSync(path.join(pluginSource, 'skills/atlas/reference.md'), '# Atlas reference\n');
     const fakeLiveSpawn = (_command, _args, options) => {
+      invokeAtlasEvalBootstrap(options.cwd);
       cpSync(path.join(REGRESSION_TASK, 'solution'), options.cwd, { recursive: true, force: true });
       const child = new EventEmitter();
       child.stdout = new PassThrough();
@@ -1143,9 +1257,10 @@ test('runEval separates measured-baseline deltas, declared targets, and protocol
     liveBaseline.tasks['fix-failing-test'] = {
       ...liveBaseline.tasks['fix-failing-test'],
       source: 'live',
-      runId: 'trusted-sonnet-run',
+      runId: 'trusted-opus-run',
       measuredAt: '2026-07-12T00:00:00.000Z',
-      modelTier: 'sonnet',
+      modelTier: declaredTarget.summary.modelTier,
+      pipelineProtocolFingerprint: declaredTarget.summary.pipelineProtocolFingerprint,
       claudeCliVersion: declaredTarget.summary.claudeCliVersion,
       pluginFingerprint: declaredTarget.summary.pluginProvenance.fingerprint,
       targetPromptFingerprint: declaredTarget.summary.pluginProvenance.targetPromptFingerprint,
@@ -1204,7 +1319,7 @@ test('runEval separates measured-baseline deltas, declared targets, and protocol
 
     const modelMismatchPath = path.join(tmpRoot, 'model-mismatch-baseline.json');
     const modelMismatchBaseline = structuredClone(liveBaseline);
-    modelMismatchBaseline.tasks['fix-failing-test'].modelTier = 'opus';
+    modelMismatchBaseline.tasks['fix-failing-test'].modelTier = 'sonnet';
     writeFileSync(modelMismatchPath, `${JSON.stringify(modelMismatchBaseline, null, 2)}\n`);
     const modelMismatch = await runEval(REGRESSION_TASK, {
       ...liveCommon,

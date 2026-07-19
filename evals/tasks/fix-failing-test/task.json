@@ -5,7 +5,7 @@
   "difficulty": "S",
   "orchestrator": "atlas",
   "prompt": "The test suite fails. Fix src/sum.mjs so every test passes.",
-  "timeoutMs": 120000,
-  "modelTier": "sonnet",
+  "timeoutMs": 180000,
+  "modelTier": "opus",
   "k": 3
 }

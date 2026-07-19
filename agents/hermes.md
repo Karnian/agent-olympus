@@ -40,7 +40,7 @@ When the prompt contains `OUTPUT_CONTRACT: AO_SPEC_V1`, this section overrides N
 ```json
 {
   "schemaVersion": 1,
-  "verdict": "CREATE | PASS | UPDATE | RECREATE",
+  "verdict": "CREATE",
   "summary": "one concise sentence",
   "specMarkdown": "complete human-readable specification, or null for PASS",
   "prd": {

@@ -1,10 +1,14 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import { isSafeRepoRelativePath } from './review-contract.mjs';
+import {
+  resolveTrustedVcsBinary,
+  sanitizedVcsEnvironment,
+} from './trusted-vcs.mjs';
 
 export const REVIEW_PACKAGE_SCHEMA_VERSION = 1;
 export const MAX_REVIEW_PATCH_BYTES = 6 * 1024 * 1024;
@@ -13,14 +17,43 @@ export const MAX_REVIEW_PATHS = 10_000;
 
 const MAX_GIT_OUTPUT_BYTES = MAX_REVIEW_PATCH_BYTES + 64 * 1024;
 const MAX_PATH_LIST_BYTES = 1024 * 1024;
+const MAX_COMMIT_HEADER_BYTES = 64 * 1024;
+const GIT_COMMAND_TIMEOUT_MS = 15_000;
+const FINAL_COMMIT_AUTOMATION_IDENTITY = 'Agent Olympus <agent-olympus@localhost>';
 const SAFE_BASE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
 const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const PATCH_FIELDS = Object.freeze(['baseToHead', 'staged', 'unstaged', 'headToWorktree']);
+const FINAL_COMMIT_PROPOSAL_FIELDS = Object.freeze([
+  'schemaVersion',
+  'objectFormat',
+  'objectId',
+  'tree',
+  'parent',
+  'author',
+  'committer',
+  'extraHeaders',
+  'message',
+]);
 const REVIEW_BASE_ENV_KEYS = Object.freeze([
   'GITHUB_BASE_REF',
   'CI_MERGE_REQUEST_TARGET_BRANCH_NAME',
   'CHANGE_TARGET',
   'SYSTEM_PULLREQUEST_TARGETBRANCH',
+]);
+const AO_RUNTIME_UNTRACKED_PREFIXES = Object.freeze([
+  '.ao/artifacts/',
+  '.ao/state/',
+  '.ao/sessions/',
+  '.ao/teams/',
+  '.ao/worktrees/',
+  '.ao/memory/',
+]);
+const AO_RUNTIME_UNTRACKED_FILES = new Set([
+  '.ao/prd.json',
+  '.ao/spec.md',
+  '.ao/wisdom.jsonl',
+  '.ao/deep-dive-report.json',
+  '.ao/harness-context.json',
 ]);
 
 export class ReviewPackageError extends Error {
@@ -32,23 +65,29 @@ export class ReviewPackageError extends Error {
 }
 
 function gitEnvironment(overrides = {}) {
-  return {
-    ...process.env,
-    GIT_OPTIONAL_LOCKS: '0',
-    GIT_PAGER: 'cat',
-    LC_ALL: 'C',
-    ...overrides,
-  };
+  return sanitizedVcsEnvironment({ git: true, overrides });
+}
+
+function hookExecutionPath() {
+  const value = process.env.PATH;
+  if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {
+    throw new ReviewPackageError(
+      'INVALID_HOOK_ENVIRONMENT',
+      'normal Git commit hooks require a non-empty NUL-free user PATH',
+    );
+  }
+  return value;
 }
 
 function runGit(cwd, args, options = {}) {
   try {
-    const output = execFileSync('git', args, {
+    const output = execFileSync(resolveTrustedVcsBinary('git'), args, {
       cwd,
       env: gitEnvironment(options.env),
       input: options.input,
       encoding: null,
       maxBuffer: options.maxBuffer || MAX_GIT_OUTPUT_BYTES,
+      timeout: GIT_COMMAND_TIMEOUT_MS,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
@@ -78,6 +117,35 @@ function tryGitText(cwd, args) {
   } catch {
     return null;
   }
+}
+
+function exactRepositoryRoot(requestedCwd) {
+  if (tryGitText(requestedCwd, ['rev-parse', '--is-inside-work-tree']) !== 'true') {
+    throw new ReviewPackageError('NOT_A_REPOSITORY', 'cwd is not inside a Git worktree');
+  }
+  const reportedRoot = tryGitText(requestedCwd, ['rev-parse', '--show-toplevel']);
+  if (!reportedRoot || !path.isAbsolute(reportedRoot)) {
+    throw new ReviewPackageError('NOT_A_REPOSITORY', 'Git did not return an absolute worktree root');
+  }
+  let canonicalCwd;
+  let canonicalRoot;
+  try {
+    canonicalCwd = realpathSync(requestedCwd);
+    canonicalRoot = realpathSync(reportedRoot);
+  } catch (cause) {
+    throw new ReviewPackageError(
+      'INVALID_CWD',
+      'cwd and the Git worktree root must resolve canonically',
+      { cause },
+    );
+  }
+  if (canonicalCwd !== canonicalRoot) {
+    throw new ReviewPackageError(
+      'REPOSITORY_ROOT_MISMATCH',
+      'cwd must be the exact canonical Git worktree root',
+    );
+  }
+  return canonicalRoot;
 }
 
 function decodeUtf8(buffer, label) {
@@ -114,6 +182,74 @@ function parseNullPaths(buffer, label) {
   return paths;
 }
 
+/**
+ * Identify only untracked files owned by the AO runtime. Tracked files remain
+ * reviewable, and project inputs such as `.ao/autonomy.json` are deliberately
+ * outside this exclusion.
+ */
+export function isReviewExcludedUntrackedPath(value) {
+  return typeof value === 'string'
+    && (AO_RUNTIME_UNTRACKED_FILES.has(value)
+      || AO_RUNTIME_UNTRACKED_PREFIXES.some(prefix => value.startsWith(prefix)));
+}
+
+function untrackedReviewPaths(cwd) {
+  const all = parseNullPaths(
+    runGit(cwd, ['ls-files', '--others', '--exclude-standard', '-z'], {
+      maxBytes: MAX_PATH_LIST_BYTES,
+      maxBuffer: MAX_PATH_LIST_BYTES + 1,
+    }),
+    'untracked',
+  );
+  return {
+    reviewable: all.filter(value => !isReviewExcludedUntrackedPath(value)),
+    excluded: all.filter(isReviewExcludedUntrackedPath),
+  };
+}
+
+function changedTrackedPaths(cwd, args, label) {
+  return parseNullPaths(
+    runGit(cwd, args, {
+      maxBytes: MAX_PATH_LIST_BYTES,
+      maxBuffer: MAX_PATH_LIST_BYTES + 1,
+    }),
+    label,
+  );
+}
+
+/**
+ * Return the reviewable dirty set while ignoring only untracked AO-owned
+ * runtime artifacts. This is the shared cleanliness boundary used before a
+ * new Atlas run and again when a reviewed final tree is committed.
+ */
+export function getReviewWorktreeState({ cwd } = {}) {
+  if (typeof cwd !== 'string' || !cwd.trim() || cwd.includes('\0')) {
+    throw new ReviewPackageError('INVALID_CWD', 'cwd must be a non-empty filesystem path');
+  }
+  const requestedCwd = path.resolve(cwd);
+  const repositoryRoot = exactRepositoryRoot(requestedCwd);
+  resolveCommit(repositoryRoot, 'HEAD', 'HEAD');
+
+  const paths = new Set([
+    ...changedTrackedPaths(
+      repositoryRoot,
+      ['diff', '--name-only', '-z', '--'],
+      'unstaged',
+    ),
+    ...changedTrackedPaths(
+      repositoryRoot,
+      ['diff', '--cached', '--name-only', '-z', 'HEAD', '--'],
+      'staged',
+    ),
+    ...untrackedReviewPaths(repositoryRoot).reviewable,
+  ]);
+  return Object.freeze({
+    repositoryRoot,
+    dirty: paths.size > 0,
+    paths: Object.freeze([...paths].sort()),
+  });
+}
+
 function resolveCommit(cwd, revision, label) {
   const value = decodeUtf8(
     runGit(cwd, ['rev-parse', '--verify', `${revision}^{commit}`], { maxBytes: 256 }),
@@ -123,6 +259,162 @@ function resolveCommit(cwd, revision, label) {
     throw new ReviewPackageError('INVALID_OBJECT_ID', `${label} did not resolve to a commit object`);
   }
   return value;
+}
+
+function parseIdentityHeader(value, label) {
+  if (typeof value !== 'string'
+    || value.length === 0
+    || Buffer.byteLength(value, 'utf8') > 4096
+    || /[\0\r\n]/.test(value)) {
+    throw new ReviewPackageError('INVALID_COMMIT_METADATA', `${label} identity header is invalid`);
+  }
+  const match = /^(.*\S) ([0-9]+) ([+-][0-9]{4})$/.exec(value);
+  if (!match || !match[1].includes('<') || !match[1].endsWith('>')) {
+    throw new ReviewPackageError('INVALID_COMMIT_METADATA', `${label} identity header is invalid`);
+  }
+  return {
+    identity: match[1],
+    timestamp: BigInt(match[2]),
+    timezone: match[3],
+  };
+}
+
+function parentCommitLogicalClock(cwd, parentCommit) {
+  const raw = runGit(cwd, ['cat-file', 'commit', parentCommit], {
+    maxBytes: MAX_COMMIT_HEADER_BYTES,
+    maxBuffer: MAX_COMMIT_HEADER_BYTES + 1,
+  });
+  const separator = raw.indexOf(Buffer.from('\n\n'));
+  if (separator < 0 || separator > MAX_COMMIT_HEADER_BYTES) {
+    throw new ReviewPackageError(
+      'INVALID_COMMIT_METADATA',
+      'parent commit has no bounded canonical header section',
+    );
+  }
+  const headerText = decodeUtf8(raw.subarray(0, separator), 'parent commit headers');
+  const headerLines = headerText.split('\n');
+  const headerValue = (name) => {
+    const matches = headerLines.filter(line => line.startsWith(`${name} `));
+    if (matches.length !== 1) {
+      throw new ReviewPackageError(
+        'INVALID_COMMIT_METADATA',
+        `parent commit must contain exactly one ${name} header`,
+      );
+    }
+    return matches[0].slice(name.length + 1);
+  };
+  return parseIdentityHeader(headerValue('committer'), 'parent committer');
+}
+
+function automationIdentityHeader(timestamp) {
+  return `${FINAL_COMMIT_AUTOMATION_IDENTITY} ${timestamp} +0000`;
+}
+
+function canonicalFinalCommitMessage(reviewTreeOid) {
+  return `chore(agent-olympus): finalize reviewed tree ${reviewTreeOid.slice(0, 12)}\n`;
+}
+
+function finalCommitRaw(proposal) {
+  return Buffer.from([
+    `tree ${proposal.tree}`,
+    `parent ${proposal.parent}`,
+    `author ${proposal.author}`,
+    `committer ${proposal.committer}`,
+    ...proposal.extraHeaders,
+    '',
+    proposal.message,
+  ].join('\n'), 'utf8');
+}
+
+function gitObjectId(raw, objectFormat) {
+  const prefix = Buffer.from(`commit ${raw.length}\0`, 'utf8');
+  return createHash(objectFormat).update(prefix).update(raw).digest('hex');
+}
+
+function buildFinalCommitProposal(cwd, parentCommit, reviewTreeOid) {
+  const logicalClock = parentCommitLogicalClock(cwd, parentCommit);
+  const timestamp = [
+    BigInt(Math.floor(Date.now() / 1000)),
+    logicalClock.timestamp + 1n,
+  ].reduce((latest, candidate) => candidate > latest ? candidate : latest);
+  const automationIdentity = automationIdentityHeader(timestamp);
+  const objectFormat = parentCommit.length === 64 ? 'sha256' : 'sha1';
+  const proposal = {
+    schemaVersion: 1,
+    objectFormat,
+    objectId: '',
+    tree: reviewTreeOid,
+    parent: parentCommit,
+    author: automationIdentity,
+    committer: automationIdentity,
+    extraHeaders: [],
+    message: canonicalFinalCommitMessage(reviewTreeOid),
+  };
+  proposal.objectId = gitObjectId(finalCommitRaw(proposal), objectFormat);
+  return proposal;
+}
+
+function assertFinalCommitProposalIntegrity(reviewPackage) {
+  const proposal = reviewPackage.finalCommitProposal;
+  if (!isPlainObject(proposal)
+    || Object.keys(proposal).length !== FINAL_COMMIT_PROPOSAL_FIELDS.length
+    || !FINAL_COMMIT_PROPOSAL_FIELDS.every(field => Object.hasOwn(proposal, field))
+    || proposal.schemaVersion !== 1
+    || !['sha1', 'sha256'].includes(proposal.objectFormat)
+    || !OBJECT_ID.test(proposal.objectId || '')
+    || proposal.objectId.length !== (proposal.objectFormat === 'sha1' ? 40 : 64)
+    || proposal.tree !== reviewPackage.reviewTreeOid
+    || proposal.parent !== reviewPackage.headCommit
+    || !Array.isArray(proposal.extraHeaders)
+    || proposal.extraHeaders.length !== 0
+    || proposal.message !== canonicalFinalCommitMessage(reviewPackage.reviewTreeOid)
+    || Buffer.byteLength(proposal.message, 'utf8') > 1024) {
+    throw new ReviewPackageError(
+      'INVALID_COMMIT_METADATA',
+      'final commit proposal is missing, non-canonical, or has forbidden extra headers',
+    );
+  }
+  const author = parseIdentityHeader(proposal.author, 'proposed author');
+  const committer = parseIdentityHeader(proposal.committer, 'proposed committer');
+  if (author.identity !== FINAL_COMMIT_AUTOMATION_IDENTITY
+    || committer.identity !== FINAL_COMMIT_AUTOMATION_IDENTITY
+    || proposal.author !== proposal.committer
+    || author.timezone !== '+0000'
+    || committer.timezone !== '+0000') {
+    throw new ReviewPackageError(
+      'INVALID_COMMIT_METADATA',
+      'final commit author and committer must use the exact Agent Olympus automation identity',
+    );
+  }
+  if (proposal.objectId !== gitObjectId(finalCommitRaw(proposal), proposal.objectFormat)) {
+    throw new ReviewPackageError(
+      'INVALID_COMMIT_METADATA',
+      'final commit proposal object id does not match its exact raw commit bytes',
+    );
+  }
+  return true;
+}
+
+function assertFinalCommitProposalCanonical(reviewPackage, cwd) {
+  assertFinalCommitProposalIntegrity(reviewPackage);
+  const parentClock = parentCommitLogicalClock(cwd, reviewPackage.headCommit);
+  const proposed = parseIdentityHeader(
+    reviewPackage.finalCommitProposal.committer,
+    'proposed committer',
+  );
+  const latestAllowed = [
+    BigInt(Math.floor(Date.now() / 1000) + 60),
+    parentClock.timestamp + 1n,
+  ].reduce((latest, candidate) => candidate > latest ? candidate : latest);
+  if (proposed.timestamp <= parentClock.timestamp
+    || proposed.timestamp > latestAllowed
+    || proposed.timezone !== '+0000') {
+    throw new ReviewPackageError(
+      'INVALID_COMMIT_METADATA',
+      'final commit proposal does not use the canonical current UTC logical clock',
+    );
+  }
+  return true;
 }
 
 function validateBaseRef(value, label = 'baseRef') {
@@ -157,14 +449,7 @@ export function resolveReviewBase({ cwd, baseRef, env = process.env } = {}) {
     throw new ReviewPackageError('INVALID_CWD', 'cwd must be a non-empty filesystem path');
   }
   const requestedCwd = path.resolve(cwd);
-  const inside = tryGitText(requestedCwd, ['rev-parse', '--is-inside-work-tree']);
-  if (inside !== 'true') {
-    throw new ReviewPackageError('NOT_A_REPOSITORY', 'cwd is not inside a Git worktree');
-  }
-  const repoRoot = tryGitText(requestedCwd, ['rev-parse', '--show-toplevel']);
-  if (!repoRoot || !path.isAbsolute(repoRoot)) {
-    throw new ReviewPackageError('NOT_A_REPOSITORY', 'Git did not return an absolute worktree root');
-  }
+  const repoRoot = exactRepositoryRoot(requestedCwd);
 
   if (baseRef !== undefined) {
     const explicit = validateBaseRef(baseRef);
@@ -234,7 +519,7 @@ function patchArgs(...range) {
   ];
 }
 
-function buildWorktreeSnapshot(cwd, headCommit) {
+function buildWorktreeSnapshot(cwd, headCommit, excludedUntrackedPaths = []) {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ao-review-index-'));
   const indexPath = path.join(tempDir, 'index');
   const env = { GIT_INDEX_FILE: indexPath };
@@ -245,6 +530,13 @@ function buildWorktreeSnapshot(cwd, headCommit) {
     // filesystem tree (tracked edits/deletes plus non-ignored untracked files)
     // without changing the caller's index or worktree.
     runGit(cwd, ['add', '-A', '--'], { env, maxBytes: 64 * 1024 });
+    if (excludedUntrackedPaths.length > 0) {
+      runGit(cwd, ['update-index', '--force-remove', '-z', '--stdin'], {
+        env,
+        input: Buffer.from(`${excludedUntrackedPaths.join('\0')}\0`, 'utf8'),
+        maxBytes: 64 * 1024,
+      });
+    }
     const reviewTreeOid = decodeUtf8(
       runGit(cwd, ['write-tree'], { env, maxBytes: 256 }),
       'review tree',
@@ -274,15 +566,14 @@ export function captureCurrentReviewTree({ cwd } = {}) {
     throw new ReviewPackageError('INVALID_CWD', 'cwd must be a non-empty filesystem path');
   }
   const requestedCwd = path.resolve(cwd);
-  if (tryGitText(requestedCwd, ['rev-parse', '--is-inside-work-tree']) !== 'true') {
-    throw new ReviewPackageError('NOT_A_REPOSITORY', 'cwd is not inside a Git worktree');
-  }
-  const repositoryRoot = tryGitText(requestedCwd, ['rev-parse', '--show-toplevel']);
-  if (!repositoryRoot || !path.isAbsolute(repositoryRoot)) {
-    throw new ReviewPackageError('NOT_A_REPOSITORY', 'Git did not return an absolute worktree root');
-  }
+  const repositoryRoot = exactRepositoryRoot(requestedCwd);
   const headCommit = resolveCommit(repositoryRoot, 'HEAD', 'HEAD');
-  const { reviewTreeOid } = buildWorktreeSnapshot(repositoryRoot, headCommit);
+  const { excluded } = untrackedReviewPaths(repositoryRoot);
+  const { reviewTreeOid } = buildWorktreeSnapshot(
+    repositoryRoot,
+    headCommit,
+    excluded,
+  );
   return Object.freeze({
     schemaVersion: REVIEW_PACKAGE_SCHEMA_VERSION,
     repositoryRoot,
@@ -363,6 +654,7 @@ export function assertReviewPackageIntegrity(reviewPackage) {
       throw new ReviewPackageError('INVALID_OBJECT_ID', `${field} is not a commit object id`);
     }
   }
+  assertFinalCommitProposalIntegrity(reviewPackage);
   if (!SAFE_BASE_REF.test(reviewPackage.baseRef || '')) {
     throw new ReviewPackageError('UNSAFE_BASE_REF', 'review package baseRef is unsafe');
   }
@@ -417,6 +709,22 @@ export function assertReviewPackageIntegrity(reviewPackage) {
   return true;
 }
 
+/**
+ * Carry the one proposal durably selected at verification start across later
+ * freshness rebuilds. Git tree/patch freshness remains represented by the
+ * evidence digest; attachReviewContext() subsequently binds this proposal into
+ * the reviewer-facing review digest.
+ */
+export function bindFinalCommitProposal(gitEvidence, finalCommitProposal) {
+  assertReviewPackageIntegrity(gitEvidence);
+  const rebound = {
+    ...gitEvidence,
+    finalCommitProposal: structuredClone(finalCommitProposal),
+  };
+  assertReviewPackageIntegrity(rebound);
+  return deepFreeze(rebound);
+}
+
 function deepFreeze(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
@@ -427,6 +735,7 @@ function contextDigestMaterial(reviewPackage) {
   return {
     schemaVersion: reviewPackage.schemaVersion,
     evidenceDigest: reviewPackage.evidenceDigest,
+    finalCommitProposal: reviewPackage.finalCommitProposal,
     prd: reviewPackage.prd,
     verification: reviewPackage.verification,
   };
@@ -634,8 +943,10 @@ export function assertReviewPackageCurrent(reviewPackage, { cwd } = {}) {
 
 /**
  * After committing an approved package, prove that HEAD contains exactly the
- * filesystem tree reviewers saw. Commit metadata and parentage may change;
- * adding, omitting, or replacing content may not.
+ * filesystem tree and canonical commit metadata reviewers saw and that it is
+ * exactly one new commit on top of the pre-commit HEAD captured by the
+ * final-review package. Merge commits, alternate ancestry, changed identity or
+ * message fields, and extra commit headers are rejected.
  *
  * @param {object} reviewPackage output from buildReviewPackage() or attachReviewContext()
  * @param {object} options
@@ -652,8 +963,9 @@ export function assertReviewPackageHeadTree(reviewPackage, { cwd } = {}) {
   if (typeof cwd !== 'string' || cwd.trim().length === 0 || cwd.includes('\0')) {
     throw new ReviewPackageError('INVALID_CWD', 'cwd must be a non-empty filesystem path');
   }
+  const repositoryRoot = exactRepositoryRoot(path.resolve(cwd));
   const headTree = decodeUtf8(
-    runGit(path.resolve(cwd), ['rev-parse', '--verify', 'HEAD^{tree}'], { maxBytes: 256 }),
+    runGit(repositoryRoot, ['rev-parse', '--verify', 'HEAD^{tree}'], { maxBytes: 256 }),
     'HEAD tree',
   ).trim();
   if (!OBJECT_ID.test(headTree)) {
@@ -665,7 +977,216 @@ export function assertReviewPackageHeadTree(reviewPackage, { cwd } = {}) {
       'HEAD tree does not match the filesystem tree approved by reviewers',
     );
   }
+  const ancestry = decodeUtf8(
+    runGit(repositoryRoot, ['rev-list', '--parents', '-n', '1', 'HEAD'], { maxBytes: 512 }),
+    'HEAD ancestry',
+  ).trim().split(/\s+/);
+  if (ancestry.length !== 2
+    || !OBJECT_ID.test(ancestry[0] || '')
+    || ancestry[1] !== reviewPackage.headCommit) {
+    throw new ReviewPackageError(
+      'COMMITTED_PARENT_MISMATCH',
+      'HEAD must be exactly one non-merge commit on top of the final-review HEAD',
+    );
+  }
+  assertFinalCommitProposalCanonical(reviewPackage, repositoryRoot);
+  if (ancestry[0] !== reviewPackage.finalCommitProposal.objectId) {
+    throw new ReviewPackageError(
+      'COMMITTED_METADATA_MISMATCH',
+      'HEAD object id does not match the commit metadata approved by reviewers',
+    );
+  }
+  const actualRaw = runGit(repositoryRoot, ['cat-file', 'commit', ancestry[0]], {
+    maxBytes: MAX_COMMIT_HEADER_BYTES,
+    maxBuffer: MAX_COMMIT_HEADER_BYTES + 1,
+  });
+  const approvedRaw = finalCommitRaw(reviewPackage.finalCommitProposal);
+  if (!actualRaw.equals(approvedRaw)) {
+    throw new ReviewPackageError(
+      'COMMITTED_METADATA_MISMATCH',
+      'HEAD raw commit bytes do not match the metadata approved by reviewers',
+    );
+  }
   return true;
+}
+
+function symbolicHeadRef(cwd) {
+  const ref = tryGitText(cwd, ['symbolic-ref', '--quiet', 'HEAD']);
+  if (!ref || !ref.startsWith('refs/heads/')) return null;
+  try {
+    runGit(cwd, ['check-ref-format', ref], { maxBytes: 256 });
+    return ref;
+  } catch {
+    return null;
+  }
+}
+
+function isRollbackSafeAttempt(cwd, commit, proposal, expectedRef) {
+  if (!expectedRef || symbolicHeadRef(cwd) !== expectedRef) return false;
+  try {
+    const ancestry = decodeUtf8(
+      runGit(cwd, ['rev-list', '--parents', '-n', '1', commit], { maxBytes: 512 }),
+      'attempted commit ancestry',
+    ).trim().split(/\s+/);
+    if (ancestry.length !== 2 || ancestry[0] !== commit || ancestry[1] !== proposal.parent) {
+      return false;
+    }
+    const raw = runGit(cwd, ['cat-file', 'commit', commit], {
+      maxBytes: MAX_COMMIT_HEADER_BYTES,
+      maxBuffer: MAX_COMMIT_HEADER_BYTES + 1,
+    });
+    const separator = raw.indexOf(Buffer.from('\n\n'));
+    if (separator < 0) return false;
+    const headers = decodeUtf8(raw.subarray(0, separator), 'attempted commit headers')
+      .split('\n');
+    const expectedHeaders = [
+      `tree ${proposal.tree}`,
+      `parent ${proposal.parent}`,
+      `author ${proposal.author}`,
+      `committer ${proposal.committer}`,
+    ];
+    if (headers.length !== expectedHeaders.length
+      || headers.some((header, index) => header !== expectedHeaders[index])) return false;
+    const message = raw.subarray(separator + 2);
+    return message.subarray(0, Buffer.byteLength(proposal.message, 'utf8'))
+      .equals(Buffer.from(proposal.message, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Materialize the exact reviewer-approved unsigned automation commit through
+ * normal trusted `git commit`. This deliberately runs repository commit hooks;
+ * any hook mutation of the approved tree or message changes the object id and
+ * is rejected before shipping. Signing is disabled because a signature header
+ * cannot be known by pre-commit reviewers. The approved worktree is revalidated
+ * before staging, and replay after a successful commit is idempotent.
+ *
+ * @param {object} reviewPackage approved complete final-review package
+ * @param {{cwd:string}} options exact canonical repository root
+ * @returns {{finalCommit:string, created:boolean}}
+ */
+export function materializeApprovedReviewCommit(reviewPackage, { cwd } = {}) {
+  const contextFields = ['prd', 'verification', 'reviewDigest'];
+  const hasReviewContext = reviewPackage
+    && typeof reviewPackage === 'object'
+    && contextFields.some(field => Object.hasOwn(reviewPackage, field));
+  if (hasReviewContext) validateReviewContext(reviewPackage);
+  else assertReviewPackageIntegrity(reviewPackage);
+  if (typeof cwd !== 'string' || cwd.trim().length === 0 || cwd.includes('\0')) {
+    throw new ReviewPackageError('INVALID_CWD', 'cwd must be a non-empty filesystem path');
+  }
+  const repositoryRoot = exactRepositoryRoot(path.resolve(cwd));
+  assertFinalCommitProposalCanonical(reviewPackage, repositoryRoot);
+  const proposal = reviewPackage.finalCommitProposal;
+  const currentHead = resolveCommit(repositoryRoot, 'HEAD', 'HEAD');
+  if (currentHead === proposal.objectId) {
+    // Replay is validation-only. In particular, never reset the real index:
+    // staged-only user work must remain visible and block finalization.
+    assertReviewPackageHeadTree(reviewPackage, { cwd: repositoryRoot });
+    const replayState = getReviewWorktreeState({ cwd: repositoryRoot });
+    if (replayState.dirty) {
+      throw new ReviewPackageError(
+        'WORKTREE_CHANGED',
+        'worktree changed or index changed after the reviewer-approved commit was materialized',
+      );
+    }
+    return Object.freeze({ finalCommit: proposal.objectId, created: false });
+  }
+  if (currentHead !== reviewPackage.headCommit) {
+    throw new ReviewPackageError(
+      'COMMITTED_PARENT_MISMATCH',
+      'HEAD moved away from both the approved parent and approved final commit',
+    );
+  }
+
+  assertReviewPackageCurrent(reviewPackage, { cwd: repositoryRoot });
+  const originalIndexTree = decodeUtf8(
+    runGit(repositoryRoot, ['write-tree'], { maxBytes: 256 }),
+    'original index tree',
+  ).trim();
+  if (!OBJECT_ID.test(originalIndexTree)) {
+    throw new ReviewPackageError('INVALID_OBJECT_ID', 'the original index did not resolve to a tree');
+  }
+  const originalRef = symbolicHeadRef(repositoryRoot);
+  const identity = parseIdentityHeader(proposal.author, 'proposed automation identity');
+  const date = `${identity.timestamp} ${identity.timezone}`;
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ao-final-commit-index-'));
+  const tempIndex = path.join(tempDir, 'index');
+  try {
+    runGit(repositoryRoot, ['read-tree', proposal.tree], {
+      env: { GIT_INDEX_FILE: tempIndex },
+      maxBytes: 256,
+    });
+    runGit(repositoryRoot, [
+      '-c',
+      'i18n.commitEncoding=UTF-8',
+      'commit',
+      '--no-gpg-sign',
+      '--allow-empty',
+      '--cleanup=verbatim',
+      '--file=-',
+    ], {
+      input: Buffer.from(proposal.message, 'utf8'),
+      env: {
+        PATH: hookExecutionPath(),
+        GIT_INDEX_FILE: tempIndex,
+        GIT_AUTHOR_NAME: 'Agent Olympus',
+        GIT_AUTHOR_EMAIL: 'agent-olympus@localhost',
+        GIT_AUTHOR_DATE: date,
+        GIT_COMMITTER_NAME: 'Agent Olympus',
+        GIT_COMMITTER_EMAIL: 'agent-olympus@localhost',
+        GIT_COMMITTER_DATE: date,
+      },
+      maxBytes: MAX_COMMIT_HEADER_BYTES,
+    });
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+
+  const committedHead = resolveCommit(repositoryRoot, 'HEAD', 'HEAD');
+  if (committedHead !== proposal.objectId) {
+    if (isRollbackSafeAttempt(repositoryRoot, committedHead, proposal, originalRef)) {
+      runGit(repositoryRoot, [
+        'update-ref',
+        '-m',
+        'agent-olympus rejected mutated final commit',
+        originalRef,
+        reviewPackage.headCommit,
+        committedHead,
+      ], { maxBytes: 256 });
+      throw new ReviewPackageError(
+        'COMMITTED_METADATA_MISMATCH',
+        'Git hooks changed the reviewer-approved commit message envelope',
+      );
+    }
+    throw new ReviewPackageError(
+      'COMMITTED_HEAD_DIVERGED',
+      'Git hooks or another writer advanced HEAD; history was preserved and finalization stopped',
+    );
+  }
+
+  const currentIndexTree = decodeUtf8(
+    runGit(repositoryRoot, ['write-tree'], { maxBytes: 256 }),
+    'current index tree',
+  ).trim();
+  if (currentIndexTree !== originalIndexTree) {
+    throw new ReviewPackageError(
+      'WORKTREE_CHANGED',
+      'the real index changed while the reviewer-approved commit was materialized',
+    );
+  }
+  runGit(repositoryRoot, ['read-tree', proposal.tree], { maxBytes: 256 });
+  assertReviewPackageHeadTree(reviewPackage, { cwd: repositoryRoot });
+  const worktree = getReviewWorktreeState({ cwd: repositoryRoot });
+  if (worktree.dirty) {
+    throw new ReviewPackageError(
+      'WORKTREE_CHANGED',
+      'worktree changed while the reviewer-approved commit was materialized',
+    );
+  }
+  return Object.freeze({ finalCommit: proposal.objectId, created: true });
 }
 
 /**
@@ -686,14 +1207,7 @@ export function buildReviewPackage({ cwd, baseRef } = {}) {
   }
 
   const requestedCwd = path.resolve(cwd);
-  const inside = tryGitText(requestedCwd, ['rev-parse', '--is-inside-work-tree']);
-  if (inside !== 'true') {
-    throw new ReviewPackageError('NOT_A_REPOSITORY', 'cwd is not inside a Git worktree');
-  }
-  const repoRoot = tryGitText(requestedCwd, ['rev-parse', '--show-toplevel']);
-  if (!repoRoot || !path.isAbsolute(repoRoot)) {
-    throw new ReviewPackageError('NOT_A_REPOSITORY', 'Git did not return an absolute worktree root');
-  }
+  const repoRoot = exactRepositoryRoot(requestedCwd);
 
   const resolvedBase = resolveReviewBase({ cwd: repoRoot, baseRef });
   const resolvedBaseRef = resolvedBase.baseRef;
@@ -722,14 +1236,15 @@ export function buildReviewPackage({ cwd, baseRef } = {}) {
     patchArgs(),
     { maxBytes: MAX_REVIEW_PATCH_BYTES },
   );
-  const untrackedPaths = parseNullPaths(
-    runGit(repoRoot, ['ls-files', '--others', '--exclude-standard', '-z'], {
-      maxBytes: MAX_PATH_LIST_BYTES,
-      maxBuffer: MAX_PATH_LIST_BYTES + 1,
-    }),
-    'untracked',
+  const {
+    reviewable: untrackedPaths,
+    excluded: excludedUntrackedPaths,
+  } = untrackedReviewPaths(repoRoot);
+  const worktreeSnapshot = buildWorktreeSnapshot(
+    repoRoot,
+    headCommit,
+    excludedUntrackedPaths,
   );
-  const worktreeSnapshot = buildWorktreeSnapshot(repoRoot, headCommit);
   const headToWorktreeBuffer = worktreeSnapshot.patch;
 
   const committedPaths = parseNullPaths(
@@ -794,6 +1309,11 @@ export function buildReviewPackage({ cwd, baseRef } = {}) {
     mergeBaseCommit,
     headCommit,
     reviewTreeOid: worktreeSnapshot.reviewTreeOid,
+    finalCommitProposal: buildFinalCommitProposal(
+      repoRoot,
+      headCommit,
+      worktreeSnapshot.reviewTreeOid,
+    ),
     diffPaths,
     untrackedPaths: [...untrackedPaths].sort(),
     patches,
