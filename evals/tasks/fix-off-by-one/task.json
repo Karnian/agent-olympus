@@ -5,7 +5,7 @@
   "difficulty": "S",
   "orchestrator": "atlas",
   "prompt": "lastN returns the wrong slice. Fix the boundary; all tests must pass.",
-  "timeoutMs": 120000,
-  "modelTier": "sonnet",
+  "timeoutMs": 180000,
+  "modelTier": "opus",
   "k": 3
 }

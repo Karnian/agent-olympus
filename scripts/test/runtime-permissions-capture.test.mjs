@@ -18,6 +18,10 @@ import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import {
+  loadRuntimePermissions,
+  loadRuntimeSessionIdentity,
+} from '../lib/runtime-permissions.mjs';
 
 const __dirname = resolve(fileURLToPath(import.meta.url), '..');
 const SCRIPT = resolve(__dirname, '..', 'runtime-permissions-capture.mjs');
@@ -29,15 +33,20 @@ function makeCwd() {
   return dir;
 }
 
+function runtimeHomeFor(cwd) {
+  return `${cwd}-runtime-home`;
+}
+
 /**
  * Invoke the hook with `payload` on stdin. Returns the resolved cache record
  * (or null when the hook chose not to write). Throws on hook crash.
  */
 function runHook(payload, { cwd, env = {} } = {}) {
+  mkdirSync(runtimeHomeFor(cwd), { recursive: true, mode: 0o700 });
   const stdoutRaw = execFileSync(process.execPath, [SCRIPT], {
     input: JSON.stringify(payload),
     cwd,
-    env: { ...process.env, ...env },
+    env: { ...process.env, HOME: runtimeHomeFor(cwd), ...env },
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
     timeout: 10000,
@@ -52,11 +61,23 @@ function runHook(payload, { cwd, env = {} } = {}) {
   return JSON.parse(readFileSync(cachePath, 'utf-8'));
 }
 
+function loadGrant(cwd) {
+  const identity = loadRuntimeSessionIdentity({ cwd });
+  if (!identity) return null;
+  return loadRuntimePermissions({
+    cwd,
+    runtimeHome: runtimeHomeFor(cwd),
+    expectedSessionId: identity.sessionId,
+    expectedCaptureId: identity.captureId,
+  });
+}
+
 describe('runtime-permissions-capture hook', () => {
   let cwd;
   beforeEach(() => { cwd = makeCwd(); });
   afterEach(() => {
     try { rmSync(cwd, { recursive: true, force: true }); } catch {}
+    try { rmSync(runtimeHomeFor(cwd), { recursive: true, force: true }); } catch {}
   });
 
   it('captures top-level permission_mode (snake_case) from stdin', () => {
@@ -67,35 +88,47 @@ describe('runtime-permissions-capture hook', () => {
     }, { cwd });
     assert.ok(rec, 'cache file should exist');
     assert.equal(rec.schemaVersion, 1);
-    assert.equal(rec.permissionMode, 'bypassPermissions');
+    assert.equal(rec.permissionObservation, 'recognized');
     assert.equal(rec.source, 'hook_stdin');
     assert.equal(rec.sessionId, 'sess-1');
+    assert.equal(loadGrant(cwd).permissionMode, 'bypassPermissions');
   });
 
   it('captures top-level permissionMode (camelCase) from stdin', () => {
     const rec = runHook({
       permissionMode: 'acceptEdits',
+      session_id: 'sess-camel',
       cwd,
     }, { cwd });
-    assert.equal(rec.permissionMode, 'acceptEdits');
+    assert.equal(rec.permissionObservation, 'recognized');
+    assert.equal(loadGrant(cwd).permissionMode, 'acceptEdits');
   });
 
   it('captures nested session.permission_mode', () => {
     const rec = runHook({
       session: { permission_mode: 'plan' },
+      session_id: 'sess-nested',
       cwd,
     }, { cwd });
-    assert.equal(rec.permissionMode, 'plan');
+    assert.equal(loadGrant(cwd).permissionMode, 'plan');
   });
 
-  it('falls back to CLAUDE_PERMISSION_MODE env when stdin lacks the field', () => {
+  it('captures current auto and dontAsk permission modes', () => {
+    runHook({ permission_mode: 'auto', session_id: 'sess-current', cwd }, { cwd });
+    assert.equal(loadGrant(cwd).permissionMode, 'auto');
+    runHook({ permission_mode: 'dontAsk', session_id: 'sess-current', cwd }, { cwd });
+    assert.equal(loadGrant(cwd).permissionMode, 'dontAsk');
+  });
+
+  it('records identity but never promotes from CLAUDE_PERMISSION_MODE env', () => {
     const rec = runHook(
-      { cwd },
+      { cwd, session_id: 'sess-env' },
       { cwd, env: { CLAUDE_PERMISSION_MODE: 'bypassPermissions' } },
     );
     assert.ok(rec);
-    assert.equal(rec.source, 'env');
-    assert.equal(rec.permissionMode, 'bypassPermissions');
+    assert.equal(rec.source, 'hook_stdin');
+    assert.equal(rec.permissionObservation, 'absent');
+    assert.equal(loadGrant(cwd), null);
   });
 
   it('writes nothing when neither stdin nor env carry a valid mode', () => {
@@ -103,9 +136,48 @@ describe('runtime-permissions-capture hook', () => {
     assert.equal(rec, null, 'no cache file should be written');
   });
 
-  it('drops unknown mode values silently (no cache write)', () => {
-    const rec = runHook({ permission_mode: 'godMode', cwd }, { cwd });
-    assert.equal(rec, null);
+  it('records an explicitly unknown mode as no permission grant', () => {
+    const rec = runHook({ permission_mode: 'godMode', session_id: 'sess-unknown', cwd }, { cwd });
+    assert.equal(rec.permissionObservation, 'unknown');
+    assert.equal(loadGrant(cwd), null);
+  });
+
+  it('preserves a hook session ID when the permission enum is newer than this build', () => {
+    const rec = runHook({
+      permission_mode: 'futureMode',
+      session_id: 'future-session',
+      cwd,
+    }, { cwd });
+    assert.equal(rec.permissionObservation, 'unknown');
+    assert.equal(rec.source, 'hook_stdin');
+    assert.equal(rec.sessionId, 'future-session');
+  });
+
+  it('keeps a same-session permission mode across identity-only hook payloads', () => {
+    runHook({
+      permission_mode: 'bypassPermissions',
+      session_id: 'stable-session',
+      cwd,
+    }, { cwd });
+    const rec = runHook({ session_id: 'stable-session', cwd }, { cwd });
+    assert.equal(rec.permissionObservation, 'recognized');
+    assert.equal(rec.sessionId, 'stable-session');
+    assert.equal(loadGrant(cwd).permissionMode, 'bypassPermissions');
+  });
+
+  it('explicit unknown mode clears an older same-session grant', () => {
+    runHook({
+      permission_mode: 'bypassPermissions',
+      session_id: 'changing-session',
+      cwd,
+    }, { cwd });
+    const rec = runHook({
+      permission_mode: 'futureMode',
+      session_id: 'changing-session',
+      cwd,
+    }, { cwd });
+    assert.equal(rec.permissionObservation, 'unknown');
+    assert.equal(loadGrant(cwd), null);
   });
 
   it('survives empty/invalid stdin without crashing', () => {

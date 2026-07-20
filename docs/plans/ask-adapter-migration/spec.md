@@ -199,7 +199,6 @@ Pipe the prompt to the helper via a heredoc — the helper handles capability
 detection, adapter selection, artifact writing, and process cleanup.
 
 ​```bash
-mkdir -p .ao/artifacts/ask
 node scripts/ask.mjs <model> <<'ASK_PROMPT_EOF'
 <the user's full question, as-is, no escaping needed>
 ASK_PROMPT_EOF
@@ -207,9 +206,9 @@ EXIT=$?
 ​```
 
 - `<model>` is `codex`, `gemini`, or `auto` (default)
-- The helper writes the artifact (`.ao/artifacts/ask/<model>-<ts>.md`) and prints
-  the response to stdout. No tmux required when codex-exec or gemini-exec is
-  available.
+- The helper creates its private directories, writes the artifact
+  (`.ao/artifacts/ask/<model>-<ts>.md`), and prints the response to stdout. No
+  tmux required when codex-exec or gemini-exec is available.
 - Exit codes: `0` success, `1` adapter error, `2` requested model not available
   (answer directly as Claude with a note), `3` usage error
 ```

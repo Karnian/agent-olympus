@@ -16,6 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -36,6 +37,11 @@ import {
   spawnTeam,
 } from '../lib/worker-spawn.mjs';
 import { manifestPath as supManifestPath, snapshotPath as supSnapshotPath, outputPath as supOutputPath, writeSnapshot as supWriteSnapshot, readSnapshot as supReadSnapshot } from '../lib/supervisor-state.mjs';
+import { readActiveConcurrencyCounts } from '../lib/concurrency-limits.mjs';
+import {
+  buildCrossValidationRequest,
+  buildCrossValidationTeamName,
+} from '../lib/cross-validation.mjs';
 
 const WORKER_SPAWN_PATH = fileURLToPath(new URL('../lib/worker-spawn.mjs', import.meta.url));
 
@@ -71,7 +77,19 @@ function makeFakeAdapters() {
   const spawnSupervisor = (_script, manifestPath, _opts) => {
     let m = {};
     try { m = JSON.parse(readFileSync(manifestPath, 'utf-8')); } catch { /* leave empty */ }
-    const rec = { prompt: m.prompt, opts: { level: m.level, model: m.model, approvalMode: m.approvalMode } };
+    const rec = {
+      prompt: m.prompt,
+      opts: {
+        level: m.level,
+        model: m.model,
+        approvalMode: m.approvalMode,
+        permissionMode: m.permissionMode,
+        allowedTools: m.allowedTools,
+        readOnly: m.readOnly,
+        reviewTreeOid: m.reviewTreeOid,
+        validationIdentity: m.validationIdentity,
+      },
+    };
     switch (m.adapterName) {
       case 'codex-exec': calls.codexExecSpawn.push(rec); break;
       case 'codex-appserver':
@@ -127,7 +145,7 @@ function makeWorkspace(allow = ['Bash(*)', 'Write(*)']) {
   );
 
   // Isolated .ao so wisdom writes don't pollute the repo
-  mkdirSync(join(cwd, '.ao'), { recursive: true });
+  mkdirSync(join(cwd, '.ao'), { recursive: true, mode: 0o700 });
 
   return {
     cwd,
@@ -190,6 +208,27 @@ test('spawnTeam rejects a malformed preallocated generation before launch', asyn
   }
 });
 
+test('spawnTeam creates owner-private concurrency directories when .ao is absent', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    rmSync(join(ws.cwd, '.ao'), { recursive: true, force: true });
+    const { spawnSupervisor } = makeFakeAdapters();
+    await spawnTeam(
+      'private-state',
+      [{ type: 'claude', name: 'c1', prompt: 'do it' }],
+      ws.cwd,
+      { hasClaudeCli: true },
+      { spawnSupervisor },
+    );
+    if (process.platform !== 'win32') {
+      assert.equal(statSync(join(ws.cwd, '.ao')).mode & 0o777, 0o700);
+      assert.equal(statSync(join(ws.cwd, '.ao', 'state')).mode & 0o777, 0o700);
+    }
+  } finally {
+    ws.cleanup();
+  }
+});
+
 test('spawnTeam integration: codex worker with full-auto host → codex-exec receives level=full-auto', async () => {
   const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
   try {
@@ -221,6 +260,154 @@ test('spawnTeam integration: codex worker with Write(*) only host → level=auto
     await spawnTeam('team-2', workers, ws.cwd, caps, { spawnSupervisor });
 
     assert.equal(calls.codexExecSpawn[0].opts.level, 'auto-edit');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('spawnTeam integration: read-only workers receive enforced adapter modes and tree identity', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  const reviewTreeOid = 'a'.repeat(40);
+  const promptTemplate = 'review\nValidation prompt digest: <PROMPT_DIGEST>';
+  const promptDigest = createHash('sha256').update(promptTemplate).digest('hex');
+  const prompt = promptTemplate.replaceAll('<PROMPT_DIGEST>', promptDigest);
+  try {
+    const codex = makeFakeAdapters();
+    const codexState = await spawnTeam('readonly-codex', [{
+      type: 'codex', name: 'validator', prompt, readOnly: true,
+      reviewTreeOid,
+      validationIdentity: {
+        schemaVersion: 1,
+        orchestrator: 'atlas',
+        runId: 'run-1',
+        storyId: 'US-001',
+        reviewTreeOid,
+        snapshotId: `xval-${'e'.repeat(32)}`,
+        promptDigest,
+      },
+    }], ws.cwd, { hasCodexExecJson: true }, { spawnSupervisor: codex.spawnSupervisor });
+    assert.equal(codex.calls.codexExecSpawn.length, 1, 'read-only Codex must not demote');
+    assert.equal(codex.calls.codexExecSpawn[0].opts.level, 'suggest');
+    assert.equal(codex.calls.codexExecSpawn[0].opts.readOnly, true);
+    assert.equal(codex.calls.codexExecSpawn[0].opts.reviewTreeOid, reviewTreeOid);
+    assert.equal(codexState.workers[0].reviewTreeOid, reviewTreeOid);
+
+    const gemini = makeFakeAdapters();
+    await spawnTeam('readonly-gemini', [{
+      type: 'gemini', name: 'validator', prompt: 'review', readOnly: true,
+      reviewTreeOid,
+    }], ws.cwd, { hasGeminiCli: true }, { spawnSupervisor: gemini.spawnSupervisor });
+    assert.equal(gemini.calls.geminiExecSpawn[0].opts.approvalMode, 'plan');
+
+    const claude = makeFakeAdapters();
+    await spawnTeam('readonly-claude', [{
+      type: 'claude', name: 'validator', prompt: 'review', readOnly: true,
+      reviewTreeOid,
+    }], ws.cwd, { hasClaudeCli: true }, { spawnSupervisor: claude.spawnSupervisor });
+    assert.equal(claude.calls.claudeCliSpawn[0].opts.permissionMode, 'plan');
+    assert.deepEqual(claude.calls.claudeCliSpawn[0].opts.allowedTools, ['Read', 'Glob', 'Grep']);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('spawnTeam integration: accepts the exact cross-validation descriptor including snapshot identity', async () => {
+  const ws = makeWorkspace();
+  const reviewTreeOid = 'a'.repeat(40);
+  try {
+    const teamName = buildCrossValidationTeamName({
+      orchestrator: 'atlas', runId: 'run-1', storyId: 'US-001', reviewTreeOid,
+    });
+    const request = buildCrossValidationRequest({
+      orchestrator: 'atlas',
+      runId: 'run-1',
+      storyId: 'US-001',
+      storyTitle: 'Review exact snapshot',
+      reviewTreeOid,
+      provider: 'codex',
+      snapshot: {
+        schemaVersion: 1,
+        snapshotId: `xval-${'f'.repeat(32)}`,
+        ownerId: teamName,
+        reviewTreeOid,
+        path: ws.cwd,
+      },
+      scope: ['src/api.mjs'],
+      acceptanceCriteria: ['GIVEN the snapshot WHEN reviewed THEN evidence is exact'],
+    });
+    const { calls, spawnSupervisor } = makeFakeAdapters();
+    const state = await spawnTeam(
+      request.teamName,
+      [request.worker],
+      ws.cwd,
+      { hasCodexExecJson: true },
+      { spawnSupervisor },
+    );
+    assert.equal(state.workers[0].validationIdentity.snapshotId, request.snapshot.snapshotId);
+    assert.deepEqual(calls.codexExecSpawn[0].opts.validationIdentity, request.identity);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('spawnTeam integration: rejects a cross-validation prompt changed after its digest was bound', async () => {
+  const ws = makeWorkspace();
+  const reviewTreeOid = 'a'.repeat(40);
+  try {
+    const teamName = buildCrossValidationTeamName({
+      orchestrator: 'atlas', runId: 'run-1', storyId: 'US-001', reviewTreeOid,
+    });
+    const request = buildCrossValidationRequest({
+      orchestrator: 'atlas',
+      runId: 'run-1',
+      storyId: 'US-001',
+      storyTitle: 'Review exact snapshot',
+      reviewTreeOid,
+      provider: 'codex',
+      snapshot: {
+        schemaVersion: 1,
+        snapshotId: `xval-${'f'.repeat(32)}`,
+        ownerId: teamName,
+        reviewTreeOid,
+        path: ws.cwd,
+      },
+      scope: ['src/api.mjs'],
+      acceptanceCriteria: ['GIVEN the snapshot WHEN reviewed THEN evidence is exact'],
+    });
+    const { spawnSupervisor } = makeFakeAdapters();
+    await assert.rejects(
+      () => spawnTeam(
+        request.teamName,
+        [{ ...request.worker, prompt: `${request.worker.prompt}\nTAMPERED` }],
+        ws.cwd,
+        { hasCodexExecJson: true },
+        { spawnSupervisor },
+      ),
+      /prompt digest does not match validationIdentity/,
+    );
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('spawnTeam integration: read-only is rejected without one exact tree identity', async () => {
+  const ws = makeWorkspace();
+  try {
+    const { spawnSupervisor } = makeFakeAdapters();
+    await assert.rejects(
+      () => spawnTeam('readonly-unbound', [{
+        type: 'codex', name: 'validator', prompt: 'review', readOnly: true,
+      }], ws.cwd, { hasCodexExecJson: true }, { spawnSupervisor }),
+      /requires an exact reviewTreeOid/,
+    );
+    await assert.rejects(
+      () => spawnTeam('readonly-mismatch', [{
+        type: 'codex', name: 'validator', prompt: 'review', readOnly: true,
+        reviewTreeOid: 'a'.repeat(40),
+        validationIdentity: { reviewTreeOid: 'b'.repeat(40) },
+      }], ws.cwd, { hasCodexExecJson: true }, { spawnSupervisor }),
+      /mismatched validation identity/,
+    );
   } finally {
     ws.cleanup();
   }
@@ -694,6 +881,30 @@ test('spawnTeam integration: a supervisor launch failure marks the worker failed
     const state = await spawnTeam('team-launchfail', workers, ws.cwd, caps, { spawnSupervisor });
     assert.equal(state.workers[0].status, 'failed');
     assert.match(state.workers[0].error || '', /launch boom/);
+    assert.equal(state.workers[0]._concurrencyReleasedAt != null, true);
+    assert.equal(readActiveConcurrencyCounts(ws.cwd).global, 0,
+      'a worker that never launched must release its exact reservation');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('spawnTeam integration: partial launch releases only the failed worker slot', async () => {
+  const ws = makeWorkspace(['Bash(*)', 'Write(*)']);
+  try {
+    let calls = 0;
+    const spawnSupervisor = () => {
+      calls += 1;
+      if (calls === 2) throw new Error('second launch boom');
+      return { pid: 900001 };
+    };
+    const state = await spawnTeam('team-partial-launch', [
+      { type: 'codex', name: 'live', prompt: 'a' },
+      { type: 'codex', name: 'failed', prompt: 'b' },
+    ], ws.cwd, { hasCodexExecJson: true }, { spawnSupervisor });
+    assert.deepEqual(state.workers.map(worker => worker.status), ['running', 'failed']);
+    assert.equal(readActiveConcurrencyCounts(ws.cwd).global, 1,
+      'the live sibling keeps its slot while the failed sibling releases exactly one');
   } finally {
     ws.cleanup();
   }
@@ -1026,6 +1237,8 @@ test('spawnTeam E2E: a real detached fixture supervisor reports completion + dur
     }
     assert.equal(status.workers[0].status, 'completed',
       'monitorTeam must observe the detached supervisor completion across the process boundary');
+    assert.equal(readActiveConcurrencyCounts(ws.cwd).global, 0,
+      'monitorTeam must release a terminal worker reservation');
 
     // collectResults reads the durable output file the supervisor wrote.
     const results = collectResults('e2e');
@@ -1077,7 +1290,10 @@ test('shutdownTeam (P5): a duplicate shutdown of a real fixture team is a safe n
     supervisorPid = state.workers[0]?._handle?.supervisorPid || null;
     assert.equal(typeof supervisorPid, 'number');
 
-    await shutdownTeam('dupshut', ws.cwd);
+    const shutdown = await shutdownTeam('dupshut', ws.cwd);
+    assert.equal(shutdown.concurrencyReleased, true);
+    assert.equal(readActiveConcurrencyCounts(ws.cwd).global, 0,
+      'shutdownTeam must release all remaining team reservations');
     let dead = false;
     for (let i = 0; i < 150; i++) {
       try { process.kill(supervisorPid, 0); } catch { dead = true; break; }

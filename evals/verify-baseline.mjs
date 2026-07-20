@@ -49,7 +49,7 @@ export function verifyBaselineIntegrity({
     }
   }
   return {
-    schemaVersion: 1,
+    schemaVersion: baseline.schemaVersion,
     tasks: expectedIds.length,
     k: baseline.k,
     protocolReviewRequired,

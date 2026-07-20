@@ -7,6 +7,10 @@
 
 import { execFileSync as nodeExecFileSync } from 'child_process';
 import { isAbsolute } from 'path';
+import {
+  resolveTrustedVcsBinary,
+  sanitizedVcsEnvironment,
+} from './trusted-vcs.mjs';
 
 let _execFileSync = nodeExecFileSync;
 
@@ -33,11 +37,18 @@ export function __resetForTest() {
  */
 function run(cmd, args, cwd) {
   try {
-    return _execFileSync(cmd, args, {
+    return _execFileSync(
+      _execFileSync === nodeExecFileSync ? resolveTrustedVcsBinary(cmd) : cmd,
+      args,
+      {
       encoding: 'utf8',
       timeout: 30_000,
       cwd,
-    }).trim();
+      ...(_execFileSync === nodeExecFileSync
+        ? { env: sanitizedVcsEnvironment({ git: cmd === 'git' }) }
+        : {}),
+      },
+    ).trim();
   } catch {
     return null;
   }

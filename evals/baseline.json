@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "track": "regression",
   "k": 3,
   "tasks": {
@@ -11,8 +11,14 @@
       "measuredAt": null,
       "modelTier": null,
       "orchestrator": "atlas",
-      "benchmarkFingerprint": "c9922302b1bf5f76ac00e8d4b11e543a7378279037973f345e1a3fa022fcc877",
-      "pipelineProtocolFingerprint": "473569e403e04551ff55ccb3791ebc952c8cfb5a92b8349e17d513ae2e6419e6"
+      "benchmarkFingerprint": "b4143394020179e6403059abcfd1b776eead0cc9372564e9c1a5030166ebd85c",
+      "pipelineProtocolFingerprint": "45b97ca26c9a387f3a3202bcfba7a6a4b0a788c9fd56a6e7df28e5f12563d8ef",
+      "claudeCliVersion": null,
+      "pluginFingerprint": null,
+      "targetPromptFingerprint": null,
+      "observedModels": null,
+      "maxBudgetUsd": null,
+      "providerRuntime": null
     },
     "fix-null-deref": {
       "k": 3,
@@ -22,8 +28,14 @@
       "measuredAt": null,
       "modelTier": null,
       "orchestrator": "atlas",
-      "benchmarkFingerprint": "d5ee4959a359c22ea2713101afac3dfea0519223720f076492f605865495874c",
-      "pipelineProtocolFingerprint": "473569e403e04551ff55ccb3791ebc952c8cfb5a92b8349e17d513ae2e6419e6"
+      "benchmarkFingerprint": "5996a6d90b3a264c7138b15abcb494605c64ecbb23398fc4bf6e4cc39a0c5355",
+      "pipelineProtocolFingerprint": "45b97ca26c9a387f3a3202bcfba7a6a4b0a788c9fd56a6e7df28e5f12563d8ef",
+      "claudeCliVersion": null,
+      "pluginFingerprint": null,
+      "targetPromptFingerprint": null,
+      "observedModels": null,
+      "maxBudgetUsd": null,
+      "providerRuntime": null
     },
     "fix-off-by-one": {
       "k": 3,
@@ -33,8 +45,14 @@
       "measuredAt": null,
       "modelTier": null,
       "orchestrator": "atlas",
-      "benchmarkFingerprint": "0c9b17cc3fb036a6a4b2e5c254502ff6c3fe5c12a1ec5fb4bfe6ba214629bdd2",
-      "pipelineProtocolFingerprint": "473569e403e04551ff55ccb3791ebc952c8cfb5a92b8349e17d513ae2e6419e6"
+      "benchmarkFingerprint": "e43c8706c66344affb4ba17bfd0421686ddbae379eb07aa488dfe34875288517",
+      "pipelineProtocolFingerprint": "45b97ca26c9a387f3a3202bcfba7a6a4b0a788c9fd56a6e7df28e5f12563d8ef",
+      "claudeCliVersion": null,
+      "pluginFingerprint": null,
+      "targetPromptFingerprint": null,
+      "observedModels": null,
+      "maxBudgetUsd": null,
+      "providerRuntime": null
     }
   }
 }

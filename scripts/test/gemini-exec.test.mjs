@@ -11,6 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Readable, Writable } from 'node:stream';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 
 import {
   parseGeminiJsonOutput,
@@ -439,6 +440,43 @@ test('spawn: sets workerMeta from Gemini-compatible binary resolver', () => {
     binaryFlavor: 'agy',
     binaryResolved: true,
   });
+});
+
+test('spawn: read-only mode injects private system settings, disables extensions, and cleans up', () => {
+  let spawnArgs = null;
+  let spawnOptions = null;
+  const child = createMockChildProcess();
+  const handle = spawn('review', {
+    readOnly: true,
+    approvalMode: 'plan',
+    spawn: (_path, args, options) => {
+      spawnArgs = args;
+      spawnOptions = options;
+      return child;
+    },
+    resolveGeminiBinary: () => ({
+      path: '/fake/gemini', flavor: 'gemini', resolved: true, attempted: ['gemini'],
+    }),
+    credential: { credentialSource: 'env' },
+    env: {
+      GEMINI_API_KEY: '',
+      GEMINI_CLI_SYSTEM_SETTINGS_PATH: '/attacker/override.json',
+    },
+  });
+  const settingsPath = spawnOptions.env.GEMINI_CLI_SYSTEM_SETTINGS_PATH;
+  assert.notEqual(settingsPath, '/attacker/override.json');
+  assert.deepEqual(spawnArgs, [
+    '--output-format', 'json', '-e', 'none',
+    '--approval-mode', 'plan', '-p', 'review',
+  ]);
+  assert.equal(statSync(settingsPath).mode & 0o777, 0o600);
+  const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+  assert.equal(settings.hooksConfig.enabled, false);
+  assert.equal(settings.admin.extensions.enabled, false);
+  assert.equal(settings.admin.mcp.enabled, false);
+  child.emit('exit', 0);
+  assert.equal(existsSync(settingsPath), false);
+  assert.equal(handle._exitCode, 0);
 });
 
 test('spawn ENOENT: unresolved binary message names gemini, agy, tier split, and override without changing category', async () => {

@@ -7,6 +7,22 @@ import { fileURLToPath } from 'node:url';
 const ALLOWED_KEYS = new Set(['name', 'model', 'description', 'tools', 'disallowedTools', 'memory']);
 const ALLOWED_MODELS = new Set(['haiku', 'sonnet', 'opus']);
 const AGENT_TOOL_CONTRACTS = {
+  ask: ['Read', 'Grep', 'Glob', 'Bash'],
+  executor: ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'],
+  debugger: ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'],
+  'test-engineer': ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'],
+  hephaestus: ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash'],
+  writer: ['Read', 'Grep', 'Glob', 'Edit', 'Write', 'Bash', 'WebFetch', 'WebSearch'],
+  designer: [
+    'Read',
+    'Grep',
+    'Glob',
+    'Edit',
+    'Write',
+    'Bash',
+    'mcp__Claude_Preview__preview_screenshot',
+    'mcp__Claude_Preview__preview_snapshot',
+  ],
   explore: ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
   architect: ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
   'code-reviewer': ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
@@ -23,7 +39,11 @@ const AGENT_TOOL_CONTRACTS = {
   ],
   themis: ['Read', 'Grep', 'Glob', 'Bash'],
 };
-const FORBIDDEN_TOOL_TOKENS = ['Edit', 'Write', 'NotebookEdit', 'Agent', 'Task', 'Skill'];
+const NESTED_DELEGATION_TOOLS = ['Agent', 'Task', 'Skill'];
+const MUTATION_TOOLS = ['Edit', 'Write', 'NotebookEdit'];
+const READ_ONLY_AGENTS = new Set([
+  'explore', 'architect', 'code-reviewer', 'security-reviewer', 'momus', 'aphrodite', 'themis',
+]);
 const FORBIDDEN_KEYS_FOR_CONTRACTED = ['disallowedTools', 'memory'];
 const BUILTIN_TOOLS = new Set([
   'Read',
@@ -146,7 +166,7 @@ function assertExactSet(actual, expected, label) {
 }
 
 function isForbiddenToolToken(token) {
-  return FORBIDDEN_TOOL_TOKENS.some((forbidden) => token === forbidden || token.startsWith(`${forbidden}(`));
+  return NESTED_DELEGATION_TOOLS.some((forbidden) => token === forbidden || token.startsWith(`${forbidden}(`));
 }
 
 function validateAgentFrontmatter({ source, fileStem, agentToolContracts = AGENT_TOOL_CONTRACTS }) {
@@ -173,7 +193,10 @@ function validateAgentFrontmatter({ source, fileStem, agentToolContracts = AGENT
     assert.ok('tools' in frontmatter, `${fileStem}: contracted agent must declare tools`);
     assertExactSet(new Set(toolsTokens), toolContract, `${fileStem}: contracted tools`);
     for (const token of toolsTokens) {
-      assert.ok(!isForbiddenToolToken(token), `${fileStem}: forbidden tools token ${token}`);
+      assert.ok(!isForbiddenToolToken(token), `${fileStem}: nested delegation tool ${token}`);
+      if (READ_ONLY_AGENTS.has(fileStem)) {
+        assert.ok(!MUTATION_TOOLS.includes(token), `${fileStem}: read-only agent cannot use ${token}`);
+      }
     }
     for (const key of FORBIDDEN_KEYS_FOR_CONTRACTED) {
       assert.ok(!(key in frontmatter), `${fileStem}: contracted agent must not declare ${key}`);
@@ -232,6 +255,17 @@ describe('agent frontmatter contract', () => {
 
     for (const agent of agents) {
       validateAgentFrontmatter(agent);
+    }
+  });
+
+  it('denies nested Agent, Task, and Skill delegation to every implementation leaf', async () => {
+    const agents = await readAgentFiles();
+    const leafNames = new Set(['ask', 'executor', 'debugger', 'test-engineer', 'hephaestus', 'writer', 'designer']);
+    for (const agent of agents.filter(({ fileStem }) => leafNames.has(fileStem))) {
+      const { toolsTokens } = validateAgentFrontmatter(agent);
+      for (const token of toolsTokens) {
+        assert.ok(!isForbiddenToolToken(token), `${agent.fileStem}: must not inherit ${token}`);
+      }
     }
   });
 

@@ -142,14 +142,13 @@ describe('concurrency-release: no existing state file', () => {
     assert.deepEqual(output, {});
   });
 
-  it('creates the state file with empty activeTasks', () => {
+  it('does not create a state file for a no-op release', () => {
     runHook(
       { tool_name: 'Task', tool_input: { subagent_type: 'agent-olympus:executor' } },
       tmpDir,
     );
-    assert.ok(existsSync(stateFilePath(tmpDir)), 'state file should be created');
-    const state = readState(tmpDir);
-    assert.ok(Array.isArray(state.activeTasks), 'activeTasks should be an array');
+    assert.equal(existsSync(stateFilePath(tmpDir)), false,
+      'a missing ledger should remain missing after a no-op release');
   });
 });
 
@@ -194,6 +193,35 @@ describe('concurrency-release: releases oldest matching claude task', () => {
     const codexTasks = state.activeTasks.filter(t => t.provider === 'codex');
     assert.equal(codexTasks.length, 1, 'codex task should be unchanged');
     assert.equal(codexTasks[0].id, 'codex-task');
+  });
+});
+
+describe('concurrency-release: tool_use_id releases the exact hook reservation', () => {
+  let tmpDir;
+  before(async () => {
+    tmpDir = await makeTmpDir();
+    writeState(tmpDir, [
+      makeTask('tool-old', 'claude', -2 * 60 * 1000),
+      makeTask('tool-exact', 'claude', -1 * 60 * 1000),
+    ]);
+  });
+  after(async () => { await removeTmpDir(tmpDir); });
+
+  it('does not release an older same-provider task', () => {
+    runHook({
+      tool_name: 'Task',
+      tool_use_id: 'tool-exact',
+      tool_input: { subagent_type: 'agent-olympus:executor' },
+    }, tmpDir);
+    assert.deepEqual(readState(tmpDir).activeTasks.map(task => task.id), ['tool-old']);
+
+    runHook({
+      tool_name: 'Task',
+      tool_use_id: 'already-released',
+      tool_input: { subagent_type: 'agent-olympus:executor' },
+    }, tmpDir);
+    assert.deepEqual(readState(tmpDir).activeTasks.map(task => task.id), ['tool-old'],
+      'an unmatched exact completion must not steal another same-provider slot');
   });
 });
 

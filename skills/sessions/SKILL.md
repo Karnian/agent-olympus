@@ -123,12 +123,16 @@ const sessions = listSessions({ branch: keyword, limit: 20 });
 
 If `isSessionAlive(sessionId)` returns true:
 
-```bash
-tmux new-session -d -s "ao-resume-<short-id>" -c "<session-cwd>"
-tmux send-keys -t "ao-resume-<short-id>" 'claude -r "<sessionId>" "Continue from where you left off"' Enter
+```javascript
+import { resumeClaudeSessionInTmux } from './scripts/lib/tmux-session.mjs';
+
+const resumed = resumeClaudeSessionInTmux(sessionId, session.cwd);
+if (!resumed.ok) throw new Error(`Session resume failed: ${resumed.error}`);
 ```
 
-Report the tmux session name so the user can monitor it.
+Report `resumed.sessionName` so the user can monitor it. The helper launches
+tmux with argv and owns the quoting boundary; skills never construct or type a
+shell command through tmux.
 
 If session is not alive:
 ```

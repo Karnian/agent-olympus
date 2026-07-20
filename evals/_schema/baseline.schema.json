@@ -12,7 +12,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 1
+      "const": 2
     },
     "track": {
       "const": "regression"
@@ -36,7 +36,13 @@
           "modelTier",
           "orchestrator",
           "benchmarkFingerprint",
-          "pipelineProtocolFingerprint"
+          "pipelineProtocolFingerprint",
+          "claudeCliVersion",
+          "pluginFingerprint",
+          "targetPromptFingerprint",
+          "observedModels",
+          "maxBudgetUsd",
+          "providerRuntime"
         ],
         "properties": {
           "k": {
@@ -84,9 +90,94 @@
           "pipelineProtocolFingerprint": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
+          },
+          "claudeCliVersion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pluginFingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "targetPromptFingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "observedModels": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]*$"
+            },
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": true
+          },
+          "maxBudgetUsd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          },
+          "providerRuntime": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": false,
+            "required": [
+              "effort",
+              "efforts",
+              "fastModeStates",
+              "usageSpeeds",
+              "serviceTiers"
+            ],
+            "properties": {
+              "effort": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$"
+              },
+              "efforts": {
+                "$ref": "#/$defs/runtimeValues"
+              },
+              "fastModeStates": {
+                "$ref": "#/$defs/runtimeValues"
+              },
+              "usageSpeeds": {
+                "$ref": "#/$defs/runtimeValues"
+              },
+              "serviceTiers": {
+                "$ref": "#/$defs/runtimeValues"
+              }
+            }
           }
         }
       }
+    }
+  },
+  "$defs": {
+    "runtimeValues": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$"
+      },
+      "minItems": 1,
+      "maxItems": 16,
+      "uniqueItems": true
     }
   }
 }

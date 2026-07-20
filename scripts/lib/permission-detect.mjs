@@ -31,7 +31,12 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { platform as osPlatform } from 'node:os';
-import { loadRuntimePermissions, permissionModeToLevel } from './runtime-permissions.mjs';
+import {
+  loadRuntimePermissions,
+  loadRuntimeCurrentSessionId,
+  loadRuntimeSessionIdentity,
+  permissionModeToLevel,
+} from './runtime-permissions.mjs';
 
 /**
  * Read and parse a JSON file, returning null on any error.
@@ -482,16 +487,51 @@ export function detectClaudePermissionLevelFromSettings(opts = {}) {
 }
 
 /**
+ * Resolve a runtime grant only when all three identities agree:
+ *
+ *   current project session pointer == hardened local hook identity
+ *   == hardened external permission grant.
+ *
+ * The project-local record never supplies a permission mode. It contributes
+ * only the hook session/capture binding needed to select the user-private
+ * external grant. Any missing or unsafe component fails closed to `null`.
+ */
+function loadBoundRuntimePermission(opts = {}) {
+  try {
+    const cwd = opts.cwd || process.cwd();
+    const identity = loadRuntimeSessionIdentity({ cwd });
+    if (!identity || identity.permissionObservation !== 'recognized') return null;
+
+    const currentSessionId = loadRuntimeCurrentSessionId({
+      cwd,
+      stateBase: opts.stateBase,
+    });
+    if (!currentSessionId || currentSessionId !== identity.sessionId) return null;
+
+    return loadRuntimePermissions({
+      cwd,
+      runtimeHome: opts.runtimeHome,
+      expectedSessionId: currentSessionId,
+      expectedCaptureId: identity.captureId,
+      now: opts.runtimeNow,
+      ttlMs: opts.runtimeTtlMs,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Map detected Claude permissions to a Codex-style approval level string.
  *
  * **Two-layer resolution (issue #67/#68/#69)** — settings ⇧ runtime:
  *   1. **Settings layer** (existing): merge allow/deny/ask across all scopes,
  *      derive broad/scoped flags, map to a tier.
- *   2. **Runtime layer** (NEW): read
- *      `.ao/state/ao-runtime-permissions.json`, captured by the
- *      `runtime-permissions-capture.mjs` hook from Claude Code's session
- *      `permission_mode`. UPGRADE-ONLY — the runtime tier can promote the
- *      settings tier, but never demote it.
+ *   2. **Runtime layer**: bind the current session pointer and project-local
+ *      hook identity to a short-lived grant in the user's private cache.
+ *      `.ao/state/ao-runtime-permissions.json` contains no authoritative mode.
+ *      Runtime remains UPGRADE-ONLY — it can promote the settings tier, but
+ *      never demote it.
  *
  * Why upgrade-only:
  *   - Promotion is safe: a runtime `bypassPermissions` (from
@@ -527,6 +567,8 @@ export function detectClaudePermissionLevelFromSettings(opts = {}) {
  *
  * @param {object} [opts]
  * @param {string} [opts.cwd]
+ * @param {string} [opts.stateBase] - Current-session pointer directory (testing)
+ * @param {string} [opts.runtimeHome] - Runtime grant home root (testing)
  * @param {boolean} [opts.skipRuntime] - Skip runtime override (testing/diagnostic)
  * @returns {'full-auto' | 'auto-edit' | 'suggest'}
  */
@@ -543,7 +585,7 @@ export function detectClaudePermissionLevel(opts = {}) {
   // Failures fall back to settings cleanly (best-effort).
   let runtimeLevel = null;
   try {
-    const rec = loadRuntimePermissions({ cwd: opts.cwd });
+    const rec = loadBoundRuntimePermission(opts);
     if (rec && rec.permissionMode) {
       const runtimeFlags = detectClaudePermissions({
         ...opts,
@@ -557,9 +599,7 @@ export function detectClaudePermissionLevel(opts = {}) {
         runtimeLevel = 'suggest';
       }
     }
-  } catch {
-    // Fail open — runtime override is best-effort.
-  }
+  } catch { /* fail closed to settings-only detection */ }
 
   if (!runtimeLevel) return settingsLevel;
 
@@ -597,7 +637,7 @@ export function explainPermissionLevel(opts = {}) {
   let runtime = null;
   let runtimeWasClamped = false;
   try {
-    const rec = loadRuntimePermissions({ cwd: opts.cwd });
+    const rec = loadBoundRuntimePermission(opts);
     if (rec && rec.permissionMode) {
       // Naive level if the runtime mode were applied without any
       // settings-side restrictions. We compare to the clamped level so
@@ -623,6 +663,7 @@ export function explainPermissionLevel(opts = {}) {
         clamped: runtimeWasClamped,
         bypassDisabled: runtimeFlags.bypassDisabled,
         source: rec.source,
+        capturedAt: rec.capturedAt,
         ageMs: rec.ageMs,
         sessionId: rec.sessionId,
       };

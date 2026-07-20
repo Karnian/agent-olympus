@@ -1,10 +1,14 @@
 import { execFileSync } from 'child_process';
-import { mkdirSync, writeFileSync, unlinkSync } from 'fs';
-import { randomUUID } from 'crypto';
+import { mkdirSync, writeFileSync, unlinkSync, existsSync } from 'fs';
+import { isAbsolute } from 'path';
+import { createHash, randomUUID } from 'crypto';
 import { createWorkerWorktree } from './worktree.mjs';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
 import { resolveGeminiBinary } from './gemini-binary.mjs';
+import { createGeminiReadOnlySettings } from './gemini-readonly.mjs';
 import { resolveCodexApproval, buildCodexExecArgs } from './codex-approval.mjs';
+import { codexVersionMeta } from './cli-version.mjs';
+import { requireCodexCapability } from './codex-version-gate.mjs';
 import { resolveGeminiApproval, geminiApprovalFlag } from './gemini-approval.mjs';
 import { loadAutonomyConfig } from './autonomy.mjs';
 
@@ -50,6 +54,39 @@ export function isInsideTmux() {
 
 export function sanitizeName(name) {
   return String(name).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 50);
+}
+
+function nameIdentityHash(name) {
+  return createHash('sha256').update(String(name), 'utf8').digest('hex').slice(0, 12);
+}
+
+function teamSessionPrefix(teamName) {
+  return `${SESSION_PREFIX}-${sanitizeName(teamName)}-${nameIdentityHash(teamName)}`;
+}
+
+function legacyTeamSessionName(teamName, workerName) {
+  return `${SESSION_PREFIX}-${sanitizeName(teamName)}-${sanitizeName(workerName)}`;
+}
+
+/**
+ * Match current and legacy sessions only by exact names reconstructed from
+ * durable worker identities.
+ *
+ * Prefix matching is unsafe across naming generations: the current prefix for
+ * team `alpha` can also prefix a legacy session whose team name embeds
+ * `alpha`'s hash. Without worker names we therefore claim no team-scoped
+ * sessions. The old format remains inherently ambiguous if distinct original
+ * team/worker identities sanitize to the exact same pair.
+ */
+function teamSessionMatcher(teamName, workerNames) {
+  const names = (Array.isArray(workerNames) ? workerNames : [])
+    .filter(name => typeof name === 'string' && name.length > 0);
+  const currentNames = new Set(names.map(name => sessionName(teamName, name)));
+  const legacyNames = new Set(
+    names.map(name => legacyTeamSessionName(teamName, name)),
+  );
+
+  return session => currentNames.has(session) || legacyNames.has(session);
 }
 
 /**
@@ -123,7 +160,47 @@ export function removePromptFile(filePath) {
 }
 
 export function sessionName(teamName, workerName) {
-  return `${SESSION_PREFIX}-${sanitizeName(teamName)}-${sanitizeName(workerName)}`;
+  return `${teamSessionPrefix(teamName)}-${sanitizeName(workerName)}-${nameIdentityHash(workerName)}`;
+}
+
+/**
+ * Resume one known Claude session in a detached tmux session without typing a
+ * command through send-keys. Values are encoded once as shell words and the
+ * command is supplied directly to `tmux new-session` through argv.
+ */
+export function resumeClaudeSessionInTmux(sessionId, cwd, opts = {}) {
+  try {
+    if (typeof sessionId !== 'string'
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(sessionId)) {
+      return { ok: false, error: 'invalid session id' };
+    }
+    if (typeof cwd !== 'string' || !isAbsolute(cwd) || !existsSync(cwd)) {
+      return { ok: false, error: 'session cwd must be an existing absolute path' };
+    }
+
+    const exec = opts.execFileSync || execFileSync;
+    const tmux = opts.tmuxBinary || resolveBinary('tmux');
+    const claude = opts.claudeBinary || resolveBinary('claude');
+    const sessionHash = createHash('sha256').update(sessionId, 'utf8').digest('hex').slice(0, 12);
+    const session = `ao-resume-${sanitizeName(sessionId).slice(0, 24)}-${sessionHash}`;
+    const command = [
+      claude,
+      '-r',
+      sessionId,
+      'Continue from where you left off',
+    ].map(shellQuote).join(' ');
+
+    exec(tmux, [
+      'new-session',
+      '-d',
+      '-s', session,
+      '-c', cwd,
+      command,
+    ], { stdio: 'pipe' });
+    return { ok: true, sessionName: session };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error) };
+  }
 }
 
 export function createTeamSession(teamName, workers, cwd) {
@@ -287,27 +364,31 @@ export function capturePane(sessionName, lines = 80) {
   }
 }
 
-export function killSession(name) {
+export function killSession(name, opts = {}) {
   try {
-    execFileSync(resolveBinary('tmux'), ['kill-session', '-t', name], { stdio: 'pipe' });
+    const exec = opts.execFileSync || execFileSync;
+    const tmux = opts.tmuxBinary || resolveBinary('tmux');
+    exec(tmux, ['kill-session', '-t', name], { stdio: 'pipe' });
     return true;
   } catch {
     return false;
   }
 }
 
-export function killTeamSessions(teamName) {
-  const prefix = `${SESSION_PREFIX}-${sanitizeName(teamName)}`;
+export function killTeamSessions(teamName, opts = {}) {
+  const matchesTeam = teamSessionMatcher(teamName, opts.workerNames);
   try {
-    const sessions = execFileSync(resolveBinary('tmux'), ['list-sessions', '-F', '#{session_name}'], {
+    const exec = opts.execFileSync || execFileSync;
+    const tmux = opts.tmuxBinary || resolveBinary('tmux');
+    const sessions = exec(tmux, ['list-sessions', '-F', '#{session_name}'], {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim().split('\n');
 
     let killed = 0;
     for (const s of sessions) {
-      if (s.startsWith(prefix)) {
-        killSession(s);
+      if (matchesTeam(s)) {
+        killSession(s, { execFileSync: exec, tmuxBinary: tmux });
         killed++;
       }
     }
@@ -317,19 +398,21 @@ export function killTeamSessions(teamName) {
   }
 }
 
-export function listTeamSessions(teamName) {
-  const prefix = teamName
-    ? `${SESSION_PREFIX}-${sanitizeName(teamName)}`
-    : SESSION_PREFIX;
+export function listTeamSessions(teamName, opts = {}) {
+  const matchesTeam = teamName
+    ? teamSessionMatcher(teamName, opts.workerNames)
+    : session => session.startsWith(`${SESSION_PREFIX}-`);
 
   try {
-    const sessions = execFileSync(resolveBinary('tmux'), ['list-sessions', '-F', '#{session_name}:#{session_created}'], {
+    const exec = opts.execFileSync || execFileSync;
+    const tmux = opts.tmuxBinary || resolveBinary('tmux');
+    const sessions = exec(tmux, ['list-sessions', '-F', '#{session_name}:#{session_created}'], {
       stdio: 'pipe',
       encoding: 'utf-8'
     }).trim().split('\n');
 
     return sessions
-      .filter(s => s.startsWith(prefix))
+      .filter(s => matchesTeam(s.split(':', 1)[0]))
       .map(s => {
         const [name, created] = s.split(':');
         return { name, createdAt: parseInt(created) * 1000 };
@@ -366,7 +449,7 @@ export function listTeamSessions(teamName) {
  * @param {string} [nonce]     - per-invocation hex token to scope the marker
  * @returns {string}
  */
-function withExitMarker(cliCommand, safeFile, nonce) {
+function withExitMarker(cliCommand, safeFile, nonce, extraCleanupFiles = []) {
   const marker = nonce ? `${WORKER_EXIT_MARKER}:${nonce}` : WORKER_EXIT_MARKER;
   // `<cli> && __ao_ec=0 || __ao_ec=$?` rather than `<cli>; __ao_ec=$?`:
   //  - ERREXIT-SAFE: a bare failing command at statement level would terminate a
@@ -385,16 +468,34 @@ function withExitMarker(cliCommand, safeFile, nonce) {
   // The leading `echo ""` puts the marker at column 0 for the line-anchored
   // parser, so it matches the EXECUTED echo, never the typed command echo (where
   // the marker sits mid-line after `echo "`).
-  return `${cliCommand} && __ao_ec=0 || __ao_ec=$?; rm -f "${safeFile}"; echo ""; echo "${marker}:$__ao_ec"`;
+  const cleanup = [safeFile, ...extraCleanupFiles]
+    .map(file => `rm -f "${file}"`)
+    .join('; ');
+  return `${cliCommand} && __ao_ec=0 || __ao_ec=$?; ${cleanup}; echo ""; echo "${marker}:$__ao_ec"`;
 }
 
 export function buildWorkerCommand(worker, opts = {}) {
+  // Read-only tmux uses flags that were introduced in Codex 0.143. Gate them
+  // before writing the prompt so an unsupported/unknown CLI leaves no temp
+  // artifact behind. The same authoritative checks guard the direct adapter.
+  let codexPath = null;
+  if (worker.type === 'codex' && worker.readOnly === true) {
+    codexPath = opts.codexBinary || resolveBinary('codex');
+    const meta = codexVersionMeta(codexPath, { versionProbe: opts.versionProbe });
+    requireCodexCapability(meta.codexVersion, 'ignoreRules');
+    requireCodexCapability(meta.codexVersion, 'strictConfig');
+    requireCodexCapability(meta.codexVersion, 'ignoreUserConfig');
+  }
+
   // Write the prompt to a temp file to avoid shell injection via inline quoting.
   // The command reads the file contents and passes them to the CLI via stdin
   // where possible, or via a subshell cat when the CLI only accepts a positional
   // argument. The temp file is removed and an exit-status sentinel emitted by
   // withExitMarker() once the CLI returns.
-  const promptFile = writePromptFile(worker.prompt);
+  const promptFileWriter = typeof opts.promptFileWriter === 'function'
+    ? opts.promptFileWriter
+    : writePromptFile;
+  const promptFile = promptFileWriter(worker.prompt);
   const safeFile = sanitizeForShellArg(promptFile);
   // Per-invocation hex nonce (from the caller) scopes the exit sentinel so
   // worker output can't forge a completion. Omitted → legacy unscoped marker.
@@ -406,22 +507,51 @@ export function buildWorkerCommand(worker, opts = {}) {
       // Detect from autonomy.json config or Claude settings files.
       // Codex 0.118+: -a/-s are GLOBAL flags and MUST appear BEFORE `exec`.
       const autonomyConfig = opts.autonomyConfig || loadAutonomyConfig(opts.cwd || process.cwd());
-      const level = resolveCodexApproval(autonomyConfig, { cwd: opts.cwd });
+      const level = worker.readOnly === true
+        ? 'suggest'
+        : resolveCodexApproval(autonomyConfig, { cwd: opts.cwd });
       const codexArgs = buildCodexExecArgs(level).join(' '); // "-a never -s <sandbox>"
-      return withExitMarker(`"${resolveBinary('codex')}" ${codexArgs} exec "$(cat "${safeFile}")"`, safeFile, exitNonce);
+      const isolationOverrides = worker.readOnly === true
+        ? ' --strict-config -c project_doc_max_bytes=0 -c skills.bundled.enabled=false'
+        : '';
+      const isolatedExec = worker.readOnly === true
+        ? ' --ignore-user-config --ignore-rules --skip-git-repo-check --ephemeral'
+        : '';
+      codexPath ||= opts.codexBinary || resolveBinary('codex');
+      return withExitMarker(`"${codexPath}" ${codexArgs}${isolationOverrides} exec${isolatedExec} -- "$(cat "${safeFile}")"`, safeFile, exitNonce);
     }
     case 'gemini': {
       // Mirror Claude's permission level to Gemini approval mode
       const gAutonomy = opts.autonomyConfig || loadAutonomyConfig(opts.cwd || process.cwd());
-      const gMode = resolveGeminiApproval(gAutonomy, { cwd: opts.cwd });
+      const gMode = worker.readOnly === true
+        ? 'plan'
+        : resolveGeminiApproval(gAutonomy, { cwd: opts.cwd });
       const gFlag = geminiApprovalFlag(gMode);
       const gFlagPart = gFlag ? ` ${gFlag}` : '';
+      const readOnlySettings = worker.readOnly === true
+        ? createGeminiReadOnlySettings()
+        : null;
+      const configPrefix = readOnlySettings
+        ? `GEMINI_CLI_SYSTEM_SETTINGS_PATH=${shellQuote(readOnlySettings.path)} `
+        : '';
+      const extensionPart = readOnlySettings ? ' -e none' : '';
       // resolveGeminiBinary: honors AO_GEMINI_BINARY and falls back to agy
       // when the gemini CLI is absent (2026-06-18 tier split).
-      return withExitMarker(`"${resolveGeminiBinary().path}"${gFlagPart} -p "$(cat "${safeFile}")"`, safeFile, exitNonce);
+      return withExitMarker(
+        `${configPrefix}"${resolveGeminiBinary().path}"${gFlagPart}${extensionPart} -p "$(cat "${safeFile}")"`,
+        safeFile,
+        exitNonce,
+        readOnlySettings ? [sanitizeForShellArg(readOnlySettings.path)] : [],
+      );
     }
     case 'claude':
     default:
-      return withExitMarker(`"${resolveBinary('claude')}" --print "$(cat "${safeFile}")"`, safeFile, exitNonce);
+      return withExitMarker(
+        worker.readOnly === true
+          ? `"${resolveBinary('claude')}" --print --bare --no-session-persistence --permission-mode plan --allowedTools Read,Glob,Grep -- "$(cat "${safeFile}")"`
+          : `"${resolveBinary('claude')}" --print -- "$(cat "${safeFile}")"`,
+        safeFile,
+        exitNonce,
+      );
   }
 }

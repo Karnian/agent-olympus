@@ -24,10 +24,23 @@
  * @param {Object} m - the validated supervisor manifest
  */
 export function buildExecOpts(m) {
+  const readOnly = m.readOnly === true;
   return {
-    cwd: m.cwd, model: m.model, level: m.level,
+    cwd: m.cwd, model: m.model, readOnly, level: readOnly ? 'suggest' : m.level,
     appendSystemPrompt: m.systemPrompt, maxBudgetUsd: m.maxBudgetUsd,
-    approvalMode: m.approvalMode, credential: m.geminiCredential,
+    // A read-only Codex review must not load project/user MCP servers or other
+    // mutable user configuration. Other exec adapters ignore this option.
+    ignoreUserConfig: readOnly ? true : undefined,
+    ignoreRules: readOnly ? true : undefined,
+    skipGitRepoCheck: readOnly ? true : undefined,
+    strictConfig: readOnly ? true : undefined,
+    configOverrides: readOnly
+      ? ['project_doc_max_bytes=0', 'skills.bundled.enabled=false']
+      : m.configOverrides,
+    approvalMode: readOnly ? 'plan' : m.approvalMode,
+    permissionMode: readOnly ? 'plan' : m.permissionMode,
+    allowedTools: readOnly ? ['Read', 'Glob', 'Grep'] : m.allowedTools,
+    credential: m.geminiCredential,
   };
 }
 
@@ -36,7 +49,12 @@ export function buildExecOpts(m) {
  * @param {Object} m
  */
 export function buildAppserverThreadOpts(m) {
-  return { cwd: m.cwd, level: m.level, ephemeral: true, serviceName: `agent-olympus:${m.teamName}` };
+  return {
+    cwd: m.cwd,
+    level: m.readOnly === true ? 'suggest' : m.level,
+    ephemeral: true,
+    serviceName: `agent-olympus:${m.teamName}`,
+  };
 }
 
 /**
@@ -45,5 +63,14 @@ export function buildAppserverThreadOpts(m) {
  * @param {Object} m
  */
 export function buildGeminiAcpSessionOpts(m) {
-  return { cwd: m.cwd, approvalMode: m.approvalMode, model: m.model };
+  const readOnly = m.readOnly === true;
+  return {
+    cwd: m.cwd,
+    approvalMode: readOnly ? 'plan' : m.approvalMode,
+    // Legacy sessions warn and continue when the server cannot change modes.
+    // A cross-validation worker cannot safely do that: plan mode is part of
+    // its execution security contract, so createSession must fail closed.
+    requireApprovalMode: readOnly,
+    model: m.model,
+  };
 }

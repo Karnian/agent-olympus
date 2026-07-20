@@ -9,8 +9,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   promises as fsp,
+  chmodSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -26,11 +28,14 @@ import {
   discoverActiveRun,
   addEvent,
   appendUserTaskUpdate,
+  bindRunToCurrentSession,
   addVerification,
   finalizeRun,
   getActiveRunId,
   listRuns,
   getRun,
+  getRunVerificationsStrict,
+  getRunExecutionPrdSnapshot,
   getUserTaskUpdates,
   replayEvents,
   verifyStory,
@@ -38,7 +43,9 @@ import {
   checkVerificationGate,
   generateCompletionNotices,
   setActiveRunId,
+  persistRunExecutionPrdSnapshot,
 } from '../lib/run-artifacts.mjs';
+import { registerSession } from '../lib/session-registry.mjs';
 
 const RUN_ARTIFACTS_URL = new URL('../lib/run-artifacts.mjs', import.meta.url).href;
 
@@ -150,6 +157,43 @@ test('createRun: creates the run directory and writes initial summary.json', asy
   }
 });
 
+test('bindRunToCurrentSession: safely adopts a sessionless preallocated run once', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const base = path.join(tmpDir, '.ao', 'artifacts', 'runs');
+    const stateDir = path.join(tmpDir, '.ao', 'state');
+    const sessionsBase = path.join(tmpDir, '.ao', 'sessions');
+    const created = createRunArtifact('athena', 'preallocated task', {
+      base,
+      stateDir,
+      trustedRoot: tmpDir,
+    });
+    assert.equal(created.ok, true);
+    assert.equal(readJson(path.join(created.runDir, 'summary.json')).sessionId, undefined);
+
+    registerSession('session-live-1', { base: sessionsBase, stateBase: stateDir });
+    const bound = bindRunToCurrentSession(created.runId, {
+      base,
+      stateDir,
+      sessionsBase,
+      trustedRoot: tmpDir,
+    });
+    assert.deepEqual(bound, { ok: true, sessionId: 'session-live-1', idempotent: false });
+    assert.equal(readJson(path.join(created.runDir, 'summary.json')).sessionId, 'session-live-1');
+    assert.equal(bindRunToCurrentSession(created.runId, {
+      base, stateDir, sessionsBase, trustedRoot: tmpDir,
+    }).idempotent, true);
+
+    registerSession('session-live-2', { base: sessionsBase, stateBase: stateDir });
+    assert.equal(bindRunToCurrentSession(created.runId, {
+      base, stateDir, sessionsBase, trustedRoot: tmpDir,
+    }).reason, 'run-session-conflict');
+    assert.equal(readJson(path.join(created.runDir, 'summary.json')).sessionId, 'session-live-1');
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
 test('createRun: explicit failure envelope rejects unsafe identities and ambiguous custom state', async () => {
   const tmpDir = await makeTmpDir();
   try {
@@ -195,6 +239,59 @@ test('createRun: safe custom orchestrator remains finalizable', async () => {
       stateDir,
       trustedRoot: tmpDir,
     }), { ok: true, idempotent: false });
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('Atlas execution PRD snapshot is immutable, generation-bound, and idempotent', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const base = path.join(tmpDir, 'runs');
+    const stateDir = path.join(tmpDir, 'state');
+    const created = createRunArtifact('atlas', 'snapshot final PRD', {
+      base,
+      stateDir,
+      trustedRoot: tmpDir,
+    });
+    assert.equal(created.ok, true);
+    const prd = {
+      projectName: 'snapshot-test',
+      userStories: [{ id: 'US-001', title: 'Done', passes: true }],
+    };
+    const generation = createHash('sha256')
+      .update(JSON.stringify(prd), 'utf8')
+      .digest('hex');
+    const first = persistRunExecutionPrdSnapshot(created.runId, { prd, generation }, {
+      base,
+      trustedRoot: tmpDir,
+    });
+    assert.equal(first.ok, true);
+    assert.equal(first.created, true);
+
+    const replay = persistRunExecutionPrdSnapshot(created.runId, { prd, generation }, {
+      base,
+      trustedRoot: tmpDir,
+    });
+    assert.equal(replay.ok, true);
+    assert.equal(replay.created, false);
+    assert.deepEqual(
+      getRunExecutionPrdSnapshot(created.runId, { base, trustedRoot: tmpDir }).snapshot.prd,
+      prd,
+    );
+
+    const conflictingPrd = structuredClone(prd);
+    conflictingPrd.userStories[0].title = 'Changed';
+    const conflictingGeneration = createHash('sha256')
+      .update(JSON.stringify(conflictingPrd), 'utf8')
+      .digest('hex');
+    assert.equal(
+      persistRunExecutionPrdSnapshot(created.runId, {
+        prd: conflictingPrd,
+        generation: conflictingGeneration,
+      }, { base, trustedRoot: tmpDir }).reason,
+      'execution-prd-snapshot-conflict',
+    );
   } finally {
     await removeTmpDir(tmpDir);
   }
@@ -628,7 +725,7 @@ test('addVerification: creates verification.jsonl with the first result', async 
       verifiedBy: 'themis',
       timestamp: new Date().toISOString(),
     };
-    addVerification(runId, result, { base: tmpDir });
+    assert.deepEqual(addVerification(runId, result, { base: tmpDir }), { ok: true });
 
     const verPath = path.join(runDir, 'verification.jsonl');
     assert.ok(existsSync(verPath), 'verification.jsonl must be created');
@@ -665,6 +762,106 @@ test('addVerification: appends a second result to existing verification.jsonl', 
   }
 });
 
+test('getRunVerificationsStrict rejects every malformed row while getRun stays compatible', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId, runDir } = createRun('atlas', 'strict verification read', { base: tmpDir });
+    addVerification(runId, {
+      story_id: 'US-001',
+      verdict: 'pass',
+      evidence: 'tests passed',
+      verifiedBy: 'themis',
+    }, { base: tmpDir });
+    const verificationPath = path.join(runDir, 'verification.jsonl');
+    const clean = getRunVerificationsStrict(runId, { base: tmpDir });
+    assert.equal(clean.ok, true);
+    assert.equal(clean.verifications.length, 1);
+    assert.equal(clean.verifications[0].story_id, 'US-001');
+
+    writeFileSync(verificationPath, `${readFileSync(verificationPath, 'utf8')}{broken-json}\n`, {
+      mode: 0o600,
+    });
+
+    assert.equal(getRun(runId, { base: tmpDir }).verifications.length, 1,
+      'the compatibility reader must retain its historical skip-invalid projection');
+    const strict = getRunVerificationsStrict(runId, { base: tmpDir });
+    assert.equal(strict.ok, false);
+    assert.deepEqual(strict.verifications, []);
+    assert.match(strict.reason, /line 2.*invalid JSON/i);
+
+    writeFileSync(verificationPath, '{"story_id":"US-001"}\n42\n', { mode: 0o600 });
+    const scalar = getRunVerificationsStrict(runId, { base: tmpDir });
+    assert.equal(scalar.ok, false);
+    assert.match(scalar.reason, /line 2.*not an object/i);
+
+    writeFileSync(verificationPath, '{"story_id":"US-001"}\n\n', { mode: 0o600 });
+    const blank = getRunVerificationsStrict(runId, { base: tmpDir });
+    assert.equal(blank.ok, false);
+    assert.match(blank.reason, /line 2.*blank/i);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('getRunVerificationsStrict fails closed for missing, linked, and permission-unsafe evidence', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const missing = createRun('atlas', 'missing verification', { base: tmpDir });
+    assert.equal(getRunVerificationsStrict(missing.runId, { base: tmpDir }).ok, false);
+
+    const linked = createRun('atlas', 'linked verification', { base: tmpDir });
+    const outside = path.join(tmpDir, 'outside-verification.jsonl');
+    writeFileSync(outside, '{"story_id":"US-LINK"}\n', { mode: 0o600 });
+    symlinkSync(outside, path.join(linked.runDir, 'verification.jsonl'));
+    assert.equal(getRunVerificationsStrict(linked.runId, { base: tmpDir }).ok, false);
+
+    const hardLinked = createRun('atlas', 'hard-linked verification', { base: tmpDir });
+    linkSync(outside, path.join(hardLinked.runDir, 'verification.jsonl'));
+    assert.equal(getRunVerificationsStrict(hardLinked.runId, { base: tmpDir }).ok, false);
+
+    const unsafe = createRun('atlas', 'unsafe verification', { base: tmpDir });
+    const unsafePath = path.join(unsafe.runDir, 'verification.jsonl');
+    writeFileSync(unsafePath, '{"story_id":"US-UNSAFE"}\n', { mode: 0o600 });
+    if (process.platform !== 'win32') {
+      chmodSync(unsafePath, 0o644);
+      assert.equal(getRunVerificationsStrict(unsafe.runId, { base: tmpDir }).ok, false);
+    }
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
+test('getRunVerificationsStrict rejects evidence replaced after its descriptor read', async () => {
+  const tmpDir = await makeTmpDir();
+  try {
+    const { runId } = createRun('athena', 'verification replacement race', { base: tmpDir });
+    addVerification(runId, {
+      story_id: 'US-001',
+      verdict: 'pass',
+      evidence: 'original evidence',
+      verifiedBy: 'themis',
+    }, { base: tmpDir });
+
+    const strict = getRunVerificationsStrict(runId, {
+      base: tmpDir,
+      _afterVerificationRead(filePath) {
+        unlinkSync(filePath);
+        writeFileSync(filePath, JSON.stringify({
+          story_id: 'US-001',
+          verdict: 'pass',
+          evidence: 'replacement evidence',
+          verifiedBy: 'attacker',
+        }) + '\n', { mode: 0o600 });
+      },
+    });
+    assert.equal(strict.ok, false);
+    assert.deepEqual(strict.verifications, []);
+    assert.match(strict.reason, /changed/i);
+  } finally {
+    await removeTmpDir(tmpDir);
+  }
+});
+
 test('addEvent and addVerification reject traversal and no-follow linked artifacts', async () => {
   const tmpDir = await makeTmpDir();
   try {
@@ -679,10 +876,11 @@ test('addEvent and addVerification reject traversal and no-follow linked artifac
       base,
       trustedRoot: tmpDir,
     });
-    addVerification('../escaped', { story_id: 'escape', verdict: 'pass' }, {
+    const escapedVerification = addVerification('../escaped', { story_id: 'escape', verdict: 'pass' }, {
       base,
       trustedRoot: tmpDir,
     });
+    assert.equal(escapedVerification.ok, false);
     assert.equal(existsSync(path.join(escapedDir, 'events.jsonl')), false);
     assert.equal(existsSync(path.join(escapedDir, 'verification.jsonl')), false);
 
@@ -699,11 +897,12 @@ test('addEvent and addVerification reject traversal and no-follow linked artifac
       stateDir,
       trustedRoot: tmpDir,
     });
-    addVerification(runId, { story_id: 'US-LINK', verdict: 'pass', verifiedBy: 'themis' }, {
+    const linkedVerification = addVerification(runId, { story_id: 'US-LINK', verdict: 'pass', verifiedBy: 'themis' }, {
       base,
       stateDir,
       trustedRoot: tmpDir,
     });
+    assert.equal(linkedVerification.ok, false);
     assert.equal(readFileSync(outsideEvents, 'utf8'), 'event-sentinel\n');
     assert.equal(readFileSync(outsideVerifications, 'utf8'), 'verification-sentinel\n');
 
@@ -771,12 +970,13 @@ test('terminal run rejects late events and verifications while keeping run_final
     const terminalVerifications = readFileSync(verificationPath);
 
     addEvent(runId, { type: 'late-output', detail: 'must not append' }, { base: tmpDir });
-    addVerification(runId, {
+    const lateVerification = addVerification(runId, {
       story_id: 'US-LATE',
       verdict: 'fail',
       evidence: 'must not append',
       verifiedBy: 'late-writer',
     }, { base: tmpDir, stateDir });
+    assert.equal(lateVerification.ok, false);
 
     assert.deepEqual(readFileSync(eventsPath), terminalEvents);
     assert.deepEqual(readFileSync(verificationPath), terminalVerifications);

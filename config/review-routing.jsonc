@@ -1,6 +1,7 @@
-// Review routing rules (v1.0.2 US-005)
+// Review routing rules (v1.1.0 US-005)
 //
-// Schema: { schemaVersion: 1, alwaysInclude: [...], rules: [{match, reviewers}],
+// Schema: { schemaVersion: 1, approvalReviewers: [...], reviewResultContract: {...},
+//           alwaysInclude: [...], rules: [{pathMatch, reviewers}],
 //           securityPatterns: [regex strings], fallback: [full reviewer set] }
 //
 // Rules are evaluated top-to-bottom. The union of all matching rules' `reviewers`
@@ -10,6 +11,29 @@
 // Disable entirely via .ao/autonomy.json -> { "reviewRouter": { "disabled": true } }.
 {
   "schemaVersion": 1,
+
+  // Only these non-implementation agents may participate in an approval gate.
+  // Themis can run checks but cannot edit directly; the exact-tree freshness
+  // gate rejects command side effects. The router also enforces this list in
+  // code, so stale rules cannot re-introduce implementation roles.
+  "approvalReviewers": [
+    "aphrodite",
+    "architect",
+    "code-reviewer",
+    "security-reviewer",
+    "themis"
+  ],
+
+  // Versioned output contract supplied to every routed reviewer by Atlas/Athena.
+  // AO_REVIEW_V1 is exact JSON (no Markdown fence or surrounding prose).
+  "reviewResultContract": {
+    "name": "AO_REVIEW_V1",
+    "schemaVersion": 1,
+    "verdicts": ["APPROVE", "REVISE", "REJECT", "BLOCKED"],
+    "required": ["schemaVersion", "reviewer", "reviewDigest", "verdict", "findings", "escalations"],
+    "findingRequired": ["severity", "confidence", "file", "line", "evidence", "recommendation"],
+    "escalationRequired": ["additionalReviewer", "reason"]
+  },
 
   // Reviewers always included regardless of diff scope.
   // Set to ["*"] to force the full fallback reviewer set on every diff (rollback path).
@@ -21,12 +45,12 @@
     {
       "name": "frontend-styles",
       "pathMatch": "\\.(css|scss|sass|less)$",
-      "reviewers": ["aphrodite", "designer"]
+      "reviewers": ["aphrodite"]
     },
     {
       "name": "frontend",
       "pathMatch": "\\.(tsx|jsx|vue|svelte|html|htm)$|^(components|pages)/",
-      "reviewers": ["aphrodite", "designer", "code-reviewer"]
+      "reviewers": ["aphrodite", "code-reviewer"]
     },
     {
       "name": "backend",
@@ -37,6 +61,16 @@
       "name": "node-backend",
       "pathMatch": "^(api|server|backend|services|routes|controllers|middleware)/.*\\.(ts|js|mjs|cjs)$",
       "reviewers": ["code-reviewer", "architect", "security-reviewer"]
+    },
+    {
+      "name": "orchestration-runtime",
+      "pathMatch": "^(scripts|hooks|evals)/.*\\.(ts|js|mjs|cjs)$",
+      "reviewers": ["code-reviewer", "security-reviewer"]
+    },
+    {
+      "name": "generic-js-ts",
+      "pathMatch": "\\.(ts|js|mjs|cjs)$",
+      "reviewers": ["code-reviewer"]
     },
     {
       "name": "infra",
@@ -51,12 +85,12 @@
     {
       "name": "tests",
       "pathMatch": "(test|spec|__tests__|__mocks__)/|\\.(test|spec)\\.(ts|js|mjs|tsx|jsx|go|py|rb)$",
-      "reviewers": ["test-engineer", "code-reviewer"]
+      "reviewers": ["themis", "code-reviewer"]
     },
     {
       "name": "docs",
       "pathMatch": "\\.(md|mdx|rst|txt)$|^(docs|documentation)/",
-      "reviewers": ["writer"]
+      "reviewers": ["code-reviewer"]
     }
   ],
 
@@ -122,6 +156,6 @@
     "architect",
     "security-reviewer",
     "aphrodite",
-    "test-engineer"
+    "themis"
   ]
 }

@@ -8,6 +8,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -63,6 +64,23 @@ function withRoot(fn) {
   return Promise.resolve(fn(root)).finally(() => rmSync(root, { recursive: true, force: true }));
 }
 
+function validationContract(reviewTreeOid = 'c'.repeat(40)) {
+  const template = 'review exact snapshot\nValidation prompt digest: <PROMPT_DIGEST>';
+  const promptDigest = createHash('sha256').update(template).digest('hex');
+  return {
+    prompt: template.replaceAll('<PROMPT_DIGEST>', promptDigest),
+    identity: {
+      schemaVersion: 1,
+      orchestrator: 'atlas',
+      runId: 'run-1',
+      storyId: 'US-001',
+      reviewTreeOid,
+      snapshotId: `xval-${'e'.repeat(32)}`,
+      promptDigest,
+    },
+  };
+}
+
 test('supervisor: happy path — fixture exit 0 → completed snapshot + durable output, manifest unlinked', async () => {
   await withRoot(async (root) => {
     const { runId, workerRunId } = freshIds();
@@ -79,6 +97,67 @@ test('supervisor: happy path — fixture exit 0 → completed snapshot + durable
 
     assert.equal(readFileSync(outputPath(root, runId, workerRunId), 'utf-8'), 'HELLO-OUTPUT');
     assert.equal(existsSync(mp), false, 'manifest is unlinked after read');
+  });
+});
+
+test('supervisor: read-only completion snapshot echoes the exact validation execution proof', async () => {
+  await withRoot(async (root) => {
+    const { runId, workerRunId } = freshIds();
+    const contract = validationContract();
+    const mp = writeManifest(root, runId, workerRunId, {
+      readOnly: true,
+      reviewTreeOid: contract.identity.reviewTreeOid,
+      validationIdentity: contract.identity,
+      prompt: contract.prompt,
+      fixture: { exitCode: 0, output: 'BOUND' },
+    });
+    const { code } = await waitExit(spawnSupervisor(mp));
+    assert.equal(code, 0);
+    const snapshot = readSnapshot(snapshotPath(root, runId, workerRunId), {
+      runId,
+      workerRunId,
+      readOnly: true,
+      reviewTreeOid: contract.identity.reviewTreeOid,
+      validationIdentity: contract.identity,
+      cwd: root,
+    });
+    assert.equal(snapshot.kind, 'ok');
+    assert.deepEqual(snapshot.snapshot.validationIdentity, contract.identity);
+    assert.equal(snapshot.snapshot.cwd, root);
+  });
+});
+
+test('supervisor: rejects a validation identity whose digest is not bound to the prompt', async () => {
+  await withRoot(async (root) => {
+    const { runId, workerRunId } = freshIds();
+    const contract = validationContract();
+    const mp = writeManifest(root, runId, workerRunId, {
+      readOnly: true,
+      reviewTreeOid: contract.identity.reviewTreeOid,
+      validationIdentity: contract.identity,
+      prompt: `${contract.prompt}\nTAMPERED`,
+      fixture: { exitCode: 0, output: 'MUST-NOT-RUN' },
+    });
+    const { code } = await waitExit(spawnSupervisor(mp));
+    assert.equal(code, 2);
+    assert.notEqual(readSnapshot(snapshotPath(root, runId, workerRunId)).kind, 'ok');
+  });
+});
+
+test('supervisor: rejects read-only codex-appserver because it lacks config isolation', async () => {
+  await withRoot(async (root) => {
+    const { runId, workerRunId } = freshIds();
+    const contract = validationContract();
+    const mp = writeManifest(root, runId, workerRunId, {
+      adapterName: 'codex-appserver',
+      readOnly: true,
+      reviewTreeOid: contract.identity.reviewTreeOid,
+      validationIdentity: contract.identity,
+      prompt: contract.prompt,
+    });
+    const { code } = await waitExit(spawnSupervisor(mp));
+    assert.equal(code, 2);
+    assert.notEqual(readSnapshot(snapshotPath(root, runId, workerRunId)).kind, 'ok');
   });
 });
 
@@ -232,6 +311,46 @@ test('buildAppserverThreadOpts: carries level + ephemeral + per-team serviceName
   assert.equal(opts.level, 'workspace-write');
   assert.equal(opts.ephemeral, true);
   assert.equal(opts.serviceName, 'agent-olympus:sprint-x');
+});
+
+test('option builders: read-only manifest overrides every adapter permission axis', () => {
+  const manifest = {
+    cwd: '/w',
+    teamName: 'xval',
+    readOnly: true,
+    level: 'full-auto',
+    approvalMode: 'yolo',
+    permissionMode: 'bypassPermissions',
+    allowedTools: ['Bash', 'Edit'],
+  };
+  const exec = buildExecOpts(manifest);
+  assert.equal(exec.level, 'suggest');
+  assert.equal(exec.readOnly, true);
+  assert.equal(exec.ignoreUserConfig, true);
+  assert.equal(exec.ignoreRules, true);
+  assert.equal(exec.skipGitRepoCheck, true);
+  assert.equal(exec.strictConfig, true);
+  assert.deepEqual(exec.configOverrides, [
+    'project_doc_max_bytes=0',
+    'skills.bundled.enabled=false',
+  ]);
+  assert.equal(exec.approvalMode, 'plan');
+  assert.equal(exec.permissionMode, 'plan');
+  assert.deepEqual(exec.allowedTools, ['Read', 'Glob', 'Grep']);
+  assert.equal(buildAppserverThreadOpts(manifest).level, 'suggest');
+  const acp = buildGeminiAcpSessionOpts(manifest);
+  assert.equal(acp.approvalMode, 'plan');
+  assert.equal(acp.requireApprovalMode, true);
+});
+
+test('option builders: writable Gemini ACP retains legacy fail-open mode setup', () => {
+  const acp = buildGeminiAcpSessionOpts({ cwd: '/w', approvalMode: 'auto_edit' });
+  assert.equal(acp.approvalMode, 'auto_edit');
+  assert.equal(acp.requireApprovalMode, false);
+  assert.equal(buildExecOpts({ cwd: '/w' }).ignoreUserConfig, undefined);
+  assert.equal(buildExecOpts({ cwd: '/w' }).ignoreRules, undefined);
+  assert.equal(buildExecOpts({ cwd: '/w' }).skipGitRepoCheck, undefined);
+  assert.equal(buildExecOpts({ cwd: '/w' }).strictConfig, undefined);
 });
 
 test('option builders: live in a CLI-free module (importing them does not run a supervisor)', () => {

@@ -16,7 +16,9 @@ User Request
          │
          ▼
     Atlas/Athena Pipeline:
-    Triage → Analyze → Plan(+PRD) → Execute → Verify → Review → Slop Clean → Commit
+    Triage → Analyze → Plan(+PRD) → Execute → Verify → Review → Finalize
+                                                               ↓
+                                      Re-verify final tree → Final Review → Commit
          │           │                              │
          │           └─ /research (if needed)       └─ /trace (if debugger fails)
          └─ /deepinit (if unfamiliar codebase)
@@ -44,7 +46,7 @@ agent-olympus/
 │   ├── code-reviewer.md          — Code quality review, read-only (Sonnet)
 │   ├── explore.md                — Fast codebase scanner (Haiku)
 │   ├── writer.md                 — Documentation writer (Haiku)
-│   ├── hephaestus.md             — Codex deep worker (Sonnet)
+│   ├── hephaestus.md             — Deep autonomous coder (Sonnet)
 │   ├── ask.md                    — Quick Codex/Gemini query agent (Sonnet)
 │   └── themis.md                 — Quality gate: tests/lint/AC verification (Sonnet)
 ├── skills/                       — 37 user-facing skills (workflow recipes)
@@ -52,6 +54,8 @@ agent-olympus/
 │   ├── athena/SKILL.md           — /athena: autonomous team pipeline
 │   ├── plan/SKILL.md             — /plan: forward/reverse product planning
 │   ├── ask/SKILL.md              — /ask: quick Codex/Gemini query (sync + async)
+│   ├── codex-goal/SKILL.md        — /codex-goal: bounded Codex delegation
+│   ├── codex-review/SKILL.md      — /codex-review: independent Codex diff gate
 │   ├── deep-interview/SKILL.md   — /deep-interview: Socratic clarification
 │   ├── deepinit/SKILL.md         — /deepinit: codebase AGENTS.md generation
 │   ├── research/SKILL.md         — /research: parallel web research
@@ -82,7 +86,7 @@ agent-olympus/
 │   ├── taste/SKILL.md            — /taste: record/list/prune aesthetic preferences
 │   ├── teach-design/SKILL.md     — /teach-design: capture brand identity for auto-injection
 │   ├── resume-handoff/SKILL.md   — /resume-handoff: read browser handoff state for manual resume
-│   └── setup-gemini-auth/SKILL.md — /setup-gemini-auth: macOS Keychain wizard for Gemini API-key users (v1.1.3)
+│   └── setup-gemini-auth/SKILL.md — /setup-gemini-auth: macOS Keychain wizard for Gemini API-key users
 ├── scripts/                      — Hook scripts (Node.js ESM, zero dependencies)
 │   ├── run.cjs                   — Cross-platform hook runner with version fallback
 │   ├── intent-gate.mjs           — UserPromptSubmit: classify intent (EN/KO/JA/ZH)
@@ -90,12 +94,12 @@ agent-olympus/
 │   ├── concurrency-gate.mjs      — PreToolUse: enforce parallel task limits
 │   ├── concurrency-release.mjs   — PostToolUse: release task from concurrency pool
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
-│   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode (v1.1.6)
+│   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode
 │   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (2858 tests, 108 files; v1.5.1: 2858/2858 passing)
+│   ├── test/                     — node:test unit tests (3360 tests, 134 files; v1.5.1 baseline 2858/108)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
-│       ├── intent-patterns.mjs   — Intent classifier (8 categories, multilingual)
+│       ├── intent-patterns.mjs   — Intent classifier (13 categories + unknown fallback, multilingual)
 │       ├── model-router.mjs      — Routing logic with JSONC config merge
 │       ├── tmux-session.mjs      — Tmux session lifecycle + sanitizeForShellArg()
 │       ├── inbox-outbox.mjs      — File-based message queue (legacy, used by tmux fallback)
@@ -124,7 +128,7 @@ agent-olympus/
 │       ├── recovery-claim.mjs    — Crash-reclaimable stale-owner election
 │       ├── eval-failure-candidates.mjs — Sanitized failed-run review queue
 │       ├── session-registry.mjs  — Cross-session metadata tracking and crash recovery
-│       ├── codex-approval.mjs    — Claude permission detection → Codex sandbox-axis mirroring + host-sandbox intersection (v1.1.0)
+│       ├── codex-approval.mjs    — Claude permission detection → Codex sandbox-axis mirroring + host-sandbox intersection
 │       ├── gemini-approval.mjs   — Claude permission detection → Gemini approval mode mirroring
 │       ├── gemini-binary.mjs     — Gemini binary resolution (gemini → agy fallback)
 │       ├── gemini-exec.mjs       — Gemini exec adapter (single-turn JSON spawn)
@@ -137,7 +141,7 @@ agent-olympus/
 │       ├── cli-version.mjs       — Fail-open CLI version probe + advisory minimum-version gate
 │       ├── host-sandbox-detect.mjs — Passive host sandbox detection (LSM, container, seccomp)
 │       ├── permission-detect.mjs — Unified permission detection (settings + runtime layers, shared by all adapters)
-│       ├── runtime-permissions.mjs — Runtime permission_mode capture/load helpers (v1.1.6)
+│       ├── runtime-permissions.mjs — Runtime permission_mode capture/load helpers
 │       ├── artifact-pipe.mjs     — Cascade artifact archival pipe for orchestrator stages
 │       ├── browser-handoff.mjs   — Browser pause state persistence for /resume-handoff
 │       ├── design-identity.mjs   — Brand identity loader/writer (.ao/memory/)
@@ -150,25 +154,24 @@ agent-olympus/
 │       ├── ui-reference.mjs      — UI reference material loader for design skills
 │       ├── ui-remediate.mjs      — UI remediation chain orchestrator
 │       ├── ui-smell-scan.mjs     — UI smell detection heuristics
-│       ├── ao-keychain-write.mjs — macOS Keychain item writer with partition-list grant (v1.1.3+)
+│       ├── ao-keychain-write.mjs — macOS Keychain item writer with partition-list grant
 │       ├── architect-scope.mjs   — Architect agent scope/blast-radius calculator
-│       ├── gemini-credential.mjs — Gemini API key auto-resolver (env/Keychain/libsecret) (v1.1.1+)
+│       ├── gemini-credential.mjs — Gemini API key auto-resolver (env/Keychain/libsecret)
 │       ├── light-mode.mjs        — Atlas/Athena lightweight execution path
-│       ├── model-usage.mjs       — Per-subagent model usage logger for Opus-skew analysis (v1.1.0+)
+│       ├── model-usage.mjs       — Per-subagent model usage logger for Opus-skew analysis
 │       └── stage-escalation.mjs  — Escalation-first model routing for orchestrator stages
-├── config/
-│   └── model-routing.jsonc       — Intent→model routing configuration
-└── hooks/
-    └── hooks.json                — Hook event registrations
+└── config/
+    ├── model-routing.jsonc       — Intent→model routing configuration
+    └── review-routing.jsonc      — Review reviewer-set routing configuration
 ```
 
 ## Conventions
 
 - Naming follows Greek-myth agents where practical, with the `agent-olympus:` namespace for subagents and skills.
 - Scripts are zero-dependency Node.js ESM (`.mjs`), except `scripts/run.cjs` for cross-platform hook wrapping.
-- Hooks are fail-safe: catch errors, write a safe default (`{}`), and exit 0.
+- Hooks exit 0 and normally fail open; only concurrency admission and the Atlas executable-control gates (skill-init after proven identity, skill-scoped Stop) fail closed — [hooks.md](docs/internals/hooks.md).
 - State writes use atomic tmp+rename helpers; state files use mode `0600` and state directories use `0700`.
-- Persisted formats use `schemaVersion: 1`; see [docs/development.md](docs/development.md) for loader/writer rules.
+- Persisted formats are independently versioned (the concurrency ledger is v2); authorization and admission formats fail closed on unknown versions. See [docs/development.md](docs/development.md).
 - State lives under `.ao/`: `state/` is transient, `memory/` is durable, and run/team artifacts are swept by lifecycle rules.
 
 ## Worker Adapter System
@@ -180,22 +183,13 @@ agent-olympus/
 - Key files: `scripts/lib/worker-spawn.mjs`, `codex-appserver.mjs`, `codex-exec.mjs`, `claude-cli.mjs`, `gemini-acp.mjs`, `gemini-exec.mjs`, `permission-detect.mjs`.
 - Detached worker supervisor -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md); permission mirroring -> [docs/internals/permission-mirroring.md](docs/internals/permission-mirroring.md); Gemini credentials -> [docs/internals/credentials.md](docs/internals/credentials.md).
 
-## Deep References
-
-- Hook architecture / per-hook details -> [docs/internals/hooks.md](docs/internals/hooks.md).
-- Autonomy config resolution (layered, CI kill-switch) -> [docs/internals/autonomy-config.md](docs/internals/autonomy-config.md).
-- Adapter priority + session naming -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md).
-- schemaVersion convention -> [docs/development.md](docs/development.md).
-
 ## Contributing
 
-- Add an agent: follow [docs/development.md#how-to-add-a-new-agent](docs/development.md#how-to-add-a-new-agent).
-- Add a skill: follow [docs/development.md#how-to-add-a-new-skill](docs/development.md#how-to-add-a-new-skill).
-- Add a hook: follow [docs/development.md#how-to-add-a-new-hook](docs/development.md#how-to-add-a-new-hook).
+Follow [docs/development.md](docs/development.md) when adding agents, skills, hooks, or persisted formats.
 
 ## Testing
 
-Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the current 3360-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
@@ -208,6 +202,8 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 ## Known Limitations
 
 - `--bare` Claude Code mode skips hooks, plugins, and skill directory walks, so Agent Olympus hooks will not fire there.
+- Atlas requires Claude Code 2.1.214+ (validated; earlier support unknown). Missing `UserPromptExpansion` stops `/atlas`; missing skill hooks removes the Stop gate (unsupported). Fresh runs need clean trees and suppress WIP commits.
+- Trusted VCS uses fixed roots: Git for Atlas/ship/CI; `gh` for GitHub/PR evidence. nix/asdf/mise-only installs are unsupported.
 - Claude Code sandbox mode should be used when testing hooks; edge cases can appear around `.ao/` filesystem access.
 - Gemini credential auto-resolution supports macOS Keychain and Linux libsecret in v1; Windows users must set `GEMINI_API_KEY`.
 
@@ -217,7 +213,7 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | Agent | Role |
 |-------|------|
 | **atlas** | Hub-and-spoke: one brain delegates to many sub-agents; supports session recovery via checkpoint |
-| **athena** | Peer-to-peer: Claude + Codex + Gemini team via adapter system; supports session recovery via checkpoint |
+| **athena** | Hybrid team: native Claude teammates plus lead-bridged Codex/Gemini adapters; supports session recovery via checkpoint |
 
 ### Planning & Specification (Opus)
 | Agent | Role |
@@ -234,16 +230,16 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | **designer** | UI/UX implementation specialist |
 | **test-engineer** | Test strategy, TDD, coverage |
 | **debugger** | Root-cause analysis and fix |
-| **hephaestus** | Codex deep worker (large refactoring, algorithms) |
+| **hephaestus** | Deep autonomous coder (large refactoring, algorithms) |
 
-### Review (Read-Only)
+### Review & Quality Gate (No Direct Edits)
 | Agent | Role |
 |-------|------|
 | **architect** (Opus) | Functional completeness, architecture alignment |
 | **aphrodite** | UI/UX design critique — Nielsen heuristics, Gestalt principles, WCAG 2.2 AA |
 | **security-reviewer** | OWASP Top 10, secrets, injection |
 | **code-reviewer** | Logic defects, SOLID, DRY, AI slop |
-| **themis** | Quality gate: tests, lint, namespace, frontmatter, per-AC verification |
+| **themis** | Test-executing quality gate; final tree freshness rejects side effects |
 
 ### Utility
 | Agent | Role |
@@ -258,7 +254,7 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | Skill | Trigger | What It Does |
 |-------|---------|--------------|
 | `/atlas` | "해줘", "do it" | Full autonomous pipeline: triage → analyze → plan → execute → verify → review → commit |
-| `/athena` | "팀으로 해", "team" | Same pipeline but with Claude + Codex + Gemini team (each in git worktree) via adapter system |
+| `/athena` | "팀으로 해", "team" | Native Claude teammates plus lead-bridged Codex/Gemini workers, all worktree-isolated |
 | `/plan` | "기획", "spec", "역기획" | Adaptive product planner — forward (idea→spec) and reverse (code→spec) |
 
 ### Pre-Processing
@@ -317,16 +313,17 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | `/taste` | "취향", "aesthetic" | Record, list, and prune aesthetic preferences for auto-injection |
 | `/teach-design` | "디자인학습", "brand-capture" | Capture project brand identity for designer/aphrodite subagents |
 | `/resume-handoff` | "재개", "resume" | Read persisted browser handoff state for manual resume |
-| `/setup-gemini-auth` | "제미니키체인", "gemini keychain" | macOS-only one-time wizard to create AO-owned Keychain item (v1.1.3) |
+| `/setup-gemini-auth` | "제미니키체인", "gemini keychain" | macOS-only one-time wizard to create AO-owned Keychain item |
 
 ## Hooks
 
 | Event | Hook | Purpose |
 |-------|------|---------|
 | SessionStart | session-start | Inject prior wisdom + interrupted checkpoint context at session start |
-| SessionStart | runtime-permissions-capture | Capture runtime `permission_mode` from hook stdin/env to `.ao/state/ao-runtime-permissions.json` (async, v1.1.6) |
-| UserPromptSubmit | intent-gate | Classify user intent into 7 categories (multilingual) |
-| UserPromptSubmit | runtime-permissions-capture | Refresh runtime `permission_mode` cache so mid-session mode flips are picked up on next turn (async, v1.1.6) |
+| SessionStart | runtime-permissions-capture | Bind hook session identity to an external private runtime grant (async) |
+| UserPromptExpansion:atlas\|agent-olympus:atlas + PreToolUse:Skill | orchestrator-skill-init | Atlas bootstrap: create/adopt one run + inject executable control; fail-closed after proven identity, `{}` otherwise |
+| UserPromptSubmit | intent-gate | Classify user intent into 13 categories + unknown fallback (multilingual) |
+| UserPromptSubmit | runtime-permissions-capture | Refresh the bound grant without trusting project-local state (async) |
 | PreToolUse:Task | concurrency-gate | Enforce parallel task limits |
 | PreToolUse:Task | model-router | Inject model routing advice based on intent |
 | PreToolUse:Agent | concurrency-gate | Same limits for Agent tool |
@@ -340,7 +337,8 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | Notification:idle_prompt | notification | Log idle/permission prompts for stall detection |
 | Notification:permission_prompt | notification | Same logging for permission prompts |
 | SessionEnd | session-end | Sweep stale state; collect linked failed-run candidates |
-| Stop | stop-hook | Auto-commit uncommitted work as WIP commit on session end |
+| Stop | stop-hook | Auto-commit uncommitted work as WIP (off during an active Atlas run) |
+| Stop (skill-scoped) | orchestrator-stop-gate | atlas SKILL.md frontmatter: blocks premature Stop mid-run |
 
 ## State Files
 
@@ -353,7 +351,7 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | `.ao/state/checkpoint-atlas[-sessionId].json` | Atlas session recovery checkpoint (session-scoped) | Auto-expires after 24h |
 | `.ao/state/checkpoint-athena[-sessionId].json` | Athena session recovery checkpoint (session-scoped) | Auto-expires after 24h |
 | `.ao/state/ao-intent.json` | Last classified intent | Updated per prompt |
-| `.ao/state/ao-concurrency.json` | Active task tracking | Updated per task spawn/complete |
+| `.ao/state/ao-concurrency.json` | Schema-v2 active task tracking and recovery barrier | Updated per task spawn/complete; never generic-TTL swept |
 | `.ao/memory/` | Durable design identity and taste memory (`schemaVersion:1`) | Survives SessionEnd and cancel |
 | `.ao/state/supervisor/<runId>/` | Detached worker snapshots/manifests | Swept per inactive run |
 | `.ao/artifacts/runs/<runId>/` | Run evidence, failure marker, task ledger | Retained for audit/candidate review |
@@ -362,16 +360,6 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 | `.ao/sessions/<sessionId>.json` | Cross-session registry metadata | 90-day TTL |
 | `.ao/teams/<slug>/` | Inbox/outbox for team workers (Claude/Codex/Gemini) | Created by Athena, cleaned on completion |
 | `.ao/worktrees/<slug>/<worker>/` | Isolated git worktrees for Athena workers | Created per worker, merged + cleaned on completion |
-
-## Multi-Model Support
-
-| Model | Agent Tier | When Used |
-|-------|-----------|-----------|
-| Claude Haiku | explore, writer | Fast scans, documentation |
-| Claude Sonnet | executor, designer, aphrodite, debugger, ask, reviewers, hephaestus | Standard implementation and review |
-| Claude Opus | atlas, athena, metis, prometheus, momus, hermes, architect | Orchestration, analysis, planning |
-| OpenAI Codex | hephaestus (via adapter) | Algorithms, large refactoring, deep exploration |
-| Google Gemini | (via adapter) | Cross-validation, alternative perspective |
 
 ## Key Design Decisions
 
@@ -382,6 +370,6 @@ Run the 2858-test Node suite and syntax checks from [docs/testing.md](docs/testi
 5. **External skill awareness** — Atlas/Athena can invoke installed plugin skills when they fit.
 6. **Zero runtime dependencies** — All scripts use Node.js built-ins only. No npm packages.
 7. **Athena worktree isolation** — Parallel workers use `.ao/worktrees/<slug>/<worker>/`.
-8. **Fail-safe hooks** — Hooks catch errors and output `{}` so Claude Code is never blocked.
+8. **Fail-safe hooks** — Hooks exit 0; only concurrency admission and the Atlas executable-control gates fail closed.
 9. **Atomic state writes** — State mutations use tmp+rename via `lib/fs-atomic.mjs`.
 10. **tmux injection prevention** — `sanitizeForShellArg()` in `lib/tmux-session.mjs` escapes shell special characters before any `send-keys` call.

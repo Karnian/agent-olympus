@@ -6,15 +6,30 @@ import { fileURLToPath } from 'node:url';
 
 const REPO_ROOT = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 
+function canonicalProviderLifecycle(source, skill) {
+  const startMarker = '<!-- AO-CONTRACT:provider-lifecycle:start -->';
+  const endMarker = '<!-- AO-CONTRACT:provider-lifecycle:end -->';
+  assert.equal((source.match(/AO-CONTRACT:provider-lifecycle:start/g) || []).length, 1, `${skill}: one start marker`);
+  assert.equal((source.match(/AO-CONTRACT:provider-lifecycle:end/g) || []).length, 1, `${skill}: one end marker`);
+  const start = source.indexOf(startMarker);
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, `${skill}: ordered canonical lifecycle markers`);
+  return source.slice(start, end);
+}
+
 for (const skill of ['atlas', 'athena']) {
   test(`${skill} provider fallback recipe consumes targetProvider and dispatches provider child teams`, () => {
-    const source = readFileSync(path.join(REPO_ROOT, `skills/${skill}/SKILL.md`), 'utf-8');
-    assert.match(source, /reassignProvider\(/);
-    assert.match(source, /dispatchProviderFallback\(/);
-    assert.match(source, /pollProviderFallback\(/);
-    assert.match(source, /completeClaudeFallback\(/);
-    assert.match(source, /monitorTeam\(/);
-    assert.match(source, /collectResults\(/);
+    const source = readFileSync(path.join(
+      REPO_ROOT,
+      skill === 'atlas' ? 'skills/atlas/reference.md' : 'skills/athena/SKILL.md',
+    ), 'utf-8');
+    const lifecycle = canonicalProviderLifecycle(source, skill);
+    assert.match(lifecycle, /reassignProvider\(/);
+    assert.match(lifecycle, /dispatchProviderFallback\(/);
+    assert.match(lifecycle, /pollProviderFallback\(/);
+    assert.match(lifecycle, /completeClaudeFallback\(/);
+    assert.match(lifecycle, /monitorTeam\(/);
+    assert.match(lifecycle, /collectResults\(/);
     assert.match(source, /const cwd = process\.cwd\(\)/);
     assert.match(source, /const capabilities = preflightReport\.capabilities/);
     assert.match(source, /const teamSlug =/);
@@ -23,21 +38,21 @@ for (const skill of ['atlas', 'athena']) {
     } else {
       assert.match(source, /await spawnTeam\(teamSlug, externalWorkers, cwd, capabilities\)/);
     }
-    assert.equal((source.match(/await spawnTeam\(/g) || []).length, 1);
-    assert.match(source, /status\?\.workers\.every\(\(worker\) => worker\.status === 'completed'\)/);
-    assert.match(source, /MANDATORY WORKTREE:/);
+    assert.equal((lifecycle.match(/await spawnTeam\(/g) || []).length, 1);
+    assert.match(lifecycle, /status\?\.workers\.every\(\(worker\) => worker\.status === 'completed'\)/);
+    assert.match(lifecycle, /MANDATORY WORKTREE:/);
     assert.doesNotMatch(source, /plannedWorkers/);
     assert.ok(
       source.indexOf('const teamSlug =') < source.indexOf('createWorkerWorktree(cwd, teamSlug'),
       `${skill} must define teamSlug before creating worktrees`,
     );
-    assert.match(source, /targetProvider/);
-    assert.match(source, /progress\.status === 'running'/);
-    assert.match(source, /progress\.status === 'completed'/);
-    assert.match(source, /progress\.status === 'claude-task'/);
-    assert.match(source, /replacementWorker\.prompt/);
-    assert.match(source, /progress\.output/);
-    assert.match(source, /const claudeOutput = Task/);
+    assert.match(lifecycle, /targetProvider/);
+    assert.match(lifecycle, /progress\.status === 'running'/);
+    assert.match(lifecycle, /progress\.status === 'completed'/);
+    assert.match(lifecycle, /progress\.status === 'claude-task'/);
+    assert.match(lifecycle, /replacementWorker\.prompt/);
+    assert.match(lifecycle, /progress\.output/);
+    assert.match(lifecycle, /const claudeOutput = Task/);
     assert.doesNotMatch(source, /providerChildTeams/);
     assert.doesNotMatch(source, /reassignToClaude\(/);
     assert.doesNotMatch(source, /<atlas-team-name-for-/);
@@ -45,7 +60,7 @@ for (const skill of ['atlas', 'athena']) {
 }
 
 test('atlas supervisor fallback is driven by persisted monitor status', () => {
-  const source = readFileSync(path.join(REPO_ROOT, 'skills/atlas/SKILL.md'), 'utf-8');
+  const source = readFileSync(path.join(REPO_ROOT, 'skills/atlas/reference.md'), 'utf-8');
   assert.match(source, /const status = monitorTeam\(teamSlug\)/);
   assert.match(source, /\(status\?\.workers \|\| \[\]\)\.filter\(\(worker\) => worker\.status === 'failed'\)/);
   assert.match(source, /failedWorker\.errorReason/);
@@ -54,7 +69,7 @@ test('atlas supervisor fallback is driven by persisted monitor status', () => {
 });
 
 test('atlas integrates committed external worktrees before terminal cleanup', () => {
-  const source = readFileSync(path.join(REPO_ROOT, 'skills/atlas/SKILL.md'), 'utf-8');
+  const source = readFileSync(path.join(REPO_ROOT, 'skills/atlas/reference.md'), 'utf-8');
   assert.match(source, /External worktrees must branch from a committed Atlas checkpoint/);
   assert.match(source, /model: undefined/);
   assert.match(source, /status', '--porcelain'/);
@@ -69,7 +84,9 @@ test('atlas integrates committed external worktrees before terminal cleanup', ()
 
 test('athena external workers use provider defaults and preserve work until a clean merge', () => {
   const source = readFileSync(path.join(REPO_ROOT, 'skills/athena/SKILL.md'), 'utf-8');
-  assert.match(source, /model: workerType === 'claude' \? \(stories\[0\]\.model \|\| 'sonnet'\) : undefined/);
+  const executionPrd = readFileSync(path.join(REPO_ROOT, 'scripts/lib/execution-prd.mjs'), 'utf-8');
+  assert.match(source, /const workerDefinitions = buildAthenaWorkerDefinitions\(prd, \{ allowCompleted: true \}\)/);
+  assert.match(executionPrd, /model: type === 'claude' \? \(stories\[0\]\.model \|\| 'sonnet'\) : undefined/);
   assert.match(source, /MANDATORY WORKTREE:/);
   assert.match(source, /Athena parallel worktrees must branch from a committed checkpoint/);
   assert.ok(
@@ -77,7 +94,14 @@ test('athena external workers use provider defaults and preserve work until a cl
       < source.indexOf('createWorkerWorktree(cwd, teamSlug, worker.name)'),
     'Athena must reject a dirty root before deriving isolated branches from HEAD',
   );
-  assert.match(source, /if \(!created \|\| !branch \|\| !path \|\| path === cwd\) continue/);
+  assert.match(
+    source,
+    /Object\.values\(worktrees\)\.some\(\(item\) => !item\.created \|\| item\.path === cwd\)[\s\S]*?throw new Error\('Athena scope enforcement requires an isolated git worktree for every worker/,
+  );
+  assert.match(
+    source,
+    /if \(!created \|\| !branch \|\| !path \|\| path === cwd\) \{[\s\S]*?throw new Error\(`Worker \$\{worker\.name\} lacks the isolated worktree required for scope validation`\)/,
+  );
   assert.match(source, /status', '--porcelain'/);
   assert.match(source, /if \(!result\.success\)[\s\S]*throw new Error/);
   assert.ok(

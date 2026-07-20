@@ -24,6 +24,7 @@ import {
   MONITOR_CAP,
   CI_CAP,
   QUALITY_CAP,
+  FINAL_REVIEW_CAP,
   SCHEMA_VERSION,
   validatePipelineLedgerIdentity,
   getPhaseSequence,
@@ -41,8 +42,15 @@ import {
   nextPhase,
   getPipelineState,
   isComplete,
+  finalizeCompletedPipeline,
+  inspectCurrentPhaseLoop,
+  withCurrentPhaseLoopTick,
 } from '../lib/phase-runner.mjs';
-import { createRun } from '../lib/run-artifacts.mjs';
+import {
+  createRun,
+  getActiveRunId,
+  getRunExecutionPrdSnapshot,
+} from '../lib/run-artifacts.mjs';
 
 async function makeTmpDir() {
   return fsp.mkdtemp(path.join(os.tmpdir(), 'ao-phase-runner-test-'));
@@ -77,6 +85,39 @@ function readEvents(cwd, runId) {
     .map(line => JSON.parse(line));
 }
 
+function writeCompletedAtlasPrd(cwd) {
+  const prd = {
+    projectName: 'phase-runner-finalization',
+    mode: 'engineering-change',
+    scale: 'S',
+    goals: ['Finalize one test run.'],
+    nonGoals: [],
+    constraints: [],
+    risks: [],
+    openQuestions: [],
+    userStories: [{
+      id: 'US-001',
+      title: 'Finalize the run',
+      acceptanceCriteria: [
+        'GIVEN a complete pipeline WHEN finalization runs THEN the final PRD is preserved',
+      ],
+      passes: true,
+      parallelGroup: 'A',
+      assignTo: 'claude',
+      model: 'sonnet',
+      agentType: 'executor',
+      scope: ['README.md'],
+      dependsOn: [],
+      requiresTDD: false,
+    }],
+  };
+  mkdirSync(path.join(cwd, '.ao'), { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(cwd, '.ao', 'prd.json'), `${JSON.stringify(prd, null, 2)}\n`, {
+    mode: 0o600,
+  });
+  return prd;
+}
+
 function readValidEvents(cwd, runId) {
   const file = eventsPath(cwd, runId);
   if (!existsSync(file)) return [];
@@ -96,9 +137,13 @@ async function completeThrough(runId, cwd, phaseIds) {
   for (const phaseId of phaseIds) {
     const entered = enterPhase(runId, phaseId, { cwd });
     assert.equal(entered.proceed, true, `enter ${phaseId}`);
-    if (['review', 'monitor', 'ci'].includes(phaseId)) {
-      const ticked = loopTick(runId, phaseId, { cwd });
-      assert.equal(ticked.allowed, true, `tick ${phaseId}`);
+    if (['review', 'finalize', 'monitor', 'ci'].includes(phaseId)) {
+      const loopKey = phaseId === 'finalize' ? 'final-review' : phaseId;
+      const loopState = inspectCurrentPhaseLoop(runId, loopKey, { cwd });
+      if (loopState.satisfied !== true) {
+        const ticked = loopTick(runId, loopKey, { cwd });
+        assert.equal(ticked.allowed, true, `tick ${phaseId}`);
+      }
     }
     const completed = await completeNoCheckpoint(runId, phaseId, cwd);
     assert.equal(completed.ok, true, `complete ${phaseId}`);
@@ -121,6 +166,7 @@ describe('phase sequence well-formedness', () => {
     assert.equal(MONITOR_CAP, 10);
     assert.equal(CI_CAP, 2);
     assert.equal(QUALITY_CAP, 2);
+    assert.equal(FINAL_REVIEW_CAP, 3);
     assert.equal(SCHEMA_VERSION, 1);
   });
 
@@ -347,6 +393,48 @@ test('permissive pipeline and loop-guard files are rejected before use', async (
 // ---------------------------------------------------------------------------
 
 describe('enterPhase', () => {
+  test('runs a synchronous entry boundary under the transition lock before mutation', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-entry-boundary';
+      initPipeline(runId, 'atlas', { cwd });
+      const before = readJson(pipelinePath(cwd, runId));
+      let observed = null;
+      const denied = enterPhase(runId, 'triage', {
+        cwd,
+        _validateEntry: (boundary) => {
+          observed = boundary;
+          throw new Error('deny entry');
+        },
+      });
+      assert.deepEqual(denied, {
+        proceed: false,
+        skip: false,
+        reason: 'transition-busy',
+        status: 'pending',
+        degraded: true,
+      });
+      assert.equal(observed.runId, runId);
+      assert.equal(observed.phaseId, 'triage');
+      assert.equal(observed.pipeline.phases.triage.status, 'pending');
+      assert.equal(Object.isFrozen(observed.pipeline), true);
+      assert.ok(observed._runLockOwner);
+      assert.deepEqual(readJson(pipelinePath(cwd, runId)), before);
+
+      const entered = enterPhase(runId, 'triage', {
+        cwd,
+        _validateEntry: ({ pipeline }) => {
+          assert.equal(pipeline.phases.triage.status, 'pending');
+          return true;
+        },
+      });
+      assert.equal(entered.proceed, true);
+      assert.equal(getPipelineState(runId, { cwd }).phases.triage.status, 'in_progress');
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
   test('rejects future traversal on a valid ledger without mutating it', async () => {
     const cwd = await makeTmpDir();
     try {
@@ -461,6 +549,112 @@ describe('enterPhase', () => {
 // ---------------------------------------------------------------------------
 
 describe('beginAttempt + reattempt', () => {
+  test('quality-fail reattempt atomically consumes its own cap without taxing review retries', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-quality-fail-budget';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).count, 1);
+      await completeThrough(runId, cwd, ['execute']);
+      assert.equal(enterPhase(runId, 'verify', { cwd }).proceed, true);
+
+      const firstQualityRetry = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, { cwd });
+      assert.equal(firstQualityRetry.allowed, true);
+      assert.equal(readJson(guardPath(cwd, runId)).counters['quality-cycles'].count, 1);
+
+      await completeThrough(runId, cwd, ['execute', 'verify']);
+      assert.equal(enterPhase(runId, 'review', { cwd }).proceed, true);
+      assert.equal(loopTick(runId, 'review', { cwd }).count, 1);
+      const reviewRetry = reattempt(runId, {
+        reopen: ['verify'], reason: 'review_reject',
+      }, { cwd });
+      assert.equal(reviewRetry.allowed, true);
+      assert.equal(readJson(guardPath(cwd, runId)).counters['quality-cycles'].count, 1,
+        'review rejection must not consume the quality-failure budget');
+
+      assert.equal(enterPhase(runId, 'verify', { cwd }).proceed, true);
+      const secondQualityRetry = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, { cwd });
+      assert.equal(secondQualityRetry.allowed, true);
+      assert.equal(readJson(guardPath(cwd, runId)).counters['quality-cycles'].count, QUALITY_CAP);
+
+      await completeThrough(runId, cwd, ['execute']);
+      assert.equal(enterPhase(runId, 'verify', { cwd }).proceed, true);
+      const exhausted = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, { cwd });
+      assert.equal(exhausted.allowed, false);
+      assert.equal(exhausted.qualityCount, QUALITY_CAP);
+      assert.equal(getPipelineState(runId, { cwd }).phases.verify.status, 'in_progress');
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('review markers are attempt-bound, idempotent, and gate trusted approval callbacks', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-review-marker-idempotent';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).allowed, true);
+      await completeThrough(runId, cwd, ['execute', 'verify']);
+      assert.equal(enterPhase(runId, 'review', { cwd }).proceed, true);
+
+      let approvals = 0;
+      const denied = withCurrentPhaseLoopTick(
+        runId,
+        'review',
+        'review',
+        () => { approvals += 1; },
+        { cwd },
+      );
+      assert.equal(denied.ok, false);
+      assert.equal(denied.reason, 'phase-loop-tick-required');
+      assert.equal(approvals, 0);
+
+      const first = loopTick(runId, 'review', { cwd });
+      const duplicate = loopTick(runId, 'review', { cwd });
+      assert.equal(first.allowed, true);
+      assert.equal(first.count, 1);
+      assert.equal(first.reused, undefined);
+      assert.equal(duplicate.allowed, true);
+      assert.equal(duplicate.count, 1);
+      assert.equal(duplicate.reused, true);
+      assert.equal(inspectCurrentPhaseLoop(runId, 'review', { cwd }).canTick, false);
+      const approved = withCurrentPhaseLoopTick(
+        runId,
+        'review',
+        'review',
+        ({ _runLockOwner, pipeline }) => {
+          approvals += 1;
+          assert.equal(typeof _runLockOwner?.token, 'string');
+          assert.equal(pipeline.phases.review.attempts, 1);
+          return 'approved';
+        },
+        { cwd },
+      );
+      assert.equal(approved.ok, true);
+      assert.equal(approved.result, 'approved');
+      assert.equal(approvals, 1);
+      assert.equal((await completeNoCheckpoint(runId, 'review', cwd)).ok, true);
+
+      assert.equal(enterPhase(runId, 'finalize', { cwd }).proceed, true);
+      const finalFirst = loopTick(runId, 'final-review', { cwd });
+      const finalDuplicate = loopTick(runId, 'final-review', { cwd });
+      assert.equal(finalFirst.count, 1);
+      assert.equal(finalDuplicate.count, 1);
+      assert.equal(finalDuplicate.reused, true);
+      assert.equal((await completeNoCheckpoint(runId, 'finalize', cwd)).ok, true);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
   test('every review re-entry must consume its own review-round tick', async () => {
     for (const orchestrator of ['atlas', 'athena']) {
       const cwd = await makeTmpDir();
@@ -477,6 +671,12 @@ describe('beginAttempt + reattempt', () => {
           assert.equal((await completeNoCheckpoint(runId, 'verify', cwd)).ok, true);
         }
         enterPhase(runId, 'review', { cwd });
+        const deniedBeforeTick = reattempt(runId, {
+          reopen: [orchestrator === 'atlas' ? 'verify' : 'integrate'],
+          reason: 'review_reject',
+        }, { cwd });
+        assert.equal(deniedBeforeTick.allowed, false);
+        assert.equal(deniedBeforeTick.count, 1);
         assert.equal(loopTick(runId, 'review', { cwd }).count, 1);
         const reopenedPhase = orchestrator === 'atlas' ? 'verify' : 'integrate';
         assert.equal(reattempt(runId, {
@@ -498,7 +698,81 @@ describe('beginAttempt + reattempt', () => {
     }
   });
 
-  test('first attempt + 14 reattempts fill cap, next reattempt blocks without count skip', async () => {
+  test('final review rejection rewinds through the orchestrator attempt phase', async () => {
+    for (const orchestrator of ['atlas', 'athena']) {
+      const cwd = await makeTmpDir();
+      try {
+        const runId = `run-final-reject-${orchestrator}`;
+        const attemptPhase = orchestrator === 'atlas' ? 'execute' : 'integrate';
+        const rewindPhase = orchestrator === 'atlas' ? 'verify' : 'integrate';
+        initPipeline(runId, orchestrator, { cwd });
+        await advanceToAttemptPhase(runId, orchestrator, cwd);
+        assert.equal(beginAttempt(runId, { cwd }).allowed, true);
+        const tail = orchestrator === 'atlas'
+          ? [attemptPhase, 'verify', 'review']
+          : [attemptPhase, 'review'];
+        await completeThrough(runId, cwd, tail);
+        enterPhase(runId, 'finalize', { cwd });
+        const deniedBeforeTick = reattempt(runId, {
+          reopen: [rewindPhase],
+          reason: 'final_review_reject',
+        }, { cwd });
+        assert.equal(deniedBeforeTick.allowed, false, orchestrator);
+        assert.equal(deniedBeforeTick.count, 1, orchestrator);
+        assert.equal(loopTick(runId, 'final-review', { cwd }).allowed, true);
+
+        const retry = reattempt(runId, {
+          reopen: [rewindPhase],
+          reason: 'final_review_reject',
+        }, { cwd });
+        assert.equal(retry.allowed, true, orchestrator);
+        assert.deepEqual(retry.reopened, [rewindPhase], orchestrator);
+        assert.equal(nextPhase(runId, { cwd }), rewindPhase, orchestrator);
+      } finally {
+        await removeTmpDir(cwd);
+      }
+    }
+  });
+
+  test('light-mode review reexecution durably recompletes execute and verify events', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-light-mode-review-reexec';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).count, 1);
+      await completeThrough(runId, cwd, ['execute', 'verify']);
+      assert.equal(enterPhase(runId, 'review', { cwd }).proceed, true);
+      assert.equal(loopTick(runId, 'review', { cwd }).count, 1);
+
+      const retried = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'light_mode_reexec',
+      }, { cwd });
+      assert.equal(retried.allowed, true);
+      assert.equal(retried.count, 2);
+      assert.deepEqual(retried.reopened, ['execute', 'verify']);
+      await completeThrough(runId, cwd, ['execute', 'verify']);
+      assert.equal(enterPhase(runId, 'review', { cwd }).proceed, true);
+      assert.equal(loopTick(runId, 'review', { cwd }).count, 2);
+      assert.equal((await completeNoCheckpoint(runId, 'review', cwd)).ok, true);
+
+      const completions = readEvents(cwd, runId)
+        .filter(event => event.type === 'pipeline_phase_completed')
+        .map(event => event.phase);
+      assert.equal(completions.filter(phaseId => phaseId === 'execute').length, 2);
+      assert.equal(completions.filter(phaseId => phaseId === 'verify').length, 2);
+      assert.equal(completions.filter(phaseId => phaseId === 'review').length, 1);
+      const ledger = readJson(pipelinePath(cwd, runId));
+      assert.equal(ledger.phases.execute.status, 'completed');
+      assert.equal(ledger.phases.verify.status, 'completed');
+      assert.equal(ledger.phases.review.status, 'completed');
+      assert.equal(ledger.reattemptReceipt.currentPhase, 'review');
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('three review rounds remain available without consuming the quality-failure cap', async () => {
     const cwd = await makeTmpDir();
     try {
       initPipeline('run-attempts', 'atlas', { cwd });
@@ -511,7 +785,8 @@ describe('beginAttempt + reattempt', () => {
       enterPhase('run-attempts', 'review', { cwd });
 
       const counts = [];
-      for (let i = 0; i < 14; i++) {
+      for (let i = 0; i < 2; i++) {
+        assert.equal(loopTick('run-attempts', 'review', { cwd }).count, i + 1);
         const r = reattempt('run-attempts', { reopen: ['verify'], reason: 'review_reject' }, { cwd });
         assert.equal(r.allowed, true);
         counts.push(r.count);
@@ -519,20 +794,18 @@ describe('beginAttempt + reattempt', () => {
         await completeThrough('run-attempts', cwd, ['verify']);
         enterPhase('run-attempts', 'review', { cwd });
       }
-      assert.deepEqual(counts, Array.from({ length: 14 }, (_, i) => i + 2));
-
-      const blocked = reattempt('run-attempts', { reopen: ['verify'], reason: 'review_reject' }, { cwd });
-      assert.equal(blocked.allowed, false);
-      assert.equal(blocked.count, 15);
-      assert.deepEqual(blocked.reopened, []);
-      assert.equal(readJson(guardPath(cwd, 'run-attempts')).counters.iterations.count, 15);
-      assert.equal(readJson(pipelinePath(cwd, 'run-attempts')).attempt, 15);
+      assert.equal(loopTick('run-attempts', 'review', { cwd }).count, 3);
+      assert.equal((await completeNoCheckpoint('run-attempts', 'review', cwd)).ok, true);
+      assert.deepEqual(counts, [2, 3]);
+      assert.equal(readJson(guardPath(cwd, 'run-attempts')).counters.iterations.count, 3);
+      assert.equal(readJson(guardPath(cwd, 'run-attempts')).counters['quality-cycles'], undefined);
+      assert.equal(readJson(pipelinePath(cwd, 'run-attempts')).attempt, 3);
     } finally {
       await removeTmpDir(cwd);
     }
   });
 
-  test('attempt mirror corruption never changes cap enforcement', async () => {
+  test('attempt mirror corruption fails closed before consuming cap or rewinding', async () => {
     const cwd = await makeTmpDir();
     try {
       initPipeline('run-mirror', 'atlas', { cwd });
@@ -544,11 +817,14 @@ describe('beginAttempt + reattempt', () => {
 
       await completeThrough('run-mirror', cwd, ['execute', 'verify']);
       enterPhase('run-mirror', 'review', { cwd });
+      assert.equal(loopTick('run-mirror', 'review', { cwd }).allowed, true);
 
       const second = reattempt('run-mirror', { reopen: ['verify'], reason: 'review_reject' }, { cwd });
-      assert.equal(second.allowed, true);
-      assert.equal(second.count, 2);
-      assert.equal(readJson(pipelinePath(cwd, 'run-mirror')).attempt, 2);
+      assert.equal(second.allowed, false);
+      assert.equal(second.degraded, true);
+      assert.equal(second.count, 1);
+      assert.equal(readJson(guardPath(cwd, 'run-mirror')).counters.iterations.count, 1);
+      assert.equal(readJson(pipelinePath(cwd, 'run-mirror')).attempt, 999);
     } finally {
       await removeTmpDir(cwd);
     }
@@ -593,17 +869,314 @@ describe('beginAttempt + reattempt', () => {
     try {
       const runId = 'run-invalid-reattempt';
       initPipeline(runId, 'atlas', { cwd });
-      const early = reattempt(runId, { reopen: ['verify'], reason: 'review_reject' }, { cwd });
+      let callbackCalls = 0;
+      const early = reattempt(
+        runId,
+        { reopen: ['verify'], reason: 'review_reject' },
+        { cwd, _beforeRewind: () => { callbackCalls += 1; } },
+      );
       assert.equal(early.allowed, false);
       assert.deepEqual(early.reopened, []);
+      assert.equal(callbackCalls, 0);
       assert.equal(existsSync(guardPath(cwd, runId)), false);
 
       await advanceToAttemptPhase(runId, 'atlas', cwd);
       assert.equal(beginAttempt(runId, { cwd }).allowed, true);
-      const future = reattempt(runId, { reopen: ['verify'], reason: 'review_reject' }, { cwd });
+      const future = reattempt(
+        runId,
+        { reopen: ['verify'], reason: 'review_reject' },
+        { cwd, _beforeRewind: () => { callbackCalls += 1; } },
+      );
       assert.equal(future.allowed, false);
       assert.deepEqual(future.reopened, []);
+      assert.equal(callbackCalls, 0);
       assert.equal(readJson(guardPath(cwd, runId)).counters.iterations.count, 1);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('trusted rewind callback runs after preflight and before the single mutation', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-atomic-reattempt';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).count, 1);
+      await completeThrough(runId, cwd, ['execute', 'verify']);
+      enterPhase(runId, 'review', { cwd });
+      assert.equal(loopTick(runId, 'review', { cwd }).allowed, true);
+
+      const observations = [];
+      const retry = reattempt(
+        runId,
+        { reopen: ['verify'], reason: 'review_reject' },
+        {
+          cwd,
+          _beforeRewind: (context) => {
+            observations.push({
+              context,
+              counter: readJson(guardPath(cwd, runId)).counters.iterations.count,
+              attempt: readJson(pipelinePath(cwd, runId)).attempt,
+            });
+          },
+        },
+      );
+      assert.equal(retry.allowed, true);
+      assert.equal(retry.count, 2);
+      assert.equal(observations.length, 1);
+      assert.equal(observations[0].counter, 1);
+      assert.equal(observations[0].attempt, 1);
+      assert.equal(observations[0].context.nextAttempt, 2);
+      assert.equal(readJson(guardPath(cwd, runId)).counters.iterations.count, 2);
+      assert.equal(readJson(pipelinePath(cwd, runId)).attempt, 2);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('throwing rewind callback leaves the counter and pipeline ledger unchanged', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-atomic-reattempt-throw';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).count, 1);
+      await completeThrough(runId, cwd, ['execute', 'verify']);
+      enterPhase(runId, 'review', { cwd });
+      assert.equal(loopTick(runId, 'review', { cwd }).allowed, true);
+      const ledgerBefore = readFileSync(pipelinePath(cwd, runId), 'utf8');
+      const guardBefore = readFileSync(guardPath(cwd, runId), 'utf8');
+
+      const retry = reattempt(
+        runId,
+        { reopen: ['verify'], reason: 'review_reject' },
+        { cwd, _beforeRewind: () => { throw new Error('CAS failed'); } },
+      );
+      assert.equal(retry.allowed, false);
+      assert.equal(retry.degraded, true);
+      assert.equal(readFileSync(pipelinePath(cwd, runId), 'utf8'), ledgerBefore);
+      assert.equal(readFileSync(guardPath(cwd, runId), 'utf8'), guardBefore);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('quality-boundary crash resumes without consuming quality or PRD rollback twice', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-reattempt-crash-after-quality';
+      const snapshotPath = path.join(cwd, 'latest-prd-snapshot.json');
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).count, 1);
+      await completeThrough(runId, cwd, ['execute']);
+      assert.equal(enterPhase(runId, 'verify', { cwd }).proceed, true);
+
+      let rollbackCalls = 0;
+      const rollback = () => {
+        rollbackCalls += 1;
+        writeFileSync(snapshotPath, JSON.stringify({ generation: 7, passes: false }), { mode: 0o600 });
+      };
+      const interrupted = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, {
+        cwd,
+        _beforeRewind: rollback,
+        _afterReattemptBoundary: boundary => {
+          if (boundary === 'quality') throw new Error('simulated crash after quality write');
+        },
+      });
+      assert.equal(interrupted.allowed, false);
+      assert.equal(interrupted.degraded, true);
+      assert.equal(readJson(guardPath(cwd, runId)).counters['quality-cycles'].count, 1);
+      assert.equal(readJson(guardPath(cwd, runId)).counters.iterations.count, 1);
+      assert.equal(readJson(pipelinePath(cwd, runId)).attempt, 1);
+      assert.equal(readJson(pipelinePath(cwd, runId)).pendingReattempt.targetAttempt, 2);
+      assert.equal(rollbackCalls, 1);
+
+      const resumed = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, { cwd, _beforeRewind: rollback });
+      assert.equal(resumed.allowed, true);
+      assert.equal(resumed.count, 2);
+      assert.equal(resumed.qualityCount, 1);
+      assert.equal(rollbackCalls, 1, 'durable intent replay must not repeat the PRD rollback');
+      assert.deepEqual(JSON.parse(readFileSync(snapshotPath, 'utf8')), {
+        generation: 7,
+        passes: false,
+      });
+      assert.equal(readJson(guardPath(cwd, runId)).counters['quality-cycles'].count, 1);
+      assert.equal(readJson(guardPath(cwd, runId)).counters.iterations.count, 2);
+      assert.equal(Object.hasOwn(readJson(pipelinePath(cwd, runId)), 'pendingReattempt'), false);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('iteration-boundary crash converges already-consumed counters with the pending ledger', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-reattempt-crash-after-iteration';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).count, 1);
+      await completeThrough(runId, cwd, ['execute']);
+      assert.equal(enterPhase(runId, 'verify', { cwd }).proceed, true);
+
+      const interrupted = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, {
+        cwd,
+        _afterReattemptBoundary: boundary => {
+          if (boundary === 'iteration') throw new Error('simulated crash after iteration write');
+        },
+      });
+      assert.equal(interrupted.allowed, false);
+      assert.equal(interrupted.degraded, true);
+      const guardAfterCrash = readJson(guardPath(cwd, runId));
+      assert.equal(guardAfterCrash.counters['quality-cycles'].count, 1);
+      assert.equal(guardAfterCrash.counters.iterations.count, 2);
+      assert.equal(readJson(pipelinePath(cwd, runId)).attempt, 1);
+
+      const resumed = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, { cwd });
+      assert.equal(resumed.allowed, true);
+      assert.equal(resumed.count, 2);
+      assert.equal(resumed.qualityCount, 1);
+      const guardAfterResume = readJson(guardPath(cwd, runId));
+      assert.equal(guardAfterResume.counters['quality-cycles'].count, 1);
+      assert.equal(guardAfterResume.counters.iterations.count, 2);
+      assert.equal(readJson(pipelinePath(cwd, runId)).attempt, 2);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('final pipeline rename failure leaves a recoverable intent and never double-charges counters', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-reattempt-final-rename-failure';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).count, 1);
+      await completeThrough(runId, cwd, ['execute']);
+      assert.equal(enterPhase(runId, 'verify', { cwd }).proceed, true);
+
+      const writes = [];
+      const interrupted = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, {
+        cwd,
+        _writeReattemptLedger: ({ stage }, write) => {
+          writes.push(stage);
+          return stage === 'commit' ? false : write();
+        },
+      });
+      assert.equal(interrupted.allowed, false);
+      assert.equal(interrupted.reason, 'pipeline-commit-failed');
+      assert.deepEqual(writes, ['prepare', 'commit']);
+      assert.equal(readJson(guardPath(cwd, runId)).counters['quality-cycles'].count, 1);
+      assert.equal(readJson(guardPath(cwd, runId)).counters.iterations.count, 2);
+      const pendingLedger = readJson(pipelinePath(cwd, runId));
+      assert.equal(pendingLedger.attempt, 1);
+      assert.equal(pendingLedger.pendingReattempt.targetAttempt, 2);
+
+      const resumed = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, { cwd });
+      assert.equal(resumed.allowed, true);
+      assert.equal(resumed.count, 2);
+      assert.equal(resumed.qualityCount, 1);
+      assert.equal(readJson(guardPath(cwd, runId)).counters['quality-cycles'].count, 1);
+      assert.equal(readJson(guardPath(cwd, runId)).counters.iterations.count, 2);
+      assert.equal(Object.hasOwn(readJson(pipelinePath(cwd, runId)), 'pendingReattempt'), false);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('lost acknowledgement after a successful final rename replays the committed receipt', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-reattempt-lost-commit-ack';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).count, 1);
+      await completeThrough(runId, cwd, ['execute']);
+      assert.equal(enterPhase(runId, 'verify', { cwd }).proceed, true);
+
+      let rollbackCalls = 0;
+      const interrupted = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, {
+        cwd,
+        _beforeRewind: () => { rollbackCalls += 1; },
+        _writeReattemptLedger: ({ stage }, write) => {
+          const written = write();
+          return stage === 'commit' ? false : written;
+        },
+      });
+      assert.equal(interrupted.allowed, false);
+      const committed = readJson(pipelinePath(cwd, runId));
+      assert.equal(committed.attempt, 2);
+      assert.equal(committed.reattemptReceipt.targetAttempt, 2);
+      assert.equal(Object.hasOwn(committed, 'pendingReattempt'), false);
+
+      const replayed = reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, {
+        cwd,
+        _beforeRewind: () => { rollbackCalls += 1; },
+      });
+      assert.equal(replayed.allowed, true);
+      assert.equal(replayed.reused, true);
+      assert.equal(replayed.count, 2);
+      assert.equal(replayed.qualityCount, 1);
+      assert.equal(rollbackCalls, 1);
+      assert.equal(readJson(guardPath(cwd, runId)).counters['quality-cycles'].count, 1);
+      assert.equal(readJson(guardPath(cwd, runId)).counters.iterations.count, 2);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('a pending reattempt rejects different reason or reopen content without mutation', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-reattempt-pending-conflict';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).count, 1);
+      await completeThrough(runId, cwd, ['execute']);
+      assert.equal(enterPhase(runId, 'verify', { cwd }).proceed, true);
+      reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, {
+        cwd,
+        _afterReattemptBoundary: boundary => {
+          if (boundary === 'quality') throw new Error('leave pending intent');
+        },
+      });
+      const ledgerBefore = readFileSync(pipelinePath(cwd, runId), 'utf8');
+      const guardBefore = readFileSync(guardPath(cwd, runId), 'utf8');
+
+      for (const request of [
+        { reopen: ['execute', 'verify'], reason: 'review_reject' },
+        { reopen: ['verify'], reason: 'quality_fail' },
+      ]) {
+        const conflict = reattempt(runId, request, { cwd });
+        assert.equal(conflict.allowed, false);
+        assert.equal(conflict.degraded, true);
+        assert.equal(conflict.reason, 'pending-reattempt-conflict');
+        assert.equal(readFileSync(pipelinePath(cwd, runId), 'utf8'), ledgerBefore);
+        assert.equal(readFileSync(guardPath(cwd, runId), 'utf8'), guardBefore);
+      }
+
+      assert.equal(reattempt(runId, {
+        reopen: ['execute', 'verify'], reason: 'quality_fail',
+      }, { cwd }).allowed, true);
     } finally {
       await removeTmpDir(cwd);
     }
@@ -611,14 +1184,12 @@ describe('beginAttempt + reattempt', () => {
 });
 
 describe('loopTick', () => {
-  test('dispatches review, monitor, ci, and quality caps', async () => {
+  test('dispatches monitor and ci multi-cycle caps', async () => {
     const cwd = await makeTmpDir();
     try {
       const cases = [
-        ['review', 3, 'atlas'],
         ['monitor', 10, 'athena'],
         ['ci', 2, 'atlas'],
-        ['quality', 2, 'atlas'],
       ];
       for (const [key, cap, orchestrator] of cases) {
         const runId = `run-${key}`;
@@ -630,24 +1201,49 @@ describe('loopTick', () => {
           await advanceToAttemptPhase(runId, 'atlas', cwd);
           beginAttempt(runId, { cwd });
           await completeThrough(runId, cwd, ['execute']);
-          if (key === 'quality') {
-            enterPhase(runId, 'verify', { cwd });
-          } else {
-            await completeThrough(runId, cwd, ['verify']);
-            if (key === 'review') {
-              enterPhase(runId, 'review', { cwd });
-            } else {
-              await completeThrough(runId, cwd, ['review', 'finalize']);
-              skipPhase(runId, 'ship', 'not-applicable', { cwd });
-              enterPhase(runId, 'ci', { cwd });
-            }
-          }
+          await completeThrough(runId, cwd, ['verify']);
+          await completeThrough(runId, cwd, ['review', 'finalize']);
+          skipPhase(runId, 'ship', 'not-applicable', { cwd });
+          enterPhase(runId, 'ci', { cwd });
         }
         const results = [];
         for (let i = 0; i < cap + 1; i++) results.push(loopTick(runId, key, { cwd }));
         assert.deepEqual(results.map(r => r.allowed), [...Array(cap).fill(true), false], `${key} allowed sequence`);
         assert.equal(results.at(-1).count, cap, `${key} count pinned at cap`);
       }
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('final review is idempotent per attempt and independently bounded', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-final-review';
+      initPipeline(runId, 'atlas', { cwd });
+      await advanceToAttemptPhase(runId, 'atlas', cwd);
+      assert.equal(beginAttempt(runId, { cwd }).allowed, true);
+      await completeThrough(runId, cwd, ['execute', 'verify', 'review']);
+      enterPhase(runId, 'finalize', { cwd });
+
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const first = loopTick(runId, 'final-review', { cwd });
+        const duplicate = loopTick(runId, 'final-review', { cwd });
+        assert.equal(first.allowed, true);
+        assert.equal(first.count, attempt);
+        assert.equal(duplicate.allowed, true);
+        assert.equal(duplicate.count, attempt);
+        assert.equal(duplicate.reused, true);
+        if (attempt < 2) {
+          assert.equal(reattempt(runId, {
+            reopen: ['verify'], reason: 'final_review_reject',
+          }, { cwd }).allowed, true);
+          await completeThrough(runId, cwd, ['verify', 'review']);
+          assert.equal(enterPhase(runId, 'finalize', { cwd }).proceed, true);
+        }
+      }
+      assert.equal(readJson(guardPath(cwd, runId)).counters.finalReviewRounds.count, 2);
+      assert.equal(readJson(guardPath(cwd, runId)).counters.reviewRounds.count, 2);
     } finally {
       await removeTmpDir(cwd);
     }
@@ -962,6 +1558,9 @@ describe('completePhase', () => {
         if (phaseId === 'monitor') {
           assert.equal(loopTick(runId, 'monitor', { cwd }).allowed, true);
         }
+        if (phaseId === 'integrate') {
+          assert.equal(loopTick(runId, 'quality', { cwd }).allowed, true);
+        }
         if (phaseId === 'spawn') {
           assert.equal(recordPhaseOutputs(runId, phaseId, { teamSlug: 'durable-team' }, { cwd }).ok, true);
         }
@@ -1070,6 +1669,43 @@ describe('completePhase', () => {
       assert.equal(typeof outputs.tail, 'string');
       assert.ok(Buffer.byteLength(JSON.stringify(outputs), 'utf-8') <= 4096);
       assert.equal(outputs.tail.includes('x'.repeat(20)), true);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('trusted completion evidence is derived under the phase lock after traversal checks', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-derived-completion';
+      initPipeline(runId, 'atlas', { cwd });
+      let calls = 0;
+      const denied = await completePhase(runId, 'triage', undefined, {
+        cwd,
+        saveCheckpoint: false,
+        _deriveOutputs: () => { calls += 1; return { proof: 'too-early' }; },
+      });
+      assert.equal(denied.ok, false);
+      assert.equal(calls, 0);
+
+      enterPhase(runId, 'triage', { cwd });
+      const completed = await completePhase(runId, 'triage', undefined, {
+        cwd,
+        saveCheckpoint: false,
+        _deriveOutputs: (context) => {
+          calls += 1;
+          assert.equal(context.phaseId, 'triage');
+          assert.equal(context.attempt, 0);
+          assert.equal(context.phaseAttempt, 1);
+          assert.equal(Number.isFinite(Date.parse(context.phaseStartedAt)), true);
+          return { proof: 'git-bound' };
+        },
+      });
+      assert.equal(completed.ok, true);
+      assert.equal(calls, 1);
+      assert.deepEqual(getPipelineState(runId, { cwd }).phases.triage.outputs, {
+        proof: 'git-bound',
+      });
     } finally {
       await removeTmpDir(cwd);
     }
@@ -1192,6 +1828,41 @@ describe('recordPhaseOutputs', () => {
 });
 
 describe('skipPhase and reopenPhase', () => {
+  test('runs a synchronous skip boundary under the transition lock before mutation', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const runId = 'run-skip-boundary';
+      initPipeline(runId, 'atlas', { cwd });
+      assert.equal(enterPhase(runId, 'triage', { cwd }).proceed, true);
+      assert.equal((await completeNoCheckpoint(runId, 'triage', cwd)).ok, true);
+      const before = readJson(pipelinePath(cwd, runId));
+      let observed = null;
+      assert.deepEqual(skipPhase(runId, 'context', 'trivial', {
+        cwd,
+        _validateSkip: (boundary) => {
+          observed = boundary;
+          throw new Error('deny skip');
+        },
+      }), { ok: false, next: null, degraded: true });
+      assert.equal(observed.phaseId, 'context');
+      assert.equal(observed.reason, 'trivial');
+      assert.equal(observed.pipeline.phases.context.status, 'pending');
+      assert.deepEqual(readJson(pipelinePath(cwd, runId)), before);
+
+      const skipped = skipPhase(runId, 'context', 'trivial', {
+        cwd,
+        _validateSkip: ({ pipeline }) => {
+          assert.equal(pipeline.phases.context.status, 'pending');
+          return true;
+        },
+      });
+      assert.equal(skipped.ok, true);
+      assert.equal(getPipelineState(runId, { cwd }).phases.context.status, 'skipped');
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
   test('skipPhase rejects future skips and advances only when the current phase is skipped', async () => {
     const cwd = await makeTmpDir();
     try {
@@ -1531,5 +2202,146 @@ describe('isComplete', () => {
     const state = getPipelineState('missing-run', { cwd: '/tmp/ao-missing-phase-runner' });
     assert.equal(state.schemaVersion, 1);
     assert.deepEqual(state.phases, {});
+  });
+});
+
+describe('finalizeCompletedPipeline', () => {
+  test('rejects an incomplete pipeline without mutating the running summary', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const base = path.join(cwd, '.ao', 'artifacts', 'runs');
+      const stateDir = path.join(cwd, '.ao', 'state');
+      const created = createRun('atlas', 'incomplete finalization', {
+        base,
+        stateDir,
+        trustedRoot: cwd,
+      });
+      assert.equal(created.ok, true);
+      initPipeline(created.runId, 'atlas', { cwd });
+      const summaryPath = path.join(base, created.runId, 'summary.json');
+      const before = readFileSync(summaryPath, 'utf8');
+
+      const result = finalizeCompletedPipeline(created.runId, { cwd });
+      assert.deepEqual(result, {
+        ok: false,
+        reason: 'pipeline-incomplete',
+        degraded: false,
+      });
+      assert.equal(readFileSync(summaryPath, 'utf8'), before);
+      assert.equal(getActiveRunId('atlas', { stateDir }), created.runId);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('runs the final evidence validator under the completion transition lock', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const base = path.join(cwd, '.ao', 'artifacts', 'runs');
+      const stateDir = path.join(cwd, '.ao', 'state');
+      const created = createRun('atlas', 'validated finalization', {
+        base,
+        stateDir,
+        trustedRoot: cwd,
+      });
+      assert.equal(created.ok, true);
+      initPipeline(created.runId, 'atlas', { cwd });
+      await completeThrough(created.runId, cwd, ['triage', 'context', 'spec', 'plan']);
+      assert.equal(beginAttempt(created.runId, { cwd }).allowed, true);
+      await completeThrough(created.runId, cwd, ['execute', 'verify', 'review']);
+      assert.equal(enterPhase(created.runId, 'finalize', { cwd }).proceed, true);
+      assert.equal(loopTick(created.runId, 'final-review', { cwd }).allowed, true);
+      assert.equal((await completeNoCheckpoint(created.runId, 'finalize', cwd, {
+        finalReviewDigest: 'digest',
+        finalReviewTreeOid: 'tree',
+        finalCommit: 'commit',
+      })).ok, true);
+      assert.equal(skipPhase(created.runId, 'ship', 'not-applicable', { cwd }).ok, true);
+      assert.equal(skipPhase(created.runId, 'ci', 'no-pr', { cwd }).ok, true);
+      await completeThrough(created.runId, cwd, ['complete']);
+      const finalPrd = writeCompletedAtlasPrd(cwd);
+
+      let calls = 0;
+      const denied = finalizeCompletedPipeline(created.runId, {
+        cwd,
+        _validateCompletion: ({ finalizeOutputs, _runLockOwner }) => {
+          calls += 1;
+          assert.equal(typeof _runLockOwner?.token, 'string');
+          assert.equal(finalizeOutputs.finalCommit, 'commit');
+          return false;
+        },
+      });
+      assert.equal(denied.ok, false);
+      assert.equal(denied.reason, 'completion-evidence-invalid');
+      assert.equal(readJson(path.join(base, created.runId, 'summary.json')).status, 'running');
+
+      const finalized = finalizeCompletedPipeline(created.runId, {
+        cwd,
+        _validateCompletion: () => { calls += 1; return true; },
+      });
+      assert.equal(finalized.ok, true);
+      assert.equal(calls, 2);
+      const snapshot = getRunExecutionPrdSnapshot(created.runId, {
+        base,
+        trustedRoot: cwd,
+      });
+      assert.equal(snapshot.ok, true);
+      assert.deepEqual(snapshot.snapshot.prd, finalPrd);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  test('atomically finalizes a complete run and repairs a stale matching pointer', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const base = path.join(cwd, '.ao', 'artifacts', 'runs');
+      const stateDir = path.join(cwd, '.ao', 'state');
+      const pointerPath = path.join(stateDir, 'ao-active-run-atlas.json');
+      const created = createRun('atlas', 'complete finalization', {
+        base,
+        stateDir,
+        trustedRoot: cwd,
+      });
+      assert.equal(created.ok, true);
+      const pointerPayload = readFileSync(pointerPath, 'utf8');
+      initPipeline(created.runId, 'atlas', { cwd });
+      await completeThrough(created.runId, cwd, ['triage', 'context', 'spec', 'plan']);
+      assert.equal(beginAttempt(created.runId, { cwd }).allowed, true);
+      await completeThrough(created.runId, cwd, ['execute', 'verify', 'review', 'finalize']);
+      assert.equal(skipPhase(created.runId, 'ship', 'not-applicable', { cwd }).ok, true);
+      assert.equal(skipPhase(created.runId, 'ci', 'no-pr', { cwd }).ok, true);
+      await completeThrough(created.runId, cwd, ['complete']);
+      const finalPrd = writeCompletedAtlasPrd(cwd);
+
+      const first = finalizeCompletedPipeline(created.runId, { cwd });
+      assert.equal(first.ok, true);
+      assert.equal(first.idempotent, false);
+      assert.equal(getActiveRunId('atlas', { stateDir }), null);
+      assert.deepEqual(
+        getRunExecutionPrdSnapshot(created.runId, { base, trustedRoot: cwd }).snapshot.prd,
+        finalPrd,
+      );
+
+      writeFileSync(pointerPath, pointerPayload, { flag: 'wx', mode: 0o600 });
+      assert.equal(getActiveRunId('atlas', { stateDir }), created.runId);
+      writeFileSync(path.join(cwd, 'later-user-work.txt'), 'must not strand pointer repair\n');
+      let replayValidationCalls = 0;
+      const replay = finalizeCompletedPipeline(created.runId, {
+        cwd,
+        _validateCompletion: () => {
+          replayValidationCalls += 1;
+          return false;
+        },
+      });
+      assert.equal(replay.ok, true);
+      assert.equal(replay.idempotent, true);
+      assert.equal(replayValidationCalls, 0,
+        'completed-summary replay repairs durable state without consulting a mutable checkout');
+      assert.equal(getActiveRunId('atlas', { stateDir }), null);
+      assert.equal(readJson(path.join(base, created.runId, 'summary.json')).result, 'success');
+    } finally {
+      await removeTmpDir(cwd);
+    }
   });
 });

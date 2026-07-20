@@ -71,15 +71,22 @@ function bashSyntaxCheck(str) {
   }
 }
 
-// buildWorkerCommand writes a /tmp/ao-prompt-<uuid>.txt that the real command
+// buildWorkerCommand writes an OS-temp ao-prompt-<uuid>.txt that the real command
 // would `rm -f` at runtime; under `bash -n` nothing executes, so reap it here.
 function reapPromptFiles(cmd) {
-  for (const m of cmd.match(/\/tmp\/ao-prompt-[0-9a-fA-F-]+\.txt/g) || []) {
+  const tempArtifacts = cmd.match(
+    /\/[^'"\s;]*(?:ao-prompt-[0-9a-fA-F-]+\.txt|ao-gemini-readonly-[0-9a-fA-F-]+\.json)/g,
+  ) || [];
+  for (const m of new Set(tempArtifacts)) {
     try { unlinkSync(m); } catch {}
   }
 }
 
 const WORKER_TYPES = ['codex', 'gemini', 'claude'];
+const SUPPORTED_CODEX_PROBE = () => ({
+  version: '0.143.0',
+  raw: 'codex-cli 0.143.0\n',
+});
 // Adversarial prompt exercising every char sanitizeForShellArg targets, plus
 // shell metacharacters (`;`, `&`). Safe because it lives in a temp file read
 // via `"$(cat ...)"`, never on the shell source line.
@@ -219,6 +226,135 @@ for (const type of WORKER_TYPES) {
     assert.ok(ok, `bash -n rejected composed ${type} command:\n${composed}\n${stderr}`);
   });
 }
+
+test('read-only tmux worker commands enforce provider-native restrictive flags', () => {
+  const codex = buildWorkerCommand(
+    { type: 'codex', prompt: 'review', readOnly: true },
+    { cwd: tmpdir(), autonomyConfig: {}, versionProbe: SUPPORTED_CODEX_PROBE },
+  );
+  const gemini = buildWorkerCommand(
+    { type: 'gemini', prompt: 'review', readOnly: true },
+    { cwd: tmpdir(), autonomyConfig: {} },
+  );
+  const claude = buildWorkerCommand(
+    { type: 'claude', prompt: 'review', readOnly: true },
+    { cwd: tmpdir(), autonomyConfig: {} },
+  );
+  try {
+    assert.match(
+      codex,
+      /-a never -s read-only --strict-config -c project_doc_max_bytes=0 -c skills\.bundled\.enabled=false exec --ignore-user-config --ignore-rules --skip-git-repo-check --ephemeral/,
+    );
+    assert.match(gemini, /GEMINI_CLI_SYSTEM_SETTINGS_PATH='[^']*\/ao-gemini-readonly-/);
+    assert.match(gemini, /--approval-mode plan -e none -p/);
+    assert.match(gemini, /rm -f "[^"]*\/ao-gemini-readonly-/,
+      'read-only settings must be removed after the CLI exits');
+    assert.match(
+      claude,
+      /--print --bare --no-session-persistence --permission-mode plan --allowedTools Read,Glob,Grep -- "\$\(cat /,
+    );
+    assert.doesNotMatch(claude, /--allowedTools Read Glob Grep/);
+    assert.doesNotMatch(claude, /(?<!no-)session-persistence\b/);
+  } finally {
+    for (const command of [codex, gemini, claude]) reapPromptFiles(command);
+  }
+});
+
+test('Claude tmux commands terminate options immediately before the final prompt', () => {
+  const readOnly = buildWorkerCommand(
+    { type: 'claude', prompt: 'review', readOnly: true },
+    { cwd: tmpdir(), autonomyConfig: {} },
+  );
+  const mutable = buildWorkerCommand(
+    { type: 'claude', prompt: 'implement' },
+    { cwd: tmpdir(), autonomyConfig: {} },
+  );
+  try {
+    assert.match(readOnly, /--allowedTools Read,Glob,Grep -- "\$\(cat "[^"]+"\)"/);
+    assert.match(mutable, /--print -- "\$\(cat "[^"]+"\)"/);
+  } finally {
+    reapPromptFiles(readOnly);
+    reapPromptFiles(mutable);
+  }
+});
+
+test('read-only Codex tmux fails closed on old/unknown versions before prompt creation', () => {
+  for (const version of ['0.142.5', null]) {
+    let promptWrites = 0;
+    let probes = 0;
+    assert.throws(
+      () => buildWorkerCommand(
+        { type: 'codex', prompt: 'review', readOnly: true },
+        {
+          cwd: tmpdir(),
+          autonomyConfig: {},
+          codexBinary: '/fake/codex',
+          versionProbe: (binPath) => {
+            probes += 1;
+            assert.equal(binPath, '/fake/codex');
+            return {
+              version,
+              raw: version ? `codex-cli ${version}\n` : 'unparseable\n',
+            };
+          },
+          promptFileWriter: () => {
+            promptWrites += 1;
+            return '/tmp/ao-prompt-should-not-exist.txt';
+          },
+        },
+      ),
+      new RegExp(
+        `read-only rule isolation requires Codex >=0\\.143\\.0 .*detected ${version || 'unknown'}\\. `
+        + 'Upgrade with: npm install -g @openai/codex@latest',
+      ),
+    );
+    assert.equal(probes, 1);
+    assert.equal(promptWrites, 0, 'version rejection must precede prompt-file creation');
+  }
+});
+
+test('read-only Codex tmux accepts the supported minimum version', () => {
+  let promptWrites = 0;
+  const command = buildWorkerCommand(
+    { type: 'codex', prompt: 'review', readOnly: true },
+    {
+      cwd: tmpdir(),
+      autonomyConfig: {},
+      codexBinary: '/fake/codex',
+      versionProbe: SUPPORTED_CODEX_PROBE,
+      promptFileWriter: () => {
+        promptWrites += 1;
+        return '/tmp/ao-prompt-supported.txt';
+      },
+    },
+  );
+
+  assert.equal(promptWrites, 1);
+  assert.match(command, /^"\/fake\/codex" -a never -s read-only --strict-config/);
+});
+
+test('Codex tmux commands terminate options before an option-shaped prompt', () => {
+  for (const readOnly of [false, true]) {
+    const command = buildWorkerCommand(
+      { type: 'codex', prompt: '--help', readOnly },
+      {
+        cwd: tmpdir(),
+        autonomyConfig: {},
+        codexBinary: '/fake/codex',
+        versionProbe: SUPPORTED_CODEX_PROBE,
+      },
+    );
+    try {
+      assert.match(
+        command,
+        /\bexec(?: --ignore-user-config --ignore-rules --skip-git-repo-check --ephemeral)? -- "\$\(cat "[^"]+"\)"/,
+        `${readOnly ? 'read-only' : 'mutable'} command must place -- immediately before the prompt`,
+      );
+    } finally {
+      reapPromptFiles(command);
+    }
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Gemini binary fallback wiring: the tmux gemini command must honor

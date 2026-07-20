@@ -1,7 +1,7 @@
 /**
  * Unit tests for scripts/lib/model-router.mjs
  *
- * Tests routeByIntent() for all 7 intent categories, low-confidence fallback,
+ * Tests routeByIntent() for every intent category, low-confidence fallback,
  * missing/null input, and user config override behavior (via buildRoutingTable).
  *
  * Because model-router.mjs calls loadRoutingConfig() which reads
@@ -20,6 +20,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { routeByIntent, DEFAULT_ROUTING_CONFIG } from '../lib/model-router.mjs';
+import { classifyIntent } from '../lib/intent-patterns.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -93,10 +94,10 @@ describe('model-router', () => {
   });
 
   // -------------------------------------------------------------------------
-  // routeByIntent — 7 intent categories produce correct agent/model mapping
+  // routeByIntent — all intent categories produce correct agent/model mapping
   // -------------------------------------------------------------------------
 
-  describe('routeByIntent: all 7 categories with high confidence', () => {
+  describe('routeByIntent: all categories with high confidence', () => {
     const expectations = [
       {
         category: 'visual-engineering',
@@ -105,10 +106,46 @@ describe('model-router', () => {
         teamWorkerType: DEFAULT_ROUTING_CONFIG.routes['visual-engineering'].teamWorkerType,
       },
       {
+        category: 'design-review',
+        agent: DEFAULT_ROUTING_CONFIG.routes['design-review'].agent,
+        model: DEFAULT_ROUTING_CONFIG.routes['design-review'].model,
+        teamWorkerType: DEFAULT_ROUTING_CONFIG.routes['design-review'].teamWorkerType,
+      },
+      {
+        category: 'code-review',
+        agent: DEFAULT_ROUTING_CONFIG.routes['code-review'].agent,
+        model: DEFAULT_ROUTING_CONFIG.routes['code-review'].model,
+        teamWorkerType: DEFAULT_ROUTING_CONFIG.routes['code-review'].teamWorkerType,
+      },
+      {
+        category: 'security-review',
+        agent: DEFAULT_ROUTING_CONFIG.routes['security-review'].agent,
+        model: DEFAULT_ROUTING_CONFIG.routes['security-review'].model,
+        teamWorkerType: DEFAULT_ROUTING_CONFIG.routes['security-review'].teamWorkerType,
+      },
+      {
+        category: 'test-authoring',
+        agent: DEFAULT_ROUTING_CONFIG.routes['test-authoring'].agent,
+        model: DEFAULT_ROUTING_CONFIG.routes['test-authoring'].model,
+        teamWorkerType: DEFAULT_ROUTING_CONFIG.routes['test-authoring'].teamWorkerType,
+      },
+      {
+        category: 'product-planning',
+        agent: DEFAULT_ROUTING_CONFIG.routes['product-planning'].agent,
+        model: DEFAULT_ROUTING_CONFIG.routes['product-planning'].model,
+        teamWorkerType: DEFAULT_ROUTING_CONFIG.routes['product-planning'].teamWorkerType,
+      },
+      {
         category: 'deep',
         agent: DEFAULT_ROUTING_CONFIG.routes['deep'].agent,
         model: DEFAULT_ROUTING_CONFIG.routes['deep'].model,
         teamWorkerType: DEFAULT_ROUTING_CONFIG.routes['deep'].teamWorkerType,
+      },
+      {
+        category: 'deep-mutation',
+        agent: DEFAULT_ROUTING_CONFIG.routes['deep-mutation'].agent,
+        model: DEFAULT_ROUTING_CONFIG.routes['deep-mutation'].model,
+        teamWorkerType: DEFAULT_ROUTING_CONFIG.routes['deep-mutation'].teamWorkerType,
       },
       {
         category: 'quick',
@@ -135,6 +172,12 @@ describe('model-router', () => {
         teamWorkerType: DEFAULT_ROUTING_CONFIG.routes['planning'].teamWorkerType,
       },
       {
+        category: 'external-model',
+        agent: DEFAULT_ROUTING_CONFIG.routes['external-model'].agent,
+        model: DEFAULT_ROUTING_CONFIG.routes['external-model'].model,
+        teamWorkerType: DEFAULT_ROUTING_CONFIG.routes['external-model'].teamWorkerType,
+      },
+      {
         category: 'unknown',
         agent: DEFAULT_ROUTING_CONFIG.routes['unknown'].agent,
         model: DEFAULT_ROUTING_CONFIG.routes['unknown'].model,
@@ -152,6 +195,17 @@ describe('model-router', () => {
     }
   });
 
+  it('default route keys exactly cover every classifier category plus unknown', () => {
+    assert.deepEqual(
+      Object.keys(DEFAULT_ROUTING_CONFIG.routes).sort(),
+      [
+        'visual-engineering', 'design-review', 'code-review', 'security-review', 'test-authoring',
+        'product-planning', 'deep', 'deep-mutation', 'quick', 'writing',
+        'artistry', 'planning', 'external-model', 'unknown',
+      ].sort(),
+    );
+  });
+
   it('routeByIntent: result always contains fallbackChain array', () => {
     const result = routeByIntent(intent('deep'));
     assert.ok(Array.isArray(result.fallbackChain));
@@ -167,6 +221,89 @@ describe('model-router', () => {
   it('routeByIntent: advice includes confidence percentage', () => {
     const result = routeByIntent(intent('quick', 0.75));
     assert.ok(result.advice.includes('75%'), `Expected "75%" in advice: "${result.advice}"`);
+  });
+
+  it('preserves explicit external-model intent instead of falling back to executor', () => {
+    const result = routeByIntent(intent('external-model', 0.9));
+    assert.equal(result.recommendedAgent, 'agent-olympus:ask');
+    assert.match(result.advice, /external-model intent/i);
+  });
+
+  it('routes provider-aware cross-reviews to external or internal read-only agents', () => {
+    const cases = [
+      ['cross-review this change', 'external-model', 'agent-olympus:ask'],
+      ['교차 검증 해줘', 'external-model', 'agent-olympus:ask'],
+      ['ask Claude to cross-review this change', 'code-review', 'agent-olympus:code-reviewer'],
+      ['as Claude, review this change', 'code-review', 'agent-olympus:code-reviewer'],
+      ['ask Claude to review the Codex adapter', 'code-review', 'agent-olympus:code-reviewer'],
+      ['Claude suggested this; get a second opinion', 'external-model', 'agent-olympus:ask'],
+      ['클로드로 교차 검증해줘', 'code-review', 'agent-olympus:code-reviewer'],
+      ['Codex and Claude cross-review this change', 'external-model', 'agent-olympus:ask'],
+      ['codex랑 claude로 교차검증 해줘', 'external-model', 'agent-olympus:ask'],
+      ['review the patch generated by Codex', 'code-review', 'agent-olympus:code-reviewer'],
+      ['We use Codex for code generation; review this adapter', 'code-review', 'agent-olympus:code-reviewer'],
+      ['use Codex to review this change', 'external-model', 'agent-olympus:ask'],
+      ['use Codex, review this change', 'external-model', 'agent-olympus:ask'],
+      ['fix issues from the Claude review', 'quick', 'agent-olympus:executor'],
+      ['클로드가 검토한 문제를 수정해줘', 'quick', 'agent-olympus:executor'],
+      ['코덱스가 검토한 문제를 수정해줘', 'quick', 'agent-olympus:executor'],
+      ['Claude, analyze and implement this database refactor', 'deep-mutation', 'agent-olympus:hephaestus'],
+      ['ask Claude to analyze and fix this auth bug', 'deep-mutation', 'agent-olympus:hephaestus'],
+      ['ask Claude to review this; implement the result', 'quick', 'agent-olympus:executor'],
+      ['ask Codex to review this; fix the result', 'quick', 'agent-olympus:executor'],
+      ['ask Claude to review this, implement the result', 'quick', 'agent-olympus:executor'],
+      ['ask Gemini to review this, fix the findings', 'quick', 'agent-olympus:executor'],
+      ['ask Codex to review this fix', 'external-model', 'agent-olympus:ask'],
+      ['ask Claude to review this update', 'code-review', 'agent-olympus:code-reviewer'],
+      ['have this patch reviewed by Codex', 'external-model', 'agent-olympus:ask'],
+      ['get this checked by Gemini', 'external-model', 'agent-olympus:ask'],
+    ];
+
+    for (const [prompt, category, agent] of cases) {
+      const classified = classifyIntent(prompt);
+      assert.equal(classified.category, category, prompt);
+      assert.equal(routeByIntent(classified).recommendedAgent, agent, prompt);
+    }
+  });
+
+  it('preserves explicit provider and design-review intents below the generic threshold', () => {
+    const external = classifyIntent('ask codex to review the database schema migration security authorization oauth jwt architecture refactor optimize distributed microservice infrastructure kubernetes concurrency');
+    const design = classifyIntent('review the UI design CSS layout responsive color font button modal navbar sidebar component animation accessibility WCAG');
+    assert.equal(routeByIntent({ ...external, confidence: 0.01 }).recommendedAgent, 'agent-olympus:ask');
+    assert.equal(routeByIntent({ ...design, confidence: 0.01 }).recommendedAgent, 'agent-olympus:aphrodite');
+  });
+
+  it('routes explicit specialist and product intents to their dedicated agents', () => {
+    const cases = [
+      ['security review the authentication flow', 'agent-olympus:security-reviewer'],
+      ['write unit tests for the authentication database layer', 'agent-olympus:test-engineer'],
+      ['write a PRD for this feature', 'agent-olympus:hermes'],
+      ['reverse engineer a spec from this code', 'agent-olympus:hermes'],
+    ];
+    for (const [prompt, agent] of cases) {
+      assert.equal(routeByIntent(classifyIntent(prompt)).recommendedAgent, agent, prompt);
+    }
+  });
+
+  it('routes quick fixes to a mutation-capable executor rather than read-only explore', () => {
+    const result = routeByIntent(intent('quick', 0.9));
+    assert.equal(result.recommendedAgent, 'agent-olympus:executor');
+    assert.equal(result.recommendedModel, 'sonnet');
+    assert.notEqual(result.recommendedAgent, 'agent-olympus:explore');
+  });
+
+  it('routes execution of an existing plan to a mutation-capable agent', () => {
+    const result = routeByIntent(classifyIntent('implement the plan'));
+    assert.equal(result.recommendedAgent, 'agent-olympus:executor');
+    assert.equal(result.recommendedModel, 'sonnet');
+  });
+
+  it('routes deep implementation to Hephaestus while deep review stays Architect', () => {
+    const mutation = routeByIntent(intent('deep-mutation', 0.9));
+    const review = routeByIntent(intent('deep', 0.9));
+    assert.equal(mutation.recommendedAgent, 'agent-olympus:hephaestus');
+    assert.equal(mutation.recommendedModel, 'sonnet');
+    assert.equal(review.recommendedAgent, 'agent-olympus:architect');
   });
 
   // -------------------------------------------------------------------------

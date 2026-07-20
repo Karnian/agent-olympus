@@ -29,16 +29,19 @@ automatic escalation for your review.
 
 ```stage_verdict
 stage: plan-validation
-verdict: APPROVE        # or: REVISE | REJECT
-confidence: high        # or: medium | low (based on evidence strength)
-escalate_to: none       # or: opus (only when REJECT + you believe a
-                        #           stronger planner would actually fix it)
+verdict: APPROVE
+confidence: high
+escalate_to: none
 reasons:
   - <one-line reason — cite which criterion failed and why>
   - <another reason>
 evidence:
   - <file:line or quoted snippet supporting each reason>
 ```
+
+Allowed alternatives are `REVISE` or `REJECT` for `verdict`, `medium` or
+`low` for `confidence`, and `opus` for `escalate_to` only when a stronger
+planner is likely to resolve a `REJECT` result.
 
 Use escalate_to=opus sparingly — only when REJECT and you judge the prior
 planner's model tier was insufficient. For style/clarity issues, leave

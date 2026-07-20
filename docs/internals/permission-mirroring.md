@@ -33,13 +33,15 @@ All worker types (Codex, Claude, Gemini) mirror the host session's permission le
 | Any broad/scoped Write/Edit, or scoped Bash, or `acceptEdits` mode | `never`         | `workspace-write`    |
 | Otherwise (suggest-tier)                                           | _demoted_       | _demoted_            |
 
-Suggest-tier hosts cannot run codex usefully — a `read-only` sandbox would let codex silently complete with "I can only suggest changes" and confuse Atlas/Athena into marking the task done. So:
+Suggest-tier hosts cannot use a Codex implementation worker safely — a `read-only` sandbox could let it return advice that Atlas/Athena mistakes for completed edits. So:
 - **Atlas/Athena teams** (`worker-spawn.mjs`): codex workers are demoted to `claude` workers BEFORE adapter selection (`demoteCodexWorkersIfNeeded`). The `_demotedFrom`/`_demotionReason`/`_demotedModel` fields are preserved on the worker for observability. Provider-specific fields like `model` are stripped so the Claude path doesn't receive a Codex model name.
-- **`/ask` skill** (`ask.mjs`): codex requests exit with code 2 (model not available, answer as Claude) — no team context to demote into.
+- **`/ask` skill** (`ask.mjs`): analysis-only Codex requests stay available under `-s read-only -a never`, with a system-prompt no-write guard and a post-run `git status --porcelain` check. This exception does not apply to implementation workers.
 
 The `-a` and `-s` flags are GLOBAL Codex CLI flags and MUST appear BEFORE the `exec` subcommand. `codex exec -a never` errors with `unexpected argument '-a'` in 0.118+.
 
-**Known limitation — settings-file mirror + runtime override (v1.1.6+).** Detection reads Claude Code's *settings files* AND, since v1.1.6, the runtime `permission_mode` captured by the `RuntimePermissionsCapture` hook on SessionStart + UserPromptSubmit. The two layers merge **upgrade-only** in `detectClaudePermissionLevel`: runtime can promote a tier (`bypassPermissions` settings-empty → `full-auto`) but never demote it (settings literal allow grants stay broad even when runtime mode flips to `default`). The runtime tier flows through the same deny/ask/disableBypassPermissionsMode/allowManagedPermissionRulesOnly pipeline as the settings defaultMode, so a managed deny on Bash still clamps a runtime `bypassPermissions` to `auto-edit`. **Still NOT observable**: `--allowedTools` / `--disallowedTools` / `--tools` CLI flags and `--settings` inline overrides — there is no documented stdin/env signal for these. Set `.ao/autonomy.json { codex: { approval: "suggest" } }` or run `node scripts/diagnose-sandbox.mjs --explain-permissions` if you need to verify the resolved tier.
+**Settings-file mirror + bound runtime override (v1.1.6+, hardened after v1.5.1).** Detection reads Claude Code's *settings files* and a runtime `permission_mode` captured by the `RuntimePermissionsCapture` hook on SessionStart + UserPromptSubmit. Project-local `.ao/state/ao-runtime-permissions.json` is identity/diagnostic state only and never grants permission. The authoritative record is stored outside the workspace at `~/.cache/agent-olympus/runtime-permissions/<sha256(canonical-project-root)>.json`, with private directory/file modes and no-follow, single-link, bounded-size, ownership, ancestry, and replacement-race checks. Promotion requires the hardened current-session pointer, local hook session/capture ID, and external record to agree; new/unknown sessions tombstone an old grant, SessionEnd revokes the matching grant, and failures fall back to settings-only. Windows runtime promotion is disabled until equivalent ACL ownership can be proved.
+
+The two layers merge **upgrade-only** in `detectClaudePermissionLevel`: runtime can promote a tier (`bypassPermissions` settings-empty → `full-auto`) but never demote it (settings literal allow grants stay broad even when runtime mode flips to `default`). The runtime tier flows through the same deny/ask/disableBypassPermissionsMode/allowManagedPermissionRulesOnly pipeline as the settings defaultMode, so a managed deny on Bash still clamps a runtime `bypassPermissions` to `auto-edit`. **Still NOT observable**: `--allowedTools` / `--disallowedTools` / `--tools` CLI flags and `--settings` inline overrides — there is no documented stdin/env signal for these. Set `.ao/autonomy.json { codex: { approval: "suggest" } }` or run `node scripts/diagnose-sandbox.mjs --explain-permissions` if you need to verify the resolved tier.
 
 **Host sandbox intersection** (`scripts/lib/host-sandbox-detect.mjs`). The codex permission level derived from `permissions.allow` is now INTERSECTED with a passive host-sandbox detection (the more restrictive of the two wins). Signal priority:
 
@@ -68,13 +70,13 @@ Override via `.ao/autonomy.json`:
 {
   "codex": { "approval": "full-auto", "hostSandbox": "auto" },
   "gemini": { "approval": "yolo" },
-  "nativeTeams": true,
   "planExecution": "ask"
 }
 ```
 Codex values: `auto` (default), `suggest`, `auto-edit`, `full-auto`
 Codex host sandbox: `auto` (default — detect), `unrestricted`, `workspace-write`, `read-only`. Env var `AO_HOST_SANDBOX_LEVEL` (same enum, minus `auto`) takes precedence.
 Gemini values: `auto` (default), `default`, `auto_edit`, `yolo`, `plan`
-`nativeTeams`: `true` enables Native Agent Teams without env var (fallback when `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` is not set in hook environment)
+`nativeTeams` is a legacy compatibility boolean only. Runtime support now
+requires both `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` and Claude Code 2.1.178+;
+configuration cannot manufacture a missing native-team capability.
 `planExecution`: `ask` (default) presents Solo/Atlas/Athena choice via `AskUserQuestion` interactive UI after plan approval (text fallback for non-Desktop environments); `solo` skips orchestration; `atlas`/`athena` auto-routes. Simple plans (S-scale or ≤2 stories) auto-skip to solo.
-

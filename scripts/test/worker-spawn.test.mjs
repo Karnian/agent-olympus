@@ -21,8 +21,26 @@ import {
   pollProviderFallback,
   planProviderFailover,
   readProcStartId,
+  reassignProvider,
   selectAdapter,
 } from '../lib/worker-spawn.mjs';
+
+const XVAL_PROMPT_TEMPLATE = 'review\nValidation prompt digest: <PROMPT_DIGEST>';
+const XVAL_PROMPT_DIGEST = createHash('sha256').update(XVAL_PROMPT_TEMPLATE).digest('hex');
+const XVAL_PROMPT = XVAL_PROMPT_TEMPLATE.replaceAll('<PROMPT_DIGEST>', XVAL_PROMPT_DIGEST);
+
+function xvalIdentity(reviewTreeOid, overrides = {}) {
+  return {
+    schemaVersion: 1,
+    orchestrator: 'atlas',
+    runId: 'run-1',
+    storyId: 'US-001',
+    reviewTreeOid,
+    snapshotId: `xval-${'e'.repeat(32)}`,
+    promptDigest: XVAL_PROMPT_DIGEST,
+    ...overrides,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // detectCodexError — no failure
@@ -1272,6 +1290,30 @@ test('selectAdapter: codex worker + hasCodexExecJson → codex-exec', () => {
   assert.equal(result, 'codex-exec');
 });
 
+test('selectAdapter: writable Codex keeps appserver priority', () => {
+  const result = selectAdapter(
+    { type: 'codex', name: 'w1' },
+    { hasCodexAppServer: true, hasCodexExecJson: true },
+  );
+  assert.equal(result, 'codex-appserver');
+});
+
+test('selectAdapter: read-only Codex prefers isolated exec over appserver', () => {
+  const result = selectAdapter(
+    { type: 'codex', name: 'validator', readOnly: true },
+    { hasCodexAppServer: true, hasCodexExecJson: true },
+  );
+  assert.equal(result, 'codex-exec');
+});
+
+test('selectAdapter: read-only Codex never uses appserver without isolated config', () => {
+  const result = selectAdapter(
+    { type: 'codex', name: 'validator', readOnly: true },
+    { hasCodexAppServer: true, hasCodexExecJson: false },
+  );
+  assert.equal(result, 'tmux');
+});
+
 test('selectAdapter: codex worker + no hasCodexExecJson → tmux', () => {
   const result = selectAdapter({ type: 'codex', name: 'w1' }, { hasCodexExecJson: false });
   assert.equal(result, 'tmux');
@@ -1342,6 +1384,94 @@ test('demoteCodexWorkersIfNeeded: suggest level demotes codex workers to claude'
   assert.equal(workers[2].type, 'claude');
   assert.equal(workers[2]._demotedFrom, 'codex');
   assert.equal(workers[3].type, 'gemini'); // unchanged (different type)
+});
+
+test('demoteCodexWorkersIfNeeded: read-only Codex remains Codex at suggest level', () => {
+  const workers = [{
+    type: 'codex',
+    name: 'validator',
+    readOnly: true,
+    reviewTreeOid: 'a'.repeat(40),
+  }];
+  assert.equal(demoteCodexWorkersIfNeeded(workers, 'suggest'), 0);
+  assert.equal(workers[0].type, 'codex');
+  assert.equal(workers[0]._demotedFrom, undefined);
+});
+
+test('planProviderFailover preserves read-only review identity across providers', () => {
+  const reviewTreeOid = 'a'.repeat(40);
+  const plan = planProviderFailover({
+    type: 'codex',
+    name: 'validator',
+    prompt: XVAL_PROMPT,
+    readOnly: true,
+    reviewTreeOid,
+    validationIdentity: xvalIdentity(reviewTreeOid),
+  }, { category: 'rate_limited', message: '429' }, { hasGeminiCli: true });
+  assert.equal(plan.targetProvider, 'gemini');
+  assert.equal(plan.replacementWorker.readOnly, true);
+  assert.equal(plan.replacementWorker.reviewTreeOid, reviewTreeOid);
+  assert.equal(plan.replacementWorker.validationIdentity.reviewTreeOid, reviewTreeOid);
+});
+
+test('reassignProvider rejects an explicit read-only downgrade or tree mismatch', async () => {
+  const reviewTreeOid = 'a'.repeat(40);
+  const worker = {
+    type: 'codex',
+    name: 'validator',
+    prompt: XVAL_PROMPT,
+    readOnly: true,
+    reviewTreeOid,
+    validationIdentity: xvalIdentity(reviewTreeOid),
+  };
+  const liveState = { workers: [worker], capabilities: { hasGeminiCli: true } };
+  await assert.rejects(
+    () => reassignProvider(
+      'xval', 'validator', XVAL_PROMPT, { category: 'rate_limited', message: '429' },
+      undefined,
+      { liveState, rootReadOnly: false },
+    ),
+    /cannot be downgraded/,
+  );
+  await assert.rejects(
+    () => reassignProvider(
+      'xval', 'validator', XVAL_PROMPT, { category: 'rate_limited', message: '429' },
+      undefined,
+      { liveState, rootReadOnly: true, rootReviewTreeOid: 'b'.repeat(40) },
+    ),
+    /reviewTreeOid values do not match/,
+  );
+});
+
+test('reassignProvider catch path preserves replacement review identity', async () => {
+  const reviewTreeOid = 'a'.repeat(40);
+  const validationIdentity = xvalIdentity(reviewTreeOid);
+  const worker = {
+    type: 'codex',
+    name: 'validator',
+    prompt: XVAL_PROMPT,
+    readOnly: true,
+    reviewTreeOid,
+    validationIdentity,
+  };
+  const result = await reassignProvider(
+    'xval',
+    'validator',
+    XVAL_PROMPT,
+    { category: 'rate_limited', message: '429' },
+    undefined,
+    {
+      liveState: { workers: [worker], capabilities: { hasGeminiCli: true } },
+      addWisdom: async () => { throw new Error('injected post-plan failure'); },
+    },
+  );
+  assert.equal(result.targetProvider, 'gemini');
+  assert.equal(result.rootReadOnly, true);
+  assert.equal(result.rootReviewTreeOid, reviewTreeOid);
+  assert.deepEqual(result.rootValidationIdentity, validationIdentity);
+  assert.equal(result.replacementWorker.readOnly, true);
+  assert.equal(result.replacementWorker.reviewTreeOid, reviewTreeOid);
+  assert.deepEqual(result.replacementWorker.validationIdentity, validationIdentity);
 });
 
 test('demoteCodexWorkersIfNeeded: full-auto level keeps codex workers', () => {

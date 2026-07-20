@@ -1,0 +1,8 @@
+{
+  "name": "eval-role-scope",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

@@ -5,10 +5,10 @@
  *
  * Fires on SessionStart and UserPromptSubmit. Reads the JSON payload Claude
  * Code writes to stdin, looks for the `permission_mode` field (or any of the
- * documented variants), and persists it to
- * `.ao/state/ao-runtime-permissions.json` so downstream code (`/ask`,
- * `permission-detect.mjs`, Atlas/Athena) can resolve the SESSION-RUNTIME
- * permission tier — not just the settings-file tier.
+ * documented variants). The project-local `.ao` record stores only hook
+ * identity/diagnostics; the authoritative, short-lived mode grant is written
+ * to the user's private runtime cache outside the workspace. Downstream code
+ * accepts it only when the current session pointer and both records agree.
  *
  * Why two events
  * ──────────────
@@ -44,28 +44,40 @@ async function main() {
     // 1. Try stdin first — this is the authoritative source while a Claude
     //    Code session is live.
     const fromStdin = extractPermissionModeFromStdin(data);
-    if (fromStdin.mode) {
+    if (fromStdin.mode || fromStdin.modeObserved) {
       captureRuntimePermissions({
         permissionMode: fromStdin.mode,
+        permissionModeObserved: fromStdin.modeObserved,
         source: 'hook_stdin',
         sessionId: fromStdin.sessionId,
         rawStdinKeys: fromStdin.observedKeys,
       }, { cwd });
     } else {
-      // 2. Fallback to env vars. Only writes if a valid mode is present —
-      //    we never overwrite a stdin-sourced cache with a less-trusted
-      //    env-sourced one within the same hook invocation.
+      // 2. Observe env vars for diagnostics only. Project configuration can
+      //    influence a hook process environment, so env mode values never
+      //    create an authoritative grant even when stdin supplies a session
+      //    identity. Identity-only refresh may preserve an independently
+      //    validated same-session stdin grant without extending its TTL.
       const fromEnv = extractPermissionModeFromEnv();
       if (fromEnv) {
         captureRuntimePermissions({
           permissionMode: fromEnv,
-          source: 'env',
+          source: fromStdin.sessionId ? 'hook_stdin' : 'env',
+          permissionSource: 'env',
+          sessionId: fromStdin.sessionId,
+          rawStdinKeys: fromStdin.observedKeys,
+        }, { cwd });
+      } else if (fromStdin.sessionId) {
+        captureRuntimePermissions({
+          permissionMode: null,
+          permissionModeObserved: false,
+          source: 'hook_stdin',
           sessionId: fromStdin.sessionId,
           rawStdinKeys: fromStdin.observedKeys,
         }, { cwd });
       }
-      // No stdin field, no env → silent no-op. Cache (if any) keeps its
-      // prior value until TTL expires.
+      // No mode and no session identity → silent no-op. Cache (if any) keeps
+      // its prior value until TTL expires.
     }
   } catch {
     // swallow — never block hooks

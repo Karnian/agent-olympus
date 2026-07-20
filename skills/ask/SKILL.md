@@ -43,7 +43,6 @@ Pipe the prompt to `scripts/ask.mjs` via a heredoc — no shell quoting needed,
 multi-line prompts with backticks/quotes/`$` work as-is.
 
 ```bash
-mkdir -p .ao/artifacts/ask
 node "$CLAUDE_PLUGIN_ROOT"/scripts/ask.mjs <model> <<'ASK_PROMPT_EOF'
 <the user's full question, as-is>
 ASK_PROMPT_EOF
@@ -51,8 +50,9 @@ EXIT=$?
 ```
 
 The helper handles capability detection, adapter selection, the
-spawn → collect → shutdown lifecycle, and artifact writing. Output goes to
-stdout; the artifact path is logged to stderr.
+spawn → collect → shutdown lifecycle, private `0700` state/artifact directory
+creation, and artifact writing. Output goes to stdout; the artifact path is
+logged to stderr.
 
 For Codex only, append `--no-mcp` to skip user-level Codex configuration for
 that invocation (`codex exec --ignore-user-config ...`), in either sync or

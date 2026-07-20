@@ -15,8 +15,9 @@
 
 import { readStdin } from './lib/stdin.mjs';
 import { loadCheckpoint } from './lib/checkpoint.mjs';
+import { getActiveRunId } from './lib/run-artifacts.mjs';
 import { execFileSync } from 'child_process';
-import { existsSync } from 'fs';
+import { existsSync, lstatSync } from 'fs';
 import { basename, join } from 'path';
 
 /**
@@ -58,6 +59,16 @@ const EXCLUDE_PATTERNS = [
 /** True if `file` matches any sensitive/noise exclusion pattern. */
 function isExcluded(file) {
   return EXCLUDE_PATTERNS.some(pat => pat.test(file));
+}
+
+function hasAtlasActivePointerArtifact() {
+  try {
+    lstatSync(join(process.cwd(), '.ao', 'state', 'ao-active-run-atlas.json'));
+    return true;
+  } catch (error) {
+    // An unreadable/unsafe path is not evidence that no Atlas run exists.
+    return error?.code !== 'ENOENT';
+  }
 }
 
 /** Split NUL-delimited git output (`-z`) into clean path entries. */
@@ -300,6 +311,17 @@ function formatNames(names) {
 async function main() {
   try {
     await readStdin(2000); // Stop event data (not needed)
+
+    // Atlas owns its final reviewed commit through the code-owned pipeline.
+    // Its skill-scoped Stop hook may block an early Stop and immediately cause
+    // another Stop event. Never let this global WIP hook commit the incomplete,
+    // unreviewed tree in either event. The active pointer is cleared only after
+    // successful finalization, so a normal manual Stop keeps the legacy WIP
+    // behavior while an Atlas run is protected fail-closed.
+    if (getActiveRunId('atlas') || hasAtlasActivePointerArtifact()) {
+      process.stdout.write('{}');
+      process.exit(0);
+    }
 
     // 1. Confirm we are inside a git repo and resolve its git dir
     let gitDir;

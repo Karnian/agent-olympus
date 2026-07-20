@@ -36,6 +36,7 @@ import { spawn as nodeSpawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { buildEnhancedPath } from './resolve-binary.mjs';
 import { resolveGeminiBinary } from './gemini-binary.mjs';
+import { createGeminiReadOnlySettings } from './gemini-readonly.mjs';
 import {
   resolveGeminiApiKey,
   maskKey,
@@ -276,6 +277,7 @@ function _heuristicCategory(text) {
  * @param {Object} [opts]
  * @param {string} [opts.cwd] - Working directory for the child process
  * @param {Object} [opts.env] - Additional environment variables
+ * @param {boolean} [opts.readOnly] - Enforce isolated system settings and no extensions
  * @returns {GeminiAcpHandle}
  */
 export function startServer(opts = {}) {
@@ -283,6 +285,10 @@ export function startServer(opts = {}) {
   const resolveBin = typeof opts.resolveGeminiBinary === 'function' ? opts.resolveGeminiBinary : resolveGeminiBinary;
   const binary = resolveBin();
   const args = ['--acp'];
+  const readOnlySettings = opts.readOnly === true
+    ? createGeminiReadOnlySettings()
+    : null;
+  if (readOnlySettings) args.push('-e', 'none');
 
   // Resolve GEMINI_API_KEY from the OS secret store before spawning; see
   // scripts/lib/gemini-credential.mjs. Parent process.env stays unmodified;
@@ -299,6 +305,7 @@ export function startServer(opts = {}) {
     PATH: buildEnhancedPath(),
     ...(resolvedKey ? { GEMINI_API_KEY: resolvedKey } : {}),
     ...opts.env,
+    ...(readOnlySettings?.env || {}),
   };
   if (process.env.AO_DEBUG_GEMINI) {
     try {
@@ -308,12 +315,18 @@ export function startServer(opts = {}) {
     } catch { /* never throw from logging */ }
   }
 
-  const child = spawnImpl(binary.path, args, {
-    cwd: opts.cwd || process.cwd(),
-    stdio: ['pipe', 'pipe', 'pipe'],
-    env: mergedEnv,
-    detached: true,
-  });
+  let child;
+  try {
+    child = spawnImpl(binary.path, args, {
+      cwd: opts.cwd || process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: mergedEnv,
+      detached: true,
+    });
+  } catch (error) {
+    readOnlySettings?.cleanup();
+    throw error;
+  }
 
   const emitter = new EventEmitter();
 
@@ -336,6 +349,8 @@ export function startServer(opts = {}) {
     _messageQueue: [],
     _draining: false,
     _deadLetters: [],
+    _readOnly: opts.readOnly === true,
+    _securityViolation: null,
     workerMeta: { binaryFlavor: binary.flavor, binaryResolved: binary.resolved },
     // Account name used to resolve GEMINI_API_KEY for this session — the auth
     // error classifier calls invalidateCache(handle._credentialAccount) on
@@ -374,10 +389,39 @@ export function startServer(opts = {}) {
           emitter.emit(emitName, msg.params || msg);
         }
       } else if (kind === 'request') {
-        // Server-initiated request (e.g. approval prompt).
-        // Auto-respond with an empty result — we rely on session mode for permissions.
+        // Server-initiated request (e.g. ACP permission or proxied filesystem
+        // operation). A read-only validator must never silently approve one:
+        // explicitly cancel permission requests and reject every other request.
+        // Writable legacy sessions retain the old empty-result behavior.
         try {
-          const resp = JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} });
+          let response;
+          if (handle._readOnly && (
+            msg.method === 'session/request_permission'
+            || msg.method === 'requestPermission'
+            || msg.method === 'approvalRequest'
+          )) {
+            response = {
+              jsonrpc: '2.0',
+              id: msg.id,
+              result: { outcome: { outcome: 'cancelled' } },
+            };
+          } else if (handle._readOnly) {
+            const violation = {
+              category: 'permission_denied',
+              message: `Read-only ACP client rejected server request: ${String(msg.method || 'unknown')}`,
+            };
+            handle._securityViolation = violation;
+            handle.status = 'failed';
+            handle._turnError = violation;
+            response = {
+              jsonrpc: '2.0',
+              id: msg.id,
+              error: { code: -32001, message: violation.message },
+            };
+          } else {
+            response = { jsonrpc: '2.0', id: msg.id, result: {} };
+          }
+          const resp = JSON.stringify(response);
           handle.process.stdin.write(resp + '\n');
         } catch {
           // stdin may be closed during shutdown — ignore
@@ -396,6 +440,7 @@ export function startServer(opts = {}) {
 
   // Register exit handler BEFORE sending any signals to avoid missing early exits
   child.on('exit', (code) => {
+    readOnlySettings?.cleanup();
     handle._exitCode = code;
     if (handle.status === 'starting' || handle.status === 'ready' || handle.status === 'running') {
       handle.status = 'failed';
@@ -414,6 +459,7 @@ export function startServer(opts = {}) {
   });
 
   child.on('error', (err) => {
+    readOnlySettings?.cleanup();
     handle._stderrChunks.push(_formatSpawnErrorMessage(err, binary));
     handle.status = 'failed';
     emitter.emit('error', err);
@@ -661,6 +707,8 @@ export async function initializeServer(handle, clientInfo) {
  * @param {Object} [opts]
  * @param {string} [opts.cwd] - Working directory for the session
  * @param {string} [opts.approvalMode] - Approval mode: 'default' | 'auto_edit' | 'yolo' | 'plan'
+ * @param {boolean} [opts.requireApprovalMode=false] - Fail session creation if
+ *   setSessionMode rejects the requested mode instead of warning and continuing
  * @param {string} [opts.model] - Model identifier override
  * @returns {Promise<{ sessionId?: string, error?: Object }>}
  */
@@ -689,6 +737,16 @@ export async function createSession(handle, opts = {}) {
   if (sessionId && opts.approvalMode) {
     const resp = await sendRequest(handle, 'setSessionMode', { sessionId, mode: opts.approvalMode });
     if (resp.error) {
+      _maybeInvalidateOnAuthError(handle, resp.error);
+      if (opts.requireApprovalMode === true) {
+        return {
+          error: {
+            ...resp.error,
+            category: mapGeminiAcpError(resp.error),
+            message: `Required approval mode "${opts.approvalMode}" was rejected: ${resp.error.message || 'unknown error'}`,
+          },
+        };
+      }
       handle._warnings = handle._warnings || [];
       handle._warnings.push(`setSessionMode("${opts.approvalMode}") failed: ${resp.error.message || 'unknown error'} — worker may use default mode`);
     }
@@ -831,7 +889,10 @@ export function monitor(handle) {
     sessionId: handle._sessionId,
   };
 
-  if (handle.status === 'failed') {
+  if (handle._securityViolation) {
+    result.status = 'failed';
+    result.error = { ...handle._securityViolation, exitCode: handle._exitCode };
+  } else if (handle.status === 'failed') {
     const stderr = handle._stderrChunks.join('');
     const turnErr = handle._turnError;
     const message = (turnErr && turnErr.message) || stderr || 'Gemini ACP process failed';

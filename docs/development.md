@@ -48,12 +48,21 @@
 
 ### schemaVersion Convention (v1.0.2+)
 
-Every new persisted file format introduced in v1.0.2 carries `schemaVersion: 1`:
+Every persisted format carries an independently versioned `schemaVersion`:
 - **JSON files**: top-level field (`{ "schemaVersion": 1, ... }`)
 - **JSONL files**: per-line field (`{"schemaVersion":1,"id":"..."}`)
-- **Loader rule**: if `schemaVersion > 1` (unknown future format), the loader MUST return the empty default (`{}` or `[]`) and emit a clear error to stderr (suppressOutput). Never throw or block.
-- **Writer rule**: callers are responsible for including `schemaVersion: 1` in data passed to memory.mjs writers and artifact writers.
-- **Migration policy**: when schemaVersion increments in a future release, the new loader MUST include a migration path or a clear upgrade message.
+- **Loader rule**: loaders must explicitly define their unknown-version policy. Non-authoritative caches may return an empty default with a diagnostic; authorization, permission, locking, and admission state must preserve the artifact and fail closed when its semantics are unknown.
+- **Writer rule**: writers emit the format's current exported schema constant rather than assuming every format remains at version 1.
+- **Migration policy**: a version increment requires an explicit migration path for supported older versions or a clear upgrade message. Never silently reinterpret an unknown future version.
+
+The concurrency ledger is `schemaVersion: 2`. Version 2 makes its recovery
+barrier part of the compatibility boundary so a v1 reader rejects it instead
+of discarding admission-critical metadata. The v2 loader durably migrates a
+valid ordinary v1 ledger; unknown versions and v1 artifacts containing
+unpublished recovery metadata remain unchanged and block admission. Legacy
+defaults apply only to absent fields, never explicit nulls. Recovery quarantine
+preserves original bytes, recovery expiry re-scans late durable team state, and
+compact canonical writes are size-checked before atomic replacement.
 
 ### Hardened Append-Only Artifact Policy (v1.5.0+)
 

@@ -314,3 +314,67 @@ test('monitorTeam + collectResults: read a supervisor worker via disk snapshot/o
     }
   });
 });
+
+test('monitorTeam exposes a bounded read-only validation identity for resume checks', async () => {
+  await withRoot((root) => {
+    const origCwd = process.cwd();
+    process.chdir(root);
+    try {
+      const reviewTreeOid = 'c'.repeat(40);
+      const validationIdentity = {
+        schemaVersion: 1,
+        orchestrator: 'atlas',
+        runId: 'run-1',
+        storyId: 'US-001',
+        reviewTreeOid,
+        snapshotId: `xval-${'e'.repeat(32)}`,
+        promptDigest: 'd'.repeat(64),
+      };
+      const worker = mkWorker({
+        status: 'running',
+        readOnly: true,
+        reviewTreeOid,
+        validationIdentity,
+        cwd: root,
+        worktreePath: root,
+      });
+      mkdirSync(join(root, '.ao', 'state'), { recursive: true });
+      writeFileSync(join(root, '.ao', 'state', 'team-xval.json'), JSON.stringify({
+        teamName: 'xval', phase: 'running', runId: RUN, projectRoot: root,
+        workers: [worker],
+      }));
+      putSnap(root, {
+        status: 'completed',
+        readOnly: true,
+        reviewTreeOid,
+        validationIdentity,
+        cwd: root,
+      });
+
+      const status = monitorTeam('xval');
+      assert.equal(status.workers[0].readOnly, true);
+      assert.equal(status.workers[0].reviewTreeOid, reviewTreeOid);
+      assert.deepEqual(status.workers[0].validationIdentity, validationIdentity);
+      assert.equal(status.workers[0].cwd, root);
+      assert.equal(status.workers[0].worktreePath, root);
+
+      worker.validationIdentity = { ...validationIdentity, unbounded: 'x'.repeat(10_000) };
+      worker.cwd = `/${'x'.repeat(5000)}`;
+      worker.worktreePath = '../live-root';
+      writeFileSync(join(root, '.ao', 'state', 'team-xval.json'), JSON.stringify({
+        teamName: 'xval', phase: 'running', runId: RUN, projectRoot: root,
+        workers: [worker],
+      }));
+      const malformed = monitorTeam('xval').workers[0];
+      assert.equal(malformed.validationIdentity, null,
+        'unknown/unbounded persisted fields must not cross the public monitor boundary');
+      assert.equal(malformed.cwd, null, 'overlong cwd must not cross the public monitor boundary');
+      assert.equal(malformed.worktreePath, null,
+        'relative worktreePath must not cross the public monitor boundary');
+      assert.doesNotThrow(() => collectResults('xval'),
+        'malformed persisted validation identity must not DoS result collection');
+    } finally {
+      process.chdir(origCwd);
+    }
+  });
+});

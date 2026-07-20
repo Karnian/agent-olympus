@@ -134,13 +134,11 @@ export function classifyResultEvent(resultEvent) {
 // ─── Core API ────────────────────────────────────────────────────────────────
 
 /**
- * Spawn a Claude CLI process with the given prompt.
- * Uses `-p --output-format stream-json --verbose --bare` for headless JSONL streaming.
+ * Build Claude CLI argv. Exposed for hermetic parsing tests.
  *
  * @param {string} prompt - The prompt to send to Claude
  * @param {Object} [opts] - Options
  * @param {string} [opts.cwd] - Working directory
- * @param {Object} [opts.env] - Additional environment variables merged over process.env
  * @param {string} [opts.model] - Model override (e.g., 'sonnet', 'opus', 'haiku')
  * @param {string[]} [opts.allowedTools] - Tool whitelist (e.g., ['Bash', 'Edit', 'Read'])
  * @param {string} [opts.systemPrompt] - System prompt override
@@ -149,10 +147,9 @@ export function classifyResultEvent(resultEvent) {
  * @param {string} [opts.permissionMode] - Permission mode ('default', 'bypassPermissions', etc.)
  * @param {boolean} [opts.bare] - Run in bare mode (skip hooks/plugins). Default: true
  * @param {boolean} [opts.noSessionPersistence] - Skip session persistence. Default: true
- * @returns {ClaudeCliHandle}
+ * @returns {string[]}
  */
-export function spawn(prompt, opts = {}) {
-  const claudePath = resolveClaudeBinary();
+export function _buildSpawnArgs(prompt, opts = {}) {
   const args = [
     '-p',
     '--output-format', 'stream-json',
@@ -191,7 +188,9 @@ export function spawn(prompt, opts = {}) {
 
   // Allowed tools
   if (opts.allowedTools && opts.allowedTools.length > 0) {
-    args.push('--allowedTools', ...opts.allowedTools);
+    // `--allowedTools <tools...>` is variadic. Pass the whitelist as one
+    // comma-delimited value so it cannot consume the final prompt.
+    args.push('--allowedTools', opts.allowedTools.join(','));
   }
 
   // System prompt
@@ -208,8 +207,24 @@ export function spawn(prompt, opts = {}) {
     args.push('--max-budget-usd', String(opts.maxBudgetUsd));
   }
 
-  // Prompt as the final positional argument
-  args.push(prompt);
+  // Terminate every variadic/optional argument before the final prompt.
+  args.push('--', prompt);
+
+  return args;
+}
+
+/**
+ * Spawn a Claude CLI process with the given prompt.
+ * Uses `-p --output-format stream-json --verbose --bare` for headless JSONL streaming.
+ *
+ * @param {string} prompt - The prompt to send to Claude
+ * @param {Object} [opts] - Options accepted by `_buildSpawnArgs()`
+ * @param {Object} [opts.env] - Additional environment variables merged over process.env
+ * @returns {ClaudeCliHandle}
+ */
+export function spawn(prompt, opts = {}) {
+  const claudePath = resolveClaudeBinary();
+  const args = _buildSpawnArgs(prompt, opts);
 
   const child = nodeSpawn(claudePath, args, {
     cwd: opts.cwd || process.cwd(),

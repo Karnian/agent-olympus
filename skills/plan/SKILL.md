@@ -73,8 +73,8 @@ Phase 1: UNDERSTAND (Hermes)              Phase R1: DISCOVERY (parallel)
         └──────┬───────┘                                │
                ▼                                        ▼
         Phase 4: FINALIZE              Phase R4: FINALIZE
-        Write .ao/spec.md               Write .ao/spec.md
-        + .ao/prd.json                  + .ao/prd.json (mode: reverse)
+        Persist typed pair              Persist typed pair
+        through hardened writer         through hardened writer (reverse)
                │                                        │
                ▼                                        ▼
         Ready for Atlas/Athena          "Act on improvements?"
@@ -135,11 +135,11 @@ that Atlas's execution-time mutations do NOT affect.
 
 ### Phase 0 — TRIAGE (mode + scale detection)
 
-Detect both MODE and SCALE in a single lightweight pass.
+Detect execution direction, persisted SPEC MODE, and SCALE in a single lightweight pass.
 This avoids spawning a sub-agent just for scale detection.
 
 ```
-Analyze the user's request and determine two things:
+Analyze the user's request and determine three things:
 
 1. MODE — Is this forward (new idea → spec) or reverse (existing code → spec)?
 
@@ -155,7 +155,15 @@ Analyze the user's request and determine two things:
 
    If ambiguous, default to FORWARD.
 
-2. SCALE — How large is this?
+2. SPEC MODE — Which AO_SPEC_V1 mode describes the durable artifact?
+
+   Reverse always maps to `reverse`.
+   Forward maps to the narrowest of:
+   - `product-feature`: a user-facing capability with target users and outcome metrics
+   - `engineering-change`: refactor, migration, tooling, infrastructure, or compatibility work
+   - `bugfix`: a reproducible mismatch between actual and expected behavior
+
+3. SCALE — How large is this?
 
    S = Single file, one feature, obvious implementation
        Examples: 'fix typo', 'add a button', 'bump version', 'rename function'
@@ -168,13 +176,14 @@ Analyze the user's request and determine two things:
 
    For reverse mode: S = single module, M = multi-module project, L = large system
 
-Record: detected_mode (forward|reverse), detected_scale (S|M|L)
+Record: detected_mode (forward|reverse), spec_mode
+(product-feature|engineering-change|bugfix|reverse), and detected_scale (S|M|L)
 ```
 
 If `detected_mode == reverse`: jump to **Phase R1**.
 If `detected_mode == forward`: continue to **Phase 1**.
 
-Output: "[plan] Phase 0 complete — mode: <detected_mode>, scale: <detected_scale>"
+Output: "[plan] Phase 0 complete — direction: <detected_mode>, spec mode: <spec_mode>, scale: <detected_scale>"
 
 ### Phase 1 — UNDERSTAND
 
@@ -216,23 +225,23 @@ Use hermes to produce an initial spec:
 
 ```
 Task(subagent_type="agent-olympus:hermes", model="opus",
-  prompt="Create an initial product specification for this request.
+  prompt="Create an initial specification for this request.
 
   Request: <user_request>
+  Persisted AO_SPEC_V1 mode: <spec_mode>
   Scale: <detected_scale>
   Codebase context: <analysis_of_relevant_files_if_applicable>
 
   Produce a structured spec with these sections:
-  1. Problem Statement — WHO has this problem, WHAT is the pain, WHY now
-  2. Target Users — specific personas, not just 'users'
-  3. Appetite — how much time/effort to invest (S=hours, M=days, L=weeks)
-  4. Goals — specific, measurable objectives (bullet list)
-  5. Non-Goals — explicitly out of scope
-  6. User Stories — each with ID (US-001), JTBD format, acceptance criteria (GIVEN/WHEN/THEN)
-  7. Success Metrics — measurable outcomes with target values
-  8. Constraints — technical, time, or resource constraints
-  9. Risks & Unknowns — flag areas needing spikes/research before implementation
-  10. Open Questions — anything that only the user can answer
+  1. Problem or evidence boundary
+  2. Goals and explicit non-goals
+  3. User stories with IDs and GIVEN/WHEN/THEN acceptance criteria
+  4. Constraints, risks, assumptions, and open questions
+  5. For product-feature only: target users and measurable success metrics
+  6. For engineering-change only: invariants, compatibility, migration, rollback, and observability
+  7. For bugfix only: reproduction, expected behavior, regression criteria, and non-goals
+
+  Do not force personas, JTBD, or market metrics onto engineering-change or bugfix work.
 
   IMPORTANT — Flag untestable words in acceptance criteria:
   Words like 'robust', 'fast', 'user-friendly', 'seamless', 'efficient', 'intuitive'
@@ -260,7 +269,7 @@ If hermes_output is empty OR hermes_output.length < 50 characters:
   const { summary } = extractStructuralSummary(<user_request_text>, 100);
   // Retry with ONLY the summary + a simplified prompt
   hermes_output = Task(subagent_type="agent-olympus:hermes", model="sonnet",
-    prompt="Create a product spec. Input (summarized): " + summary)
+    prompt="Create a <spec_mode> specification. Input (summarized): " + summary)
 
   If hermes_output is STILL empty OR hermes_output.length < 50:
     Output: "[plan] ✗ Phase 1 FAILED — Hermes could not generate spec after retry."
@@ -313,9 +322,9 @@ Branch on detected_scale:
 #### M-scale review
 Ask momus to validate the spec:
 
-```
+````text
 Task(subagent_type="agent-olympus:momus", model="opus",
-  prompt="Review this product spec for completeness and clarity.
+  prompt="Review this <spec_mode> specification for completeness and clarity.
 
   Spec: <updated_spec_from_phase_1_or_2>
   User request: <original_user_request>
@@ -332,14 +341,22 @@ Task(subagent_type="agent-olympus:momus", model="opus",
   - Vague acceptance criteria that need specificity
   - Scope creep — work not required by the request
 
-  End with one of:
-  VERDICT: APPROVE
-  VERDICT: REVISE — <bullet list of specific changes>
-  VERDICT: REJECT  — <reason>")
-```
+  End with the exact fenced stage contract required by Momus:
+  ```stage_verdict
+  stage: plan-validation
+  verdict: APPROVE        # or REVISE | REJECT
+  confidence: high        # or medium | low
+  escalate_to: none       # or opus only for a model-capability rejection
+  reasons:
+    - <criterion-specific reason>
+  evidence:
+    - <file:line or quoted spec evidence>
+  ```")
+````
 
-If REVISE or REJECT: collect feedback and ask Hermes to update the spec with the feedback.
-If APPROVE: proceed to Phase 4.
+Parse only the final fenced `STAGE_VERDICT`. If its verdict is REVISE or REJECT,
+collect feedback and ask Hermes to update the spec. Missing or malformed blocks
+are not approval. If its verdict is APPROVE, proceed to Phase 4.
 
 #### L-scale review
 Invoke consensus-plan skill:
@@ -357,15 +374,23 @@ After consensus-plan completes, use its output as the finalized spec.
 
 ### Phase 4 — FINALIZE
 
-Output: "[plan] Starting Phase 4: FINALIZE — writing spec files..."
+Output: "[plan] Starting Phase 4: FINALIZE — persisting a validated spec pair..."
 
-Write the spec in two formats:
+Construct the spec in two formats, but do not write either `.ao` file directly.
+The two payloads are one typed generation and must be committed together by
+`writeHermesSpecArtifacts()` after validation.
 
-#### Human-readable: .ao/spec.md
+#### Human-readable payload for .ao/spec.md
+
+Render mode-appropriate sections only. `Target Users`, persona phrasing, and
+`Success Metrics` are product-feature sections; engineering-change and bugfix
+specs instead encode their required evidence in the mode-specific sections,
+common constraints/risks, stories, and acceptance criteria.
 
 ```markdown
 # <Project/Feature Name> — Specification
 
+**Mode:** product-feature / engineering-change / bugfix / reverse
 **Scale:** S / M / L
 **Created:** <date>
 **Status:** Draft / Reviewed / Approved
@@ -373,7 +398,7 @@ Write the spec in two formats:
 ## Problem Statement
 <one paragraph describing the problem being solved>
 
-## Target Users
+## Target Users (product-feature only)
 <who benefits from this and why>
 
 ## Goals
@@ -388,7 +413,7 @@ Write the spec in two formats:
 ## User Stories
 
 ### US-001: <title>
-**As a** <persona>, **I want to** <action>, **so that** <benefit>
+**Outcome/behavior:** <observable result; product-feature may use As a / I want / so that>
 
 **Acceptance Criteria:**
 - GIVEN <context> WHEN <action> THEN <result>
@@ -396,20 +421,29 @@ Write the spec in two formats:
 - GIVEN <context> WHEN <action> THEN <result>
 
 ### US-002: <title>
-**As a** <persona>, **I want to** <action>, **so that** <benefit>
+**Outcome/behavior:** <observable result; product-feature may use persona phrasing>
 
 **Acceptance Criteria:**
 - GIVEN <context> WHEN <action> THEN <result>
 - GIVEN <context> WHEN <action> THEN <result>
 
-## Success Metrics
+## Success Metrics (product-feature only)
 - <metric 1>: <target value, e.g., "95% test pass rate">
 - <metric 2>: <target value>
 
 ## Constraints
 - <technical constraint>
+
+## Engineering Change Contract (engineering-change only)
+- Invariants, compatibility, migration, rollback, observability, failure behavior
+
+## Bugfix Evidence (bugfix only)
+- Reproduction boundary, expected behavior, regression criteria, non-goals
 - <time or resource constraint>
 - <external dependency>
+
+## Risks
+- <risk, failure mode, or compatibility concern>
 
 ## Open Questions
 (if any remain after clarification)
@@ -421,45 +455,87 @@ Write the spec in two formats:
 - <feedback summary>
 ```
 
-#### Machine-readable: .ao/prd.json
+#### Machine-readable payload for .ao/prd.json
 
+The following is a validator-backed product-feature example. Replace its
+values, but preserve the field types and exact enums.
+
+<!-- AO_SPEC_FIXTURE:forward-prd -->
 ```json
 {
-  "projectName": "<feature-or-project-slug>",
-  "scale": "S|M|L",
-  "createdAt": "<ISO timestamp>",
-  "status": "draft|reviewed|approved",
-  "problemStatement": "<one paragraph>",
-  "targetUsers": "<one paragraph>",
-  "goals": ["<goal 1>", "<goal 2>"],
-  "nonGoals": ["<out of scope 1>"],
+  "projectName": "example-notification-preferences",
+  "mode": "product-feature",
+  "scale": "M",
+  "createdAt": "2026-01-15T00:00:00.000Z",
+  "status": "draft",
+  "problemStatement": "Account holders cannot choose which product notifications they receive.",
+  "targetUsers": ["Signed-in account holders who receive product notifications"],
+  "goals": ["Let account holders persist explicit notification choices"],
+  "nonGoals": ["Replace the notification delivery provider"],
   "userStories": [
     {
       "id": "US-001",
-      "title": "<one-line title>",
-      "asA": "<persona>",
-      "iWantTo": "<action>",
-      "soThat": "<benefit>",
+      "title": "Persist notification preferences",
+      "asA": "signed-in account holder",
+      "iWantTo": "choose notification categories",
+      "soThat": "I receive only relevant product messages",
       "acceptanceCriteria": [
-        "GIVEN <context> WHEN <action> THEN <result>",
-        "GIVEN <context> WHEN <action> THEN <result>"
-      ]
+        "GIVEN a signed-in account holder WHEN they save valid notification choices THEN the choices are returned on the next settings load",
+        "GIVEN an unsupported category WHEN the account holder saves preferences THEN the request is rejected without changing stored choices"
+      ],
+      "passes": false
     }
   ],
   "successMetrics": [
     {
-      "metric": "<metric name>",
-      "target": "<value>"
+      "metric": "preference persistence contract tests",
+      "target": "100% pass in the required test suite"
     }
   ],
-  "constraints": ["<constraint 1>"],
+  "constraints": ["Preserve existing notification delivery behavior for accounts without saved choices"],
+  "risks": ["A migration defect could opt existing accounts out of required service messages"],
   "openQuestions": []
 }
 ```
 
+Choose the narrowest accurate `mode`. Reverse planning always uses `reverse`;
+forward planning distinguishes product features, engineering changes, and bug
+fixes. The working PRD must retain every AO_SPEC_V1 common field so Atlas or
+Athena can validate it without silently accepting a legacy partial shape.
+Only `product-feature` requires `targetUsers` and `successMetrics`; for the
+other modes, replace those product-only fields with evidence appropriate to
+the change while keeping the common fields intact.
+
+After auto-validation, persist the pair only through the hardened artifact
+writer. A direct `Write`, shell redirection, or separate file update is
+forbidden because it bypasses pair recovery, no-follow checks, mode hardening,
+and schema validation:
+
+```javascript
+import { existsSync, readFileSync } from 'node:fs';
+import { writeHermesSpecArtifacts } from './scripts/lib/spec-artifact.mjs';
+
+const replacing = existsSync('.ao/spec.md') || existsSync('.ao/prd.json');
+const envelope = JSON.stringify({
+  schemaVersion: 1,
+  verdict: replacing ? 'UPDATE' : 'CREATE',
+  summary: '<one concise plan summary>',
+  specMarkdown: finalizedSpecMarkdown,
+  prd: finalizedPrd,
+});
+const persisted = writeHermesSpecArtifacts(envelope, { cwd: process.cwd() });
+if (!persisted.written || !persisted.validated) {
+  throw new Error('Plan artifact pair was not durably validated and written');
+}
+// Only these re-read committed payloads may be copied to docs/plans/.
+const committedSpec = readFileSync(persisted.specPath, 'utf8');
+const committedPrd = JSON.parse(readFileSync(persisted.prdPath, 'utf8'));
+```
+
 #### Persistent storage: docs/plans/\<slug\>/
 
-After writing to `.ao/`, persist to the git-tracked `docs/plans/` directory:
+After the hardened writer commits the `.ao` pair, persist its re-read payloads
+to the git-tracked `docs/plans/` directory:
 
 1. **Derive slug** from `prd.json.projectName` using the Slug Derivation rules in Spec_Persistence.
 
@@ -470,9 +546,9 @@ After writing to `.ao/`, persist to the git-tracked `docs/plans/` directory:
    If docs/plans/ directory doesn't exist → create it
    ```
 
-3. **Write spec.md**: Copy `.ao/spec.md` content to `docs/plans/<slug>/spec.md`.
+3. **Write spec.md**: Copy `committedSpec` to `docs/plans/<slug>/spec.md`.
 
-4. **Write prd.json**: Copy `.ao/prd.json` content to `docs/plans/<slug>/prd.json`.
+4. **Write prd.json**: Copy `committedPrd` to `docs/plans/<slug>/prd.json`.
 
 5. **Write features/ (M/L scale with 4+ user stories only)**:
    ```
@@ -485,7 +561,7 @@ After writing to `.ao/`, persist to the git-tracked `docs/plans/` directory:
    ## User Stories
 
    ### <US-ID>: <title>
-   **As a** <persona>, **I want to** <action>, **so that** <benefit>
+   **Outcome/behavior:** <observable result; use persona phrasing only for product-feature>
 
    **Acceptance Criteria:**
    - GIVEN <context> WHEN <action> THEN <result>
@@ -520,7 +596,7 @@ After writing to `.ao/`, persist to the git-tracked `docs/plans/` directory:
 
 ### Auto-Validation (Phase 4 gate)
 
-Before writing files, validate consistency:
+Before artifact persistence, validate consistency:
 
 ```
 Validation checklist:
@@ -534,7 +610,7 @@ Validation checklist:
 6. Open questions: if openQuestions.length > 0 AND scale == L,
    add "(⚠️ N open questions remain — stakeholder review recommended)" to summary
 
-If any check fails → fix automatically before writing.
+If any check fails → fix automatically before persistence.
 If untestable words found → rewrite with measurable alternatives.
 Log all auto-corrections in Review Notes section.
 ```
@@ -636,7 +712,7 @@ After user selects:
 - "Athena" → invoke `Skill(skill="agent-olympus:athena")`
 - Other (custom text) → interpret user intent and route accordingly
 
-**Important:** The spec is already written to `.ao/prd.json` — Atlas/Athena will read it automatically. No need to pass the spec content in the prompt.
+**Important:** The validated spec pair is already persisted under `.ao/` — Atlas/Athena will read `.ao/prd.json` automatically. No need to pass the spec content in the prompt.
 
 ---
 
@@ -673,7 +749,7 @@ Phase R3: SYNTHESIS & GAP ANALYSIS
         │
         ▼
 Phase R4: FINALIZE
-    Write .ao/spec.md and .ao/prd.json
+    Persist validated pair through writeHermesSpecArtifacts()
     Present summary with health score
 ```
 
@@ -794,7 +870,7 @@ Merge architect feedback into the spec.
 
 ### Phase R4 — FINALIZE (Reverse)
 
-Write the reverse spec to `.ao/spec.md`:
+Build the reverse human-readable payload for `.ao/spec.md`:
 
 ```markdown
 # <Project Name> — Reverse Specification
@@ -858,69 +934,89 @@ Write the reverse spec to `.ao/spec.md`:
 - <opportunity 2: description + expected impact>
 ```
 
-Also write `.ao/prd.json` for machine consumption by Atlas/Athena:
+Build the matching AO_SPEC_V1 superset payload for `.ao/prd.json`. Preserve
+reverse-analysis metadata as additional fields, but expose executable findings
+through `userStories` with `passes:false` so Atlas/Athena and the shared schema
+validator can consume the same artifact without conversion:
 
+The following is a validator-backed reverse example. Replace its values with
+repository evidence, but preserve the field types and exact enums.
+
+<!-- AO_SPEC_FIXTURE:reverse-prd -->
 ```json
 {
   "mode": "reverse",
-  "projectName": "<project-slug>",
-  "analyzedAt": "<ISO timestamp>",
-  "target": "<path_or_repo>",
+  "projectName": "example-existing-service",
+  "scale": "M",
+  "goals": ["Document verified current behavior and prioritized improvement opportunities"],
+  "nonGoals": ["Claim behavior not supported by repository evidence"],
+  "constraints": ["Every recovered criterion cites code, test, config, or documentation evidence"],
+  "risks": ["Untested paths may make inferred behavior incomplete"],
+  "openQuestions": [],
+  "analyzedAt": "2026-01-15T00:00:00.000Z",
+  "target": "src/example-service",
   "healthScore": {
-    "testCoverage": <0-100>,
-    "documentation": <0-100>,
-    "codeQuality": <0-100>,
-    "architecture": <0-100>,
-    "security": <0-100>,
-    "overall": <0-100>
+    "testCoverage": 80,
+    "documentation": 70,
+    "codeQuality": 85,
+    "architecture": 80,
+    "security": 75,
+    "overall": 78
   },
-  "features": [
+  "userStories": [
     {
       "id": "RF-001",
-      "title": "<title>",
-      "testCoverage": "full|partial|none",
-      "asA": "<persona>",
-      "iWantTo": "<action>",
-      "soThat": "<benefit>",
-      "acceptanceCriteria": ["GIVEN ... WHEN ... THEN ..."],
-      "sourceFiles": ["path/to/file.ts"]
+      "title": "Recover the service health endpoint contract",
+      "acceptanceCriteria": ["GIVEN the service is ready WHEN a client requests the health endpoint THEN the endpoint returns the documented ready response"],
+      "passes": false,
+      "testCoverage": "partial",
+      "asA": "service operator",
+      "iWantTo": "query service readiness",
+      "soThat": "I can detect an unavailable deployment",
+      "sourceFiles": ["src/example-service/health.mjs"]
     }
   ],
   "technicalDebt": [
     {
-      "severity": "critical|moderate|low",
-      "description": "<issue>",
-      "file": "<path>",
-      "suggestion": "<fix>"
+      "severity": "moderate",
+      "description": "The failure response lacks a regression test",
+      "file": "src/example-service/health.mjs",
+      "suggestion": "Add a test for the unavailable dependency branch"
     }
   ],
   "improvementOpportunities": [
     {
-      "title": "<opportunity>",
-      "impact": "high|medium|low",
-      "description": "<details>"
+      "title": "Cover the unavailable dependency response",
+      "impact": "medium",
+      "description": "Turn the recovered failure behavior into an executable regression test"
     }
   ]
 }
 ```
 
-This JSON is designed so Atlas/Athena can directly read improvement opportunities
-and convert them into executable user stories without human reformatting.
+This JSON is directly valid AO_SPEC_V1 input. Atlas/Athena may enrich these
+stories with execution assignments, but must not discard the reverse metadata.
+
+After the Reverse Auto-Validation gate, persist this pair with the exact
+`writeHermesSpecArtifacts()` envelope procedure from forward Phase 4. Directly
+writing either `.ao` artifact is forbidden. Re-read `committedSpec` and
+`committedPrd` from the returned paths before making permanent copies.
 
 #### Persistent storage: docs/plans/\<slug\>/ (Reverse)
 
-After writing to `.ao/`, persist to the git-tracked `docs/plans/` directory:
+After the hardened writer commits the `.ao` pair, persist its re-read payloads
+to the git-tracked `docs/plans/` directory:
 
 1. **Derive slug** from `prd.json.projectName` using the Slug Derivation rules in Spec_Persistence.
 
 2. **Detect create vs update**: Same as forward mode.
 
-3. **Write spec.md**: Copy reverse spec content to `docs/plans/<slug>/spec.md`.
+3. **Write spec.md**: Copy the re-read `committedSpec` to `docs/plans/<slug>/spec.md`.
 
-4. **Write prd.json**: Copy reverse prd.json to `docs/plans/<slug>/prd.json`.
+4. **Write prd.json**: Copy the re-read `committedPrd` to `docs/plans/<slug>/prd.json`.
 
 5. **Write features/ (M/L scale only)**:
-   Same logic as forward mode, but group by RF-NNN features instead of US-NNN stories.
+   Same logic as forward mode, but group by RF-NNN `userStories` instead of US-NNN stories.
    Feature file names derived from feature group titles.
 
 6. **Append to CHANGELOG.md** (create if new):
@@ -938,19 +1034,21 @@ After writing to `.ao/`, persist to the git-tracked `docs/plans/` directory:
 
 ### Reverse Auto-Validation (Phase R4 gate)
 
-Before writing reverse output files, validate consistency:
+Before reverse artifact persistence, validate consistency:
 
 ```
 Validation checklist:
-1. Feature count: spec.md RF-NNN count == prd.json features array length
-2. Feature IDs: all RF-NNN IDs in spec.md appear in prd.json (no orphans)
+1. Feature count: spec.md RF-NNN count == prd.json userStories array length
+2. Feature IDs: all RF-NNN IDs in spec.md appear in prd.json.userStories (no orphans)
 3. Health scores: all 5 dimensions present and in 0-100 range
 4. Overall score: matches weighted average (or is explicitly justified if not)
-5. Tech debt severity: every item has severity tag (critical/moderate/low)
-6. Source files: every RF-NNN references at least one source file path
-7. Acceptance criteria: every feature has ≥1 GIVEN/WHEN/THEN or behavioral description
+5. AO_SPEC fields: scale and all common arrays exist; each user story has
+   passes:false and at least one uppercase GIVEN/WHEN/THEN criterion
+6. Tech debt severity: every item has severity tag (critical/moderate/low)
+7. Source files: every RF-NNN references at least one source file path
+8. Acceptance criteria: every feature has at least one uppercase GIVEN/WHEN/THEN statement
 
-If any check fails → fix automatically before writing.
+If any check fails → fix automatically before persistence.
 Log all auto-corrections in spec footer.
 ```
 
@@ -1024,8 +1122,10 @@ additional input to the Plan skill's Phase 1 UNDERSTAND step.
 
 STOP and save the spec when:
 - Auto-validation passes (all checklist items green)
-- Spec.md is written with all mandatory sections filled (Problem, Goals, User Stories, Constraints)
-- prd.json is written, verified readable, and story/feature count matches spec.md
+- The `.ao/spec.md` and `.ao/prd.json` pair is committed by
+  `writeHermesSpecArtifacts()` with all mandatory sections filled
+- The writer reports `validated:true`, both committed payloads are re-read, and
+  the story/feature count matches between them
 - No untestable words remain in acceptance criteria
 - User approves the spec OR explicitly says "proceed" OR scale is S (auto-approved)
 

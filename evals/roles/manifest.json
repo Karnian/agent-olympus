@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "namespace": "agent-olympus",
+  "agents": [
+    {
+      "name": "aphrodite",
+      "invocation": "agent-olympus:aphrodite",
+      "model": "sonnet",
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "WebFetch",
+        "WebSearch",
+        "mcp__Claude_Preview__preview_screenshot",
+        "mcp__Claude_Preview__preview_snapshot"
+      ],
+      "readOnly": true,
+      "machineOutputs": ["AO_REVIEW_V1"]
+    },
+    {
+      "name": "architect",
+      "invocation": "agent-olympus:architect",
+      "model": "opus",
+      "tools": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
+      "readOnly": true,
+      "machineOutputs": ["AO_REVIEW_V1", "STAGE_VERDICT"]
+    },
+    {
+      "name": "ask",
+      "invocation": "agent-olympus:ask",
+      "model": "sonnet",
+      "tools": ["Read", "Grep", "Glob", "Bash"],
+      "readOnly": false,
+      "machineOutputs": []
+    },
+    {
+      "name": "athena",
+      "invocation": "agent-olympus:athena",
+      "model": "opus",
+      "tools": null,
+      "readOnly": false,
+      "machineOutputs": []
+    },
+    {
+      "name": "atlas",
+      "invocation": "agent-olympus:atlas",
+      "model": "opus",
+      "tools": null,
+      "readOnly": false,
+      "machineOutputs": []
+    },
+    {
+      "name": "code-reviewer",
+      "invocation": "agent-olympus:code-reviewer",
+      "model": "sonnet",
+      "tools": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
+      "readOnly": true,
+      "machineOutputs": ["AO_REVIEW_V1", "STAGE_VERDICT"]
+    },
+    {
+      "name": "debugger",
+      "invocation": "agent-olympus:debugger",
+      "model": "sonnet",
+      "tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+      "readOnly": false,
+      "machineOutputs": []
+    },
+    {
+      "name": "designer",
+      "invocation": "agent-olympus:designer",
+      "model": "sonnet",
+      "tools": [
+        "Read",
+        "Grep",
+        "Glob",
+        "Edit",
+        "Write",
+        "Bash",
+        "mcp__Claude_Preview__preview_screenshot",
+        "mcp__Claude_Preview__preview_snapshot"
+      ],
+      "readOnly": false,
+      "machineOutputs": []
+    },
+    {
+      "name": "executor",
+      "invocation": "agent-olympus:executor",
+      "model": "sonnet",
+      "tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+      "readOnly": false,
+      "machineOutputs": []
+    },
+    {
+      "name": "explore",
+      "invocation": "agent-olympus:explore",
+      "model": "haiku",
+      "tools": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
+      "readOnly": true,
+      "machineOutputs": []
+    },
+    {
+      "name": "hephaestus",
+      "invocation": "agent-olympus:hephaestus",
+      "model": "sonnet",
+      "tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+      "readOnly": false,
+      "machineOutputs": []
+    },
+    {
+      "name": "hermes",
+      "invocation": "agent-olympus:hermes",
+      "model": "opus",
+      "tools": ["Read", "Grep", "Glob"],
+      "readOnly": false,
+      "machineOutputs": ["AO_SPEC_V1"]
+    },
+    {
+      "name": "metis",
+      "invocation": "agent-olympus:metis",
+      "model": "opus",
+      "tools": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
+      "readOnly": false,
+      "machineOutputs": []
+    },
+    {
+      "name": "momus",
+      "invocation": "agent-olympus:momus",
+      "model": "opus",
+      "tools": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
+      "readOnly": false,
+      "machineOutputs": ["STAGE_VERDICT"]
+    },
+    {
+      "name": "prometheus",
+      "invocation": "agent-olympus:prometheus",
+      "model": "opus",
+      "tools": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
+      "readOnly": false,
+      "machineOutputs": []
+    },
+    {
+      "name": "security-reviewer",
+      "invocation": "agent-olympus:security-reviewer",
+      "model": "sonnet",
+      "tools": ["Read", "Grep", "Glob", "WebFetch", "WebSearch"],
+      "readOnly": true,
+      "machineOutputs": ["AO_REVIEW_V1"]
+    },
+    {
+      "name": "test-engineer",
+      "invocation": "agent-olympus:test-engineer",
+      "model": "sonnet",
+      "tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash"],
+      "readOnly": false,
+      "machineOutputs": []
+    },
+    {
+      "name": "themis",
+      "invocation": "agent-olympus:themis",
+      "model": "sonnet",
+      "tools": ["Read", "Grep", "Glob", "Bash"],
+      "readOnly": false,
+      "machineOutputs": ["AO_REVIEW_V1"]
+    },
+    {
+      "name": "writer",
+      "invocation": "agent-olympus:writer",
+      "model": "haiku",
+      "tools": ["Read", "Grep", "Glob", "Edit", "Write", "Bash", "WebFetch", "WebSearch"],
+      "readOnly": false,
+      "machineOutputs": []
+    }
+  ]
+}

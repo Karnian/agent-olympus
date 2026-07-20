@@ -65,8 +65,9 @@ run, team, worktree, checkpoint, and state and STOP. Report that the live team
 needs explicit operator recovery; do not silently convert uncertainty into a
 new run.
 
-Do **not** call `shutdownTeam()`, `cleanupTeamWorktrees()`, `TeamDelete`, broad
-tmux enumeration, or manual prefix matching from `/cancel` while the run is
+Do **not** call `shutdownTeam()`, `cleanupTeamWorktrees()`, send native-team
+shutdown requests, perform broad tmux enumeration, or use manual prefix matching
+from `/cancel` while the run is
 active: `shutdownTeam()` cleans team state/worktrees, while the terminal-failure
 proof must still read that evidence. There is currently no non-destructive,
 run-bound live-worker cancellation primitive. A session-name similarity is not

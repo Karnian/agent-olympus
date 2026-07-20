@@ -7,7 +7,11 @@ description: Multi-perspective plan validation — Planner/Architect/Critic cons
 
 ## Purpose
 
-consensus-plan produces a battle-tested PRD by running every draft plan through an independent Architect review and a Critic review before it is ever executed. The loop catches architectural anti-patterns, missing edge cases, and scope creep at the cheapest possible moment — before a single line of code is written.
+consensus-plan produces a reviewed **execution-assignment plan** for an existing
+typed AO_SPEC PRD. It runs every draft through independent Architect and Momus
+review before returning assignments to Atlas or Athena. The caller remains the
+sole owner of `.ao/prd.json` and applies the result through the hardened
+execution-PRD enrichment store.
 
 ## Use_When
 
@@ -15,16 +19,22 @@ consensus-plan produces a battle-tested PRD by running every draft plan through 
 - Atlas Phase 2 needs a higher-confidence plan than a single Prometheus pass delivers
 - Athena needs a shared, agreed-upon PRD before dispatching workers
 - Task is architectural, cross-system, or has stated non-functional requirements
+- A valid AO_SPEC planning PRD already exists and its generation is supplied by
+  `readPlanningPrdForExecution()`
 
 ## Do_Not_Use_When
 
 - Task is trivial (single file, obvious change) — use Atlas directly
 - User wants to skip planning and execute immediately
-- A PRD already exists and only execution is needed
+- No valid typed planning PRD exists — run `/plan` (or the orchestrator Spec
+  Gate) first; this skill must not create a replacement schema
 
 ## Core_Principle
 
-**NEVER hand off an unreviewed plan.** A plan is only finalized when both the Architect and the Critic independently issue APPROVE verdicts, or when the user explicitly overrides after a REJECT.
+**NEVER hand off an unreviewed plan.** A plan is finalized only when both the
+Architect and Momus independently approve it, or when the user explicitly
+overrides after a rejection. The skill MUST NOT write, replace, rename, or
+delete `.ao/prd.json` or `.ao/spec.md`.
 
 ## Architecture
 
@@ -49,8 +59,9 @@ Phase 3: CONSENSUS
         │
         ▼
 Phase 4: FINALIZE
-    - Write .ao/prd.json
-    - Return markdown summary
+    - Return AO_CONSENSUS_ASSIGNMENT_PLAN_V1
+    - Optionally archive that assignment-only envelope
+    - Caller validates, merges, and CAS-persists it
 ```
 
 ## Steps
@@ -63,7 +74,11 @@ Task Prometheus to produce the initial plan:
 Task(subagent_type="agent-olympus:prometheus", model="opus",
   prompt="Create a structured implementation plan for the following task.
 
+  Orchestrator: <atlas|athena>
+  Source PRD generation: <64-character generation from readPlanningPrdForExecution>
+  Available providers: Claude=true, Codex=<true|false>, Gemini=<true|false>
   Task: <user_request>
+  Typed AO_SPEC PRD (requirements and story IDs are immutable): <planning_prd>
   Codebase context: <analysis_results_if_available>
   Prior wisdom: <formatWisdomForPrompt() if available>
   Additional constraints: <constraints_from_prior_reject_if_any>
@@ -74,10 +89,12 @@ Task(subagent_type="agent-olympus:prometheus", model="opus",
   2. Complexity estimate per story: S / M / L
   3. Execution order and dependency graph (which stories block which)
   4. Parallel groups — stories that can run concurrently (non-overlapping file scopes)
-  5. Agent and model assignment per story (executor/designer/test-engineer, haiku/sonnet/opus)
+  5. Provider, agent, and model assignment per story, using only providers
+     reported available above
   6. Explicit file ownership per story to prevent conflicts
 
-  Output the plan as structured text followed by a PRD JSON block.")
+  Preserve the AO_SPEC story IDs and order. Do not rewrite requirements and do
+  not write any file. Produce an assignment-plan draft for review.")
 ```
 
 Record the draft as `draft_plan` and `revision_count = 0`.
@@ -205,90 +222,128 @@ On user confirmation, reset `revision_count = 0` and return to Phase 1 with the 
 
 ### Phase 4 — FINALIZE
 
-Write the approved plan to `.ao/prd.json`:
+Return exactly one JSON object with no Markdown fence or surrounding prose.
+This is an assignment-only handoff; it is not a PRD replacement:
 
 ```json
 {
-  "projectName": "consensus-<task-slug>",
-  "consensusReached": true,
+  "schemaVersion": 1,
+  "contract": "AO_CONSENSUS_ASSIGNMENT_PLAN_V1",
+  "verdict": "APPROVE",
+  "approvalBasis": "reviewers",
+  "orchestrator": "atlas",
+  "sourcePrdGeneration": "<copy the supplied 64-character generation exactly>",
   "revisionCycles": <revision_count>,
-  "userStories": [
+  "summary": "one concise assignment-plan summary",
+  "assignments": [
     {
-      "id": "US-001",
-      "title": "...",
-      "complexity": "S|M|L",
-      "acceptanceCriteria": ["specific", "measurable", "testable"],
-      "passes": false,
-      "assignTo": "claude|codex",
-      "model": "opus|sonnet|haiku",
+      "storyId": "US-001",
       "parallelGroup": "A",
-      "ownedFiles": ["path/to/file.ts"]
+      "scope": ["path/to/file.ts"],
+      "dependsOn": [],
+      "requiresTDD": true,
+      "assignTo": "claude",
+      "model": "sonnet",
+      "agentType": "executor"
     }
-  ],
-  "dependencyOrder": ["US-001", "US-002"],
-  "architectReview": "<brief summary>",
-  "mosReview": "<brief summary>"
+  ]
 }
 ```
 
-**PRD QUALITY RULE**: Generic acceptance criteria are FORBIDDEN.
+Set `orchestrator` to the caller-supplied value. Set `approvalBasis` to
+`reviewers` only when both reviewers approved; use `user-override` only after an
+explicit user override. The envelope must contain every existing PRD story once,
+in the same order, and must copy `sourcePrdGeneration` exactly.
 
-Not acceptable:
-- "Implementation is complete"
-- "Code works correctly"
-- "Feature is functional"
+Assignment fields are deliberately different by orchestrator:
 
-Acceptable:
-- "GET /api/users returns 200 with a JSON array matching the User schema"
-- "parseConfig() returns default values when a key is missing from the config file"
-- "tests/auth.test.ts exists and all 5 test cases pass with `npm test`"
+- **Atlas**: `storyId`, `parallelGroup`, `scope`, optional `dependsOn` and
+  `requiresTDD`, plus `assignTo` and a Claude model-tier hint (`model`) for
+  every provider. `agentType` is required for Claude and must be omitted for
+  Codex/Gemini.
+- **Athena**: the common fields plus `assignedWorker`, `workerType`, optional
+  Claude `model`, and `agentType` for Claude only. External workers omit both
+  `model` and `agentType`.
 
-Output a markdown summary to the user (or pipeline caller):
+Allowed Claude execution roles are `executor`, `designer`, `test-engineer`,
+`debugger`, `hephaestus`, and `writer`. Never assign a provider reported
+unavailable. Never include `projectName`, requirements, titles, acceptance
+criteria, `passes`, review prose, or any other PRD field in an assignment item.
 
+The caller parses and applies the envelope through the checked bridge below:
+
+```javascript
+import {
+  buildConsensusExecutionPrd,
+  parseConsensusAssignmentPlan,
+} from './scripts/lib/consensus-assignment-plan.mjs';
+import { enrichExecutionPrd } from './scripts/lib/execution-prd-store.mjs';
+import { writeOutbox } from './scripts/lib/artifact-pipe.mjs';
+
+const assignmentPlan = parseConsensusAssignmentPlan(<raw skill output>, {
+  orchestrator: '<atlas|athena>',
+});
+const executionCandidate = buildConsensusExecutionPrd(
+  planningPrdState.prd,
+  assignmentPlan,
+  {
+    orchestrator: '<atlas|athena>',
+    sourcePrdGeneration: planningPrdState.generation,
+    hasCodex,
+    hasGemini: hasGeminiCli,
+  },
+);
+
+// Archival only. Never reload this best-effort pipe artifact as authority.
+await writeOutbox(
+  runId,
+  'plan',
+  'consensus-assignment-plan.json',
+  assignmentPlan,
+);
+
+const plannedPrdState = enrichExecutionPrd(executionCandidate, {
+  cwd,
+  orchestrator: '<atlas|athena>',
+  expectedGeneration: planningPrdState.generation,
+});
 ```
-## Consensus Plan — <task-slug>
 
-**Revision cycles:** <N>
-**Stories:** <count> across <parallel-group-count> parallel groups
-**Complexity distribution:** S:<n> M:<n> L:<n>
-
-### User Stories
-| ID | Title | Complexity | Group | Agent |
-|----|-------|------------|-------|-------|
-| US-001 | … | M | A | executor/sonnet |
-…
-
-### Architect Notes
-<one short paragraph>
-
-### Critic Notes
-<one short paragraph>
-
-PRD saved to `.ao/prd.json`. Ready for execution.
-```
+`buildConsensusExecutionPrd()` rejects unknown fields, stale generations,
+missing/reordered stories, unavailable providers, invalid scope ownership, and
+orchestrator-specific assignment errors. `enrichExecutionPrd()` remains the
+only authoritative writer and proves that non-assignment AO_SPEC content did
+not change.
 
 ## Pipeline_Integration
 
-When called from Atlas or Athena, this skill acts as a drop-in replacement for the Phase 2 PLAN step:
+When called from Atlas or Athena, this skill replaces only the Prometheus +
+Momus assignment-planning pass:
 
-- **Input**: same `user_request` and `analysis_results` Atlas passes to Prometheus
-- **Output**: finalized `.ao/prd.json` + markdown summary returned to the caller
-- Atlas can then skip its own momus validation pass and proceed directly to Phase 3 EXECUTE
+- **Input**: orchestrator name, provider capabilities, immutable typed PRD and
+  generation, user request, and analysis context
+- **Output**: one validated `AO_CONSENSUS_ASSIGNMENT_PLAN_V1` envelope
+- **Persistence**: optional archival pipe copy only; the caller merges and
+  persists through `enrichExecutionPrd()` before execution
 
 Caller pattern (Atlas Phase 2):
 
 ```
-Skill(skill="agent-olympus:consensus-plan",
+consensus_raw = Skill(skill="agent-olympus:consensus-plan",
   args="Run consensus planning for this task.
+  OUTPUT_CONTRACT: AO_CONSENSUS_ASSIGNMENT_PLAN_V1
+  Orchestrator: atlas
+  Source PRD generation: <planningPrdState.generation>
+  Available providers: Claude=true, Codex=<hasCodex>, Gemini=<hasGeminiCli>
   Task: <user_request>
+  Spec: <planningPrdState.prd>
   Analysis: <metis_analysis>
   Wisdom: <formatWisdomForPrompt()>")
 ```
 
 ## TDD Planning Hint
-When consensus produces user stories with testable acceptance criteria,
-mark each story with `requiresTDD: true` in the output so the calling
-orchestrator (Atlas/Athena) can route implementation through /tdd.
+When an existing story should use TDD, set `requiresTDD: true` on its assignment.
+Never create a new story or rewrite acceptance criteria here.
 
 ## Limits_and_Guardrails
 
@@ -300,15 +355,16 @@ orchestrator (Atlas/Athena) can route implementation through /tdd.
 
 ## Stop_Conditions
 
-STOP and return the finalized PRD when:
+STOP and return the assignment envelope when:
 - Both reviewers issue APPROVE (or user overrides)
-- `.ao/prd.json` is written and verified readable
+- The envelope satisfies `AO_CONSENSUS_ASSIGNMENT_PLAN_V1`
 
 ESCALATE to user when:
 - Either reviewer issues REJECT
 - Revision limit (2 cycles) is exceeded without consensus
 - The same blocking issue appears in two consecutive revision cycles (likely a fundamental conflict requiring human judgement)
 
-**NEVER produce a PRD from an unreviewed plan.**
+**NEVER produce assignments from an unreviewed plan, and NEVER write the
+authoritative PRD from this skill.**
 
 </Consensus_Plan_Skill>

@@ -23,6 +23,60 @@ function mode(filePath) {
   return statSync(filePath).mode & 0o777;
 }
 
+function createLiveSuiteTasks(tempRoot, count = 3) {
+  const evalsDir = path.join(tempRoot, 'evals');
+  for (let index = 1; index <= count; index += 1) {
+    const taskDir = path.join(evalsDir, 'tasks', `task-${index}`);
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(path.join(taskDir, 'task.json'), JSON.stringify({
+      schemaVersion: 1,
+      id: `task-${index}`,
+      track: 'capability',
+      orchestrator: 'atlas',
+      prompt: `bounded live task ${index}`,
+      difficulty: 'S',
+      timeoutMs: 1,
+      modelTier: 'sonnet',
+      k: 1,
+    }));
+  }
+  return evalsDir;
+}
+
+function fakeLiveRun(taskDir, {
+  costUsd = 0,
+  budgetCompliant = true,
+  trialCount = 1,
+  reportedCostTrials = trialCount,
+} = {}) {
+  const task = JSON.parse(readFileSync(path.join(taskDir, 'task.json'), 'utf-8'));
+  const providerMetrics = {
+    totalCostUsd: costUsd,
+    durationMs: 1,
+    apiDurationMs: 1,
+    turns: 1,
+    reportedCostTrials,
+    reportedDurationTrials: 1,
+    reportedTurnTrials: 1,
+  };
+  return {
+    summary: {
+      budgetCompliant,
+      providerMetrics,
+      tasks: [{
+        task: task.id,
+        track: task.track,
+        modelTier: task.modelTier,
+        passHatK: true,
+        passAtK: true,
+        budgetCompliant,
+        providerMetrics,
+      }],
+    },
+    results: Array.from({ length: trialCount }, () => ({ task: task.id, usage: null })),
+  };
+}
+
 test('runSuite aggregates both tracks, trials, tokens, baseline deltas, and secure modes', async () => {
   const tempRoot = mkdtempSync(path.join(tmpdir(), 'ao-eval-suite-'));
   try {
@@ -35,13 +89,13 @@ test('runSuite aggregates both tracks, trials, tokens, baseline deltas, and secu
     });
 
     assert.equal(result.exitCode, 0);
-    assert.equal(result.summary.taskCount, 6);
+    assert.equal(result.summary.taskCount, 8);
     assert.equal(result.summary.passHatK, true);
     assert.equal(result.summary.passAtK, true);
     assert.equal(result.summary.regressionGatePassed, true);
-    assert.deepEqual(result.summary.modelTiers, ['sonnet']);
+    assert.deepEqual(result.summary.modelTiers, ['opus', 'sonnet']);
     assert.deepEqual(result.summary.tracks, [
-      { track: 'capability', total: 3, passed: 3 },
+      { track: 'capability', total: 5, passed: 5 },
       { track: 'regression', total: 3, passed: 3 },
     ]);
     assert.equal(result.summary.tokenUsage.totalTokens, 0);
@@ -54,7 +108,7 @@ test('runSuite aggregates both tracks, trials, tokens, baseline deltas, and secu
 
     const resultLines = readFileSync(path.join(result.runDir, 'results.jsonl'), 'utf-8')
       .trim().split('\n').map((line) => JSON.parse(line));
-    assert.equal(resultLines.length, 6);
+    assert.equal(resultLines.length, 8);
     assert.equal(resultLines.every((row) => row.runId === 'suite-all-green'), true);
     assert.equal(mode(result.runDir), 0o700);
     assert.equal(mode(path.join(result.runDir, 'summary.json')), 0o600);
@@ -81,6 +135,194 @@ test('suite rejects ambiguous execution modes and non-atomic baseline refresh', 
     () => runSuite({ evalsDir: EVALS_DIR, live: true, track: 'regression', updateBaseline: true }),
     /not atomic/,
   );
+});
+
+test('live suite requires explicit safe trial and aggregate budget controls before running tasks', async () => {
+  const tempRoot = mkdtempSync(path.join(tmpdir(), 'ao-eval-live-budget-validation-'));
+  const evalsDir = createLiveSuiteTasks(tempRoot);
+  let calls = 0;
+  const runEvalImpl = async () => {
+    calls += 1;
+    throw new Error('live runner must not be called');
+  };
+  try {
+    await assert.rejects(
+      () => runSuite({ evalsDir, live: true, runEvalImpl }),
+      /require explicit --track/,
+    );
+    await assert.rejects(
+      () => runSuite({ evalsDir, live: true, track: 'all', runEvalImpl }),
+      /require explicit --k/,
+    );
+    await assert.rejects(
+      () => runSuite({ evalsDir, live: true, track: 'all', k: 1, runEvalImpl }),
+      /require explicit --max-budget-usd/,
+    );
+    await assert.rejects(
+      () => runSuite({
+        evalsDir, live: true, track: 'all', k: 1, maxBudgetUsd: 1, runEvalImpl,
+      }),
+      /require explicit --max-total-budget-usd/,
+    );
+    await assert.rejects(
+      () => runSuite({
+        evalsDir,
+        live: true,
+        track: 'all',
+        k: 0,
+        maxBudgetUsd: 1,
+        maxTotalBudgetUsd: 3,
+        runEvalImpl,
+      }),
+      /--k must be a positive safe integer/,
+    );
+    await assert.rejects(
+      () => runSuite({
+        evalsDir,
+        live: true,
+        track: 'all',
+        k: 1,
+        maxBudgetUsd: Infinity,
+        maxTotalBudgetUsd: 3,
+        runEvalImpl,
+      }),
+      /--max-budget-usd must be a finite number/,
+    );
+    await assert.rejects(
+      () => runSuite({
+        evalsDir,
+        live: true,
+        track: 'all',
+        k: 1,
+        maxBudgetUsd: 101,
+        maxTotalBudgetUsd: 303,
+        runEvalImpl,
+      }),
+      /--max-budget-usd must be a finite number greater than 0 and at most 100/,
+    );
+    await assert.rejects(
+      () => runSuite({
+        evalsDir,
+        live: true,
+        track: 'all',
+        k: 1,
+        maxBudgetUsd: 1,
+        maxTotalBudgetUsd: Number.NaN,
+        runEvalImpl,
+      }),
+      /--max-total-budget-usd must be a finite number/,
+    );
+    await assert.rejects(
+      () => runSuite({
+        evalsDir,
+        live: true,
+        track: 'all',
+        k: 2,
+        maxBudgetUsd: 1,
+        maxTotalBudgetUsd: 5.99,
+        runEvalImpl,
+      }),
+      /Projected live suite budget \$6 exceeds --max-total-budget-usd \$5\.99/,
+    );
+    assert.equal(calls, 0);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('live suite passes the per-trial cap and stops with a nonzero exit at the aggregate cap', async () => {
+  const tempRoot = mkdtempSync(path.join(tmpdir(), 'ao-eval-live-budget-cap-'));
+  const evalsDir = createLiveSuiteTasks(tempRoot);
+  const calls = [];
+  try {
+    const result = await runSuite({
+      evalsDir,
+      live: true,
+      track: 'all',
+      k: '2',
+      maxBudgetUsd: '1',
+      maxTotalBudgetUsd: '6',
+      runId: 'aggregate-cap-stop',
+      resultsDir: path.join(tempRoot, 'results'),
+      runEvalImpl: async (taskDir, opts) => {
+        calls.push({ taskDir, opts });
+        return fakeLiveRun(taskDir, { costUsd: 6, trialCount: 2 });
+      },
+    });
+
+    assert.equal(calls.length, 1, 'no later paid task may be scheduled after the cap is reached');
+    assert.equal(calls[0].opts.live, true);
+    assert.equal(calls[0].opts.k, 2);
+    assert.equal(calls[0].opts.maxBudgetUsd, 1);
+    assert.equal(result.summary.schedulingComplete, false);
+    assert.equal(result.summary.budgetCompliant, true);
+    assert.equal(result.summary.passAtK, false);
+    assert.equal(result.summary.liveBudget.stopReason, 'aggregate-budget-reached');
+    assert.equal(result.summary.liveBudget.reportedCostUsd, 6);
+    assert.equal(result.exitCode, 1);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('live suite stops scheduling and fails when a child run reports budget noncompliance', async () => {
+  const tempRoot = mkdtempSync(path.join(tmpdir(), 'ao-eval-live-child-budget-'));
+  const evalsDir = createLiveSuiteTasks(tempRoot);
+  let calls = 0;
+  try {
+    const result = await runSuite({
+      evalsDir,
+      live: true,
+      track: 'all',
+      k: 1,
+      maxBudgetUsd: 1,
+      maxTotalBudgetUsd: 3,
+      runId: 'child-budget-stop',
+      resultsDir: path.join(tempRoot, 'results'),
+      runEvalImpl: async (taskDir) => {
+        calls += 1;
+        return fakeLiveRun(taskDir, { costUsd: 0.25, budgetCompliant: false });
+      },
+    });
+
+    assert.equal(calls, 1);
+    assert.equal(result.summary.schedulingComplete, false);
+    assert.equal(result.summary.budgetCompliant, false);
+    assert.equal(result.summary.liveBudget.stopReason, 'per-run-budget-noncompliance');
+    assert.equal(result.exitCode, 1);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('live suite treats missing child cost reports as unknown and schedules no later task', async () => {
+  const tempRoot = mkdtempSync(path.join(tmpdir(), 'ao-eval-live-unknown-cost-'));
+  const evalsDir = createLiveSuiteTasks(tempRoot);
+  let calls = 0;
+  try {
+    const result = await runSuite({
+      evalsDir,
+      live: true,
+      track: 'all',
+      k: 1,
+      maxBudgetUsd: 1,
+      maxTotalBudgetUsd: 3,
+      runId: 'unknown-cost-stop',
+      resultsDir: path.join(tempRoot, 'results'),
+      runEvalImpl: async (taskDir) => {
+        calls += 1;
+        return fakeLiveRun(taskDir, { costUsd: 0, reportedCostTrials: 0 });
+      },
+    });
+
+    assert.equal(calls, 1);
+    assert.equal(result.summary.schedulingComplete, false);
+    assert.equal(result.summary.budgetCompliant, false);
+    assert.equal(result.summary.liveBudget.stopReason, 'unknown-reported-cost');
+    assert.equal(result.exitCode, 1);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
 
 test('capability-only suite reports misses without failing the regression gate', async () => {
@@ -262,6 +504,192 @@ test('buildTrend falls back from a malformed runId before deterministic tie sort
       trend.tracks.regression.map((point) => point.runId),
       ['a-malformed', 'valid'],
     );
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('buildTrend emits safe deterministic direct-agent series without collapsing personas', () => {
+  const tempRoot = mkdtempSync(path.join(tmpdir(), 'ao-eval-agent-trend-'));
+  const fingerprint = (character) => character.repeat(64);
+  const writeSummary = (dir, summary) => {
+    mkdirSync(path.join(tempRoot, dir), { recursive: true });
+    writeFileSync(path.join(tempRoot, dir, 'summary.json'), JSON.stringify(summary));
+  };
+  const directSummary = ({
+    agent,
+    runId,
+    completedAt,
+    executionMode = 'live',
+    reportedTrials = 1,
+  }) => ({
+    schemaVersion: 1,
+    runId,
+    completedAt,
+    executionMode,
+    tracks: [{ track: 'capability', total: 1, passed: 1 }],
+    tasks: [{
+      task: 'shared-role-task',
+      track: 'capability',
+      orchestrator: 'agent',
+      agent,
+      completedTrials: 3,
+      outcomePassAtK: true,
+      outcomePassHatK: true,
+      passAtK: true,
+      passHatK: false,
+      budgetCompliant: true,
+      k: 3,
+      maxBudgetUsd: 1,
+      maxScheduledBudgetUsd: 3,
+      modelTier: 'sonnet',
+      tokenUsage: { totalTokens: 123 },
+      providerMetrics: {
+        totalCostUsd: 0.25,
+        durationMs: 456,
+        turns: 7,
+        reportedCostTrials: reportedTrials,
+        reportedDurationTrials: reportedTrials,
+        reportedTurnTrials: reportedTrials,
+        untrustedExtra: 'not-reported',
+      },
+      providerRuntime: {
+        effort: 'high',
+        efforts: ['high'],
+        fastModeStates: ['off'],
+        usageSpeeds: ['standard'],
+        serviceTiers: ['standard'],
+      },
+      benchmarkFingerprint: fingerprint('a'),
+      fixtureFingerprint: fingerprint('b'),
+      pipelineProtocolFingerprint: fingerprint('c'),
+      pluginProvenance: {
+        fingerprint: fingerprint('d'),
+        targetPromptFingerprint: fingerprint('e'),
+        untrustedExtra: 'not-reported',
+      },
+      claudeCliVersion: '2.1.209',
+      observedModels: ['claude-sonnet-4-20250514'],
+      provenanceComplete: true,
+    }],
+  });
+
+  try {
+    const executorLater = directSummary({
+      agent: 'executor',
+      runId: 'executor-later',
+      completedAt: '2026-07-12T02:00:00.000Z',
+    });
+    Object.assign(executorLater.tasks[0].providerMetrics, {
+      totalCostUsd: 0,
+      durationMs: 0,
+      turns: 0,
+    });
+    writeSummary('z-executor-later', executorLater);
+    writeSummary('a-executor-earlier', directSummary({
+      agent: 'executor',
+      runId: 'executor-earlier',
+      completedAt: '2026-07-12T01:00:00.000Z',
+    }));
+    writeSummary('m-hephaestus', directSummary({
+      agent: 'hephaestus',
+      runId: 'hephaestus-run',
+      completedAt: '2026-07-12T01:00:00.000Z',
+      reportedTrials: 0,
+    }));
+    writeSummary('fixture-agent', directSummary({
+      agent: 'writer',
+      runId: 'fixture-agent',
+      completedAt: '2026-07-12T03:00:00.000Z',
+      executionMode: 'fixture',
+    }));
+    writeSummary('unsafe-agent', directSummary({
+      agent: '../executor',
+      runId: 'unsafe-agent',
+      completedAt: '2026-07-12T04:00:00.000Z',
+    }));
+    writeSummary('nested-corrupt', {
+      ...directSummary({
+        agent: 'security-reviewer',
+        runId: 'nested-corrupt',
+        completedAt: '2026-07-12T05:00:00.000Z',
+      }),
+      tracks: [null],
+    });
+
+    const trend = buildTrend(tempRoot);
+    assert.deepEqual(Object.keys(trend.agents), ['executor', 'hephaestus']);
+    assert.deepEqual(
+      trend.agents.executor.map((point) => point.runId),
+      ['executor-earlier', 'executor-later'],
+    );
+    assert.deepEqual(trend.agents.executor[0], {
+      runId: 'executor-earlier',
+      completedAt: '2026-07-12T01:00:00.000Z',
+      task: 'shared-role-task',
+      track: 'capability',
+      agent: 'executor',
+      completedTrials: 3,
+      outcomePassAtK: true,
+      outcomePassHatK: true,
+      passAtK: true,
+      passHatK: false,
+      budgetCompliant: true,
+      k: 3,
+      maxBudgetUsd: 1,
+      maxScheduledBudgetUsd: 3,
+      modelTier: 'sonnet',
+      totalTokens: 123,
+      providerMetrics: {
+        totalCostUsd: 0.25,
+        durationMs: 456,
+        turns: 7,
+        reportedCostTrials: 1,
+        reportedDurationTrials: 1,
+        reportedTurnTrials: 1,
+      },
+      providerRuntime: {
+        effort: 'high',
+        efforts: ['high'],
+        fastModeStates: ['off'],
+        usageSpeeds: ['standard'],
+        serviceTiers: ['standard'],
+      },
+      benchmarkFingerprint: fingerprint('a'),
+      fixtureFingerprint: fingerprint('b'),
+      pipelineProtocolFingerprint: fingerprint('c'),
+      pluginFingerprint: fingerprint('d'),
+      targetPromptFingerprint: fingerprint('e'),
+      claudeCliVersion: '2.1.209',
+      observedModels: ['claude-sonnet-4-20250514'],
+      provenanceComplete: true,
+    });
+    assert.deepEqual(trend.agents.executor[1].providerMetrics, {
+      totalCostUsd: 0,
+      durationMs: 0,
+      turns: 0,
+      reportedCostTrials: 1,
+      reportedDurationTrials: 1,
+      reportedTurnTrials: 1,
+    });
+    assert.deepEqual(trend.agents.hephaestus[0].providerMetrics, {
+      totalCostUsd: null,
+      durationMs: null,
+      turns: null,
+      reportedCostTrials: 0,
+      reportedDurationTrials: 0,
+      reportedTurnTrials: 0,
+    });
+    assert.notEqual(
+      trend.tracks.capability.find((point) => point.runId === 'executor-earlier').benchmarkFingerprint,
+      trend.tracks.capability.find((point) => point.runId === 'hephaestus-run').benchmarkFingerprint,
+      'the track benchmark identity must include the direct-agent persona',
+    );
+    assert.equal(Object.hasOwn(trend.agents, 'writer'), false);
+    assert.equal(Object.hasOwn(trend.agents, 'security-reviewer'), false);
+
+    const withFixtures = buildTrend(tempRoot, { includeFixtures: true });
+    assert.deepEqual(Object.keys(withFixtures.agents), ['executor', 'hephaestus', 'writer']);
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }

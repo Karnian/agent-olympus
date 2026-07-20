@@ -9,12 +9,28 @@ import {
   readdirSync,
 } from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { readExecutionPrd } from '../../scripts/lib/execution-prd-store.mjs';
+import { aggregateReviewResults } from '../../scripts/lib/review-contract.mjs';
 import {
+  assertCompleteReviewPackageIntegrity,
+  assertReviewPackageHeadTree,
+  getReviewWorktreeState,
+  resolveReviewBase,
+} from '../../scripts/lib/review-package.mjs';
+import { routeReviewers } from '../../scripts/lib/review-router.mjs';
+import {
+  appendUserTaskUpdate,
   createRun,
+  getRunReviewBasePin,
+  getRunExecutionPrdSnapshot,
+  getSealedVerificationGeneration,
+  getUserTaskUpdates,
 } from '../../scripts/lib/run-artifacts.mjs';
 import { getPhaseSequence } from '../../scripts/lib/phase-runner.mjs';
+import { loadAutonomyConfig, resolveRunShipMode } from '../../scripts/lib/autonomy.mjs';
 
-export const PIPELINE_EVIDENCE_POLICY_VERSION = 1;
+export const PIPELINE_EVIDENCE_POLICY_VERSION = 2;
 
 const TRUST = 'candidate-asserted';
 const CLOCK_TOLERANCE_MS = 2_000;
@@ -22,8 +38,27 @@ const MAX_PIPELINE_BYTES = 256 * 1024;
 const MAX_SUMMARY_BYTES = 256 * 1024;
 const MAX_GUARD_BYTES = 256 * 1024;
 const MAX_EVENTS_BYTES = 16 * 1024 * 1024;
+const MAX_APPROVAL_BYTES = 16 * 1024 * 1024;
+const MAX_BINDING_BYTES = 512 * 1024;
 const RUN_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
 const ROOT_KEYS = ['schemaVersion', 'runId', 'orchestrator', 'createdAt', 'updatedAt', 'attempt', 'phases'];
+const ROOT_KEYS_WITH_REATTEMPT_RECEIPT = [...ROOT_KEYS, 'reattemptReceipt'];
+const REATTEMPT_RECEIPT_KEYS = [
+  'schemaVersion', 'runId', 'orchestrator', 'reason', 'currentPhase',
+  'reopen', 'baseAttempt', 'targetAttempt',
+];
+const REATTEMPT_POLICIES = Object.freeze({
+  atlas: Object.freeze({
+    quality_fail: Object.freeze({ currentPhases: new Set(['verify', 'ci']), reopen: ['execute', 'verify'] }),
+    review_reject: Object.freeze({ currentPhases: new Set(['review']), reopen: ['verify'] }),
+    final_review_reject: Object.freeze({ currentPhases: new Set(['finalize']), reopen: ['verify'] }),
+    light_mode_reexec: Object.freeze({ currentPhases: new Set(['review']), reopen: ['execute', 'verify'] }),
+  }),
+  athena: Object.freeze({
+    review_reject: Object.freeze({ currentPhases: new Set(['review']), reopen: ['integrate'] }),
+    final_review_reject: Object.freeze({ currentPhases: new Set(['finalize']), reopen: ['integrate'] }),
+  }),
+});
 const PHASE_KEYS = new Set(['status', 'startedAt', 'completedAt', 'attempts', 'reason', 'outputs']);
 const CORE_PHASES = {
   atlas: new Set(['triage', 'execute', 'verify', 'review', 'finalize', 'complete']),
@@ -37,19 +72,80 @@ const DYNAMIC_SKIP_PHASES = new Set(['ship', 'ci']);
 const WORKER_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 const TEAM_SLUG = /^athena-[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
 const SHA = /^[a-f0-9]{40,64}$/;
+const OBJECT_ID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const SHA256 = /^[a-f0-9]{64}$/;
+const GENERATION_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const ATLAS_TRIAGE_OUTPUT_KEYS = ['reviewBaseRef', 'reviewBaseCommit', 'reviewBaseSource'];
+const ATLAS_VERIFY_OUTPUT_KEYS = [
+  'verificationGenerationId', 'verificationReviewDigest', 'verificationReviewTreeOid',
+];
+const ATLAS_REVIEW_OUTPUT_KEYS = ['approvedReviewDigest', 'approvedReviewTreeOid'];
+const ATLAS_FINALIZE_OUTPUT_KEYS = ['finalReviewDigest', 'finalReviewTreeOid', 'finalCommit'];
+const ATLAS_SHIP_OUTPUT_KEYS = [
+  'pushPerformed', 'createdPrUrl', 'branchName', 'baseBranch', 'headCommit',
+  'repoOriginUrl', 'repoPushUrl', 'repoRepository', 'repoDefaultBranch',
+];
+const ATLAS_CI_OUTPUT_KEYS = ['ciHeadCommit'];
+const APPROVAL_FIELDS = [
+  'schemaVersion', 'runId', 'phase', 'generationId', 'reviewPackage',
+  'reviewers', 'results', 'approvedAt', 'integrity',
+];
+const BINDING_FIELDS = [
+  'schemaVersion', 'runId', 'phase', 'generationId', 'reviewTreeOid',
+  'finalCommitProposal', 'storyIds', 'prdGeneration', 'route', 'boundAt', 'integrity',
+];
 const ATHENA_SPAWN_OUTPUT_KEYS = [
   'runId', 'teamSlug', 'intendedWorkers', 'spawnPath', 'launchState',
-  'baseCommit', 'worktreeDigest', 'adapterRunId',
+  'baseCommit', 'worktreeDigest', 'adapterRunId', 'nativeSessionId',
+  'prdGeneration',
 ];
 const ATHENA_MONITOR_OUTPUT_KEYS = [
-  'teamSlug', 'intendedWorkers', 'terminalWorkers', 'worktreeDigest', 'adapterRunId',
+  'teamSlug', 'intendedWorkers', 'terminalWorkers', 'worktreeDigest',
+  'adapterRunId', 'nativeSessionId',
 ];
 const ATHENA_INTEGRATE_OUTPUT_KEYS = [
   'teamSlug', 'intendedWorkers', 'isolatedWorkers', 'mergedWorkers',
   'worktreeDigest', 'verificationPassed', 'integrationCommit',
 ];
 const ATHENA_COMPLETE_OUTPUT_KEYS = ['teamSlug', 'worktreeDigest', 'cleanupState'];
+const PHASE_STATUS_VALUES = new Set(['pending', 'in_progress', 'completed', 'skipped', 'failed']);
+const SUMMARY_STATUS_VALUES = new Set(['running', 'completed']);
+const SUMMARY_RESULT_VALUES = new Set(['success', 'failure']);
+const KNOWN_EVENT_TYPES = new Set([
+  'checkpoint_cleared',
+  'checkpoint_saved',
+  'ci_fix_candidate',
+  'ci_fix_started',
+  'ci_head_target',
+  'ci_quality_failure',
+  'handoff_resumed',
+  'human_ship_approval',
+  'native_team_created',
+  'native_team_deleted',
+  'native_team_shutdown_complete',
+  'native_teammate_spawned',
+  'phase_transition',
+  'pipeline_phase_completed',
+  'pipeline_phase_failed',
+  'pipeline_phase_outputs_recorded',
+  'run_finalized',
+  'ship_intent',
+  'subagent_completed',
+  'user_task_update',
+  'verification_result',
+  'warning',
+  'worker_completed',
+  'worker_failed',
+  'worker_spawned',
+]);
+const GUARD_COUNTER_CAPS = new Map([
+  ['iterations', 15],
+  ['reviewRounds', 3],
+  ['finalReviewRounds', 3],
+  ['ci-cycles', 2],
+  ['monitor-iterations', 10],
+  ['quality-cycles', 2],
+]);
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -76,6 +172,49 @@ function hasExactKeys(value, expected) {
     && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
 }
 
+function validateReattemptReceipt(ledger, sequence) {
+  const receipt = ledger.reattemptReceipt;
+  if (receipt === undefined) return { ok: true, receipt: null };
+  const policy = REATTEMPT_POLICIES[ledger.orchestrator]?.[receipt?.reason];
+  const expectedKeys = receipt?.reason === 'quality_fail'
+    ? [...REATTEMPT_RECEIPT_KEYS, 'qualityBaseCount']
+    : REATTEMPT_RECEIPT_KEYS;
+  if (!hasExactKeys(receipt, expectedKeys)
+    || receipt.schemaVersion !== 1
+    || receipt.runId !== ledger.runId
+    || receipt.orchestrator !== ledger.orchestrator
+    || !policy
+    || !policy.currentPhases.has(receipt.currentPhase)
+    || !isDeepStrictEqual(receipt.reopen, policy.reopen)
+    || !Number.isInteger(receipt.baseAttempt)
+    || receipt.baseAttempt < 1
+    || !Number.isInteger(receipt.targetAttempt)
+    || receipt.targetAttempt !== receipt.baseAttempt + 1
+    || receipt.targetAttempt !== ledger.attempt
+    || receipt.targetAttempt > 15
+    || (receipt.reason === 'quality_fail'
+      && (!Number.isInteger(receipt.qualityBaseCount)
+        || receipt.qualityBaseCount < 0
+        || receipt.qualityBaseCount >= 2))) {
+    return { ok: false };
+  }
+  const currentIndex = sequence.findIndex(({ id }) => id === receipt.currentPhase);
+  const reopenIndices = receipt.reopen.map(phaseId => sequence.findIndex(({ id }) => id === phaseId));
+  if (currentIndex < 0
+    || reopenIndices.some(index => index < 0 || index > currentIndex)
+    || receipt.reopen.some(phaseId => (
+      ledger.phases?.[phaseId]?.status !== 'completed'
+      || !Number.isInteger(ledger.phases[phaseId]?.attempts)
+      || ledger.phases[phaseId].attempts < 2
+    ))
+    || ledger.phases?.[receipt.currentPhase]?.status !== 'completed'
+    || !Number.isInteger(ledger.phases[receipt.currentPhase]?.attempts)
+    || ledger.phases[receipt.currentPhase].attempts < 2) {
+    return { ok: false };
+  }
+  return { ok: true, receipt };
+}
+
 function canonicalWorkerList(value, { allowEmpty = false } = {}) {
   if (typeof value !== 'string') return null;
   if (value === '') return allowEmpty ? '' : null;
@@ -100,6 +239,10 @@ function validateAthenaPhaseOutputs(handle, ledger) {
     || (spawn.spawnPath === 'adapter-only'
       ? !/^[a-f0-9]{16}$/.test(spawn.adapterRunId || '')
       : spawn.adapterRunId !== 'none' && !/^[a-f0-9]{16}$/.test(spawn.adapterRunId || ''))
+    || (spawn.spawnPath === 'adapter-only'
+      ? spawn.nativeSessionId !== 'none'
+      : !RUN_ID_PATTERN.test(spawn.nativeSessionId || ''))
+    || !SHA256.test(spawn.prdGeneration || '')
     || !SHA.test(spawn.baseCommit || '')
     || !SHA256.test(spawn.worktreeDigest || '')) {
     return { ok: false, reason: 'athena-spawn-evidence', detail: 'Athena spawn outputs lack exact durable team/worktree identity.' };
@@ -109,7 +252,8 @@ function validateAthenaPhaseOutputs(handle, ledger) {
     || monitor.intendedWorkers !== spawn.intendedWorkers
     || monitor.terminalWorkers !== spawn.intendedWorkers
     || monitor.worktreeDigest !== spawn.worktreeDigest
-    || monitor.adapterRunId !== spawn.adapterRunId) {
+    || monitor.adapterRunId !== spawn.adapterRunId
+    || monitor.nativeSessionId !== spawn.nativeSessionId) {
     return { ok: false, reason: 'athena-monitor-evidence', detail: 'Athena monitor outputs do not prove every intended worker reached a terminal state.' };
   }
   if (!hasExactKeys(integrate, ATHENA_INTEGRATE_OUTPUT_KEYS)
@@ -138,6 +282,545 @@ function validateAthenaPhaseOutputs(handle, ledger) {
     return { ok: false, reason: 'athena-cleanup-evidence', detail: 'Athena completion must bind a successful cleanup marker to the spawn identity.' };
   }
   return { ok: true, spawn, monitor, integrate, complete };
+}
+
+function exactTimestampInTrial(value, handle, endedAtMs) {
+  return withinWindow(value, handle.startedAtMs, endedAtMs);
+}
+
+function sameStringSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.every((value, index) => value === b[index]);
+}
+
+function nonEmptyBoundedString(value, maxBytes = 2_048) {
+  return typeof value === 'string'
+    && value.trim().length > 0
+    && Buffer.byteLength(value, 'utf8') <= maxBytes;
+}
+
+function validPullRequestUrl(value) {
+  if (!nonEmptyBoundedString(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' && /\/pull\/[1-9]\d*$/.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function finalCommitProposalTimestampMs(proposal) {
+  if (proposal?.author !== proposal?.committer) return null;
+  const match = /^Agent Olympus <agent-olympus@localhost> ([0-9]+) \+0000$/
+    .exec(proposal?.author || '');
+  if (!match) return null;
+  const seconds = Number(match[1]);
+  const milliseconds = seconds * 1000;
+  return Number.isSafeInteger(seconds) && Number.isSafeInteger(milliseconds)
+    ? milliseconds
+    : null;
+}
+
+function approvalIntegrityMaterial(artifact) {
+  return {
+    schemaVersion: artifact.schemaVersion,
+    runId: artifact.runId,
+    phase: artifact.phase,
+    generationId: artifact.generationId,
+    reviewPackage: artifact.reviewPackage,
+    reviewers: artifact.reviewers,
+    results: artifact.results,
+    approvedAt: artifact.approvedAt,
+  };
+}
+
+function bindingIntegrityMaterial(binding) {
+  return {
+    schemaVersion: binding.schemaVersion,
+    runId: binding.runId,
+    phase: binding.phase,
+    generationId: binding.generationId,
+    reviewTreeOid: binding.reviewTreeOid,
+    finalCommitProposal: binding.finalCommitProposal,
+    storyIds: binding.storyIds,
+    prdGeneration: binding.prdGeneration,
+    route: binding.route,
+    boundAt: binding.boundAt,
+  };
+}
+
+function integrityDigest(value) {
+  return createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex');
+}
+
+function readAtlasJsonArtifact(filePath, label, maxBytes, handle, endedAtMs) {
+  const file = readRegularFile(filePath, maxBytes);
+  if (!file.ok) {
+    return { ok: false, detail: `${label} is missing, unsafe, oversized, or unreadable.` };
+  }
+  if (!mtimeWithinWindow(file.stats, handle.startedAtMs, endedAtMs)) {
+    return { ok: false, detail: `${label} was not written during this live trial.` };
+  }
+  const parsed = parseJson(file.buffer, label);
+  if (!parsed.ok) return { ok: false, detail: `${label} is not a valid JSON object.` };
+  return { ok: true, value: parsed.value, file };
+}
+
+function validateApprovalRosterUnchecked(artifact, cwd) {
+  const route = routeReviewers({
+    diffPaths: artifact.reviewPackage.diffPaths,
+    diffContent: artifact.reviewPackage.diff,
+    baseDir: cwd,
+  });
+  if (!Array.isArray(route.reviewers)
+    || !Array.isArray(route.allowedReviewers)
+    || !Array.isArray(artifact.reviewers)
+    || !Array.isArray(artifact.results)
+    || artifact.reviewers.length === 0
+    || artifact.reviewers.length > 5
+    || artifact.reviewers.length !== artifact.results.length
+    || new Set(artifact.reviewers).size !== artifact.reviewers.length) {
+    return { ok: false, route };
+  }
+  const allowed = new Set(route.allowedReviewers);
+  const extras = artifact.reviewers.filter(reviewer => !route.reviewers.includes(reviewer));
+  const expectedReviewers = [...route.reviewers, ...[...extras].sort()];
+  if (!isDeepStrictEqual(artifact.reviewers, expectedReviewers)
+    || route.reviewers.some(reviewer => !artifact.reviewers.includes(reviewer))
+    || artifact.reviewers.some(reviewer => !allowed.has(reviewer))) {
+    return { ok: false, route };
+  }
+  const byReviewer = new Map();
+  for (const result of artifact.results) {
+    if (!isPlainObject(result)
+      || typeof result.reviewer !== 'string'
+      || byReviewer.has(result.reviewer)) {
+      return { ok: false, route };
+    }
+    byReviewer.set(result.reviewer, result);
+  }
+  if (artifact.reviewers.some(reviewer => !byReviewer.has(reviewer))) {
+    return { ok: false, route };
+  }
+  const rawResults = Object.fromEntries(artifact.reviewers.map(reviewer => [
+    reviewer,
+    JSON.stringify(byReviewer.get(reviewer)),
+  ]));
+  const aggregate = aggregateReviewResults(rawResults, artifact.reviewers, {
+    expectedReviewDigest: artifact.reviewPackage.reviewDigest.value,
+    allowedReviewers: route.allowedReviewers,
+    reviewPackage: artifact.reviewPackage,
+  });
+  if (aggregate.verdict !== 'APPROVE'
+    || aggregate.errors.length !== 0
+    || aggregate.escalations.length !== 0
+    || !isDeepStrictEqual(aggregate.results, artifact.results)) {
+    return { ok: false, route };
+  }
+  return { ok: true, route: JSON.parse(JSON.stringify(route)) };
+}
+
+function validateApprovalRoster(artifact, cwd) {
+  try {
+    return validateApprovalRosterUnchecked(artifact, cwd);
+  } catch {
+    return { ok: false, route: null };
+  }
+}
+
+function validateBoundReviewApproval(
+  artifact,
+  binding,
+  verificationRecords,
+  handle,
+  expected,
+  pin,
+  prdRecord,
+  endedAtMs,
+) {
+  if (!hasExactKeys(artifact, APPROVAL_FIELDS)
+    || artifact.schemaVersion !== 1
+    || artifact.runId !== handle.pipelineRunId
+    || artifact.phase !== expected.phase
+    || !GENERATION_ID.test(artifact.generationId || '')
+    || artifact.generationId !== expected.generationId
+    || artifact.reviewPackage?.reviewDigest?.value !== expected.reviewDigest
+    || artifact.reviewPackage?.reviewTreeOid !== expected.reviewTreeOid
+    || artifact.integrity?.algorithm !== 'sha256'
+    || artifact.integrity?.value !== integrityDigest(approvalIntegrityMaterial(artifact))
+    || !exactTimestampInTrial(artifact.approvedAt, handle, endedAtMs)) {
+    return { ok: false, detail: 'The review approval artifact identity or integrity is invalid.' };
+  }
+  try {
+    assertCompleteReviewPackageIntegrity(artifact.reviewPackage);
+  } catch {
+    return { ok: false, detail: 'The review approval package is incomplete or internally inconsistent.' };
+  }
+  if (artifact.reviewPackage.baseRef !== pin.baseRefCommit
+    || artifact.reviewPackage.baseRefCommit !== pin.baseRefCommit
+    || !isDeepStrictEqual(artifact.reviewPackage.prd, prdRecord.prd)) {
+    return { ok: false, detail: 'The review approval is not bound to the pinned base and authoritative PRD.' };
+  }
+
+  const roster = validateApprovalRoster(artifact, handle.workdir);
+  if (!roster.ok) {
+    return { ok: false, detail: 'The review approval is not a unanimous canonical routed approval.' };
+  }
+  const storyIds = prdRecord.prd.userStories.map(story => story.id);
+  const proposalTimestampMs = finalCommitProposalTimestampMs(
+    binding?.finalCommitProposal,
+  );
+  if (!hasExactKeys(binding, BINDING_FIELDS)
+    || binding.schemaVersion !== 1
+    || binding.runId !== handle.pipelineRunId
+    || binding.phase !== expected.phase
+    || binding.generationId !== artifact.generationId
+    || binding.reviewTreeOid !== artifact.reviewPackage.reviewTreeOid
+    || !isDeepStrictEqual(
+      binding.finalCommitProposal,
+      artifact.reviewPackage.finalCommitProposal,
+    )
+    || proposalTimestampMs === null
+    || proposalTimestampMs < handle.startedAtMs - CLOCK_TOLERANCE_MS
+    || proposalTimestampMs > endedAtMs + CLOCK_TOLERANCE_MS
+    || binding.prdGeneration !== prdRecord.generation
+    || !sameStringSet(binding.storyIds, storyIds)
+    || !isDeepStrictEqual(binding.route, roster.route)
+    || binding.integrity?.algorithm !== 'sha256'
+    || binding.integrity?.value !== integrityDigest(bindingIntegrityMaterial(binding))
+    || !exactTimestampInTrial(binding.boundAt, handle, endedAtMs)
+    || isoMs(binding.boundAt) > isoMs(artifact.approvedAt)) {
+    return { ok: false, detail: 'The review verification binding identity or integrity is invalid.' };
+  }
+
+  const generationRecords = verificationRecords.filter(
+    record => record?.verificationGenerationId === artifact.generationId,
+  );
+  const recordsByStory = new Map(generationRecords.map(record => [record?.story_id, record]));
+  const canonicalRecords = storyIds.map(storyId => recordsByStory.get(storyId));
+  if (generationRecords.length !== storyIds.length
+    || recordsByStory.size !== storyIds.length
+    || canonicalRecords.some(record => !record
+      || record.reviewTreeOid !== artifact.reviewPackage.reviewTreeOid
+      || !exactTimestampInTrial(record.timestamp, handle, endedAtMs)
+      || isoMs(record.timestamp) < isoMs(binding.boundAt)
+      || isoMs(record.timestamp) > isoMs(artifact.approvedAt))
+    || !isDeepStrictEqual(canonicalRecords, artifact.reviewPackage.verification)) {
+    return { ok: false, detail: 'The review approval is not bound to one fresh verification record per PRD story.' };
+  }
+  return { ok: true, roster };
+}
+
+function validateAtlasPhaseOutputs(handle, ledger, endedAtMs) {
+  const triage = ledger.phases.triage?.outputs;
+  const verify = ledger.phases.verify?.outputs;
+  const review = ledger.phases.review?.outputs;
+  const finalize = ledger.phases.finalize?.outputs;
+  if (!hasExactKeys(triage, ATLAS_TRIAGE_OUTPUT_KEYS)
+    || typeof triage.reviewBaseRef !== 'string'
+    || !OBJECT_ID.test(triage.reviewBaseCommit || '')
+    || typeof triage.reviewBaseSource !== 'string') {
+    return { ok: false, reason: 'atlas-review-base-evidence', detail: 'Atlas triage lacks exact immutable review-base outputs.' };
+  }
+  if (!hasExactKeys(verify, ATLAS_VERIFY_OUTPUT_KEYS)
+    || !GENERATION_ID.test(verify.verificationGenerationId || '')
+    || !SHA256.test(verify.verificationReviewDigest || '')
+    || !OBJECT_ID.test(verify.verificationReviewTreeOid || '')) {
+    return { ok: false, reason: 'atlas-verification-evidence', detail: 'Atlas verify lacks exact generation-bound outputs.' };
+  }
+  if (!hasExactKeys(review, ATLAS_REVIEW_OUTPUT_KEYS)
+    || review.approvedReviewDigest !== verify.verificationReviewDigest
+    || review.approvedReviewTreeOid !== verify.verificationReviewTreeOid) {
+    return { ok: false, reason: 'atlas-review-evidence', detail: 'Atlas review outputs do not select the verified review package.' };
+  }
+  if (!hasExactKeys(finalize, ATLAS_FINALIZE_OUTPUT_KEYS)
+    || !SHA256.test(finalize.finalReviewDigest || '')
+    || !OBJECT_ID.test(finalize.finalReviewTreeOid || '')
+    || !OBJECT_ID.test(finalize.finalCommit || '')) {
+    return { ok: false, reason: 'atlas-final-review-evidence', detail: 'Atlas finalize lacks exact final-review and commit outputs.' };
+  }
+  const ship = ledger.phases.ship;
+  const ci = ledger.phases.ci;
+  if (ship?.status === 'completed'
+    && (!hasExactKeys(ship.outputs, ATLAS_SHIP_OUTPUT_KEYS)
+      || ship.outputs.pushPerformed !== true
+      || !validPullRequestUrl(ship.outputs.createdPrUrl)
+      || !OBJECT_ID.test(ship.outputs.headCommit || '')
+      || [
+        ship.outputs.branchName,
+        ship.outputs.baseBranch,
+        ship.outputs.repoOriginUrl,
+        ship.outputs.repoPushUrl,
+        ship.outputs.repoRepository,
+        ship.outputs.repoDefaultBranch,
+      ].some(value => !nonEmptyBoundedString(value)))) {
+    return {
+      ok: false,
+      reason: 'atlas-ship-evidence',
+      detail: 'Atlas ship lacks the exact code-owned remote, PR, repository, branch, and commit outputs.',
+    };
+  }
+  if (ci?.status === 'completed'
+    && (!hasExactKeys(ci.outputs, ATLAS_CI_OUTPUT_KEYS)
+      || !OBJECT_ID.test(ci.outputs.ciHeadCommit || ''))) {
+    return {
+      ok: false,
+      reason: 'atlas-ci-evidence',
+      detail: 'Atlas CI lacks the exact code-owned successful HEAD output.',
+    };
+  }
+  if (ledger.phases.ship?.status === 'completed'
+    && ledger.phases.ship.outputs?.headCommit !== finalize.finalCommit) {
+    return {
+      ok: false,
+      reason: 'atlas-ship-finalize-mismatch',
+      detail: 'Atlas ship evidence is not bound to the reviewer-approved finalize commit.',
+    };
+  }
+  if (ledger.phases.ci?.status === 'completed'
+    && ledger.phases.ci.outputs?.ciHeadCommit !== finalize.finalCommit) {
+    return {
+      ok: false,
+      reason: 'atlas-ci-finalize-mismatch',
+      detail: 'Atlas CI evidence is not bound to the reviewer-approved finalize commit.',
+    };
+  }
+
+  const opts = {
+    cwd: handle.workdir,
+    base: handle.runsBase,
+    trustedRoot: handle.workdir,
+  };
+  const pinResult = getRunReviewBasePin(handle.pipelineRunId, opts);
+  if (!pinResult.ok
+    || pinResult.pin.baseRef !== triage.reviewBaseRef
+    || pinResult.pin.baseRefCommit !== triage.reviewBaseCommit
+    || pinResult.pin.source !== triage.reviewBaseSource
+    || !exactTimestampInTrial(pinResult.pin.pinnedAt, handle, endedAtMs)) {
+    return { ok: false, reason: 'atlas-review-base-evidence', detail: 'Atlas triage outputs do not match the immutable code-owned review-base pin.' };
+  }
+
+  const snapshotRead = readAtlasJsonArtifact(
+    path.join(handle.runDir, 'execution-prd-snapshot.json'),
+    'execution PRD snapshot',
+    MAX_APPROVAL_BYTES,
+    handle,
+    endedAtMs,
+  );
+  const persistedSnapshot = getRunExecutionPrdSnapshot(handle.pipelineRunId, opts);
+  if (!snapshotRead.ok
+    || !persistedSnapshot.ok
+    || !isDeepStrictEqual(snapshotRead.value, persistedSnapshot.snapshot)
+    || !exactTimestampInTrial(persistedSnapshot.snapshot?.snapshottedAt, handle, endedAtMs)) {
+    return { ok: false, reason: 'atlas-verification-evidence', detail: 'The immutable final Atlas execution PRD snapshot is unavailable or invalid.' };
+  }
+  const prdRecord = {
+    prd: persistedSnapshot.snapshot.prd,
+    generation: persistedSnapshot.snapshot.generation,
+  };
+  const livePrdPath = path.join(handle.workdir, '.ao', 'prd.json');
+  if (existsNoFollow(livePrdPath)) {
+    let livePrdRecord;
+    try {
+      livePrdRecord = readExecutionPrd({
+        cwd: handle.workdir,
+        trustedRoot: handle.workdir,
+        orchestrator: 'atlas',
+      });
+    } catch {
+      return { ok: false, reason: 'atlas-verification-evidence', detail: 'The live Atlas execution PRD is unsafe or invalid.' };
+    }
+    if (livePrdRecord.generation !== prdRecord.generation
+      || !isDeepStrictEqual(livePrdRecord.prd, prdRecord.prd)) {
+      return { ok: false, reason: 'atlas-verification-evidence', detail: 'The live Atlas execution PRD conflicts with the immutable finalized snapshot.' };
+    }
+  }
+  if (!Array.isArray(prdRecord.prd?.userStories)
+    || prdRecord.prd.userStories.length === 0
+    || prdRecord.prd.userStories.some(story => story?.passes !== true)) {
+    return { ok: false, reason: 'atlas-verification-evidence', detail: 'Every authoritative Atlas PRD story must be complete before review evidence can pass.' };
+  }
+
+  const reviewApprovalPath = path.join(
+    handle.runDir,
+    `review-approval-review-${verify.verificationReviewDigest}.json`,
+  );
+  const reviewApprovalRead = readAtlasJsonArtifact(
+    reviewApprovalPath,
+    'review approval',
+    MAX_APPROVAL_BYTES,
+    handle,
+    endedAtMs,
+  );
+  const reviewBindingPath = path.join(
+    handle.runDir,
+    `review-verification-review-${verify.verificationGenerationId}.json`,
+  );
+  const reviewBindingRead = readAtlasJsonArtifact(
+    reviewBindingPath,
+    'review verification binding',
+    MAX_BINDING_BYTES,
+    handle,
+    endedAtMs,
+  );
+  const verificationRead = readRegularFile(
+    path.join(handle.runDir, 'verification.jsonl'),
+    MAX_EVENTS_BYTES,
+  );
+  if (!reviewApprovalRead.ok || !reviewBindingRead.ok || !verificationRead.ok
+    || !mtimeWithinWindow(verificationRead.stats, handle.startedAtMs, endedAtMs)) {
+    return { ok: false, reason: 'atlas-review-evidence', detail: 'Atlas review approval, binding, or verification ledger is unavailable.' };
+  }
+  const verificationRecords = [];
+  try {
+    for (const line of verificationRead.buffer.toString('utf8').split(/\r?\n/)) {
+      if (line.trim() !== '') verificationRecords.push(JSON.parse(line));
+    }
+  } catch {
+    return { ok: false, reason: 'atlas-review-evidence', detail: 'Atlas verification ledger is not valid JSONL.' };
+  }
+  const historical = validateBoundReviewApproval(
+    reviewApprovalRead.value,
+    reviewBindingRead.value,
+    verificationRecords,
+    handle,
+    {
+      phase: 'review',
+      generationId: verify.verificationGenerationId,
+      reviewDigest: verify.verificationReviewDigest,
+      reviewTreeOid: verify.verificationReviewTreeOid,
+    },
+    pinResult.pin,
+    prdRecord,
+    endedAtMs,
+  );
+  if (!historical.ok) {
+    return { ok: false, reason: 'atlas-review-evidence', detail: historical.detail };
+  }
+
+  const finalApprovalPath = path.join(
+    handle.runDir,
+    `review-approval-final-review-${finalize.finalReviewDigest}.json`,
+  );
+  const finalApprovalRead = readAtlasJsonArtifact(
+    finalApprovalPath,
+    'final-review approval',
+    MAX_APPROVAL_BYTES,
+    handle,
+    endedAtMs,
+  );
+  if (!finalApprovalRead.ok
+    || finalApprovalRead.value?.generationId === verify.verificationGenerationId
+    || !GENERATION_ID.test(finalApprovalRead.value?.generationId || '')
+    || !exactTimestampInTrial(finalApprovalRead.value?.approvedAt, handle, endedAtMs)) {
+    return { ok: false, reason: 'atlas-final-review-evidence', detail: 'The immutable final-review approval artifact is unavailable or stale.' };
+  }
+  const finalBindingRead = readAtlasJsonArtifact(
+    path.join(
+      handle.runDir,
+      `review-verification-final-review-${finalApprovalRead.value.generationId}.json`,
+    ),
+    'final-review verification binding',
+    MAX_BINDING_BYTES,
+    handle,
+    endedAtMs,
+  );
+  const finalGenerationRead = readAtlasJsonArtifact(
+    path.join(handle.runDir, 'verification-generation.json'),
+    'sealed final-review generation',
+    MAX_BINDING_BYTES,
+    handle,
+    endedAtMs,
+  );
+  if (!finalBindingRead.ok
+    || !finalGenerationRead.ok
+    || finalBindingRead.value?.generationId !== finalApprovalRead.value.generationId
+    || finalBindingRead.value?.phase !== 'final-review'
+    || finalGenerationRead.value?.generationId !== finalApprovalRead.value.generationId
+    || finalGenerationRead.value?.phase !== 'final-review'
+    || finalGenerationRead.value?.status !== 'sealed') {
+    return { ok: false, reason: 'atlas-final-review-evidence', detail: 'The final approval lacks a fresh sealed generation and immutable binding.' };
+  }
+  const finalApproval = finalApprovalRead.value;
+  const finalHistorical = validateBoundReviewApproval(
+    finalApproval,
+    finalBindingRead.value,
+    verificationRecords,
+    handle,
+    {
+      phase: 'final-review',
+      generationId: finalApproval.generationId,
+      reviewDigest: finalize.finalReviewDigest,
+      reviewTreeOid: finalize.finalReviewTreeOid,
+    },
+    pinResult.pin,
+    prdRecord,
+    endedAtMs,
+  );
+  if (!finalHistorical.ok) {
+    return { ok: false, reason: 'atlas-final-review-evidence', detail: finalHistorical.detail };
+  }
+  let derivedFinalize;
+  try {
+    if (getReviewWorktreeState({ cwd: handle.workdir }).dirty) {
+      throw new Error('final tree is dirty');
+    }
+    const firstHead = resolveReviewBase({ cwd: handle.workdir, baseRef: 'HEAD' }).baseRefCommit;
+    assertReviewPackageHeadTree(finalApproval.reviewPackage, { cwd: handle.workdir });
+    if (getReviewWorktreeState({ cwd: handle.workdir }).dirty) {
+      throw new Error('final tree changed during validation');
+    }
+    const finalCommit = resolveReviewBase({ cwd: handle.workdir, baseRef: 'HEAD' }).baseRefCommit;
+    if (firstHead !== finalCommit) throw new Error('HEAD changed during validation');
+    assertReviewPackageHeadTree(finalApproval.reviewPackage, { cwd: handle.workdir });
+    derivedFinalize = {
+      finalReviewDigest: finalApproval.reviewPackage.reviewDigest.value,
+      finalReviewTreeOid: finalApproval.reviewPackage.reviewTreeOid,
+      finalCommit,
+    };
+  } catch {
+    return { ok: false, reason: 'atlas-final-review-evidence', detail: 'The final-review approval does not revalidate against sealed evidence and current Git state.' };
+  }
+  if (finalApproval.reviewPackage?.reviewTreeOid !== finalize.finalReviewTreeOid
+    || finalApproval.reviewPackage?.finalCommitProposal?.objectId !== finalize.finalCommit
+    || !isDeepStrictEqual(derivedFinalize, finalize)) {
+    return { ok: false, reason: 'atlas-final-git-evidence', detail: 'Atlas finalize outputs do not match the approved clean HEAD commit and tree.' };
+  }
+  const finalGeneration = getSealedVerificationGeneration(
+    handle.pipelineRunId,
+    finalApproval.generationId,
+    opts,
+  );
+  if (!finalGeneration.ok
+    || finalGeneration.generation.phase !== 'final-review'
+    || finalGeneration.generation.reviewTreeOid !== finalize.finalReviewTreeOid
+    || !sameStringSet(
+      finalGeneration.generation.storyIds,
+      prdRecord.prd.userStories.map(story => story.id),
+    )
+    || !isDeepStrictEqual(finalGeneration.records, finalApproval.reviewPackage.verification)
+    || !exactTimestampInTrial(finalGeneration.generation.startedAt, handle, endedAtMs)
+    || !exactTimestampInTrial(finalGeneration.generation.sealedAt, handle, endedAtMs)) {
+    return { ok: false, reason: 'atlas-final-review-evidence', detail: 'The final review is not backed by the current sealed verification generation.' };
+  }
+
+  return {
+    ok: true,
+    triage,
+    verify,
+    review,
+    finalize,
+    reviewGenerationId: verify.verificationGenerationId,
+    finalGenerationId: finalApproval.generationId,
+    reviewApprovalSha256: sha256(reviewApprovalRead.file.buffer),
+    reviewBindingSha256: sha256(reviewBindingRead.file.buffer),
+    finalReviewApprovalSha256: sha256(finalApprovalRead.file.buffer),
+    finalReviewBindingSha256: sha256(finalBindingRead.file.buffer),
+    finalGenerationSha256: sha256(finalGenerationRead.file.buffer),
+    executionPrdSnapshotSha256: sha256(snapshotRead.file.buffer),
+  };
 }
 
 function relativePipelinePath(runId) {
@@ -251,6 +934,128 @@ function activePointerPath(workdir, orchestrator) {
   return path.join(workdir, '.ao', 'state', `ao-active-run-${orchestrator}.json`);
 }
 
+function normalizedStructuralValue(value, allowed) {
+  if (value === undefined) return null;
+  return allowed.has(value) ? value : 'unknown';
+}
+
+/**
+ * Best-effort diagnostics for a run that still owns its active pointer.
+ *
+ * Every file is read through the same bounded, no-follow reader used by the
+ * evidence gate. Only fixed-schema structural values leave this function;
+ * task text, outputs, event detail, error samples, and arbitrary keys never do.
+ */
+function activeRunDiagnostics(handle) {
+  const diagnostics = {
+    artifactReads: {
+      pipeline: false,
+      summary: false,
+      events: false,
+      guard: false,
+    },
+    pipeline: {
+      attempt: null,
+      phaseStatuses: {},
+    },
+    summary: {
+      status: null,
+      result: null,
+    },
+    lastEvent: null,
+    guardCounterCounts: {},
+  };
+
+  try {
+    const sequence = getPhaseSequence(handle.orchestrator);
+    const knownPhases = new Set(sequence.map((phase) => phase.id));
+
+    const pipelineFile = readRegularFile(handle.pipelinePath, MAX_PIPELINE_BYTES);
+    diagnostics.artifactReads.pipeline = pipelineFile.ok;
+    if (pipelineFile.ok) {
+      const parsed = parseJson(pipelineFile.buffer, 'pipeline.json');
+      const ledger = parsed.ok ? parsed.value : null;
+      if (ledger?.schemaVersion === 1
+        && ledger.runId === handle.pipelineRunId
+        && ledger.orchestrator === handle.orchestrator) {
+        if (Number.isInteger(ledger.attempt) && ledger.attempt >= 1 && ledger.attempt <= 15) {
+          diagnostics.pipeline.attempt = ledger.attempt;
+        }
+        if (isPlainObject(ledger.phases)) {
+          for (const { id } of sequence) {
+            const entry = ledger.phases[id];
+            if (!isPlainObject(entry) || !Object.hasOwn(entry, 'status')) continue;
+            diagnostics.pipeline.phaseStatuses[id] = normalizedStructuralValue(
+              entry.status,
+              PHASE_STATUS_VALUES,
+            );
+          }
+        }
+      }
+    }
+
+    const summaryFile = readRegularFile(path.join(handle.runDir, 'summary.json'), MAX_SUMMARY_BYTES);
+    diagnostics.artifactReads.summary = summaryFile.ok;
+    if (summaryFile.ok) {
+      const parsed = parseJson(summaryFile.buffer, 'summary.json');
+      const summary = parsed.ok ? parsed.value : null;
+      if (summary?.runId === handle.pipelineRunId
+        && summary.orchestrator === handle.orchestrator
+        && summary.task === handle.taskDescription) {
+        diagnostics.summary.status = normalizedStructuralValue(
+          summary.status,
+          SUMMARY_STATUS_VALUES,
+        );
+        diagnostics.summary.result = normalizedStructuralValue(
+          summary.result,
+          SUMMARY_RESULT_VALUES,
+        );
+      }
+    }
+
+    const eventsFile = readRegularFile(path.join(handle.runDir, 'events.jsonl'), MAX_EVENTS_BYTES);
+    diagnostics.artifactReads.events = eventsFile.ok;
+    if (eventsFile.ok) {
+      const text = eventsFile.buffer.toString('utf-8').trimEnd();
+      if (text !== '') {
+        const lastLine = text.slice(text.lastIndexOf('\n') + 1).replace(/\r$/, '');
+        try {
+          const event = JSON.parse(lastLine);
+          if (isPlainObject(event)) {
+            diagnostics.lastEvent = {
+              type: KNOWN_EVENT_TYPES.has(event.type) ? event.type : 'unknown',
+              phase: knownPhases.has(event.phase) ? event.phase : null,
+            };
+          } else {
+            diagnostics.lastEvent = { type: 'invalid', phase: null };
+          }
+        } catch {
+          diagnostics.lastEvent = { type: 'invalid', phase: null };
+        }
+      }
+    }
+
+    const guardFile = readRegularFile(path.join(handle.runDir, 'loop-guard.json'), MAX_GUARD_BYTES);
+    diagnostics.artifactReads.guard = guardFile.ok;
+    if (guardFile.ok) {
+      const parsed = parseJson(guardFile.buffer, 'loop-guard.json');
+      const guard = parsed.ok ? parsed.value : null;
+      if (guard?.schemaVersion === 1 && isPlainObject(guard.counters)) {
+        for (const [name, cap] of GUARD_COUNTER_CAPS) {
+          const count = guard.counters[name]?.count;
+          if (Number.isSafeInteger(count) && count >= 0 && count <= cap) {
+            diagnostics.guardCounterCounts[name] = count;
+          }
+        }
+      }
+    }
+  } catch {
+    // Diagnostics must never alter the active-pointer failure gate.
+  }
+
+  return diagnostics;
+}
+
 /**
  * Pre-allocate the production Atlas/Athena run identity in the isolated trial.
  * The orchestrator must adopt this active-run pointer and finalize the same run.
@@ -260,6 +1065,7 @@ export function beginPipelineEvidence({
   orchestrator,
   evalRunId,
   taskId,
+  taskPrompt,
   trial,
 }) {
   if (!['atlas', 'athena'].includes(orchestrator)) {
@@ -288,7 +1094,24 @@ export function beginPipelineEvidence({
   const runsBase = path.join(cwd, '.ao', 'artifacts', 'runs');
   const stateDir = path.join(cwd, '.ao', 'state');
   const description = `eval=${evalRunId}; task=${taskId}; trial=${trial}`;
-  const created = createRun(orchestrator, description, { base: runsBase, stateDir });
+  const durableTask = typeof taskPrompt === 'string' && taskPrompt.trim()
+    ? taskPrompt
+    : description;
+  const created = createRun(orchestrator, description, {
+    base: runsBase,
+    stateDir,
+    trustedRoot: cwd,
+  });
+  const taskUpdate = created.runId
+    ? appendUserTaskUpdate(created.runId, durableTask, {
+      base: runsBase,
+      trustedRoot: cwd,
+      allowCreate: true,
+    })
+    : { ok: false, updates: [] };
+  const persistedTaskUpdates = created.runId
+    ? getUserTaskUpdates(created.runId, { base: runsBase, trustedRoot: cwd })
+    : { ok: false, updates: [] };
   const expectedRunDir = path.join(runsBase, created.runId || '');
   const expectedPipelinePath = path.join(expectedRunDir, 'pipeline.json');
   const expectedSummaryPath = path.join(expectedRunDir, 'summary.json');
@@ -312,6 +1135,12 @@ export function beginPipelineEvidence({
     && initialSummary.value.orchestrator === orchestrator
     && initialSummary.value.task === description
     && initialSummary.value.status === 'running'
+    && taskUpdate.ok === true
+    && taskUpdate.updates?.length === 1
+    && taskUpdate.updates[0]?.task === durableTask
+    && persistedTaskUpdates.ok === true
+    && persistedTaskUpdates.updates?.length === 1
+    && persistedTaskUpdates.updates[0]?.task === durableTask
     && withinWindow(initialSummary.value.startedAt, startedAtMs, Date.now())
   );
 
@@ -332,6 +1161,7 @@ export function beginPipelineEvidence({
     runDir: expectedRunDir,
     pipelinePath: expectedPipelinePath,
     taskDescription: description,
+    durableTask,
     summaryStartedAt: initialSummary.ok ? initialSummary.value.startedAt : null,
     startedAtMs,
     orchestrator,
@@ -361,7 +1191,12 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
   }
 
   if (existsNoFollow(activePointerPath(handle.workdir, handle.orchestrator))) {
-    return fail(handle, 'active-run-not-finalized', 'The orchestrator left its active-run pointer behind.');
+    return fail(
+      handle,
+      'active-run-not-finalized',
+      'The orchestrator left its active-run pointer behind.',
+      { diagnostics: activeRunDiagnostics(handle) },
+    );
   }
 
   const pipelineFile = readRegularFile(handle.pipelinePath, MAX_PIPELINE_BYTES);
@@ -396,7 +1231,11 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
   const summary = parsedSummary.value;
   const guard = parsedGuard.value;
 
-  if (!hasExactKeys(ledger, ROOT_KEYS)) {
+  if (Object.hasOwn(ledger, 'pendingReattempt')) {
+    return fail(handle, 'pending-reattempt-not-terminal', 'A finalized pipeline cannot retain an uncommitted reattempt intent.');
+  }
+  if (!hasExactKeys(ledger, ROOT_KEYS)
+    && !hasExactKeys(ledger, ROOT_KEYS_WITH_REATTEMPT_RECEIPT)) {
     return fail(handle, 'pipeline-schema-mismatch', 'pipeline.json must contain the exact schemaVersion 1 root contract.');
   }
   if (ledger.schemaVersion !== 1
@@ -428,11 +1267,47 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
     return fail(handle, 'summary-time-window', 'Final summary timestamps do not bound the completed pipeline.');
   }
 
+  const taskLedger = getUserTaskUpdates(handle.pipelineRunId, {
+    base: handle.runsBase,
+    trustedRoot: handle.workdir,
+  });
+  const expectedTaskUpdates = 2;
+  if (!taskLedger.ok
+    || taskLedger.updates.length !== expectedTaskUpdates
+    || taskLedger.updates.some((update, index) => (
+      update.sequence !== index + 1
+      || update.task !== handle.durableTask
+      || !withinWindow(update.timestamp, handle.startedAtMs, endedAtMs)
+    ))) {
+    return fail(
+      handle,
+      'task-invocation-provenance',
+      `${handle.orchestrator === 'atlas' ? 'Atlas' : 'Athena'} evidence requires the harness allocation and the real skill invocation to append the exact task once each.`,
+    );
+  }
+
+  const atlasShipPolicy = handle.orchestrator === 'atlas'
+    ? (() => {
+        const config = loadAutonomyConfig(handle.workdir);
+        return {
+          config,
+          policy: resolveRunShipMode(config, [
+            summary.task,
+            ...taskLedger.updates.map(update => update.task),
+          ]),
+        };
+      })()
+    : null;
+
   const sequence = getPhaseSequence(handle.orchestrator);
   const expectedIds = sequence.map((phase) => phase.id);
   if (!isPlainObject(ledger.phases)
     || !hasExactKeys(ledger.phases, expectedIds)) {
     return fail(handle, 'phase-key-mismatch', 'Pipeline phase keys must exactly match the code-defined sequence.');
+  }
+  const reattemptEvidence = validateReattemptReceipt(ledger, sequence);
+  if (!reattemptEvidence.ok) {
+    return fail(handle, 'reattempt-receipt-mismatch', 'The completed reattempt receipt does not match the pipeline identity, policy, attempts, or terminal phases.');
   }
 
   if (!hasExactKeys(guard, ['schemaVersion', 'counters', 'errors'])
@@ -458,9 +1333,28 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
   if (!validateCounter('iterations', 15, ledger.attempt)) {
     return fail(handle, 'iteration-guard-mismatch', 'The loop-guard iteration counter must match the pipeline attempt.');
   }
+  if (Object.hasOwn(guard.counters, 'quality-cycles')
+    && !validateCounter(
+      'quality-cycles',
+      2,
+      reattemptEvidence.receipt?.reason === 'quality_fail'
+        ? reattemptEvidence.receipt.qualityBaseCount + 1
+        : null,
+    )) {
+    return fail(handle, 'quality-guard-mismatch', 'The bounded quality counter does not match the completed reattempt receipt.');
+  }
+  if (reattemptEvidence.receipt?.reason === 'quality_fail'
+    && !Object.hasOwn(guard.counters, 'quality-cycles')) {
+    return fail(handle, 'quality-guard-mismatch', 'A quality-fail reattempt requires its exact bounded quality counter.');
+  }
   if (isoMs(guard.counters.iterations.firstAt) < isoMs(ledger.createdAt)
     || isoMs(guard.counters.iterations.lastAt) > isoMs(ledger.updatedAt)) {
     return fail(handle, 'iteration-guard-time-mismatch', 'The iteration guard must be consulted during the recorded pipeline.');
+  }
+  if (Object.hasOwn(guard.counters, 'quality-cycles')
+    && (isoMs(guard.counters['quality-cycles'].firstAt) < isoMs(ledger.createdAt)
+      || isoMs(guard.counters['quality-cycles'].lastAt) > isoMs(ledger.updatedAt))) {
+    return fail(handle, 'quality-guard-time-mismatch', 'The quality guard must be consumed during the recorded pipeline.');
   }
 
   const phaseStatuses = {};
@@ -526,6 +1420,40 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
       && !trivialEntries.every((entry) => entry.status === 'skipped' && entry.reason === 'trivial')) {
       return fail(handle, 'invalid-trivial-skip', 'context/spec/plan must be skipped together with reason trivial.', { phaseStatuses });
     }
+    const ship = ledger.phases.ship;
+    const ci = ledger.phases.ci;
+    const shipSkipReasons = new Set(['not-applicable', 'user-declined', 'preflight-unavailable']);
+    const ciSkipReasons = new Set(['no-pr', 'watch-disabled', 'not-applicable']);
+    if (ship.status === 'skipped' && !shipSkipReasons.has(ship.reason)) {
+      return fail(handle, 'invalid-ship-skip', 'Atlas ship has an unauthorized skip reason.', { phaseStatuses });
+    }
+    if (ci.status === 'skipped' && !ciSkipReasons.has(ci.reason)) {
+      return fail(handle, 'invalid-ci-skip', 'Atlas CI has an unauthorized skip reason.', { phaseStatuses });
+    }
+    const effectiveMode = atlasShipPolicy.policy.effectiveMode;
+    const shipPolicyMatches = ship.status === 'completed'
+      ? effectiveMode === 'auto'
+      : (ship.reason === 'not-applicable' && effectiveMode === 'never')
+        || (ship.reason === 'user-declined' && effectiveMode === 'ask')
+        || (ship.reason === 'preflight-unavailable' && effectiveMode === 'auto');
+    if (!shipPolicyMatches) {
+      return fail(handle, 'ship-policy-evidence', 'Atlas ship outcome does not match the durable task and autonomy policy.', { phaseStatuses });
+    }
+    const consistentCiSkip = ci.status !== 'skipped'
+      || (ci.reason === 'no-pr' && ship.status === 'skipped')
+      || (ci.reason === 'watch-disabled' && ship.status === 'completed')
+      || (ci.reason === 'not-applicable'
+        && ship.status === 'skipped'
+        && ship.reason === 'not-applicable');
+    if (!consistentCiSkip || (ci.status === 'completed' && ship.status !== 'completed')) {
+      return fail(handle, 'ship-ci-outcome-mismatch', 'Atlas CI outcome is inconsistent with the ship outcome.', { phaseStatuses });
+    }
+    if ((ci.status === 'completed' && atlasShipPolicy.config.ci?.watchEnabled !== true)
+      || (ci.status === 'skipped'
+        && ci.reason === 'watch-disabled'
+        && atlasShipPolicy.config.ci?.watchEnabled !== false)) {
+      return fail(handle, 'ci-policy-evidence', 'Atlas CI outcome does not match the durable CI watch policy.', { phaseStatuses });
+    }
   }
   if (ledger.phases.complete.status !== 'completed') {
     return fail(handle, 'pipeline-not-complete', 'The final complete phase was not completed.', { phaseStatuses });
@@ -539,9 +1467,22 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
   if (!validateCounter('reviewRounds', 3, ledger.phases.review.attempts)) {
     return fail(handle, 'review-guard-mismatch', 'Every recorded review attempt requires exactly one bounded loop-guard review round.');
   }
-  if (isoMs(guard.counters.reviewRounds.firstAt) < isoMs(ledger.phases.review.startedAt)
+  if (isoMs(guard.counters.reviewRounds.firstAt) < ledgerCreatedAt
+    || (ledger.phases.review.attempts === 1
+      && isoMs(guard.counters.reviewRounds.firstAt) < isoMs(ledger.phases.review.startedAt))
+    || isoMs(guard.counters.reviewRounds.lastAt) < isoMs(ledger.phases.review.startedAt)
     || isoMs(guard.counters.reviewRounds.lastAt) > isoMs(ledger.phases.review.completedAt)) {
-    return fail(handle, 'review-guard-time-mismatch', 'Review guard ticks must occur inside the recorded review phase.');
+    return fail(handle, 'review-guard-time-mismatch', 'The latest review guard tick must occur inside the final recorded review attempt.');
+  }
+  if (!validateCounter('finalReviewRounds', 3, ledger.phases.finalize.attempts)) {
+    return fail(handle, 'final-review-guard-mismatch', 'Every finalize attempt requires exactly one bounded final-review tick.');
+  }
+  if (isoMs(guard.counters.finalReviewRounds.firstAt) < ledgerCreatedAt
+    || (ledger.phases.finalize.attempts === 1
+      && isoMs(guard.counters.finalReviewRounds.firstAt) < isoMs(ledger.phases.finalize.startedAt))
+    || isoMs(guard.counters.finalReviewRounds.lastAt) < isoMs(ledger.phases.finalize.startedAt)
+    || isoMs(guard.counters.finalReviewRounds.lastAt) > isoMs(ledger.phases.finalize.completedAt)) {
+    return fail(handle, 'final-review-guard-time-mismatch', 'The latest final-review guard tick must occur inside the final recorded finalize attempt.');
   }
   if (ledger.phases.ci.status === 'completed' && !validateCounter('ci-cycles', 2)) {
     return fail(handle, 'ci-guard-mismatch', 'A completed CI phase requires a bounded loop-guard CI cycle.');
@@ -566,6 +1507,12 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
   if (athenaOutputs && !athenaOutputs.ok) {
     return fail(handle, athenaOutputs.reason, athenaOutputs.detail, { phaseStatuses });
   }
+  const atlasOutputs = handle.orchestrator === 'atlas'
+    ? validateAtlasPhaseOutputs(handle, ledger, endedAtMs)
+    : null;
+  if (atlasOutputs && !atlasOutputs.ok) {
+    return fail(handle, atlasOutputs.reason, atlasOutputs.detail, { phaseStatuses });
+  }
 
   const eventLines = eventsFile.buffer.toString('utf-8').split(/\r?\n/).filter((line) => line.trim() !== '');
   const events = [];
@@ -579,6 +1526,23 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
     }
   }
   const phaseEvents = events.filter((event) => event.type === 'pipeline_phase_completed');
+  const taskEvents = events.filter((event) => event.type === 'user_task_update');
+  const firstPhaseEventIndex = events.findIndex(event => event.type === 'pipeline_phase_completed');
+  if (taskEvents.length !== expectedTaskUpdates
+    || taskEvents.some((event, index) => (
+      event.detail?.sequence !== index + 1
+      || event.detail?.task !== handle.durableTask
+      || event.timestamp !== taskLedger.updates[index]?.timestamp
+      || !withinWindow(event.timestamp, handle.startedAtMs, endedAtMs)
+      || events.indexOf(event) >= firstPhaseEventIndex
+    ))) {
+    return fail(
+      handle,
+      'task-invocation-provenance',
+      'Durable task updates and their pre-phase audit events do not prove the expected invocation path.',
+      { phaseStatuses },
+    );
+  }
   if (phaseEvents.some((event) => (
     !expectedIds.includes(event.phase)
     || event.detail?.orchestrator !== handle.orchestrator
@@ -594,7 +1558,10 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
       && event.detail?.orchestrator === 'athena'
       && isPlainObject(event.detail?.outputs)
     ));
-    const stableKeys = ['runId', 'teamSlug', 'intendedWorkers', 'spawnPath', 'baseCommit'];
+    const stableKeys = [
+      'runId', 'teamSlug', 'intendedWorkers', 'spawnPath', 'baseCommit',
+      'adapterRunId', 'nativeSessionId',
+    ];
     const matchingProgress = spawnProgressEvents.filter((event) => (
       stableKeys.every((key) => event.detail.outputs[key] === athenaOutputs.spawn[key])
       && withinWindow(event.timestamp, handle.startedAtMs, endedAtMs)
@@ -654,6 +1621,11 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
       && JSON.stringify(latest.detail?.outputs) !== JSON.stringify(ledger.phases[descriptor.id].outputs)) {
       return fail(handle, 'athena-phase-event-output-mismatch', `Completion event for ${descriptor.id} does not bind the final Athena outputs.`, { phaseStatuses });
     }
+    if (handle.orchestrator === 'atlas'
+      && ['triage', 'verify', 'review', 'finalize', 'ship', 'ci'].includes(descriptor.id)
+      && !isDeepStrictEqual(latest.detail?.outputs, ledger.phases[descriptor.id].outputs)) {
+      return fail(handle, 'atlas-phase-event-output-mismatch', `Completion event for ${descriptor.id} does not bind the final Atlas outputs.`, { phaseStatuses });
+    }
   }
 
   // File order is the durable transition order. Require its timestamps to agree
@@ -705,5 +1677,20 @@ export function verifyPipelineEvidence(handle, endedAtMs = Date.now()) {
     summarySha256: sha256(summaryFile.buffer),
     eventsSha256: sha256(eventsFile.buffer),
     guardSha256: sha256(guardFile.buffer),
+    ...(atlasOutputs ? {
+      atlasEvidence: {
+        reviewGenerationId: atlasOutputs.reviewGenerationId,
+        finalGenerationId: atlasOutputs.finalGenerationId,
+        reviewDigest: atlasOutputs.review.approvedReviewDigest,
+        finalReviewDigest: atlasOutputs.finalize.finalReviewDigest,
+        finalCommit: atlasOutputs.finalize.finalCommit,
+        reviewApprovalSha256: atlasOutputs.reviewApprovalSha256,
+        reviewBindingSha256: atlasOutputs.reviewBindingSha256,
+        finalReviewApprovalSha256: atlasOutputs.finalReviewApprovalSha256,
+        finalReviewBindingSha256: atlasOutputs.finalReviewBindingSha256,
+        finalGenerationSha256: atlasOutputs.finalGenerationSha256,
+        executionPrdSnapshotSha256: atlasOutputs.executionPrdSnapshotSha256,
+      },
+    } : {}),
   };
 }

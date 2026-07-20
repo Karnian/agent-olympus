@@ -15,6 +15,7 @@ import { finalizeSession, getCurrentSessionId, getSession, pruneSessions } from 
 import { collectRunFailureCandidate } from './lib/eval-failure-candidates.mjs';
 import { readSnapshot as readSupSnapshot, isHeartbeatFresh as supHeartbeatFresh } from './lib/supervisor-state.mjs';
 import { readProcStartId } from './lib/proc-identity.mjs';
+import { revokeRuntimePermissions } from './lib/runtime-permissions.mjs';
 
 const STALE_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -42,6 +43,14 @@ const PROTECTED_NAMES = new Set([
 // stale lock generation. Preserve both its root and optional successor claim:
 // deleting either could let an old observer replay recovery across sessions.
 const PROVIDER_RECOVERY_CLAIM = /^\.provider-fallback-[a-f0-9]{24}-recovery-[a-f0-9]{64}(?:-successor-[a-f0-9]{64})?\.claim$/;
+
+// The live concurrency namespace is authoritative admission state, not a
+// heartbeat cache: semantic no-op reads deliberately leave its mtime alone.
+// Generic TTL cleanup must therefore preserve the ledger and every lock/
+// reclaim generation. Only quarantine names emitted by durableQuarantineCopy
+// are eligible for the ordinary 24-hour sweep.
+const CONCURRENCY_ARTIFACT = /^ao-concurrency(?:\.|$)/;
+const CONCURRENCY_QUARANTINE = /^ao-concurrency\.json\.corrupt-\d{13,}-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /**
  * Remove entries in `dir` whose mtime exceeds STALE_MS.
@@ -81,7 +90,7 @@ function isSupervisorRunActive(runDir, now) {
   return false;
 }
 
-function cleanStaleFiles(dir, now) {
+function cleanStaleFiles(dir, now, { preserveConcurrency = false } = {}) {
   let cleaned = 0;
   try {
     const entries = readdirSync(dir);
@@ -89,6 +98,9 @@ function cleanStaleFiles(dir, now) {
       // v1.0.2 B-X1: protect durable-memory filenames even if they somehow
       // end up in .ao/state/ (defensive; primary storage is .ao/memory/).
       if (PROTECTED_NAMES.has(entry) || PROVIDER_RECOVERY_CLAIM.test(entry)) continue;
+      if (preserveConcurrency
+        && CONCURRENCY_ARTIFACT.test(entry)
+        && !CONCURRENCY_QUARANTINE.test(entry)) continue;
       const fullPath = join(dir, entry);
       // F1: the supervisor tree is run-scoped — NEVER wholesale-delete it by its
       // own mtime. Sweep per-run, skipping runs that are still active.
@@ -138,6 +150,16 @@ async function main() {
     // Finalize session record — use session_id from stdin or pointer file
     const sessionId = _data.session_id || getCurrentSessionId();
     if (sessionId) {
+      // Invalidate the user-private runtime permission grant before any
+      // workspace-controlled identity/pointer can be replayed after this
+      // session ends. Missing or unsafe caches fail closed and never block the
+      // lifecycle hook.
+      try {
+        revokeRuntimePermissions(sessionId, {
+          cwd: (typeof _data.cwd === 'string' && _data.cwd) || process.cwd(),
+        });
+      } catch {}
+
       // HU-17: inspect only runs explicitly linked to this session. Never scan
       // the global run-artifact tree from a lifecycle hook. Collection is
       // local, bounded, metadata-only, and fail-safe; ineligible
@@ -174,7 +196,7 @@ async function main() {
       pruneSessions();
     }
 
-    const cleanedState = cleanStaleFiles(stateDir, now);
+    const cleanedState = cleanStaleFiles(stateDir, now, { preserveConcurrency: true });
     const cleanedTeams = cleanStaleFiles(teamsDir, now);
     const cleanedProviderFallbacks = cleanStaleFiles(providerFallbackDir, now);
 

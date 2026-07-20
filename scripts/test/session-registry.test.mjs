@@ -11,6 +11,7 @@ import { promises as fs } from 'node:fs';
 import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 
 import {
   registerSession,
@@ -22,6 +23,7 @@ import {
   getSession,
   pruneSessions,
 } from '../lib/session-registry.mjs';
+import { resumeClaudeSessionInTmux } from '../lib/tmux-session.mjs';
 
 // ---------------------------------------------------------------------------
 // Temp-dir helpers
@@ -34,6 +36,62 @@ async function makeTmpDir() {
 async function removeTmpDir(dir) {
   await fs.rm(dir, { recursive: true, force: true });
 }
+
+describe('tmux-session: resumeClaudeSessionInTmux', () => {
+  it('passes one safely quoted command through tmux new-session argv', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const calls = [];
+      const result = resumeClaudeSessionInTmux('session-123', cwd, {
+        tmuxBinary: '/usr/bin/tmux',
+        claudeBinary: '/opt/bin/claude',
+        execFileSync(binary, args, opts) {
+          calls.push({ binary, args, opts });
+        },
+      });
+      const suffix = createHash('sha256').update('session-123', 'utf8').digest('hex').slice(0, 12);
+      const expectedSession = `ao-resume-session-123-${suffix}`;
+      assert.deepEqual(result, { ok: true, sessionName: expectedSession });
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].binary, '/usr/bin/tmux');
+      assert.deepEqual(calls[0].args.slice(0, 7), [
+        'new-session', '-d', '-s', expectedSession, '-c', cwd,
+        "'/opt/bin/claude' '-r' 'session-123' 'Continue from where you left off'",
+      ]);
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+
+  it('rejects unsafe IDs and non-absolute cwd before executing tmux', () => {
+    let called = false;
+    const opts = { execFileSync() { called = true; } };
+    assert.equal(resumeClaudeSessionInTmux('bad;id', '/tmp', opts).ok, false);
+    assert.equal(resumeClaudeSessionInTmux('safe-id', 'relative/path', opts).ok, false);
+    assert.equal(called, false);
+  });
+
+  it('hashes the full session ID so equal readable prefixes stay distinct', async () => {
+    const cwd = await makeTmpDir();
+    try {
+      const prefix = 'abcdefghijklmnopqrstuvwx';
+      const ids = [`${prefix}-first`, `${prefix}-second`];
+      const names = ids.map((sessionId) => resumeClaudeSessionInTmux(sessionId, cwd, {
+        tmuxBinary: '/usr/bin/tmux',
+        claudeBinary: '/opt/bin/claude',
+        execFileSync() {},
+      }).sessionName);
+
+      assert.notEqual(names[0], names[1]);
+      for (const [index, name] of names.entries()) {
+        const suffix = createHash('sha256').update(ids[index], 'utf8').digest('hex').slice(0, 12);
+        assert.equal(name, `ao-resume-${prefix}-${suffix}`);
+      }
+    } finally {
+      await removeTmpDir(cwd);
+    }
+  });
+});
 
 // ---------------------------------------------------------------------------
 // registerSession + getSession

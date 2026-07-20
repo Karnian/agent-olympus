@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   cpSync,
   chmodSync,
@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { atomicWriteFile } from '../scripts/lib/fs-atomic.mjs';
+import { probeCliVersion } from '../scripts/lib/cli-version.mjs';
 import {
   baselineValueForTask,
   readBaseline,
@@ -31,6 +32,7 @@ import { stagePluginSnapshot } from './lib/plugin-stage.mjs';
 import { passAtK, passHatK, rollupByTrack } from './lib/score.mjs';
 import {
   fingerprintBenchmark,
+  fingerprintComparableFixture,
   fingerprintPipelineProtocol,
   validateTaskDefinition,
 } from './lib/tasks.mjs';
@@ -65,6 +67,16 @@ function resolveK(task, opts) {
     throw new Error(`k must be a positive integer, got: ${rawK}`);
   }
   return k;
+}
+
+function resolveMaxBudgetUsd(task, opts) {
+  const rawValue = opts.maxBudgetUsd ?? task.maxBudgetUsd;
+  if (rawValue === undefined || rawValue === null) return null;
+  const value = Number(rawValue);
+  if (!Number.isFinite(value) || value <= 0 || value > 100) {
+    throw new Error(`maxBudgetUsd must be a number greater than 0 and at most 100, got: ${rawValue}`);
+  }
+  return value;
 }
 
 function safeNow(now) {
@@ -186,6 +198,11 @@ function compareWithBaseline({
   orchestrator,
   benchmarkFingerprint,
   pipelineProtocolFingerprint,
+  claudeCliVersion,
+  pluginProvenance,
+  observedModels,
+  maxBudgetUsd,
+  providerRuntime,
   runK,
   modelTier,
   passHat,
@@ -198,6 +215,12 @@ function compareWithBaseline({
     orchestrator: entry.orchestrator,
     benchmarkFingerprint: entry.benchmarkFingerprint,
     pipelineProtocolFingerprint: entry.pipelineProtocolFingerprint,
+    claudeCliVersion: entry.claudeCliVersion,
+    pluginFingerprint: entry.pluginFingerprint,
+    targetPromptFingerprint: entry.targetPromptFingerprint,
+    observedModels: entry.observedModels,
+    maxBudgetUsd: entry.maxBudgetUsd,
+    providerRuntime: entry.providerRuntime,
   } : null;
   const protocolGate = (entry, evaluated, reason = null) => ({
     evaluated,
@@ -251,6 +274,28 @@ function compareWithBaseline({
   if (entry.source === 'live' && entry.modelTier !== modelTier) {
     return incomparable('model-tier-mismatch', { baselineK, entry });
   }
+  if (entry.source === 'live' && entry.claudeCliVersion !== claudeCliVersion) {
+    return incomparable('claude-cli-version-mismatch', { baselineK, entry });
+  }
+  if (entry.source === 'live'
+    && entry.pluginFingerprint !== (pluginProvenance?.fingerprint ?? null)) {
+    return incomparable('plugin-fingerprint-mismatch', { baselineK, entry });
+  }
+  if (entry.source === 'live'
+    && entry.targetPromptFingerprint !== (pluginProvenance?.targetPromptFingerprint ?? null)) {
+    return incomparable('target-prompt-fingerprint-mismatch', { baselineK, entry });
+  }
+  if (entry.source === 'live'
+    && JSON.stringify(entry.observedModels) !== JSON.stringify(observedModels)) {
+    return incomparable('observed-model-mismatch', { baselineK, entry });
+  }
+  if (entry.source === 'live' && entry.maxBudgetUsd !== maxBudgetUsd) {
+    return incomparable('max-budget-mismatch', { baselineK, entry });
+  }
+  if (entry.source === 'live'
+    && JSON.stringify(entry.providerRuntime) !== JSON.stringify(providerRuntime)) {
+    return incomparable('provider-runtime-mismatch', { baselineK, entry });
+  }
   const baselineValue = baselineValueForTask(baseline, taskId);
   if (baselineValue === null) {
     return incomparable('baseline-verdict-unavailable', { baselineK, entry });
@@ -282,6 +327,7 @@ function summarizeOrchestration(orchestration) {
     finalEvent: orchestration.finalEvent,
     usage: orchestration.usage,
     timedOut: orchestration.timedOut,
+    invocation: orchestration.invocation ?? null,
   };
 }
 
@@ -328,6 +374,52 @@ export function aggregateTokenUsage(usages) {
   return aggregate;
 }
 
+function aggregateProviderMetrics(trials) {
+  const metrics = {
+    totalCostUsd: 0,
+    durationMs: 0,
+    apiDurationMs: 0,
+    turns: 0,
+    reportedCostTrials: 0,
+    reportedDurationTrials: 0,
+    reportedTurnTrials: 0,
+  };
+  for (const trial of trials) {
+    const event = trial.orchestration?.finalEvent;
+    if (Number.isFinite(event?.total_cost_usd) && event.total_cost_usd >= 0) {
+      metrics.totalCostUsd += event.total_cost_usd;
+      metrics.reportedCostTrials += 1;
+    }
+    if (Number.isFinite(event?.duration_ms) && event.duration_ms >= 0) {
+      metrics.durationMs += event.duration_ms;
+      metrics.reportedDurationTrials += 1;
+    }
+    if (Number.isFinite(event?.duration_api_ms) && event.duration_api_ms >= 0) {
+      metrics.apiDurationMs += event.duration_api_ms;
+    }
+    if (Number.isInteger(event?.num_turns) && event.num_turns >= 0) {
+      metrics.turns += event.num_turns;
+      metrics.reportedTurnTrials += 1;
+    }
+  }
+  return metrics;
+}
+
+function summarizeProviderRuntime(trials) {
+  const safeValues = (values) => [...new Set(values.filter((value) => (
+    typeof value === 'string'
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$/.test(value)
+  )))].sort();
+  const efforts = safeValues(trials.map((trial) => trial.orchestration?.invocation?.effort));
+  return {
+    effort: efforts.length === 1 ? efforts[0] : null,
+    efforts,
+    fastModeStates: safeValues(trials.map((trial) => trial.orchestration?.finalEvent?.fast_mode_state)),
+    usageSpeeds: safeValues(trials.map((trial) => trial.orchestration?.finalEvent?.usage?.speed)),
+    serviceTiers: safeValues(trials.map((trial) => trial.orchestration?.finalEvent?.usage?.service_tier)),
+  };
+}
+
 async function writeRunOutputs({ runDir, trialResults, summary }) {
   mkdirSync(runDir, { recursive: true, mode: 0o700 });
   chmodSync(runDir, 0o700);
@@ -367,6 +459,136 @@ function resolveFixture(fixture, taskDir) {
   };
 }
 
+function targetPromptRelativePaths(task) {
+  if (task.orchestrator === 'agent') return [`agents/${task.agent}.md`];
+  if (task.orchestrator === 'atlas') {
+    return ['skills/atlas/SKILL.md', 'skills/atlas/reference.md'];
+  }
+  if (task.orchestrator === 'athena') {
+    return ['skills/athena/SKILL.md', 'skills/atlas/reference.md'];
+  }
+  return [];
+}
+
+/**
+ * Bind an eval treatment to every prompt resource the selected route may load.
+ * Progressive-disclosure prompt resources use a domain-separated composite
+ * identity. The historical single-file fallback is available only when a
+ * caller explicitly marks a non-live minimal fixture.
+ */
+export function fingerprintTargetPrompt(task, fileFingerprints, options = {}) {
+  const paths = targetPromptRelativePaths(task);
+  const targetPromptPath = paths[0] ?? null;
+  if (!targetPromptPath) {
+    return {
+      targetPromptPath: null,
+      targetPromptFingerprint: null,
+      missingTargetPromptPaths: [],
+    };
+  }
+  const missingTargetPromptPaths = paths.filter(
+    relativePath => !fileFingerprints?.[relativePath],
+  );
+  const primaryFingerprint = fileFingerprints?.[targetPromptPath] ?? null;
+  if (!primaryFingerprint) {
+    return { targetPromptPath, targetPromptFingerprint: null, missingTargetPromptPaths };
+  }
+  if (missingTargetPromptPaths.length > 0 && options.allowLegacySingleFile !== true) {
+    return { targetPromptPath, targetPromptFingerprint: null, missingTargetPromptPaths };
+  }
+  const present = paths
+    .map((relativePath) => [relativePath, fileFingerprints?.[relativePath] ?? null])
+    .filter(([, fingerprint]) => fingerprint !== null);
+  if (present.length === 1) {
+    return { targetPromptPath, targetPromptFingerprint: primaryFingerprint, missingTargetPromptPaths };
+  }
+  const hash = createHash('sha256');
+  hash.update('agent-olympus-eval-target-prompt-v2\0');
+  for (const [relativePath, fingerprint] of present) {
+    hash.update(`${relativePath}\0${fingerprint}\0`);
+  }
+  return {
+    targetPromptPath,
+    targetPromptFingerprint: hash.digest('hex'),
+    missingTargetPromptPaths,
+  };
+}
+
+function oracleIsolationMode(task, live) {
+  if (!live) return 'fixture';
+  if (task.orchestrator === 'agent') return 'staged-plugin-hook-free';
+  if (task.orchestrator === 'solo') return 'safe-mode-no-plugin';
+  return 'staged-plugin-best-effort';
+}
+
+function summarizePluginProvenance(trials) {
+  const records = trials
+    .map((trial) => trial.pluginProvenance)
+    .filter((record) => record && typeof record === 'object');
+  if (records.length === 0) return null;
+  const fingerprints = [...new Set(records.map((record) => record.fingerprint).filter(Boolean))].sort();
+  const targetPromptFingerprints = [...new Set(
+    records.map((record) => record.targetPromptFingerprint).filter(Boolean),
+  )].sort();
+  return {
+    fingerprint: fingerprints.length === 1 ? fingerprints[0] : null,
+    fingerprints,
+    hooksIncluded: records.every((record) => record.hooksIncluded === true),
+    targetPromptPath: records[0].targetPromptPath,
+    targetPromptFingerprint: targetPromptFingerprints.length === 1
+      ? targetPromptFingerprints[0]
+      : null,
+    targetPromptFingerprints,
+  };
+}
+
+function directAgentProvenance(task, orchestration, pluginProvenance, claudeCliVersion) {
+  const missing = [];
+  if (!/^\d+\.\d+(?:\.\d+)?$/.test(String(claudeCliVersion ?? ''))) missing.push('claude-cli-version');
+  if (!/^[a-f0-9]{64}$/.test(String(pluginProvenance?.fingerprint ?? ''))) missing.push('plugin-fingerprint');
+  if (!/^[a-f0-9]{64}$/.test(String(pluginProvenance?.targetPromptFingerprint ?? ''))) {
+    missing.push('target-prompt-fingerprint');
+  }
+  if (pluginProvenance?.hooksIncluded !== false) missing.push('hook-isolation');
+  const invocation = orchestration.invocation;
+  if (invocation?.route !== 'direct-agent'
+    || invocation?.target !== `agent-olympus:${task.agent}`
+    || invocation?.pluginHooksEnabled !== false
+    || invocation?.promptSuggestions !== false
+    || invocation?.effort !== 'high') {
+    missing.push('direct-agent-route');
+  }
+  if (!Array.isArray(invocation?.observedModels) || invocation.observedModels.length === 0) {
+    missing.push('observed-model');
+  }
+  if (!Number.isFinite(orchestration.finalEvent?.total_cost_usd)
+    || orchestration.finalEvent.total_cost_usd < 0) {
+    missing.push('reported-cost');
+  }
+  if (!Number.isFinite(orchestration.finalEvent?.duration_ms)
+    || orchestration.finalEvent.duration_ms < 0) {
+    missing.push('reported-duration');
+  }
+  if (typeof orchestration.finalEvent?.fast_mode_state !== 'string'
+    || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$/.test(orchestration.finalEvent.fast_mode_state)) {
+    missing.push('fast-mode-state');
+  }
+  if (typeof orchestration.finalEvent?.usage?.speed !== 'string'
+    || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$/.test(orchestration.finalEvent.usage.speed)) {
+    missing.push('usage-speed');
+  }
+  if (typeof orchestration.finalEvent?.usage?.service_tier !== 'string'
+    || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$/.test(orchestration.finalEvent.usage.service_tier)) {
+    missing.push('service-tier');
+  }
+  return {
+    pass: missing.length === 0,
+    detail: missing.length === 0
+      ? 'direct-agent route, model, runtime, plugin, prompt, CLI, cost, and duration provenance are complete'
+      : `missing direct-agent provenance: ${missing.join(', ')}`,
+  };
+}
+
 /**
  * Run one eval task over k isolated trials.
  *
@@ -382,7 +604,8 @@ function resolveFixture(fixture, taskDir) {
  * @returns {Promise<{runId:string, runDir:string, summary:object, results:object[], exitCode:number}>}
  */
 export async function runEval(taskPath, opts = {}) {
-  // Safety: spawning the REAL orchestrator (`claude -p /atlas …`) is expensive,
+  // Safety: spawning the REAL orchestrator
+  // (`claude -p /agent-olympus:atlas …`) is expensive,
   // token-burning, and runs UNSUPERVISED (the HU-06 / Codex-flagged risk). Never
   // do it implicitly — a live run requires an explicit `--live` (opts.live). With
   // neither a fixture nor --live, refuse with guidance instead of silently
@@ -404,14 +627,23 @@ export async function runEval(taskPath, opts = {}) {
     throw new Error('Only regression tasks can update baseline.json');
   }
   const k = resolveK(task, opts);
+  const maxBudgetUsd = resolveMaxBudgetUsd(task, opts);
+  if (opts.live && maxBudgetUsd === null) {
+    throw new Error('Every live eval requires a declared per-trial maxBudgetUsd or --max-budget-usd');
+  }
   const runId = makeRunId(opts);
   const resultsDir = path.resolve(opts.resultsDir ?? path.join(EVALS_DIR, 'results'));
   const runDir = path.join(resultsDir, runId);
   const sourcePluginDir = path.resolve(opts.pluginDir ?? REPO_ROOT);
   const baselinePath = path.resolve(opts.baselinePath ?? path.join(EVALS_DIR, 'baseline.json'));
   const modelTier = task.modelTier ?? 'sonnet';
+  const oracleIsolation = oracleIsolationMode(task, opts.live === true);
   const benchmarkFingerprint = fingerprintBenchmark(taskDir);
+  const fixtureFingerprint = fingerprintComparableFixture(taskDir);
   const pipelineProtocolFingerprint = fingerprintPipelineProtocol();
+  const claudeCliVersion = opts.live
+    ? (opts.claudeCliVersion ?? probeCliVersion('claude').version)
+    : null;
   const trialResults = [];
   const tempRoots = [];
 
@@ -431,6 +663,7 @@ export async function runEval(taskPath, opts = {}) {
           orchestrator: task.orchestrator,
           evalRunId: runId,
           taskId: task.id,
+          taskPrompt: task.prompt,
           trial,
         })
         : null;
@@ -441,15 +674,44 @@ export async function runEval(taskPath, opts = {}) {
       // Every live trial gets a fresh plugin snapshot. Sharing one writable
       // snapshot across k trials would let an earlier run contaminate a later
       // run even though their task workdirs are isolated.
-      const stagedPlugin = opts.live ? stagePluginSnapshot(sourcePluginDir) : null;
+      const includePluginHooks = ['atlas', 'athena'].includes(task.orchestrator);
+      const stagedPlugin = opts.live && task.orchestrator !== 'solo'
+        ? stagePluginSnapshot(sourcePluginDir, { includeHooks: includePluginHooks })
+        : null;
       let orchestration;
+      let pluginProvenance = null;
       try {
+        if (stagedPlugin) {
+          const {
+            targetPromptPath,
+            targetPromptFingerprint,
+            missingTargetPromptPaths,
+          } = fingerprintTargetPrompt(
+            task,
+            stagedPlugin.fileFingerprints,
+          );
+          if (['agent', 'atlas', 'athena'].includes(task.orchestrator)
+            && !targetPromptFingerprint) {
+            const missing = missingTargetPromptPaths.length > 0
+              ? missingTargetPromptPaths.join(', ')
+              : targetPromptPath;
+            throw new Error(`Staged plugin is missing target prompt resource(s): ${missing}`);
+          }
+          pluginProvenance = {
+            fingerprint: stagedPlugin.fingerprint,
+            hooksIncluded: includePluginHooks,
+            targetPromptPath,
+            targetPromptFingerprint,
+          };
+        }
         orchestration = await runOrchestrator({
           orchestrator: task.orchestrator,
+          agentName: task.agent,
           prompt: task.prompt,
           cwd: workdir,
           timeoutMs: task.timeoutMs,
           modelTier,
+          maxBudgetUsd,
           pluginDir: stagedPlugin?.pluginDir ?? sourcePluginDir,
           spawn: opts.spawn,
           fixture: resolveFixture(opts.fixture, taskDir),
@@ -466,6 +728,20 @@ export async function runEval(taskPath, opts = {}) {
       const grade = await gradeWorkdir(graderModule.grade, workdir);
       const orchestrationPassed = orchestration.status === 'completed' && orchestration.timedOut !== true;
       const pipelinePassed = pipelineEvidence.required !== true || pipelineEvidence.pass === true;
+      const provenanceRequired = opts.live && task.orchestrator === 'agent';
+      const provenance = provenanceRequired
+        ? directAgentProvenance(task, orchestration, pluginProvenance, claudeCliVersion)
+        : { pass: true, detail: 'not required' };
+      const trialBudgetRequired = opts.live
+        && Number.isFinite(orchestration.invocation?.maxBudgetUsd);
+      const reportedTrialCost = Number.isFinite(orchestration.finalEvent?.total_cost_usd)
+        && orchestration.finalEvent.total_cost_usd >= 0;
+      const trialBudgetExceeded = trialBudgetRequired && reportedTrialCost
+        ? orchestration.finalEvent.total_cost_usd > orchestration.invocation.maxBudgetUsd
+        : null;
+      const trialBudgetCompliant = trialBudgetRequired
+        ? reportedTrialCost && trialBudgetExceeded === false
+        : null;
       const checks = [{
         name: 'orchestrator-completed',
         pass: orchestrationPassed,
@@ -476,8 +752,24 @@ export async function runEval(taskPath, opts = {}) {
         name: 'pipeline-evidence',
         pass: pipelineEvidence.pass === true,
         detail: pipelineEvidence.detail,
+      }] : []), ...(provenanceRequired ? [{
+        name: 'direct-agent-provenance',
+        pass: provenance.pass,
+        detail: provenance.detail,
+      }] : []), ...(trialBudgetRequired ? [{
+        name: 'trial-budget-compliance',
+        pass: trialBudgetCompliant === true,
+        detail: !reportedTrialCost
+          ? 'provider did not report trial cost; compliance cannot be established'
+          : trialBudgetExceeded
+          ? 'reported trial cost exceeded the declared cap'
+          : 'reported trial cost stayed within the declared cap',
       }] : []), ...grade.checks];
 
+      // Preserve the independent workdir oracle as its own axis. Process,
+      // protocol, provenance, and efficiency gates decide the overall verdict
+      // below but must never rewrite whether the produced artifact was correct.
+      const outcomePass = grade.pass;
       trialResults.push({
         schemaVersion: 1,
         runId,
@@ -487,20 +779,87 @@ export async function runEval(taskPath, opts = {}) {
         taskDir,
         trial,
         orchestrator: task.orchestrator,
+        agent: task.agent ?? null,
         modelTier,
         benchmarkFingerprint,
+        fixtureFingerprint,
         pipelineProtocolFingerprint,
-        pass: orchestrationPassed && pipelinePassed && grade.pass,
+        claudeCliVersion,
+        pluginProvenance,
+        outcomePass,
+        pass: orchestrationPassed
+          && outcomePass
+          && pipelinePassed
+          && provenance.pass
+          && trialBudgetCompliant !== false,
+        provenanceComplete: provenanceRequired ? provenance.pass : null,
+        budgetRequired: trialBudgetRequired,
+        budgetExceeded: trialBudgetExceeded,
+        budgetCompliant: trialBudgetCompliant,
         checks,
         usage: orchestration.usage,
         orchestration: summarizeOrchestration(orchestration),
         pipelineEvidence,
       });
+      if (trialBudgetRequired && trialBudgetCompliant !== true) break;
+    }
+
+    let budgetCompliant = null;
+    if (opts.live && trialResults.some((result) => result.budgetRequired === true)) {
+      budgetCompliant = trialResults.every((result) => result.budgetCompliant === true);
+      for (const result of trialResults) {
+        result.checks.push({
+          name: 'run-budget-compliance',
+          pass: budgetCompliant,
+          detail: budgetCompliant
+            ? 'reported trial cost stayed within the declared per-trial cap'
+            : 'a trial exceeded its cap or lacked cost evidence; remaining trials were not scheduled',
+        });
+        if (!budgetCompliant) result.pass = false;
+      }
+    }
+
+    let directAgentTreatmentConsistent = null;
+    if (opts.live && task.orchestrator === 'agent') {
+      const signatures = new Set(trialResults.map((result) => JSON.stringify({
+        claudeCliVersion: result.claudeCliVersion,
+        pluginFingerprint: result.pluginProvenance?.fingerprint ?? null,
+        targetPromptFingerprint: result.pluginProvenance?.targetPromptFingerprint ?? null,
+        modelSelector: result.orchestration.invocation?.modelSelector ?? null,
+        promptSuggestions: result.orchestration.invocation?.promptSuggestions ?? null,
+        effort: result.orchestration.invocation?.effort ?? null,
+        observedModels: result.orchestration.invocation?.observedModels ?? [],
+        maxBudgetUsd: result.orchestration.invocation?.maxBudgetUsd ?? null,
+        fastModeState: result.orchestration.finalEvent?.fast_mode_state ?? null,
+        usageSpeed: result.orchestration.finalEvent?.usage?.speed ?? null,
+        serviceTier: result.orchestration.finalEvent?.usage?.service_tier ?? null,
+      })));
+      directAgentTreatmentConsistent = signatures.size === 1;
+      for (const result of trialResults) {
+        result.checks.push({
+          name: 'direct-agent-treatment-consistency',
+          pass: directAgentTreatmentConsistent,
+          detail: directAgentTreatmentConsistent
+            ? 'all trials used one CLI, plugin, prompt, selector, and resolved-model treatment'
+            : 'direct-agent treatment changed across trials',
+        });
+        if (!directAgentTreatmentConsistent) result.pass = false;
+      }
     }
 
     const passHat = passHatK(trialResults);
     const passAt = passAtK(trialResults);
+    const outcomePassAt = trialResults.length > 0
+      && trialResults.some((result) => result.outcomePass === true);
+    const outcomePassHat = trialResults.length === k
+      && trialResults.every((result) => result.outcomePass === true);
     const tokenUsage = aggregateTokenUsage(trialResults.map((result) => result.usage));
+    const providerMetrics = aggregateProviderMetrics(trialResults);
+    const providerRuntime = summarizeProviderRuntime(trialResults);
+    const pluginProvenance = summarizePluginProvenance(trialResults);
+    const observedModels = [...new Set(trialResults.flatMap((result) => (
+      result.orchestration.invocation?.observedModels ?? []
+    )))].sort();
     const pipelineEvidenceSummary = {
       policyVersion: trialResults[0]?.pipelineEvidence?.policyVersion ?? null,
       required: trialResults.some((result) => result.pipelineEvidence?.required === true),
@@ -517,6 +876,11 @@ export async function runEval(taskPath, opts = {}) {
       orchestrator: task.orchestrator,
       benchmarkFingerprint,
       pipelineProtocolFingerprint,
+      claudeCliVersion,
+      pluginProvenance,
+      observedModels,
+      maxBudgetUsd: opts.live ? maxBudgetUsd : null,
+      providerRuntime: opts.live ? providerRuntime : null,
       runK: k,
       modelTier,
       passHat,
@@ -527,15 +891,32 @@ export async function runEval(taskPath, opts = {}) {
       task: task.id,
       track: task.track,
       executionMode: opts.live ? 'live' : 'fixture',
-      oracleIsolation: opts.live ? 'staged-plugin-best-effort' : 'fixture',
+      oracleIsolation,
       orchestrator: task.orchestrator,
+      agent: task.agent ?? null,
       modelTier,
       benchmarkFingerprint,
+      fixtureFingerprint,
       pipelineProtocolFingerprint,
+      claudeCliVersion,
+      pluginProvenance,
+      observedModels,
+      maxBudgetUsd: opts.live ? maxBudgetUsd : null,
+      maxScheduledBudgetUsd: opts.live ? maxBudgetUsd * k : null,
+      provenanceComplete: task.orchestrator === 'agent' && opts.live
+        ? trialResults.every((result) => result.provenanceComplete === true)
+          && directAgentTreatmentConsistent === true
+        : null,
+      budgetCompliant,
       k,
+      completedTrials: trialResults.length,
+      outcomePassHatK: outcomePassHat,
+      outcomePassAtK: outcomePassAt,
       passHatK: passHat,
       passAtK: passAt,
       tokenUsage,
+      providerMetrics,
+      providerRuntime,
       pipelineEvidence: pipelineEvidenceSummary,
       deltaVsBaseline,
       delta_vs_baseline: deltaVsBaseline,
@@ -549,27 +930,45 @@ export async function runEval(taskPath, opts = {}) {
       runId,
       completedAt: new Date().toISOString(),
       executionMode: opts.live ? 'live' : 'fixture',
-      oracleIsolation: opts.live ? 'staged-plugin-best-effort' : 'fixture',
+      oracleIsolation,
       task: task.id,
       track: task.track,
       orchestrator: task.orchestrator,
+      agent: task.agent ?? null,
       modelTier,
       benchmarkFingerprint,
+      fixtureFingerprint,
       pipelineProtocolFingerprint,
+      claudeCliVersion,
+      pluginProvenance,
+      observedModels,
+      maxBudgetUsd: taskSummary.maxBudgetUsd,
+      maxScheduledBudgetUsd: taskSummary.maxScheduledBudgetUsd,
+      provenanceComplete: taskSummary.provenanceComplete,
+      budgetCompliant: taskSummary.budgetCompliant,
       k,
+      completedTrials: taskSummary.completedTrials,
+      outcomePassHatK: taskSummary.outcomePassHatK,
+      outcomePassAtK: taskSummary.outcomePassAtK,
       passHatK: passHat,
       passAtK: passAt,
       tokenUsage,
+      providerMetrics,
+      providerRuntime,
       pipelineEvidence: pipelineEvidenceSummary,
       tasks: [taskSummary],
       tracks: rollupByTrack([taskSummary]),
       trials: trialResults.map((result) => ({
         trial: result.trial,
+        agent: result.agent,
         modelTier: result.modelTier,
+        outcomePass: result.outcomePass,
         pass: result.pass,
         checks: result.checks,
         status: result.orchestration.status,
         usage: result.usage,
+        invocation: result.orchestration.invocation,
+        pluginProvenance: result.pluginProvenance,
         pipelineEvidence: result.pipelineEvidence,
       })),
       deltaVsBaseline,
@@ -592,6 +991,12 @@ export async function runEval(taskPath, opts = {}) {
         orchestrator: task.orchestrator,
         benchmarkFingerprint,
         pipelineProtocolFingerprint,
+        claudeCliVersion,
+        pluginFingerprint: pluginProvenance?.fingerprint ?? null,
+        targetPromptFingerprint: pluginProvenance?.targetPromptFingerprint ?? null,
+        observedModels,
+        maxBudgetUsd,
+        providerRuntime,
       });
     }
     return {
@@ -620,6 +1025,8 @@ function parseCliArgs(argv) {
       opts.live = true;
     } else if (arg === '--k') {
       opts.k = argv[++index];
+    } else if (arg === '--max-budget-usd') {
+      opts.maxBudgetUsd = argv[++index];
     } else if (arg === '--run-id') {
       opts.runId = argv[++index];
     } else if (arg === '--results-dir') {
@@ -639,7 +1046,7 @@ function parseCliArgs(argv) {
 
 function usage() {
   return [
-    'Usage: node evals/run.mjs --task <dir> [--fixture solution|none|pass|fail] [--k N] [--update-baseline]',
+    'Usage: node evals/run.mjs --task <dir> [--fixture solution|none|pass|fail] [--live] [--k N] [--max-budget-usd USD] [--update-baseline]',
     '',
     'Runs one eval task and writes evals/results/<runId>/results.jsonl and summary.json.',
   ].join('\n');

@@ -95,7 +95,7 @@ Present to user: "Here's what I understood. Should I proceed with Atlas/Athena?"
 
 If user confirms:
 - For independent tasks → invoke `/atlas` with crystallized requirements
-- For interdependent tasks → invoke `/athena` with crystallized requirements
+- For non-overlapping work packages that benefit from discovery sharing → invoke `/athena` with crystallized requirements
 
 The handoff includes the full requirements summary as context,
 so the orchestrator starts with zero ambiguity.
