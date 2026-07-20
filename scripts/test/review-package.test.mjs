@@ -663,7 +663,7 @@ describe('buildReviewPackage integration', () => {
     assert.equal(resolved.baseRefCommit, git(cwd, ['rev-parse', 'develop']));
     assert.equal(resolved.source, 'conventional');
 
-    const reviewPackage = buildReviewPackage({ cwd });
+    const reviewPackage = buildReviewPackage({ cwd, baseRef: resolved.baseRef });
     assert.equal(reviewPackage.baseRef, 'develop');
     assert.deepEqual(reviewPackage.diffPaths, ['feature.txt']);
   });
