@@ -514,6 +514,7 @@ addWisdom({
 ## 요구사항
 
 - **Node.js** ≥ 20.0.0 (ESM 지원용)
+- **Claude Code**: `/atlas` 실행 제어 부트스트랩은 `UserPromptExpansion` 훅 이벤트와 skill-scoped `hooks:` frontmatter를 사용합니다 (2.1.214에서 동작 확인). 구버전 CLI에서는 부트스트랩 리마인더가 주입되지 않으며 `/atlas`는 무방비 실행 대신 의도적으로 중단합니다.
 - **선택사항**: tmux (네이티브 어댑터 사용 불가 시 모든 워커 타입의 레거시 폴백)
 - **선택사항**: codex CLI (`npm install -g @openai/codex`) — Codex 워커 실행용
 - **선택사항**: gemini CLI (`npm install -g @google/gemini-cli`) — Gemini 워커 실행용
