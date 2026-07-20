@@ -202,8 +202,8 @@ Run the current 3360-test Node suite and syntax checks from [docs/testing.md](do
 ## Known Limitations
 
 - `--bare` Claude Code mode skips hooks, plugins, and skill directory walks, so Agent Olympus hooks will not fire there.
-- Atlas executable control needs Claude Code with `UserPromptExpansion` + skill-scoped `hooks:` (verified on 2.1.214; older CLIs get no reminder and `/atlas` stops). A fresh `/atlas` refuses a dirty worktree; an active run suppresses the Stop-hook WIP auto-commit.
-- Trusted git/gh resolution uses fixed system roots only; nix/asdf/mise binaries are not found, so ship/CI evidence is unavailable there.
+- Atlas requires Claude Code 2.1.214+ (validated; earlier support unknown). Missing `UserPromptExpansion` stops `/atlas`; missing skill hooks removes the Stop gate (unsupported). Fresh runs need clean trees and suppress WIP commits.
+- Trusted VCS uses fixed roots: Git for Atlas/ship/CI; `gh` for GitHub/PR evidence. nix/asdf/mise-only installs are unsupported.
 - Claude Code sandbox mode should be used when testing hooks; edge cases can appear around `.ao/` filesystem access.
 - Gemini credential auto-resolution supports macOS Keychain and Linux libsecret in v1; Windows users must set `GEMINI_API_KEY`.
 
@@ -321,7 +321,7 @@ Run the current 3360-test Node suite and syntax checks from [docs/testing.md](do
 |-------|------|---------|
 | SessionStart | session-start | Inject prior wisdom + interrupted checkpoint context at session start |
 | SessionStart | runtime-permissions-capture | Bind hook session identity to an external private runtime grant (async) |
-| UserPromptExpansion:atlas + PreToolUse:Skill | orchestrator-skill-init | Atlas bootstrap: create/adopt one run + inject executable control; fail-closed after proven identity, `{}` otherwise |
+| UserPromptExpansion:atlas\|agent-olympus:atlas + PreToolUse:Skill | orchestrator-skill-init | Atlas bootstrap: create/adopt one run + inject executable control; fail-closed after proven identity, `{}` otherwise |
 | UserPromptSubmit | intent-gate | Classify user intent into 13 categories + unknown fallback (multilingual) |
 | UserPromptSubmit | runtime-permissions-capture | Refresh the bound grant without trusting project-local state (async) |
 | PreToolUse:Task | concurrency-gate | Enforce parallel task limits |
