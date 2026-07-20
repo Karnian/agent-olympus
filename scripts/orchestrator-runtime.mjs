@@ -1149,7 +1149,9 @@ function requireAtlasEvidencePhase(orchestrator, pipeline, phase, mode = 'verifi
   const mapping = mode === 'approval'
     ? APPROVAL_PHASE_PIPELINE_PHASE
     : EVIDENCE_PHASE_PIPELINE_PHASE;
-  const requiredPhase = mapping[phase];
+  const requiredPhase = typeof phase === 'string' && Object.hasOwn(mapping, phase)
+    ? mapping[phase]
+    : null;
   if (!requiredPhase) {
     reject('invalid-evidence-phase', 'evidence phase must be review or final-review');
   }
@@ -1347,7 +1349,11 @@ async function completeVerificationPhase(orchestrator, runId, pipeline, generati
 }
 
 function terminalFailureFor(code, phaseId) {
-  const policy = TERMINAL_FAILURE_CODES[code];
+  // Own-property lookups only: `__proto__`/`constructor` must read as absent
+  // from every argument-keyed allowlist instead of surfacing Object.prototype.
+  const policy = typeof code === 'string' && Object.hasOwn(TERMINAL_FAILURE_CODES, code)
+    ? TERMINAL_FAILURE_CODES[code]
+    : null;
   if (!policy || !phaseId || (policy.phases && !policy.phases.has(phaseId))) {
     reject(
       'terminal-failure-not-allowed',
@@ -1868,7 +1874,10 @@ export async function executeRuntimeCommand(argv, rawInput = undefined) {
     );
   } else if (command === 'reattempt') {
     const reason = args[1];
-    const reopen = REATTEMPT_POLICIES[orchestrator]?.[reason];
+    const reopen = typeof reason === 'string'
+      && Object.hasOwn(REATTEMPT_POLICIES[orchestrator], reason)
+      ? REATTEMPT_POLICIES[orchestrator][reason]
+      : null;
     if (!reopen) {
       reject('invalid-reattempt-reason', `reattempt reason is not allowed for ${orchestrator}`);
     }
@@ -1893,7 +1902,10 @@ export async function executeRuntimeCommand(argv, rawInput = undefined) {
     result = { ...result, ...(prdRollback ? { prdRollback } : {}) };
   } else if (command === 'policy-rewind') {
     const reason = args[1];
-    const policy = POLICY_REWINDS[orchestrator]?.[reason];
+    const policy = typeof reason === 'string'
+      && Object.hasOwn(POLICY_REWINDS[orchestrator], reason)
+      ? POLICY_REWINDS[orchestrator][reason]
+      : null;
     if (!policy) {
       reject('invalid-rewind-policy', `policy rewind ${reason} is not allowlisted`);
     }

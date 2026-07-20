@@ -7,6 +7,15 @@
  * creates exactly one active run otherwise. `command_args` is treated only as
  * opaque user data: it is never passed to a shell or interpolated into a
  * command string.
+ *
+ * Fail-open/fail-closed boundary: this hook also fires for every Skill tool
+ * call and every prompt expansion, so a payload that cannot be proven to be an
+ * Atlas invocation (unreadable stdin, malformed JSON, or a non-Atlas payload)
+ * must emit `{}` and never block unrelated skills. Only after the Atlas
+ * identity is established do admission and pipeline errors fail closed; a
+ * bypassed bootstrap is still safe because the skill stops without the
+ * injected reminder and the runtime CLI refuses mutations without an admitted
+ * run.
  */
 
 import { lstatSync } from 'node:fs';
@@ -526,7 +535,12 @@ export async function main() {
     const raw = await readStdin(3000);
     data = JSON.parse(raw);
   } catch {
-    process.stdout.write(`${JSON.stringify(blocked('hook input was not valid JSON'))}\n`);
+    // The Atlas identity cannot be proven from unreadable or malformed stdin,
+    // and this hook fires for every Skill call and prompt expansion. Blocking
+    // here would take unrelated skills down with a transient IO fault, so the
+    // unprovable case fails open; Atlas itself stays safe behind the missing
+    // reminder and the fail-closed runtime CLI.
+    process.stdout.write('{}\n');
     return 0;
   }
 
@@ -534,10 +548,11 @@ export async function main() {
   try {
     output = handleAtlasExpansion(data);
   } catch {
-    output = blocked(
-      'unexpected initialization failure',
-      data?.hook_event_name === 'PreToolUse' ? 'PreToolUse' : 'UserPromptExpansion',
-    );
+    let invocation = null;
+    try { invocation = atlasInvocation(data); } catch { invocation = null; }
+    output = invocation
+      ? blocked('unexpected initialization failure', invocation.hookEventName)
+      : noOutput();
   }
   process.stdout.write(`${JSON.stringify(output)}\n`);
   return 0;

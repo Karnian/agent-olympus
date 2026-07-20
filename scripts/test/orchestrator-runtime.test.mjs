@@ -62,14 +62,16 @@ function initializeGitRepository(cwd) {
   return git(cwd, ['rev-parse', 'HEAD']);
 }
 
-function invoke(script, { cwd, args = [], input } = {}) {
+function invoke(script, { cwd, args = [], input, rawInput } = {}) {
   const env = { ...process.env };
   delete env.DISABLE_AO;
   const result = spawnSync(process.execPath, [script, ...args], {
     cwd,
     env,
     encoding: 'utf8',
-    input: input === undefined ? undefined : JSON.stringify(input),
+    input: rawInput !== undefined
+      ? rawInput
+      : (input === undefined ? undefined : JSON.stringify(input)),
     // A hardened approval intentionally rebuilds and revalidates Git evidence
     // several times. Parallel full-suite I/O can make that exceed 10 seconds
     // even though every individual Git command has its own production bound.
@@ -214,6 +216,39 @@ describe('Atlas executable bootstrap', () => {
       const result = invoke(INIT, {
         cwd,
         input: expansion('do it', { command_source: 'project' }),
+      });
+      assert.equal(result.status, 0);
+      assert.deepEqual(result.json, {});
+      assert.equal(existsSync(join(cwd, '.ao', 'artifacts', 'runs')), false);
+      assert.equal(getActiveRunId('atlas', { stateDir: join(cwd, '.ao', 'state') }), null);
+    } finally {
+      clean(cwd);
+    }
+  });
+
+  it('fails open for unparseable hook stdin instead of blocking unrelated skills', () => {
+    const cwd = project();
+    try {
+      const result = invoke(INIT, { cwd, rawInput: 'not-json' });
+      assert.equal(result.status, 0);
+      assert.deepEqual(result.json, {});
+      assert.equal(existsSync(join(cwd, '.ao', 'artifacts', 'runs')), false);
+      assert.equal(getActiveRunId('atlas', { stateDir: join(cwd, '.ao', 'state') }), null);
+    } finally {
+      clean(cwd);
+    }
+  });
+
+  it('fails open for a non-Atlas Skill invocation without allocating state', () => {
+    const cwd = project();
+    try {
+      const result = invoke(INIT, {
+        cwd,
+        input: {
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Skill',
+          tool_input: { skill: 'agent-olympus:plan', args: 'spec the feature' },
+        },
       });
       assert.equal(result.status, 0);
       assert.deepEqual(result.json, {});
@@ -892,6 +927,42 @@ describe('Atlas Stop gate', () => {
       assert.match(stopped.json.reason, /completed but its active pointer remains/);
       assert.match(stopped.json.reason, /idempotent finalize\/clear recovery/);
       assert.match(stopped.json.reason, new RegExp(`finalize atlas ${created.runId}`));
+    } finally {
+      clean(cwd);
+    }
+  });
+});
+
+describe('argument-keyed allowlist hardening', () => {
+  it('reads prototype-chain keys as absent from every runtime allowlist', () => {
+    const cwd = project();
+    try {
+      const bootstrap = invoke(INIT, { cwd, input: expansion('hardening probe') });
+      const runId = contextRunId(bootstrap.json);
+      assert.ok(runId);
+
+      const entered = invoke(RUNTIME, { cwd, args: ['enter', 'atlas', runId, 'triage'] });
+      assert.equal(entered.status, 0);
+      assert.equal(entered.json.ok, true);
+
+      const cases = [
+        [['terminal-fail', 'atlas', runId, '__proto__'], 'terminal-failure-not-allowed'],
+        [['terminal-fail', 'atlas', runId, 'constructor'], 'terminal-failure-not-allowed'],
+        [['reattempt', 'atlas', runId, '__proto__'], 'invalid-reattempt-reason'],
+        [['policy-rewind', 'atlas', runId, 'constructor'], 'invalid-rewind-policy'],
+        [['verification-start', 'atlas', runId, '__proto__'], 'invalid-evidence-phase'],
+      ];
+      for (const [args, code] of cases) {
+        const result = invoke(RUNTIME, { cwd, args });
+        assert.equal(result.status, 2, args.join(' '));
+        assert.equal(result.json.ok, false, args.join(' '));
+        assert.equal(result.json.error.code, code, args.join(' '));
+      }
+
+      const status = invoke(RUNTIME, { cwd, args: ['status', 'atlas', runId] });
+      assert.equal(status.json.ok, true);
+      assert.equal(status.json.currentPhase, 'triage');
+      assert.equal(status.json.runStatus, 'running');
     } finally {
       clean(cwd);
     }

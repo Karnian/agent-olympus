@@ -24,6 +24,7 @@ import { lstatSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
+import { resolveTrustedVcsBinary, sanitizedVcsEnvironment } from './trusted-vcs.mjs';
 import {
   bindSafeDirectoryPath,
   ensureSafeDirectoryPath,
@@ -235,13 +236,20 @@ function currentSessionPaths(opts = {}) {
 
   let commonRoot = cwdRoot;
   try {
+    // Same trusted-binary + sanitized-environment policy as every other
+    // permission-boundary Git read: PATH lookup and inherited GIT_* redirects
+    // could both move the session-pointer root under project influence.
     const commonDir = execFileSync(
-      'git',
+      resolveTrustedVcsBinary('git'),
       ['-C', cwdRoot, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+      {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: sanitizedVcsEnvironment({ git: true }),
+      },
     ).trim();
     if (commonDir) commonRoot = realpathSync(dirname(commonDir));
-  } catch { /* non-git project: cwd is the state root */ }
+  } catch { /* non-git project (or no trusted git): cwd is the state root */ }
   const stateDir = join(commonRoot, '.ao', 'state');
   return { trustedRoot: commonRoot, stateDir, file: join(stateDir, CURRENT_SESSION_FILE) };
 }
