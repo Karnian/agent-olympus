@@ -95,8 +95,8 @@ agent-olympus/
 │   ├── concurrency-release.mjs   — PostToolUse: release task from concurrency pool
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode
-│   ├── stop-hook.mjs             — Stop: auto-commit uncommitted work as WIP
-│   ├── test/                     — node:test unit tests (3365 tests, 134 files; v1.5.1 baseline 2858/108)
+│   ├── stop-hook.mjs             — Stop: WIP commit + managed ref lifecycle
+│   ├── test/                     — node:test unit tests (v1.5.2: 3365 tests, 134 files)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (13 categories + unknown fallback, multilingual)

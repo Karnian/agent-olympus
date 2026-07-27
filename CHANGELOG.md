@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.5.2] - 2026-07-27
+
+Stop-hook storage-lifecycle patch. The zero-dependency Node suite is
+**3365/3365 green across 134 test files**.
+
+### Changed
+- **Managed WIP ref lifecycle (#88)** — every stop-hook save is anchored under
+  an opaque session/worktree-scoped `refs/ao-wip/v1/` ref. Explicit reflogs
+  retain superseded non-ancestor saves, while managed refs whose tip commit is
+  older than 30 days are removed with an object-ID compare-and-delete guard.
+- **Release and operator documentation** — the English/Korean feature guides,
+  hook internals, test baselines, shared agent instructions, and harness release
+  status now describe the managed-ref behavior and v1.5.2 validation baseline.
+
+### Fixed
+- Detached-HEAD, rebased, or discarded worktree WIP commits no longer become
+  immediately unreachable loose objects, preventing the auto-gc/repack failure
+  loop that could leave hundreds of orphaned `tmp_pack_*` files and exhaust
+  local disk space (#88).
+
+### Operational Note
+- The hook never prunes existing Git objects directly. It removes only expired
+  Agent Olympus v1 refs and leaves object reclamation to normal Git GC; existing
+  repositories with historical garbage should inspect a prune dry-run before
+  performing any manual cleanup.
+
 ## [1.5.1] - 2026-07-14
 
 Shipping-safety and Codex MCP diagnostics patch. The zero-dependency Node suite

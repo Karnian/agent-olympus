@@ -32,7 +32,7 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **워커 상태 대시보드**: Athena 팀 실행 중 실시간 인라인 마크다운 상태 표시
 - **Athena 워크트리 격리**: 각 병렬 워커가 독립된 git worktree에서 실행, 파일 충돌 방지
 - **SessionStart 훅**: 세션 시작 시 이전 wisdom과 중단된 체크포인트 컨텍스트 자동 주입
-- **Stop 훅 WIP 커밋**: 세션 종료 시 미커밋 작업을 WIP 커밋으로 자동 저장. 단, Atlas 실행이 활성 상태이거나 활성 포인터가 없음을 안전하게 증명할 수 없으면 코드 소유 finalization을 위해 리뷰 전 트리를 그대로 보존
+- **Stop 훅 WIP 커밋** *(v1.5.2)*: 세션 종료 시 미커밋 작업을 WIP 커밋으로 자동 저장하고, 세션/워크트리별 `refs/ao-wip/v1/` ref와 reflog로 보존(30일 유지). 단, Atlas 실행이 활성 상태이거나 활성 포인터가 없음을 안전하게 증명할 수 없으면 코드 소유 finalization을 위해 리뷰 전 트리를 그대로 보존
 - **Atlas 실행 제어 admission**: 신규 `/atlas`는 실제 Git HEAD, 깨끗한 worktree, 신뢰할 수 있는 시스템 Git을 요구하며 기존 사용자 변경은 먼저 커밋하거나 stash해야 함
 - **원자적 파일 쓰기**: 모든 상태 파일이 tmp+rename 패턴으로 기록 (충돌 방지)
 - **Superpowers 방법론 통합**: TDD 규율, 체계적 디버깅, 브레인스토밍 우선 게이트, 2단계 코드 리뷰 — 네이티브 스킬로 내장 (Superpowers 별도 설치 불필요)
@@ -68,7 +68,7 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **정제된 failed-run 피드백 루프** *(v1.5.0)*: SessionEnd가 독립 검증한 session-linked terminal task failure만 metadata/digest로 큐잉. 후보 승인과 task 연결은 사람이 수행하며 prompt, error text, path, diff, evidence payload, provider output은 큐에 기록하지 않음
 - **취소 가능한 shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`)보다 영속 user no-ship 후속 지시가 우선하며, push/PR은 repository·base·branch·remote HEAD identity에 바인딩. CI는 정확히 push된 SHA의 모든 workflow를 집계하고 crash recovery의 fix candidate를 단일 failed run과 attempt에 연결
 - **Codex MCP 복구 + `--no-mcp`** *(v1.5.1)*: `/ask`가 exec/tmux 어댑터에서 레코드 순서대로 MCP 인증 실패를 분류. Codex 전용 `--no-mcp`는 설정된 MCP server를 포함한 user-level config 전체를 건너뛰며, 인증과 명시적 CLI override는 유지하고 Codex 버전이 불명확하거나 미지원이면 fail-closed
-- **3360개 단위 테스트**: 현재 개발 트리 기준 `node:test` 기반 134개 파일의 종합 테스트 스위트 (배포된 v1.5.1 기준선: 108개 파일, 2858개 테스트)
+- **3365개 단위 테스트**: 현재 개발 트리와 v1.5.2 릴리스 기준선 모두 `node:test` 기반 134개 파일
 - **페일-세이프 아키텍처**: 훅은 보통 오류 시 개방하지만, 동시성 admission과 Atlas 실행 제어 게이트는 보호 상태가 안전하지 않거나 읽을 수 없거나 해소되지 않으면 의도적으로 차단
 
 ## 설치
@@ -593,7 +593,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## 테스트
 
-`node:test` 기반 테스트 스위트(현재 개발 트리 134개 파일, 3360개 테스트; 배포된 v1.5.1 기준선 108개 파일, 2858개 테스트)가 핵심 훅 라이브러리를 커버합니다:
+`node:test` 기반 테스트 스위트(현재 개발 트리 및 v1.5.2 릴리스 기준선: 134개 파일, 3365개 테스트)가 핵심 훅 라이브러리를 커버합니다:
 
 ```bash
 npm test
