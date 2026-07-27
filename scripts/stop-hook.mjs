@@ -10,15 +10,22 @@
  *   - This hook: temporary save (ao-wip commits)
  *   - git-master agent: final clean commit after task completion
  *
- * Never blocks session termination: always exits 0.
+ * Each save is anchored under refs/ao-wip/v1/ so detached/rebased commits stay
+ * reachable; managed anchors expire after 30 days. Never blocks session
+ * termination: always exits 0.
  */
 
 import { readStdin } from './lib/stdin.mjs';
 import { loadCheckpoint } from './lib/checkpoint.mjs';
 import { getActiveRunId } from './lib/run-artifacts.mjs';
 import { execFileSync } from 'child_process';
+import { createHash } from 'crypto';
 import { existsSync, lstatSync } from 'fs';
-import { basename, join } from 'path';
+import { basename, join, resolve } from 'path';
+
+const MANAGED_WIP_REF_PREFIX = 'refs/ao-wip/v1/';
+const MANAGED_WIP_REF_PATTERN = /^refs\/ao-wip\/v1\/[0-9a-f]{64}$/;
+const WIP_REF_RETENTION_SECONDS = 30 * 24 * 60 * 60;
 
 /**
  * Sensitive / noise path patterns that must never be auto-staged into a WIP
@@ -68,6 +75,101 @@ function hasAtlasActivePointerArtifact() {
   } catch (error) {
     // An unreadable/unsafe path is not evidence that no Atlas run exists.
     return error?.code !== 'ENOENT';
+  }
+}
+
+function parseStopEvent(raw) {
+  try {
+    const data = JSON.parse(raw);
+    return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Build an opaque, valid Git ref for this Claude session and worktree.
+ *
+ * Including the worktree identity prevents one session that legitimately moves
+ * between linked worktrees from replacing an unrelated detached-history
+ * anchor. The hash also keeps untrusted hook input out of the ref name.
+ */
+function managedWipRef(stopEvent, gitDir) {
+  const rawSessionId = stopEvent.session_id ?? stopEvent.sessionId;
+  const sessionId =
+    typeof rawSessionId === 'string' && rawSessionId.trim()
+      ? rawSessionId.trim()
+      : 'unknown-session';
+  const worktreeIdentity = `${process.cwd()}\0${resolve(gitDir)}`;
+  const key = createHash('sha256')
+    .update(`${sessionId}\0${worktreeIdentity}`)
+    .digest('hex');
+  return `${MANAGED_WIP_REF_PREFIX}${key}`;
+}
+
+/**
+ * Keep a WIP commit reachable even when its worktree uses detached HEAD or its
+ * branch is later rebased/discarded. Custom refs are local-only under normal
+ * fetch/push refspecs and make the temporary saves enumerable.
+ */
+function anchorWipCommit(stopEvent, gitDir) {
+  execFileSync(
+    'git',
+    [
+      'update-ref',
+      '--create-reflog',
+      '-m',
+      'ao-wip: update session anchor',
+      managedWipRef(stopEvent, gitDir),
+      'HEAD',
+    ],
+    { stdio: 'pipe' },
+  );
+}
+
+/**
+ * Drop only Agent Olympus v1 WIP refs whose tip commit is older than 30 days.
+ *
+ * Deletion supplies the object ID observed during enumeration, so a concurrent
+ * Stop hook that refreshes the same ref wins instead of having its live anchor
+ * removed. Git can reclaim the newly unreachable objects on its normal GC
+ * schedule; because they were reachable while live, auto-gc can pack them
+ * rather than repeatedly tripping over unreachable loose objects.
+ */
+function pruneExpiredWipRefs(nowMs = Date.now()) {
+  let raw;
+  try {
+    raw = execFileSync(
+      'git',
+      [
+        'for-each-ref',
+        '--format=%(refname)%00%(objectname)%00%(committerdate:unix)',
+        MANAGED_WIP_REF_PREFIX,
+      ],
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+  } catch {
+    return;
+  }
+
+  const cutoff = Math.floor(nowMs / 1000) - WIP_REF_RETENTION_SECONDS;
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    const [ref, objectId, rawCommittedAt] = line.split('\0');
+    const committedAt = Number(rawCommittedAt);
+    if (
+      !MANAGED_WIP_REF_PATTERN.test(ref) ||
+      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(objectId) ||
+      !Number.isFinite(committedAt) ||
+      committedAt >= cutoff
+    ) {
+      continue;
+    }
+    try {
+      execFileSync('git', ['update-ref', '-d', ref, objectId], { stdio: 'pipe' });
+    } catch {
+      // Best-effort and race-safe: a concurrently refreshed ref is preserved.
+    }
   }
 }
 
@@ -310,7 +412,7 @@ function formatNames(names) {
 
 async function main() {
   try {
-    await readStdin(2000); // Stop event data (not needed)
+    const stopEvent = parseStopEvent(await readStdin(2000));
 
     // Atlas owns its final reviewed commit through the code-owned pipeline.
     // Its skill-scoped Stop hook may block an early Stop and immediately cause
@@ -335,6 +437,10 @@ async function main() {
       process.exit(0);
     }
     if (!gitDir) gitDir = '.git';
+
+    // Reclaim stale anchors even when the working tree is clean. This is local
+    // ref cleanup only; Git owns object pruning through its normal GC policy.
+    pruneExpiredWipRefs();
 
     // 1.5 Skip the WIP commit while a merge / rebase / cherry-pick / revert is
     //     in progress. `git commit -m` would otherwise silently finalize a
@@ -460,6 +566,7 @@ async function main() {
     // 5. Build a descriptive WIP commit message from staged changes
     const message = buildWipMessage(phase, stagedList.join('\n'));
     execFileSync('git', ['commit', '-m', message], { stdio: 'pipe' });
+    anchorWipCommit(stopEvent, gitDir);
 
   } catch {
     // Fail-safe: never block session termination under any circumstances

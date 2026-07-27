@@ -1,7 +1,7 @@
 /**
  * Tests for scripts/stop-hook.mjs
  *
- * Tests via child_process: pipe `{}` on stdin, observe stdout and git state.
+ * Tests via child_process: pipe a Stop event on stdin, observe stdout and git state.
  * Tests cover:
  *   - no git repo → outputs {} immediately
  *   - git repo with no uncommitted changes → outputs {}
@@ -16,7 +16,7 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -42,11 +42,12 @@ async function removeTmpDir(dir) {
  * Run the stop hook in `cwd`.
  * Returns parsed JSON output.
  */
-function runHook(cwd) {
-  const raw = execSync(`echo '{}' | node "${SCRIPT}"`, {
+function runHook(cwd, payload = {}) {
+  const raw = execFileSync(process.execPath, [SCRIPT], {
     encoding: 'utf-8',
     cwd,
     env: { ...process.env },
+    input: JSON.stringify(payload),
     stdio: ['pipe', 'pipe', 'pipe'],
     timeout: 15000,
   });
@@ -100,6 +101,23 @@ function committedFiles(dir) {
     cwd: dir,
     stdio: 'pipe',
   }).trim().split('\n').filter(Boolean);
+}
+
+function listWipRefs(dir, prefix = 'refs/ao-wip/') {
+  const raw = execFileSync(
+    'git',
+    ['for-each-ref', '--format=%(refname)', prefix],
+    { cwd: dir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
+  ).trim();
+  return raw ? raw.split('\n') : [];
+}
+
+function resolveRef(dir, ref) {
+  return execFileSync('git', ['rev-parse', ref], {
+    cwd: dir,
+    encoding: 'utf-8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }).trim();
 }
 
 /**
@@ -209,6 +227,138 @@ describe('stop-hook: git repo with uncommitted changes — creates WIP commit', 
     runHook(tmpDir);
     const afterCount = commitCount(tmpDir);
     assert.equal(afterCount, beforeCount + 1, 'a WIP commit should have been created');
+  });
+});
+
+describe('stop-hook: WIP ref lifecycle', () => {
+  it('anchors the WIP commit under one opaque ref per session and worktree', async () => {
+    const tmpDir = await makeTmpDir();
+    try {
+      initGitRepo(tmpDir);
+      writeFileSync(path.join(tmpDir, 'anchored.txt'), 'saved\n', 'utf-8');
+
+      runHook(tmpDir, { session_id: 'session-anchor-1' });
+
+      const refs = listWipRefs(tmpDir, 'refs/ao-wip/v1/');
+      assert.equal(refs.length, 1);
+      assert.match(refs[0], /^refs\/ao-wip\/v1\/[0-9a-f]{64}$/);
+      assert.equal(resolveRef(tmpDir, refs[0]), resolveRef(tmpDir, 'HEAD'));
+    } finally {
+      await removeTmpDir(tmpDir);
+    }
+  });
+
+  it('keeps a detached-HEAD WIP reachable after the worktree moves away', async () => {
+    const tmpDir = await makeTmpDir();
+    try {
+      initGitRepo(tmpDir);
+      const branch = execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], {
+        cwd: tmpDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      execFileSync('git', ['switch', '--detach', '--quiet'], { cwd: tmpDir, stdio: 'pipe' });
+      writeFileSync(path.join(tmpDir, 'detached-work.txt'), 'saved\n', 'utf-8');
+
+      runHook(tmpDir, { session_id: 'session-detached-1' });
+      const wipCommit = resolveRef(tmpDir, 'HEAD');
+      execFileSync('git', ['switch', '--quiet', branch], { cwd: tmpDir, stdio: 'pipe' });
+
+      const reachable = execFileSync('git', ['rev-list', '--all'], {
+        cwd: tmpDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim().split('\n');
+      assert.ok(reachable.includes(wipCommit), 'detached WIP must remain reachable through its ref');
+    } finally {
+      await removeTmpDir(tmpDir);
+    }
+  });
+
+  it('updates the existing ref when the same session saves again', async () => {
+    const tmpDir = await makeTmpDir();
+    try {
+      initGitRepo(tmpDir);
+      const event = { session_id: 'session-repeat-1' };
+      writeFileSync(path.join(tmpDir, 'first.txt'), 'first\n', 'utf-8');
+      runHook(tmpDir, event);
+      const [ref] = listWipRefs(tmpDir, 'refs/ao-wip/v1/');
+      const firstCommit = resolveRef(tmpDir, ref);
+
+      execFileSync('git', ['reset', '--hard', '--quiet', 'HEAD^'], { cwd: tmpDir, stdio: 'pipe' });
+      writeFileSync(path.join(tmpDir, 'second.txt'), 'second\n', 'utf-8');
+      runHook(tmpDir, event);
+
+      assert.deepEqual(listWipRefs(tmpDir, 'refs/ao-wip/v1/'), [ref]);
+      assert.notEqual(resolveRef(tmpDir, ref), firstCommit);
+      assert.equal(resolveRef(tmpDir, ref), resolveRef(tmpDir, 'HEAD'));
+      const reflogCommits = execFileSync('git', ['reflog', 'show', '--format=%H', ref], {
+        cwd: tmpDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim().split('\n');
+      assert.ok(
+        reflogCommits.includes(firstCommit),
+        'a superseded non-ancestor WIP should stay protected by the managed ref reflog',
+      );
+    } finally {
+      await removeTmpDir(tmpDir);
+    }
+  });
+
+  it('keeps independent anchors for concurrent sessions in the same worktree', async () => {
+    const tmpDir = await makeTmpDir();
+    try {
+      initGitRepo(tmpDir);
+      writeFileSync(path.join(tmpDir, 'session-a.txt'), 'first\n', 'utf-8');
+      runHook(tmpDir, { session_id: 'session-concurrent-a' });
+      const firstCommit = resolveRef(tmpDir, 'HEAD');
+
+      writeFileSync(path.join(tmpDir, 'session-b.txt'), 'second\n', 'utf-8');
+      runHook(tmpDir, { session_id: 'session-concurrent-b' });
+      const secondCommit = resolveRef(tmpDir, 'HEAD');
+
+      const targets = listWipRefs(tmpDir, 'refs/ao-wip/v1/').map(ref => resolveRef(tmpDir, ref));
+      assert.equal(targets.length, 2);
+      assert.ok(targets.includes(firstCommit));
+      assert.ok(targets.includes(secondCommit));
+    } finally {
+      await removeTmpDir(tmpDir);
+    }
+  });
+
+  it('removes only stale managed refs even when the working tree is clean', async () => {
+    const tmpDir = await makeTmpDir();
+    try {
+      initGitRepo(tmpDir);
+      const tree = resolveRef(tmpDir, 'HEAD^{tree}');
+      const oldCommit = execFileSync('git', ['commit-tree', tree, '-p', 'HEAD'], {
+        cwd: tmpDir,
+        encoding: 'utf-8',
+        input: 'old WIP\n',
+        env: {
+          ...process.env,
+          GIT_AUTHOR_DATE: '2020-01-01T00:00:00Z',
+          GIT_COMMITTER_DATE: '2020-01-01T00:00:00Z',
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+      const oldManagedRef = `refs/ao-wip/v1/${'a'.repeat(64)}`;
+      const recentManagedRef = `refs/ao-wip/v1/${'b'.repeat(64)}`;
+      const unmanagedRef = 'refs/ao-wip/manual-preserve';
+      execFileSync('git', ['update-ref', oldManagedRef, oldCommit], { cwd: tmpDir, stdio: 'pipe' });
+      execFileSync('git', ['update-ref', recentManagedRef, 'HEAD'], { cwd: tmpDir, stdio: 'pipe' });
+      execFileSync('git', ['update-ref', unmanagedRef, oldCommit], { cwd: tmpDir, stdio: 'pipe' });
+
+      runHook(tmpDir, { session_id: 'session-cleanup-1' });
+
+      const refs = listWipRefs(tmpDir);
+      assert.ok(!refs.includes(oldManagedRef), 'expired managed ref should be deleted');
+      assert.ok(refs.includes(recentManagedRef), 'recent managed ref should be preserved');
+      assert.ok(refs.includes(unmanagedRef), 'refs outside the managed v1 shape must be preserved');
+    } finally {
+      await removeTmpDir(tmpDir);
+    }
   });
 });
 
