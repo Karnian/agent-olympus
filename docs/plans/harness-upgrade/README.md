@@ -4,7 +4,16 @@
 > harness-engineering review on **2026-06-16** (baseline: `main` @ v1.1.6 +
 > `feat/adapter-worker-supervisor` @ v1.2.0).
 
-## Status & handoff — START HERE (updated 2026-07-14)
+## Status & handoff — START HERE (updated 2026-07-27)
+
+### v1.5.2 implementation addendum — 2026-07-27
+
+- Stop-hook WIP commits now remain reachable through opaque, session/worktree-
+  scoped `refs/ao-wip/v1/` anchors and explicit reflogs, including detached HEAD
+  and non-fast-forward replacement paths.
+- Managed ref tips expire after 30 days through race-safe compare-and-delete;
+  Git retains ownership of object pruning and normal GC.
+- The v1.5.2 release suite is 3365/3365 across 134 test files.
 
 ### v1.5.1 implementation addendum — 2026-07-14
 
@@ -60,6 +69,7 @@
 - **v1.4.0** — reference refresh: Antigravity `agy` fallback, Codex CLI advisory version gate, `/codex-review`, and adapter metadata cleanup.
 - **v1.5.0 (prepared here)** — HU-01 P2/P3, HU-06.3, event-backed fail-closed recovery, bounded provider failover, HU-17 candidate ingestion, and hardened run finalization. Suite 2719/2719.
 - **v1.5.1 (prepared here)** — revocable shipping, exact-SHA all-workflow CI recovery, and Codex MCP diagnostics with fail-closed `--no-mcp`. Suite 2858/2858.
+- **v1.5.2 (prepared here)** — stop-hook WIP ref/reflog lifecycle hardening and 30-day managed-anchor retention. Suite 3365/3365.
 
 **Historical 2026-06-19 snapshot (HU-01 and HU-06.3 superseded by the addendum above):** the rest of the backlog was not started (HU-01, HU-02a, HU-03–05, HU-07–20) + the **4 deferred agents** (`metis`, `prometheus`, `hermes`, `ask` — decide read-only/Bash/unrestricted per their bodies). HU-06 `.1`/`.2` shipped in v1.2.3 and `.4` documentation shipped there; `.3` completed in v1.5.0.
 

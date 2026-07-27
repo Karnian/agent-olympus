@@ -32,7 +32,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Worker Status Dashboard**: Real-time inline markdown display of all active worker states during Athena team runs
 - **Athena worktree isolation**: Each parallel worker runs in an isolated git worktree, preventing silent file overwrites between concurrent workers
 - **SessionStart hook**: Automatically injects prior wisdom and interrupted checkpoint context at session start
-- **Stop hook WIP commit**: Auto-saves uncommitted work as a WIP commit on session end, except while an Atlas run is active (or its pointer cannot be proven absent), when Atlas preserves the unreviewed tree for its code-owned finalization
+- **Stop hook WIP commit** *(v1.5.2)*: Auto-saves uncommitted work on session end and anchors each save under a normally unpushed, session/worktree-scoped `refs/ao-wip/v1/` ref (30-day retention), except while an Atlas run is active (or its pointer cannot be proven absent), when Atlas preserves the unreviewed tree for its code-owned finalization
 - **Atlas executable-control admission**: A fresh `/atlas` requires a real Git HEAD, a clean worktree, and trusted system Git; pre-existing user changes must be committed or stashed first
 - **Atomic writes**: All state files use tmp+rename pattern for crash-safe writes
 - **Superpowers methodology**: TDD discipline, systematic debugging, brainstorm-first gate, two-stage code review — embedded as native skills (standalone; no Superpowers install required)
@@ -68,7 +68,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Sanitized failed-run feedback loop** *(v1.5.0)*: SessionEnd queues only independently verified, session-linked terminal task failures as metadata/digests. A human must approve and link candidates; prompts, error text, paths, diffs, evidence payloads, and provider output never enter the queue.
 - **Revocable shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`) is overridden by durable user no-ship follow-ups; push/PR operations bind repository, base, branch, and remote HEAD identity. CI aggregates every workflow for the exact pushed SHA and crash recovery links each fix candidate to one failed run and attempt.
 - **Codex MCP recovery + `--no-mcp`** *(v1.5.1)*: `/ask` classifies record-ordered MCP authentication failures across exec and tmux adapters. Codex-only `--no-mcp` skips the entire user-level config, including configured MCP servers, with a fail-closed Codex version gate while preserving authentication and explicit CLI overrides.
-- **3360 unit tests**: Current development-tree suite using `node:test` across 134 test files (published v1.5.1 baseline: 2858 tests across 108 files)
+- **3365 unit tests**: Current development-tree and v1.5.2 release baseline using `node:test` across 134 test files
 - **Fail-safe architecture**: Hooks normally fail open; concurrency admission and the Atlas executable-control gates deliberately block on unsafe, unreadable, or unresolved protected state
 
 ## Installation
@@ -608,7 +608,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (3360 tests across 134 files in the current development tree; 2858 tests across 108 files in the published v1.5.1 baseline) covers the core hook libraries. To run:
+A `node:test` based test suite (3365 tests across 134 files in the current development tree and v1.5.2 release baseline) covers the core hook libraries. To run:
 
 ```bash
 npm test
