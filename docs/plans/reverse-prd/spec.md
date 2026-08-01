@@ -2,12 +2,12 @@
 
 **Mode:** Reverse (기존 코드베이스로부터 추출)
 **최초 분석일:** 2026-03-27 (v0.5.0 기준)
-**최종 업데이트:** 2026-03-28 (v0.6.7 기준)
+**최종 업데이트:** 2026-08-02 (v0.6.7 역사 기준 + 현재 안전성 변경 반영)
 **대상:** /Users/k/Desktop/sub_project/agent-olympus
-**분석 당시 버전:** 0.5.0 → **현재 버전:** 0.6.7
+**분석 당시 버전:** 0.5.0 → **역사 기준:** 0.6.7 → **현재 릴리스:** 1.5.2
 **Health Score:** 62/100 → **개선 후:** 85/100 (v0.6.7)
 
-> **구현 이력 노트:** 이 기획서는 v0.5.0 코드베이스 분석을 기반으로 작성되었다. 이후 도출된 개선 작업들이 v0.6.5~v0.6.7에 걸쳐 전면 구현되었다. 아래 각 섹션에 구현 현황이 표시되어 있다.
+> **구현 이력 노트:** 이 기획서는 v0.5.0 코드베이스 분석을 기반으로 작성되었다. 이후 도출된 개선 작업들이 v0.6.5~v0.6.7에 걸쳐 전면 구현되었다. 글로벌 Stop 자동 커밋은 v0.6.5에 도입됐으나, Stop이 매 턴 발생하고 공유 worktree/index의 세션 소유권을 구분할 수 없어 v1.5.2 이후 제거됐다. 아래 각 섹션은 역사적 구현 현황과 현재 상태를 함께 표시한다.
 
 ---
 
@@ -180,7 +180,6 @@ agent-olympus/
 │   ├── concurrency-gate.mjs      (동시성 제한 hook)
 │   ├── concurrency-release.mjs   (동시성 해제 hook)
 │   ├── session-start.mjs         (SessionStart: wisdom+checkpoint 주입) ✅ v0.6.5 신규
-│   ├── stop-hook.mjs             (Stop: WIP 자동 커밋) ✅ v0.6.5 신규
 │   ├── test/                     (node:test 단위 테스트, 182개 / 13파일) ✅ v0.6.5 신규
 │   └── lib/                      (공유 라이브러리)
 │       ├── stdin.mjs             (안전한 stdin 읽기)
@@ -363,7 +362,7 @@ agent-olympus/
 
 ### 8.1 Hook 등록 구조
 
-hooks.json은 5개의 이벤트에 6개의 hook 스크립트를 등록한다 (v0.6.5에서 SessionStart, Stop 추가):
+아래 표는 v0.6.5 당시 등록 구조다. 현재 글로벌 Stop 자동 커밋 등록은 제거됐고, Atlas의 skill-scoped Stop 게이트만 유지된다.
 
 | 이벤트 | 매처 | Hook 스크립트 | 역할 |
 |--------|------|-------------|------|
@@ -375,7 +374,7 @@ hooks.json은 5개의 이벤트에 6개의 hook 스크립트를 등록한다 (v0
 | `PreToolUse` | `Agent` | model-router.mjs | 의도 기반 모델 라우팅 조언 주입 |
 | `PostToolUse` | `Task` | concurrency-release.mjs | 완료된 Task의 동시성 슬롯 해제 |
 | `PostToolUse` | `Agent` | concurrency-release.mjs | 완료된 Agent의 동시성 슬롯 해제 |
-| `Stop` | `*` | stop-hook.mjs ✅ | 세션 종료 시 미커밋 작업 WIP 커밋으로 자동 저장 |
+| ~~`Stop`~~ | ~~`*`~~ | ~~stop-hook.mjs~~ | v0.6.5 도입, v1.5.2 이후 제거 — 매 턴 공유 Git 상태를 암묵적으로 변경하지 않음 |
 
 ### 8.2 Hook 실행 흐름
 
@@ -749,7 +748,7 @@ JSONC 형식(주석 허용)으로, 의도 카테고리별 라우팅을 사용자
 3. ✅ **상태 파일 원자적 쓰기** (v0.6.5) — lib/fs-atomic.mjs (atomicWriteFileSync/atomicWriteFile/atomicMoveSync) 전면 적용
 4. ✅ **Athena 워커 git worktree 격리** (v0.6.5, Kimoring 패턴 응용) — 각 워커가 .ao/worktrees/<slug>/<worker>/에서 독립 실행, 완료 후 순차 머지
 5. ✅ **SessionStart 훅 도입** (v0.6.5, Kimoring 패턴) — wisdom + checkpoint 컨텍스트 세션 시작 시 자동 주입
-6. ✅ **Stop 훅 WIP 커밋** (v0.6.5, Kimoring 패턴) — 세션 종료 시 미커밋 작업 자동 저장
+6. ❌ **Stop 훅 WIP 커밋** (v0.6.5 도입, v1.5.2 이후 제거) — 매 턴 발생하는 Stop에서 공유 index와 `HEAD`를 암묵적으로 변경해 다중 세션 소유권 충돌을 유발할 수 있음
 7. ✅ **verify-coverage 스킬** (v0.6.5, Kimoring 패턴) — 최근 변경 파일 기반 테스트 커버리지 갭 감지
 
 ### 16.2 중간 영향 (Medium Impact)
@@ -777,7 +776,7 @@ JSONC 형식(주석 허용)으로, 의도 카테고리별 라우팅을 사용자
 - [x] 상태 파일 원자적 쓰기 (lib/fs-atomic.mjs)
 - [x] detectProvider() 중복 제거 (lib/provider-detect.mjs)
 - [x] Athena 워커 git worktree 격리 (lib/worktree.mjs)
-- [x] SessionStart/Stop 훅 도입 (Kimoring 패턴)
+- [x] SessionStart 훅 도입 (Kimoring 패턴); 글로벌 Stop 자동 커밋은 후속 안전성 검토에서 제거
 - [x] verify-coverage 스킬 신규 추가
 - [x] 문서 전면 동기화 (README.md/ko.md 언어 전환, AGENTS.md, CHANGELOG.md)
 

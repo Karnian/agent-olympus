@@ -20,7 +20,7 @@
   - `Notification:idle_prompt`: `notification` (async)
   - `Notification:permission_prompt`: `notification` (async)
   - `SessionEnd`: `session-end` (async)
-  - `Stop`: `stop-hook`; plus `orchestrator-stop-gate` registered skill-scoped via `skills/atlas/SKILL.md` frontmatter `hooks:` while `/atlas` is active
+  - `Stop` (skill-scoped only): `orchestrator-stop-gate` is registered via `skills/atlas/SKILL.md` frontmatter while `/atlas` is active; no plugin-global Stop hook stages or commits user work
 - Skill vs agent invocation in Claude Code:
   - Skills (`skills/*/SKILL.md`) are user-facing workflows invoked by slash command, trigger keyword, or `Skill(skill="agent-olympus:<name>")`.
   - Agents (`agents/*.md`) are internal personas invoked with `Task(subagent_type="agent-olympus:<name>", model="<tier>", prompt="...")`.

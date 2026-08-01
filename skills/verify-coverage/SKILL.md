@@ -57,7 +57,6 @@ Output a markdown report:
 
 ### ⚠️ Hook Registration Check
 - scripts/session-start.mjs → ✅ registered in hooks.json
-- scripts/stop-hook.mjs → ✅ registered in hooks.json
 
 ### Test Results
 49/49 passing (+ N new)

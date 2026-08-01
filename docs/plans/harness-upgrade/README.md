@@ -4,7 +4,17 @@
 > harness-engineering review on **2026-06-16** (baseline: `main` @ v1.1.6 +
 > `feat/adapter-worker-supervisor` @ v1.2.0).
 
-## Status & handoff — START HERE (updated 2026-07-27)
+## Status & handoff — START HERE (updated 2026-08-02)
+
+### Post-v1.5.2 safety change — 2026-08-02
+
+- The plugin-global Stop auto-commit was removed because Claude Code emits Stop
+  at the end of every turn and multiple sessions can share one worktree/index.
+- Agent Olympus no longer stages, commits, or moves `HEAD` implicitly. The
+  skill-scoped Atlas Stop gate remains for incomplete-run control only.
+- Existing local `refs/ao-wip/v1/*` recovery refs are preserved for manual
+  inspection; no upgrade path deletes them automatically.
+- The current development suite is 3322/3322 across 133 test files.
 
 ### v1.5.2 implementation addendum — 2026-07-27
 
@@ -89,7 +99,7 @@
 
 **Gotchas:**
 - **Subagent defs load at session START** — a plugin update mid-session does NOT reload them; runtime tool restrictions only apply in a session started *after* the update. Verify with a **fresh `claude -p`** (the running session is stale).
-- A Stop hook **auto-commits uncommitted work as `ao-wip`** — after Codex implements, `git reset --mixed <last-clean>` and re-commit cleanly.
+- No global Stop auto-commit exists. Inspect `git status`, then commit or stash deliberately before switching worktrees or starting a fresh Atlas run.
 - `tools:` allowlist is the enforced mechanism (NOT `disallowedTools`); MCP tokens (`mcp__server__tool`) are accepted but only inject when the MCP server is connected (graceful code-only fallback otherwise).
 - Restore files via a **backup copy**, not `git checkout` (Codex's edits are uncommitted; checkout would revert them).
 
