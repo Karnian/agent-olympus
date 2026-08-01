@@ -1,12 +1,24 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { join } from 'node:path';
 
 function readRepoFile(path) {
   return readFileSync(fileURLToPath(new URL(`../../${path}`, import.meta.url)), 'utf8');
 }
+
+describe('explicit Git ownership at turn completion', () => {
+  it('keeps Stop skill-scoped and never registers a global auto-commit hook', () => {
+    const hookRegistry = JSON.parse(readRepoFile('hooks/hooks.json'));
+    const removedHook = fileURLToPath(new URL('../../scripts/stop-hook.mjs', import.meta.url));
+    const atlasSkill = readRepoFile('skills/atlas/SKILL.md');
+
+    assert.equal(Object.hasOwn(hookRegistry.hooks, 'Stop'), false);
+    assert.equal(existsSync(removedHook), false);
+    assert.match(atlasSkill, /orchestrator-stop-gate\.mjs/);
+  });
+});
 
 describe('provider-aware planning and Athena applicability', () => {
   it('Prometheus never invents Codex availability', () => {
