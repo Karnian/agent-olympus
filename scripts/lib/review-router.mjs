@@ -56,7 +56,6 @@ const REVIEW_POLICY_PATHS = new Set([
   'scripts/orchestrator-runtime.mjs',
   'scripts/orchestrator-skill-init.mjs',
   'scripts/orchestrator-stop-gate.mjs',
-  'scripts/stop-hook.mjs',
   'scripts/lib/phase-runner.mjs',
   'scripts/lib/orchestrator-review-evidence.mjs',
   'scripts/lib/review-contract.mjs',

@@ -3,7 +3,6 @@
  * SessionEnd hook — cleans up stale state files on session termination.
  * Removes transient .ao/state/, .ao/teams/, and provider-fallback artifacts
  * older than 24 hours.
- * Complement to stop-hook.mjs (which handles WIP commits).
  * Never blocks: always exits 0.
  */
 

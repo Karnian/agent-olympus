@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.6.0] - 2026-08-03
+
+Explicit Git-ownership release. The global Stop-hook auto-commit feature has
+been removed, and the zero-dependency Node suite is **3322/3322 green across
+133 test files**.
+
+### Removed
+- **Implicit Git mutations on Stop** — Agent Olympus no longer stages the
+  shared index, creates WIP commits, or moves `HEAD` when Claude finishes a
+  turn. Git changes now occur only through an explicit user or orchestrator
+  workflow. The skill-scoped Atlas Stop gate remains in place to prevent an
+  incomplete Atlas run from terminating prematurely.
+- **Stop-hook maintenance surface** — removed the global hook registration,
+  `scripts/stop-hook.mjs`, its 44 dedicated tests, and its review/evaluation
+  fingerprint entries.
+
+### Migration
+- Existing local `refs/ao-wip/v1/*` refs are intentionally left untouched so
+  an upgrade cannot destroy recovery history. Operators can inspect them with
+  `git for-each-ref refs/ao-wip/v1/` and remove individually reviewed refs with
+  `git update-ref -d <refname> <object-id>`.
+
 ## [1.5.2] - 2026-07-27
 
 Stop-hook storage-lifecycle patch. The zero-dependency Node suite is

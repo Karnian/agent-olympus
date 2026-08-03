@@ -246,7 +246,6 @@ describe('review-router: routeReviewers basic scopes', () => {
         'scripts/orchestrator-runtime.mjs',
         'scripts/orchestrator-skill-init.mjs',
         'scripts/orchestrator-stop-gate.mjs',
-        'scripts/stop-hook.mjs',
         'scripts/lib/orchestrator-review-evidence.mjs',
         'scripts/lib/review-contract.mjs',
         'scripts/lib/review-package.mjs',

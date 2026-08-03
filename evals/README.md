@@ -220,8 +220,7 @@ reference retain their single-file identity.
 The measurement machinery has a separate `pipelineProtocolFingerprint` over
 the live harness, pipeline-evidence policy, and production
 phase/loop-guard/run-artifact roots, the Atlas bootstrap/runtime/Stop gates,
-the interacting global Stop hook, and the installed hook registry, plus their
-repo-local relative-import closure.
+and the installed hook registry, plus their repo-local relative-import closure.
 Builtins, packages, and unreferenced SUT files are excluded. A
 protocol-only change therefore does
 not erase an otherwise valid outcome delta. It sets
@@ -275,8 +274,9 @@ benchmark/plugin/prompt/protocol fingerprints.
 This prevents Executor and Hephaestus results on the same fixture from being
 collapsed into a generic `orchestrator: "agent"` series.
 
-Local run artifacts under `evals/results/` are gitignored so live output cannot
-be swept into an automatic WIP commit.
+Local run artifacts under `evals/results/` are gitignored. Agent Olympus does
+not register a global Stop auto-commit hook; live output remains in place until
+an explicit Git workflow handles it.
 
 Supported Atlas, Athena, and direct-agent live evals burn real tokens and run
 unsupervised. None of these paths is run by CI or this repository's test suite.

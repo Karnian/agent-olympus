@@ -4,7 +4,17 @@
 > harness-engineering review on **2026-06-16** (baseline: `main` @ v1.1.6 +
 > `feat/adapter-worker-supervisor` @ v1.2.0).
 
-## Status & handoff — START HERE (updated 2026-07-27)
+## Status & handoff — START HERE (updated 2026-08-03)
+
+### v1.6.0 implementation addendum — 2026-08-03
+
+- The plugin-global Stop auto-commit was removed because Claude Code emits Stop
+  at the end of every turn and multiple sessions can share one worktree/index.
+- Agent Olympus no longer stages, commits, or moves `HEAD` implicitly. The
+  skill-scoped Atlas Stop gate remains for incomplete-run control only.
+- Existing local `refs/ao-wip/v1/*` recovery refs are preserved for manual
+  inspection; no upgrade path deletes them automatically.
+- The v1.6.0 release suite is 3322/3322 across 133 test files.
 
 ### v1.5.2 implementation addendum — 2026-07-27
 
@@ -70,6 +80,7 @@
 - **v1.5.0 (prepared here)** — HU-01 P2/P3, HU-06.3, event-backed fail-closed recovery, bounded provider failover, HU-17 candidate ingestion, and hardened run finalization. Suite 2719/2719.
 - **v1.5.1 (prepared here)** — revocable shipping, exact-SHA all-workflow CI recovery, and Codex MCP diagnostics with fail-closed `--no-mcp`. Suite 2858/2858.
 - **v1.5.2 (prepared here)** — stop-hook WIP ref/reflog lifecycle hardening and 30-day managed-anchor retention. Suite 3365/3365.
+- **v1.6.0 (prepared here)** — remove plugin-global Stop auto-commits, preserve Atlas control gating, and document explicit Git ownership plus legacy-ref migration. Suite 3322/3322.
 
 **Historical 2026-06-19 snapshot (HU-01 and HU-06.3 superseded by the addendum above):** the rest of the backlog was not started (HU-01, HU-02a, HU-03–05, HU-07–20) + the **4 deferred agents** (`metis`, `prometheus`, `hermes`, `ask` — decide read-only/Bash/unrestricted per their bodies). HU-06 `.1`/`.2` shipped in v1.2.3 and `.4` documentation shipped there; `.3` completed in v1.5.0.
 
@@ -89,7 +100,7 @@
 
 **Gotchas:**
 - **Subagent defs load at session START** — a plugin update mid-session does NOT reload them; runtime tool restrictions only apply in a session started *after* the update. Verify with a **fresh `claude -p`** (the running session is stale).
-- A Stop hook **auto-commits uncommitted work as `ao-wip`** — after Codex implements, `git reset --mixed <last-clean>` and re-commit cleanly.
+- No global Stop auto-commit exists. Inspect `git status`, then commit or stash deliberately before switching worktrees or starting a fresh Atlas run.
 - `tools:` allowlist is the enforced mechanism (NOT `disallowedTools`); MCP tokens (`mcp__server__tool`) are accepted but only inject when the MCP server is connected (graceful code-only fallback otherwise).
 - Restore files via a **backup copy**, not `git checkout` (Codex's edits are uncommitted; checkout would revert them).
 

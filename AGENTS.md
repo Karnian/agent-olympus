@@ -95,8 +95,7 @@ agent-olympus/
 │   ├── concurrency-release.mjs   — PostToolUse: release task from concurrency pool
 │   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
 │   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode
-│   ├── stop-hook.mjs             — Stop: WIP commit + managed ref lifecycle
-│   ├── test/                     — node:test unit tests (v1.5.2: 3365 tests, 134 files)
+│   ├── test/                     — node:test unit tests (current: 3322 tests, 133 files)
 │   └── lib/
 │       ├── stdin.mjs             — Shared stdin reader with timeout
 │       ├── intent-patterns.mjs   — Intent classifier (13 categories + unknown fallback, multilingual)
@@ -189,7 +188,7 @@ Follow [docs/development.md](docs/development.md) when adding agents, skills, ho
 
 ## Testing
 
-Run the current 3365-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the current 3322-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
@@ -202,7 +201,7 @@ Run the current 3365-test Node suite and syntax checks from [docs/testing.md](do
 ## Known Limitations
 
 - `--bare` Claude Code mode skips hooks, plugins, and skill directory walks, so Agent Olympus hooks will not fire there.
-- Atlas requires Claude Code 2.1.214+ (validated; earlier support unknown). Missing `UserPromptExpansion` stops `/atlas`; missing skill hooks removes the Stop gate (unsupported). Fresh runs need clean trees and suppress WIP commits.
+- Atlas requires Claude Code 2.1.214+ (validated; earlier support unknown). Missing `UserPromptExpansion` stops `/atlas`; missing skill hooks removes the Stop gate (unsupported). Fresh runs need clean trees; Agent Olympus does not auto-stage or auto-commit pre-existing work.
 - Trusted VCS uses fixed roots: Git for Atlas/ship/CI; `gh` for GitHub/PR evidence. nix/asdf/mise-only installs are unsupported.
 - Claude Code sandbox mode should be used when testing hooks; edge cases can appear around `.ao/` filesystem access.
 - Gemini credential auto-resolution supports macOS Keychain and Linux libsecret in v1; Windows users must set `GEMINI_API_KEY`.
@@ -337,7 +336,6 @@ Run the current 3365-test Node suite and syntax checks from [docs/testing.md](do
 | Notification:idle_prompt | notification | Log idle/permission prompts for stall detection |
 | Notification:permission_prompt | notification | Same logging for permission prompts |
 | SessionEnd | session-end | Sweep stale state; collect linked failed-run candidates |
-| Stop | stop-hook | Auto-commit uncommitted work as WIP (off during an active Atlas run) |
 | Stop (skill-scoped) | orchestrator-stop-gate | atlas SKILL.md frontmatter: blocks premature Stop mid-run |
 
 ## State Files
@@ -373,3 +371,4 @@ Run the current 3365-test Node suite and syntax checks from [docs/testing.md](do
 8. **Fail-safe hooks** — Hooks exit 0; only concurrency admission and the Atlas executable-control gates fail closed.
 9. **Atomic state writes** — State mutations use tmp+rename via `lib/fs-atomic.mjs`.
 10. **tmux injection prevention** — `sanitizeForShellArg()` in `lib/tmux-session.mjs` escapes shell special characters before any `send-keys` call.
+11. **Explicit Git ownership** — no global Stop hook stages or commits the shared worktree; Git mutations require an explicit user or orchestrator workflow.

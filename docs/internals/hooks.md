@@ -3,7 +3,7 @@
 
 - `run.cjs` is the universal entry point — it resolves the correct script path with version fallback
 - All hooks receive JSON on stdin and output JSON on stdout
-- Hooks must complete within their timeout (3s for most, 5s for SessionStart/SessionEnd and both Atlas executable-control hooks, 10s for the global Stop hook)
+- Hooks must complete within their timeout (3s for most, 5s for SessionStart/SessionEnd and both Atlas executable-control hooks)
 - Hooks normally fail open and always exit zero. Three gates are deliberate fail-closed exceptions: ConcurrencyGate (an unsafe, unreadable, or unresolved concurrency state returns a blocking decision so unknown reservations cannot authorize more work), AtlasSkillInit after the Atlas identity is proven, and AtlasStopGate while an Atlas run is active. AtlasSkillInit still fails open (`{}`) for unreadable stdin or any payload that is not provably an Atlas invocation, so a transient IO fault can never block unrelated skills.
 - Hooks can set `"async": true` to run in the background without blocking Claude's execution
 - **IntentGate** (`scripts/intent-gate.mjs`) — fires on UserPromptSubmit; classifies intent and saves `.ao/state/ao-intent.json` for routing. Categories: `visual-engineering`, `design-review`, `code-review`, `security-review`, `test-authoring`, `product-planning`, `deep`, `deep-mutation`, `quick`, `writing`, `artistry`, `planning`, `external-model`, plus `unknown`. `code-review` sends explicit Claude-only review to the internal read-only reviewer; `external-model` sends explicit Codex/Gemini or providerless cross-review to `/ask`.
@@ -19,4 +19,17 @@
 - **ConcurrencyRelease** (`scripts/concurrency-release.mjs`) — fires on PostToolUse Task/Agent + SubagentStop; 3-stage release: task_id match → provider match → SubagentStop safety net (force-release oldest). Stale threshold 3 min
 - **PlanExecuteGate** (`scripts/plan-execute-gate.mjs`) — fires on PostToolUse ExitPlanMode; reads `planExecution` from autonomy.json and injects execution routing (solo/ask/atlas/athena); `ask` mode instructs Claude to use `AskUserQuestion` interactive UI with text fallback; writes marker `.ao/state/ao-plan-pending.json` for SessionStart fallback (marker preserved as `handled: true`, cleaned by SessionEnd after 24h)
 - **SessionEnd** (`scripts/session-end.mjs`) — fires on session termination; revokes the matching external runtime grant, then cleans stale transient state and provider-fallback artifacts older than 24h. The live concurrency ledger and all lock/reclaim generations are never swept by mtime; only collision-safe `ao-concurrency.json.corrupt-*` quarantines use the 24-hour TTL, as eventual cleanup rather than the primary recovery path. It also checks at most the newest 64 run IDs explicitly linked to the ending session, within a one-second collection budget, and derives metadata-only HU-17 review candidates from eligible finalized task/orchestration failures. Candidate collection makes one non-waiting queue-lock attempt, never scans all runs, and remains local/fail-safe; hook output is valid JSON with exit zero (async, non-blocking).
-- **Stop** (`scripts/stop-hook.mjs`, v1.5.2+) — fires at session end; auto-commits any uncommitted work as a WIP commit so nothing is lost; uses selective staging (excludes `.env`, secrets, `.ao/state/`, `.ao/teams/`). Each save is anchored by session and worktree under the normally unpushed `refs/ao-wip/v1/` namespace, with an explicit reflog for superseded non-ancestor saves, so detached/rebased commits stay reachable and can be packed by normal Git GC; managed anchors whose tip commit is older than 30 days are removed with an object-ID compare-and-delete guard. While an Atlas run is active (or its active pointer cannot be proven absent) the WIP commit is suppressed so the incomplete, unreviewed tree is never committed; normal behavior resumes once the run finalizes and clears its pointer
+- **Explicit Git ownership** (v1.6.0+) — no plugin-global Stop hook is registered. Claude Code emits Stop when the main agent finishes each turn, so Agent Olympus does not stage the shared index, create an implicit WIP commit, or move `HEAD` at that boundary. Git mutations require an explicit user or orchestrator workflow. The skill-scoped AtlasStopGate above remains active only for Atlas control flow and does not commit work.
+
+Legacy installations may still have local `refs/ao-wip/v1/*` refs created by
+v1.5.2. Upgrades leave them untouched so recovery history is not destroyed.
+Inspect them before deletion:
+
+```bash
+git for-each-ref --format='%(refname) %(objectname) %(committerdate:iso8601)' refs/ao-wip/v1/
+git show <object-id>
+git update-ref -d <refname> <object-id>
+```
+
+Delete only individually reviewed refs. Git reclaims newly unreachable objects
+later under its normal GC policy.

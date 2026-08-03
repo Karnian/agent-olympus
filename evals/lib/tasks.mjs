@@ -52,7 +52,6 @@ const HARNESS_RUNTIME_FILES = [
   { absolutePath: path.join(REPO_ROOT, 'scripts/orchestrator-runtime.mjs'), relativePath: 'harness/orchestrator-runtime.mjs' },
   { absolutePath: path.join(REPO_ROOT, 'scripts/orchestrator-skill-init.mjs'), relativePath: 'harness/orchestrator-skill-init.mjs' },
   { absolutePath: path.join(REPO_ROOT, 'scripts/orchestrator-stop-gate.mjs'), relativePath: 'harness/orchestrator-stop-gate.mjs' },
-  { absolutePath: path.join(REPO_ROOT, 'scripts/stop-hook.mjs'), relativePath: 'harness/stop-hook.mjs' },
   { absolutePath: path.join(REPO_ROOT, 'scripts/lib/loop-guard.mjs'), relativePath: 'harness/loop-guard.mjs' },
   { absolutePath: path.join(REPO_ROOT, 'scripts/lib/phase-runner.mjs'), relativePath: 'harness/phase-runner.mjs' },
   { absolutePath: path.join(REPO_ROOT, 'scripts/lib/run-artifacts.mjs'), relativePath: 'harness/run-artifacts.mjs' },
