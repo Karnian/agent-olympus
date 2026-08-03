@@ -220,8 +220,7 @@ reference retain their single-file identity.
 The measurement machinery has a separate `pipelineProtocolFingerprint` over
 the live harness, pipeline-evidence policy, and production
 phase/loop-guard/run-artifact roots, the Atlas bootstrap/runtime/Stop gates,
-and the installed hook registry, plus their
-repo-local relative-import closure.
+and the installed hook registry, plus their repo-local relative-import closure.
 Builtins, packages, and unreferenced SUT files are excluded. A
 protocol-only change therefore does
 not erase an otherwise valid outcome delta. It sets

@@ -32,7 +32,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Worker Status Dashboard**: Real-time inline markdown display of all active worker states during Athena team runs
 - **Athena worktree isolation**: Each parallel worker runs in an isolated git worktree, preventing silent file overwrites between concurrent workers
 - **SessionStart hook**: Automatically injects prior wisdom and interrupted checkpoint context at session start
-- **Explicit Git ownership**: No global Stop hook stages or commits the shared worktree when Claude finishes a turn; Git mutations happen only through an explicit user or orchestrator workflow. Atlas keeps its separate skill-scoped Stop gate for incomplete-run control
+- **Explicit Git ownership** *(v1.6.0)*: No global Stop hook stages or commits the shared worktree when Claude finishes a turn; Git mutations happen only through an explicit user or orchestrator workflow. Atlas keeps its separate skill-scoped Stop gate for incomplete-run control
 - **Atlas executable-control admission**: A fresh `/atlas` requires a real Git HEAD, a clean worktree, and trusted system Git; pre-existing user changes must be committed or stashed first
 - **Atomic writes**: All state files use tmp+rename pattern for crash-safe writes
 - **Superpowers methodology**: TDD discipline, systematic debugging, brainstorm-first gate, two-stage code review — embedded as native skills (standalone; no Superpowers install required)
@@ -68,7 +68,7 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Sanitized failed-run feedback loop** *(v1.5.0)*: SessionEnd queues only independently verified, session-linked terminal task failures as metadata/digests. A human must approve and link candidates; prompts, error text, paths, diffs, evidence payloads, and provider output never enter the queue.
 - **Revocable shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`) is overridden by durable user no-ship follow-ups; push/PR operations bind repository, base, branch, and remote HEAD identity. CI aggregates every workflow for the exact pushed SHA and crash recovery links each fix candidate to one failed run and attempt.
 - **Codex MCP recovery + `--no-mcp`** *(v1.5.1)*: `/ask` classifies record-ordered MCP authentication failures across exec and tmux adapters. Codex-only `--no-mcp` skips the entire user-level config, including configured MCP servers, with a fail-closed Codex version gate while preserving authentication and explicit CLI overrides.
-- **3322 unit tests**: Current development tree using `node:test` across 133 test files (v1.5.2 release baseline: 3365 tests across 134 files)
+- **3322 unit tests**: v1.6.0 release baseline using `node:test` across 133 test files (previous v1.5.2 baseline: 3365 tests across 134 files)
 - **Fail-safe architecture**: Hooks normally fail open; concurrency admission and the Atlas executable-control gates deliberately block on unsafe, unreadable, or unresolved protected state
 
 ## Installation
@@ -87,6 +87,19 @@ Clone the repository and reference it in your Claude Code plugin directory:
 ```bash
 git clone https://github.com/Karnian/agent-olympus.git ~/.claude/plugins/agent-olympus
 ```
+
+### Upgrading from v1.5.2
+
+v1.6.0 leaves existing local `refs/ao-wip/v1/*` recovery refs untouched so an
+upgrade cannot delete saved work. Inspect each ref before deleting it:
+
+```bash
+git for-each-ref refs/ao-wip/v1/
+git show <object-id>
+git update-ref -d <refname> <object-id>
+```
+
+No automatic cleanup runs after the global Stop auto-commit hook is removed.
 
 ## Quick Start
 
@@ -608,7 +621,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (3322 tests across 133 files in the current development tree; v1.5.2 release baseline: 3365 tests across 134 files) covers the core hook libraries. To run:
+A `node:test` based test suite (v1.6.0 release baseline: 3322 tests across 133 files; previous v1.5.2 baseline: 3365 tests across 134 files) covers the core hook libraries. To run:
 
 ```bash
 npm test

@@ -2,12 +2,12 @@
 
 **Mode:** Reverse (기존 코드베이스로부터 추출)
 **최초 분석일:** 2026-03-27 (v0.5.0 기준)
-**최종 업데이트:** 2026-08-02 (v0.6.7 역사 기준 + 현재 안전성 변경 반영)
+**최종 업데이트:** 2026-08-03 (v0.6.7 역사 기준 + v1.6.0 안전성 변경 반영)
 **대상:** /Users/k/Desktop/sub_project/agent-olympus
-**분석 당시 버전:** 0.5.0 → **역사 기준:** 0.6.7 → **현재 릴리스:** 1.5.2
+**분석 당시 버전:** 0.5.0 → **역사 기준:** 0.6.7 → **현재 릴리스:** 1.6.0
 **Health Score:** 62/100 → **개선 후:** 85/100 (v0.6.7)
 
-> **구현 이력 노트:** 이 기획서는 v0.5.0 코드베이스 분석을 기반으로 작성되었다. 이후 도출된 개선 작업들이 v0.6.5~v0.6.7에 걸쳐 전면 구현되었다. 글로벌 Stop 자동 커밋은 v0.6.5에 도입됐으나, Stop이 매 턴 발생하고 공유 worktree/index의 세션 소유권을 구분할 수 없어 v1.5.2 이후 제거됐다. 아래 각 섹션은 역사적 구현 현황과 현재 상태를 함께 표시한다.
+> **구현 이력 노트:** 이 기획서는 v0.5.0 코드베이스 분석을 기반으로 작성되었다. 이후 도출된 개선 작업들이 v0.6.5~v0.6.7에 걸쳐 전면 구현되었다. 글로벌 Stop 자동 커밋은 v0.6.5에 도입됐으나, Stop이 매 턴 발생하고 공유 worktree/index의 세션 소유권을 구분할 수 없어 v1.6.0에서 제거됐다. 아래 각 섹션은 역사적 구현 현황과 현재 상태를 함께 표시한다.
 
 ---
 
@@ -374,7 +374,7 @@ agent-olympus/
 | `PreToolUse` | `Agent` | model-router.mjs | 의도 기반 모델 라우팅 조언 주입 |
 | `PostToolUse` | `Task` | concurrency-release.mjs | 완료된 Task의 동시성 슬롯 해제 |
 | `PostToolUse` | `Agent` | concurrency-release.mjs | 완료된 Agent의 동시성 슬롯 해제 |
-| ~~`Stop`~~ | ~~`*`~~ | ~~stop-hook.mjs~~ | v0.6.5 도입, v1.5.2 이후 제거 — 매 턴 공유 Git 상태를 암묵적으로 변경하지 않음 |
+| ~~`Stop`~~ | ~~`*`~~ | ~~stop-hook.mjs~~ | v0.6.5 도입, v1.6.0 제거 — 매 턴 공유 Git 상태를 암묵적으로 변경하지 않음 |
 
 ### 8.2 Hook 실행 흐름
 
@@ -748,7 +748,7 @@ JSONC 형식(주석 허용)으로, 의도 카테고리별 라우팅을 사용자
 3. ✅ **상태 파일 원자적 쓰기** (v0.6.5) — lib/fs-atomic.mjs (atomicWriteFileSync/atomicWriteFile/atomicMoveSync) 전면 적용
 4. ✅ **Athena 워커 git worktree 격리** (v0.6.5, Kimoring 패턴 응용) — 각 워커가 .ao/worktrees/<slug>/<worker>/에서 독립 실행, 완료 후 순차 머지
 5. ✅ **SessionStart 훅 도입** (v0.6.5, Kimoring 패턴) — wisdom + checkpoint 컨텍스트 세션 시작 시 자동 주입
-6. ❌ **Stop 훅 WIP 커밋** (v0.6.5 도입, v1.5.2 이후 제거) — 매 턴 발생하는 Stop에서 공유 index와 `HEAD`를 암묵적으로 변경해 다중 세션 소유권 충돌을 유발할 수 있음
+6. ❌ **Stop 훅 WIP 커밋** (v0.6.5 도입, v1.6.0 제거) — 매 턴 발생하는 Stop에서 공유 index와 `HEAD`를 암묵적으로 변경해 다중 세션 소유권 충돌을 유발할 수 있음
 7. ✅ **verify-coverage 스킬** (v0.6.5, Kimoring 패턴) — 최근 변경 파일 기반 테스트 커버리지 갭 감지
 
 ### 16.2 중간 영향 (Medium Impact)

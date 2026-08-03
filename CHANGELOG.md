@@ -1,9 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [1.6.0] - 2026-08-03
 
-The global Stop-hook auto-commit feature has been removed. The current
-development suite contains **3322 tests across 133 test files**.
+Explicit Git-ownership release. The global Stop-hook auto-commit feature has
+been removed, and the zero-dependency Node suite is **3322/3322 green across
+133 test files**.
 
 ### Removed
 - **Implicit Git mutations on Stop** — Agent Olympus no longer stages the
