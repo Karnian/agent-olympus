@@ -375,7 +375,12 @@ export async function runOnce(adapterName, prompt, _testInject = {}) {
 
   let handle = null;
   try {
-    handle = adapter.spawn(effectivePrompt, opts);
+    // The caller is waiting on this answer: return at turn.completed and let
+    // Codex finish its own teardown after we exit (see codex-exec release()).
+    const spawnOpts = adapterName === 'codex-exec'
+      ? { ...opts, releaseOnTurnCompleted: true }
+      : opts;
+    handle = adapter.spawn(effectivePrompt, spawnOpts);
   } catch (err) {
     const msg = `Failed to spawn ${adapterName}: ${err && err.message ? err.message : String(err)}`;
     writeArtifact(path, `# Error\n\n${msg}\n`);

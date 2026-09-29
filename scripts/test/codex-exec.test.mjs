@@ -1197,6 +1197,122 @@ test('issue #74: a timeout that resolves before exit schedules no late reap', as
   }
 });
 
+// ─── release at turn.completed ───────────────────────────────────────────────
+
+function turnCompletedLine() {
+  return JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n';
+}
+
+test('collect: a default handle still waits for close after turn.completed', async () => {
+  const child = createOpenStdoutChild(7070);
+  const handle = createHandle(child);
+
+  const p = collect(handle, 1000);
+  let resolved = false;
+  p.then(() => { resolved = true; });
+  child.stdout.push(turnCompletedLine());
+  await tick();
+  await tick();
+  assert.equal(handle.status, 'completed');
+  assert.equal(resolved, false, 'only release-on-turn handles settle before close');
+
+  child.emit('exit', 0);
+  child.emit('close', 0);
+  const result = await p;
+  assert.equal(result.status, 'completed');
+  assert.equal(handle._settledOnTurn, undefined);
+});
+
+test('collect: a release-on-turn handle settles at turn.completed without waiting for exit', async () => {
+  const child = createOpenStdoutChild(7171); // never exits or closes on its own
+  const handle = createHandle(child);
+  handle._releaseOnTurn = true;
+
+  const p = collect(handle, 1000);
+  child.stdout.push(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'OK' } }) + '\n');
+  child.stdout.push(turnCompletedLine());
+
+  const result = await p;
+  assert.equal(result.status, 'completed');
+  assert.ok(!('error' in result), 'settled before the 1000ms timeout');
+  assert.equal(result.output, 'OK\n');
+  assert.deepEqual(result.usage, { input_tokens: 1, output_tokens: 1 });
+  assert.equal(handle._settledOnTurn, true);
+  assert.equal(handle._exitCode, null, 'the process is still running when collect() resolves');
+});
+
+test('collect: a release-on-turn handle does not settle on a failed item alone', async () => {
+  const child = createOpenStdoutChild(7474);
+  const handle = createHandle(child);
+  handle._releaseOnTurn = true;
+
+  const p = collect(handle, 50);
+  child.stdout.push(JSON.stringify({
+    type: 'item.completed',
+    item: { type: 'command_execution', aggregated_output: '', exit_code: 1, status: 'failed' },
+  }) + '\n');
+  const result = await p;
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.category, 'timeout');
+  assert.notEqual(handle._settledOnTurn, true);
+});
+
+test('shutdown: releases a turn-settled handle instead of signalling it', async () => {
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = createOpenStdoutChild(7272);
+    let unrefs = 0;
+    child.unref = () => { unrefs += 1; };
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+
+    const p = collect(handle, 1000);
+    child.stdout.push(turnCompletedLine());
+    await p;
+
+    await shutdown(handle, 20);
+    assert.deepEqual(calls, [], 'no group signal: Codex must be free to run its SessionEnd hooks');
+    assert.equal(child.killed, false, 'no direct signal either');
+    assert.equal(unrefs, 1, 'the child no longer holds the caller event loop');
+    assert.equal(child.stdout.destroyed, true);
+    assert.equal(child.stderr.destroyed, true);
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+test('shutdown: a release-on-turn handle that timed out is still terminated', async () => {
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = createMockChildProcess();
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+
+    const result = await collect(handle, 20);
+    assert.equal(result.error.category, 'timeout');
+    await shutdown(handle, 20);
+    assert.deepEqual(calls[0], [-12345, 'SIGTERM']);
+    assert.equal(child.killed, true);
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+test('spawn: releaseOnTurnCompleted is honored only for ephemeral runs', () => {
+  const opts = {
+    spawn: () => createMockChildProcess(),
+    versionProbe: () => ({ version: '0.143.0', raw: 'codex-cli 0.143.0\n' }),
+    log: () => {},
+  };
+  const release = { ...opts, releaseOnTurnCompleted: true };
+  assert.equal(spawnCodex('hi', opts)._releaseOnTurn, false);
+  assert.equal(spawnCodex('hi', release)._releaseOnTurn, true);
+  assert.equal(spawnCodex('hi', { ...release, persist: true })._releaseOnTurn, false);
+  assert.equal(spawnResume('thread-1', 'hi', release)._releaseOnTurn, false);
+});
+
 // ─── shutdown ─────────────────────────────────────────────────────────────────
 
 test('shutdown: sends SIGTERM and marks process as killed', () => {

@@ -24,6 +24,9 @@ const CODEX_EXEC_VERSION_NOTE =
  * @property {Object|null} _usage - Token usage from turn.completed
  * @property {number|null} _exitCode - Process exit code
  * @property {string[]} _stderrChunks - Accumulated stderr chunks
+ * @property {boolean} _releaseOnTurn - collect() settles at turn.completed and
+ *   shutdown() releases the process instead of signalling it
+ * @property {boolean} _settledOnTurn - collect() settled at turn.completed
  */
 
 /**
@@ -215,7 +218,7 @@ export function _buildResumeArgs(threadId, opts = {}) {
   ];
 }
 
-function spawnCodexProcess(args, prompt, opts = {}) {
+function spawnCodexProcess(args, prompt, opts = {}, { releaseOnTurn = false } = {}) {
   const codexPath = resolveBinary('codex');
   const workerMeta = probeCodexWorkerMeta(codexPath, opts);
 
@@ -253,6 +256,8 @@ function spawnCodexProcess(args, prompt, opts = {}) {
     _exitCode: null,
     _stderrChunks: [],
     _hadItemFailure: false,
+    _releaseOnTurn: releaseOnTurn,
+    _settledOnTurn: false,
     workerMeta,
   };
 
@@ -374,11 +379,17 @@ function emitVersionLog(opts, level, message) {
  * @param {boolean} [opts.skipGitRepoCheck] - Permit a metadata-free tree snapshot
  * @param {boolean} [opts.persist] - When true, omit --ephemeral so Codex writes
  *   a resumable session
+ * @param {boolean} [opts.releaseOnTurnCompleted] - Settle collect() at
+ *   turn.completed and let shutdown() release Codex to finish its own teardown
+ *   (plugins, MCP servers, SessionEnd hooks) in the background. Ignored with
+ *   `persist`, whose session must be fully written before a resume.
  * @param {Object} [opts.env] - Additional environment variables merged over process.env
  * @returns {CodexHandle}
  */
 export function spawn(prompt, opts = {}) {
-  return spawnCodexProcess(_buildSpawnArgs(opts), prompt, opts);
+  return spawnCodexProcess(_buildSpawnArgs(opts), prompt, opts, {
+    releaseOnTurn: opts.releaseOnTurnCompleted === true && opts.persist !== true,
+  });
 }
 
 /**
@@ -402,7 +413,8 @@ export function spawn(prompt, opts = {}) {
  * @returns {CodexHandle}
  */
 export function spawnResume(threadId, prompt, opts = {}) {
-  return spawnCodexProcess(_buildResumeArgs(threadId, opts), prompt, opts);
+  // A resumed session is always persisted, so it never releases early.
+  return spawnCodexProcess(_buildResumeArgs(threadId, opts), prompt, opts, { releaseOnTurn: false });
 }
 
 /**
@@ -458,7 +470,9 @@ export function monitor(handle) {
 /**
  * Collect the final result from a Codex handle.
  * If the process is still running, waits for it to exit (up to timeoutMs).
- * On timeout the handle is marked failed and the promise resolves immediately.
+ * A handle spawned with `releaseOnTurnCompleted` settles as soon as
+ * turn.completed is parsed instead. On timeout the handle is marked failed and
+ * the promise resolves immediately.
  *
  * @param {CodexHandle} handle
  * @param {number} [timeoutMs=30000]
@@ -547,6 +561,7 @@ export function collect(handle, timeoutMs = 30000) {
       if (timeout) { clearTimeout(timeout); timeout = null; }
       handle.process.removeListener('exit', onExit);
       handle.process.removeListener('close', onClose);
+      handle.stdout?.removeListener?.('data', onData);
     };
 
     // Issue #74: when the direct codex child exits, a tool-call grandchild may
@@ -598,6 +613,21 @@ export function collect(handle, timeoutMs = 30000) {
       resolve(monitor(handle));
     }
 
+    // After turn.completed, `codex exec` spends seconds tearing down plugins,
+    // MCP servers, and SessionEnd hooks before it exits. A release-on-turn
+    // caller has nothing left to wait for, so settle here; shutdown() then
+    // releases the process rather than signalling it, so that teardown (and
+    // any cleanup hook) still runs to completion. This listener is attached
+    // after spawn()'s parser, so the chunk carrying turn.completed has already
+    // been parsed (the issue #64 guarantee).
+    function onData() {
+      if (settled || handle.status !== 'completed') return;
+      settled = true;
+      handle._settledOnTurn = true;
+      cleanup();
+      resolve(monitor(handle));
+    }
+
     timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
@@ -614,7 +644,22 @@ export function collect(handle, timeoutMs = 30000) {
 
     handle.process.once('exit', onExit);
     handle.process.once('close', onClose);
+    if (handle._releaseOnTurn === true) handle.stdout?.on?.('data', onData);
   });
+}
+
+/**
+ * Let a turn-settled Codex process finish its own teardown unattended: drop
+ * our pipe ends and unref the child so the caller can exit without waiting.
+ * Codex keeps running in its own process group, runs its SessionEnd hooks,
+ * and exits on its own.
+ *
+ * @param {CodexHandle} handle
+ */
+function release(handle) {
+  try { handle.process.stdout?.destroy?.(); } catch { /* best-effort */ }
+  try { handle.process.stderr?.destroy?.(); } catch { /* best-effort */ }
+  try { handle.process.unref?.(); } catch { /* best-effort */ }
 }
 
 /** Grace period before escalating from SIGTERM to SIGKILL (ms) */
@@ -628,7 +673,8 @@ const SHUTDOWN_GRACE_MS = 5000;
  * NOTE: this body only runs while the DIRECT child is still alive
  * (handle._exitCode === null) — e.g. a timeout or cancel. The happy-path
  * "lingering grandchild" case (issue #74) is handled by collect()'s 'exit'
- * reap, because shutdown() early-returns once _exitCode is set.
+ * reap, because shutdown() early-returns once _exitCode is set. A handle that
+ * collect() settled at turn.completed is released instead of signalled.
  *
  * @param {CodexHandle} handle
  * @param {number} [graceMs=5000] - Grace period before SIGKILL
@@ -639,6 +685,12 @@ export function shutdown(handle, graceMs = SHUTDOWN_GRACE_MS) {
 
   // If the process already exited, no need to send signals (avoids PID reuse risk)
   if (handle._exitCode !== null) return Promise.resolve();
+
+  // The turn finished; signalling now would cut Codex's SessionEnd hooks short.
+  if (handle._settledOnTurn === true) {
+    release(handle);
+    return Promise.resolve();
+  }
 
   // Send SIGTERM to the whole process group first (negative PID) so orphaned
   // grandchildren that inherited codex's stdout pipe are reaped alongside the
