@@ -4,6 +4,10 @@ import { buildCodexExecArgs } from './codex-approval.mjs';
 import { codexVersionMeta } from './cli-version.mjs';
 import { requireCodexCapability } from './codex-version-gate.mjs';
 import { classifyCodexDiagnostic } from './codex-error-classifier.mjs';
+import { readProcStartId } from './proc-identity.mjs';
+import { fileURLToPath } from 'node:url';
+
+const RELEASE_REAPER_PATH = fileURLToPath(new URL('./codex-release-reaper.mjs', import.meta.url));
 
 /** Valid resolved permission levels (mirrors codex-approval VALID_LEVELS). */
 const VALID_SPAWN_LEVELS = new Set(['suggest', 'auto-edit', 'full-auto']);
@@ -648,15 +652,38 @@ export function collect(handle, timeoutMs = 30000) {
   });
 }
 
+// Test seam for the detached reaper launch; tests override via
+// _setReleaseReaperSpawn so no real process is started.
+let _spawnReleaseReaper = (pid) => {
+  const reaper = nodeSpawn(
+    process.execPath,
+    [RELEASE_REAPER_PATH, String(pid), readProcStartId(pid) || ''],
+    { detached: true, stdio: 'ignore' },
+  );
+  reaper.unref();
+};
+
+/** @internal Override the release-reaper launcher (tests only). Returns prev. */
+export function _setReleaseReaperSpawn(fn) {
+  const prev = _spawnReleaseReaper;
+  if (typeof fn === 'function') _spawnReleaseReaper = fn;
+  return prev;
+}
+
 /**
  * Let a turn-settled Codex process finish its own teardown unattended: drop
  * our pipe ends and unref the child so the caller can exit without waiting.
  * Codex keeps running in its own process group, runs its SessionEnd hooks,
- * and exits on its own.
+ * and exits on its own. The caller can no longer perform the issue #74 group
+ * reap, so a detached reaper (codex-release-reaper.mjs) does it once the
+ * leader exits, and terminates a teardown that outlives its deadline.
  *
  * @param {CodexHandle} handle
  */
 function release(handle) {
+  if (typeof handle.pid === 'number') {
+    try { _spawnReleaseReaper(handle.pid); } catch { /* best-effort */ }
+  }
   try { handle.process.stdout?.destroy?.(); } catch { /* best-effort */ }
   try { handle.process.stderr?.destroy?.(); } catch { /* best-effort */ }
   try { handle.process.unref?.(); } catch { /* best-effort */ }

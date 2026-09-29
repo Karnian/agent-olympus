@@ -23,6 +23,7 @@ import {
   _buildSpawnArgs,
   _buildResumeArgs,
   _setGroupKill,
+  _setReleaseReaperSpawn,
 } from '../lib/codex-exec.mjs';
 
 // Neutralize the real process-group signal for the whole file so collect()'s
@@ -30,6 +31,8 @@ import {
 // against the mock pids (which are arbitrary integers). Individual tests that
 // need to assert the reap install their own spy via _setGroupKill and restore.
 _setGroupKill(() => {});
+// Likewise never launch the real detached release reaper from unit tests.
+_setReleaseReaperSpawn(() => {});
 
 // ─── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -1271,7 +1274,14 @@ test('shutdown: releases a turn-settled handle instead of signalling it', async 
     child.stdout.push(turnCompletedLine());
     await p;
 
-    await shutdown(handle, 20);
+    const reaped = [];
+    const prevReaper = _setReleaseReaperSpawn((pid) => { reaped.push(pid); });
+    try {
+      await shutdown(handle, 20);
+    } finally {
+      _setReleaseReaperSpawn(prevReaper);
+    }
+    assert.deepEqual(reaped, [7272], 'a detached reaper takes over the issue #74 group reap');
     assert.deepEqual(calls, [], 'no group signal: Codex must be free to run its SessionEnd hooks');
     assert.equal(child.killed, false, 'no direct signal either');
     assert.equal(unrefs, 1, 'the child no longer holds the caller event loop');

@@ -126,6 +126,7 @@ Invoked by skills, CI, or maintainers — not registered as hooks.
 | `codex-exec.mjs` | Codex exec adapter (single-turn JSONL) |
 | `codex-appserver.mjs` | Codex app-server adapter (multi-turn JSON-RPC 2.0) |
 | `codex-error-classifier.mjs` | Ordered Codex failure classifier |
+| `codex-release-reaper.mjs` | Detached group reaper for a Codex process released at turn.completed |
 | `codex-version-gate.mjs` | Authoritative Codex minimum-version gates for adapter flags |
 | `gemini-exec.mjs` | Gemini exec adapter (single-turn JSON spawn) |
 | `gemini-acp.mjs` | Gemini ACP adapter (multi-turn JSON-RPC 2.0) |

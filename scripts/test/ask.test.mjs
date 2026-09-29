@@ -249,6 +249,21 @@ test('runOnce: success path — spawn/collect/shutdown all called once', withTem
   assert.match(readFileSync(result.artifactPath, 'utf-8'), /hello world/);
 }));
 
+test('runOnce: codex-exec returns at turn.completed except under the read-only fallback', withTempCwd(async (cwd) => {
+  const normal = makeFakeAdapter({ collectResult: { status: 'completed', output: 'ok' } });
+  await runOnce('codex-exec', 'q', { adapter: normal.adapter, opts: { cwd } });
+  assert.equal(normal.calls.spawnOpts[0].releaseOnTurnCompleted, true);
+
+  // The fallback's post-run tree check must also see writes made during teardown.
+  const fallback = makeFakeAdapter({ collectResult: { status: 'completed', output: 'ok' } });
+  await runOnce('codex-exec', 'q', { adapter: fallback.adapter, opts: { cwd, _readonlyFallback: true } });
+  assert.equal(fallback.calls.spawnOpts[0].releaseOnTurnCompleted, undefined);
+
+  const gemini = makeFakeAdapter({ collectResult: { status: 'completed', output: 'ok' } });
+  await runOnce('gemini-exec', 'q', { adapter: gemini.adapter, opts: { cwd } });
+  assert.equal(gemini.calls.spawnOpts[0].releaseOnTurnCompleted, undefined);
+}));
+
 test('runOnce: adapter error path — shutdown still called (AC-7)', withTempCwd(async (cwd) => {
   const { adapter, calls } = makeFakeAdapter({
     collectResult: {
