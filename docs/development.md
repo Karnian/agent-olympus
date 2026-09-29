@@ -45,6 +45,14 @@
    ```
 2. Register in `hooks/hooks.json` under the appropriate event
 3. Use `run.cjs` as the command wrapper for version-safe resolution
+4. Add a row to [internals/file-map.md](internals/file-map.md)
+
+## How to Add a Script or Library Module
+
+Add a row for every new `scripts/*.mjs` or `scripts/lib/*.mjs` file to
+[internals/file-map.md](internals/file-map.md). `scripts/test/file-map-docs.test.mjs`
+fails on missing or stale rows. Do not grow the `AGENTS.md` directory tree; it
+lists top-level directories only.
 
 ### schemaVersion Convention (v1.0.2+)
 
