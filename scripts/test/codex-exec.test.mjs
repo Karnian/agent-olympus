@@ -1368,7 +1368,7 @@ test('spawn: releaseOnTurnCompleted is honored only for ephemeral runs', () => {
   };
   const release = { ...opts, releaseOnTurnCompleted: true };
   assert.equal(spawnCodex('hi', opts)._releaseOnTurn, false);
-  assert.equal(spawnCodex('hi', release)._releaseOnTurn, true);
+  assert.equal(spawnCodex('hi', release)._releaseOnTurn, process.platform !== 'win32');
   assert.equal(spawnCodex('hi', { ...release, persist: true })._releaseOnTurn, false);
   assert.equal(spawnResume('thread-1', 'hi', release)._releaseOnTurn, false);
 });
