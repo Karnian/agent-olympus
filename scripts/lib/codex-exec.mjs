@@ -386,13 +386,17 @@ function emitVersionLog(opts, level, message) {
  * @param {boolean} [opts.releaseOnTurnCompleted] - Settle collect() at
  *   turn.completed and let shutdown() release Codex to finish its own teardown
  *   (plugins, MCP servers, SessionEnd hooks) in the background. Ignored with
- *   `persist`, whose session must be fully written before a resume.
+ *   `persist`, whose session must be fully written before a resume, and on
+ *   Windows.
  * @param {Object} [opts.env] - Additional environment variables merged over process.env
  * @returns {CodexHandle}
  */
 export function spawn(prompt, opts = {}) {
   return spawnCodexProcess(_buildSpawnArgs(opts), prompt, opts, {
-    releaseOnTurn: opts.releaseOnTurnCompleted === true && opts.persist !== true,
+    // The release reaper signals process groups, which Windows lacks.
+    releaseOnTurn: opts.releaseOnTurnCompleted === true
+      && opts.persist !== true
+      && process.platform !== 'win32',
   });
 }
 
@@ -552,6 +556,9 @@ export function collect(handle, timeoutMs = 30000) {
   return new Promise((resolve) => {
     if (handle.status !== 'running') {
       flushPartial(handle);
+      if (handle.status === 'completed' && handle._releaseOnTurn === true && handle._exitCode === null) {
+        handle._settledOnTurn = true;
+      }
       resolve(monitor(handle));
       return;
     }
@@ -623,9 +630,11 @@ export function collect(handle, timeoutMs = 30000) {
     // releases the process rather than signalling it, so that teardown (and
     // any cleanup hook) still runs to completion. This listener is attached
     // after spawn()'s parser, so the chunk carrying turn.completed has already
-    // been parsed (the issue #64 guarantee).
+    // been parsed (the issue #64 guarantee). If the process has already
+    // exited, close is imminent and onExit's reap still has to run, so leave
+    // this to the close path.
     function onData() {
-      if (settled || handle.status !== 'completed') return;
+      if (settled || handle.status !== 'completed' || handle._exitCode !== null) return;
       settled = true;
       handle._settledOnTurn = true;
       cleanup();
@@ -660,6 +669,8 @@ let _spawnReleaseReaper = (pid) => {
     [RELEASE_REAPER_PATH, String(pid), readProcStartId(pid) || ''],
     { detached: true, stdio: 'ignore' },
   );
+  // A launch failure is reported asynchronously; it must not crash the caller.
+  reaper.on('error', () => {});
   reaper.unref();
 };
 

@@ -1260,6 +1260,56 @@ test('collect: a release-on-turn handle does not settle on a failed item alone',
   assert.notEqual(handle._settledOnTurn, true);
 });
 
+test('collect: exit before turn.completed data leaves the handle on the close path (issue #74)', async () => {
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = createOpenStdoutChild(7575);
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+    child.on('exit', (code) => { handle._exitCode = code; });
+
+    const p = collect(handle, 1000);
+    child.emit('exit', 0);                 // direct child exits first
+    child.stdout.push(turnCompletedLine()); // buffered turn.completed arrives late
+    await tick();
+    await tick();
+
+    assert.notEqual(handle._settledOnTurn, true, 'an exited process is never released');
+    assert.deepEqual(calls, [[-7575, 'SIGTERM']], 'the exit reap still ran');
+    child.emit('close', 0);
+    const result = await p;
+    assert.equal(result.status, 'completed');
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+test('collect: an already-completed release-on-turn handle is released, not signalled', async () => {
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  const prevReaper = _setReleaseReaperSpawn(() => {});
+  try {
+    const child = createOpenStdoutChild(7676);
+    child.unref = () => {};
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+    child.stdout.push(turnCompletedLine());
+    await tick();
+    assert.equal(handle.status, 'completed', 'precondition: turn finished before collect()');
+
+    const result = await collect(handle, 1000);
+    assert.equal(result.status, 'completed');
+    assert.equal(handle._settledOnTurn, true);
+    await shutdown(handle, 20);
+    assert.deepEqual(calls, []);
+    assert.equal(child.killed, false);
+  } finally {
+    _setGroupKill(prev);
+    _setReleaseReaperSpawn(prevReaper);
+  }
+});
+
 test('shutdown: releases a turn-settled handle instead of signalling it', async () => {
   const calls = [];
   const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });

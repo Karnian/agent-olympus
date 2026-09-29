@@ -5,9 +5,11 @@
  * teardown (plugins, MCP servers, SessionEnd hooks). Nobody is left to run the
  * issue #74 process-group reap, so release() starts this script detached. It
  * waits for the Codex group leader to exit on its own, then SIGTERMs whatever
- * is left in its process group. A leader still alive at the deadline is
- * terminated (SIGTERM, then SIGKILL) so a hung teardown cannot linger forever.
- * A changed start identity means the PID was recycled, so nothing is signalled.
+ * is left in its process group and SIGKILLs any survivor after a grace period.
+ * A leader still alive at the deadline is terminated the same way so a hung
+ * teardown cannot linger forever, but only when its start identity is known:
+ * a changed or unknown identity means the PID may belong to another process.
+ * POSIX only; codex-exec never releases a handle on Windows.
  *
  * Usage: node codex-release-reaper.mjs <pid> [startId]
  */
@@ -28,12 +30,16 @@ function isAlive(pid) {
   }
 }
 
+function isGroupAlive(pid) {
+  return isAlive(-pid);
+}
+
 function signalGroup(pid, signal) {
   try { process.kill(-pid, signal); } catch { /* group already gone */ }
 }
 
 /**
- * @returns {Promise<'reaped'|'terminated'|'reused'>}
+ * @returns {Promise<'reaped'|'terminated'|'reused'|'unverified'>}
  */
 export async function reapReleasedGroup({
   pid,
@@ -42,31 +48,38 @@ export async function reapReleasedGroup({
   pollMs = POLL_MS,
   graceMs = KILL_GRACE_MS,
   alive = isAlive,
+  groupAlive = isGroupAlive,
   readStartId = readProcStartId,
   killGroup = signalGroup,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   now = Date.now,
 }) {
+  const identity = startId || readStartId(pid);
   const reused = () => {
-    if (!startId) return false;
+    if (!identity) return false;
     const current = readStartId(pid);
-    return current !== null && current !== startId;
+    return current !== null && current !== identity;
   };
 
   const deadline = now() + deadlineMs;
+  let outcome = 'reaped';
   while (alive(pid)) {
     if (reused()) return 'reused';
     if (now() >= deadline) {
-      killGroup(pid, 'SIGTERM');
-      await sleep(graceMs);
-      if (alive(pid) && !reused()) killGroup(pid, 'SIGKILL');
-      return 'terminated';
+      // Without a start identity a live PID may not be Codex any more.
+      if (!identity) return 'unverified';
+      outcome = 'terminated';
+      break;
     }
     await sleep(pollMs);
   }
 
+  // Once the leader has exited, the PGID cannot be reused while any member
+  // of the group is still alive, so group signals reach only its survivors.
   killGroup(pid, 'SIGTERM');
-  return 'reaped';
+  await sleep(graceMs);
+  if (groupAlive(pid) && !reused()) killGroup(pid, 'SIGKILL');
+  return outcome;
 }
 
 async function main() {
