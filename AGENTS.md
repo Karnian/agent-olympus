@@ -28,141 +28,22 @@ User Request
 
 ```
 agent-olympus/
-├── hooks/hooks.json              — Hook event registrations
-├── agents/                       — 19 agent personas (role definitions)
-│   ├── atlas.md                  — Self-driving sub-agent orchestrator (Opus)
-│   ├── athena.md                 — Self-driving team orchestrator (Opus)
-│   ├── metis.md                  — Pre-planning analyst (Opus)
-│   ├── prometheus.md             — Strategic planner (Opus)
-│   ├── momus.md                  — Plan validator / critic (Opus)
-│   ├── hermes.md                 — Product planning specialist, forward & reverse PRD (Opus)
-│   ├── executor.md               — Implementation worker (Sonnet)
-│   ├── designer.md               — UI/UX implementation specialist (Sonnet)
-│   ├── aphrodite.md              — UI/UX design reviewer, goddess of beauty (Sonnet)
-│   ├── test-engineer.md          — Test strategy & TDD (Sonnet)
-│   ├── debugger.md               — Root-cause analysis & fix (Sonnet)
-│   ├── architect.md              — Architecture review, read-only (Opus)
-│   ├── security-reviewer.md      — Security review, read-only (Sonnet)
-│   ├── code-reviewer.md          — Code quality review, read-only (Sonnet)
-│   ├── explore.md                — Fast codebase scanner (Haiku)
-│   ├── writer.md                 — Documentation writer (Haiku)
-│   ├── hephaestus.md             — Deep autonomous coder (Sonnet)
-│   ├── ask.md                    — Quick Codex/Gemini query agent (Sonnet)
-│   └── themis.md                 — Quality gate: tests/lint/AC verification (Sonnet)
-├── skills/                       — 37 user-facing skills (workflow recipes)
-│   ├── atlas/SKILL.md            — /atlas: autonomous sub-agent pipeline
-│   ├── athena/SKILL.md           — /athena: autonomous team pipeline
-│   ├── plan/SKILL.md             — /plan: forward/reverse product planning
-│   ├── ask/SKILL.md              — /ask: quick Codex/Gemini query (sync + async)
-│   ├── codex-goal/SKILL.md        — /codex-goal: bounded Codex delegation
-│   ├── codex-review/SKILL.md      — /codex-review: independent Codex diff gate
-│   ├── deep-interview/SKILL.md   — /deep-interview: Socratic clarification
-│   ├── deepinit/SKILL.md         — /deepinit: codebase AGENTS.md generation
-│   ├── research/SKILL.md         — /research: parallel web research
-│   ├── trace/SKILL.md            — /trace: competing-hypothesis root-cause analysis
-│   ├── brainstorm/SKILL.md       — /brainstorm: design-before-code diverge-converge
-│   ├── slop-cleaner/SKILL.md     — /slop-cleaner: AI bloat removal
-│   ├── git-master/SKILL.md       — /git-master: atomic commit discipline
-│   ├── cancel/SKILL.md           — /cancel: graceful session shutdown
-│   ├── finish-branch/SKILL.md    — /finish-branch: structured branch completion checklist
-│   ├── sessions/SKILL.md         — /sessions: browse/inspect/resume session history
-│   ├── deep-dive/SKILL.md        — /deep-dive: exhaustive single-topic investigation
-│   ├── consensus-plan/SKILL.md   — /consensus-plan: multi-agent planning consensus
-│   ├── external-context/SKILL.md — /external-context: inject external docs/specs into context
-│   ├── harness-init/SKILL.md     — /harness-init: initialize AGENTS.md + docs/ structure
-│   ├── systematic-debug/SKILL.md — /systematic-debug: root-cause-first debugging
-│   ├── tdd/SKILL.md              — /tdd: test-driven development (RED-GREEN-REFACTOR)
-│   ├── verify-coverage/SKILL.md  — /verify-coverage: detect test coverage gaps for changed files
-│   ├── design-critique/SKILL.md  — /design-critique: Nielsen + Gestalt + WCAG design critique
-│   ├── a11y-audit/SKILL.md       — /a11y-audit: WCAG 2.2 AA accessibility audit (code-review only)
-│   ├── design-system-audit/SKILL.md — /design-system-audit: token leaks, component API consistency
-│   ├── ux-copy-review/SKILL.md   — /ux-copy-review: UX copy clarity, consistency, tone, inclusivity
-│   ├── ui-review/SKILL.md        — /ui-review: umbrella (chains all 4 design review skills)
-│   ├── ui-remediate/SKILL.md     — /ui-remediate: sequential remediation chain (audit→normalize→polish→re-audit)
-│   ├── arrange/SKILL.md          — /arrange: layout & spacing rhythm pass
-│   ├── normalize/SKILL.md        — /normalize: replace hardcoded values with design tokens
-│   ├── polish/SKILL.md           — /polish: final-pass micro-refinements
-│   ├── typeset/SKILL.md          — /typeset: typography-only pass (font, hierarchy, sizing)
-│   ├── taste/SKILL.md            — /taste: record/list/prune aesthetic preferences
-│   ├── teach-design/SKILL.md     — /teach-design: capture brand identity for auto-injection
-│   ├── resume-handoff/SKILL.md   — /resume-handoff: read browser handoff state for manual resume
-│   └── setup-gemini-auth/SKILL.md — /setup-gemini-auth: macOS Keychain wizard for Gemini API-key users
-├── scripts/                      — Hook scripts (Node.js ESM, zero dependencies)
-│   ├── run.cjs                   — Cross-platform hook runner with version fallback
-│   ├── intent-gate.mjs           — UserPromptSubmit: classify intent (EN/KO/JA/ZH)
-│   ├── model-router.mjs          — PreToolUse: inject model routing advice
-│   ├── concurrency-gate.mjs      — PreToolUse: enforce parallel task limits
-│   ├── concurrency-release.mjs   — PostToolUse: release task from concurrency pool
-│   ├── session-start.mjs         — SessionStart: inject wisdom + checkpoint context
-│   ├── runtime-permissions-capture.mjs — SessionStart + UserPromptSubmit: capture runtime permission_mode
-│   ├── test/                     — node:test unit tests (current: 3322 tests, 133 files)
-│   └── lib/
-│       ├── stdin.mjs             — Shared stdin reader with timeout
-│       ├── intent-patterns.mjs   — Intent classifier (13 categories + unknown fallback, multilingual)
-│       ├── model-router.mjs      — Routing logic with JSONC config merge
-│       ├── tmux-session.mjs      — Tmux session lifecycle + sanitizeForShellArg()
-│       ├── inbox-outbox.mjs      — File-based message queue (legacy, used by tmux fallback)
-│       ├── worker-spawn.mjs      — Team lifecycle, supervisors, and provider failover
-│       ├── adapter-worker-supervisor.mjs — Detached adapter owner and disk reporter
-│       ├── supervisor-state.mjs  — Run-scoped snapshots and heartbeat
-│       ├── supervisor-opts.mjs   — Pure manifest→adapter option builders
-│       ├── proc-identity.mjs     — PID start-time identity and reuse detection
-│       ├── checkpoint.mjs        — Session checkpoint save/restore (24h expiry)
-│       ├── phase-runner.mjs      — Durable phase ledger and event-backed transitions
-│       ├── athena-recovery.mjs   — Generation-bound Athena resume/adoption
-│       ├── orphan-run-recovery.mjs — Fail-closed orphan terminalization
-│       ├── wisdom.mjs            — Structured learning store (JSONL, intent-aware query)
-│       ├── worker-status.mjs     — Real-time worker status dashboard (inline markdown)
-│       ├── worktree.mjs          — Git worktree isolation for Athena parallel workers
-│       ├── fs-atomic.mjs         — Atomic write helpers (tmp+rename pattern)
-│       ├── hardened-fs.mjs       — Shared no-follow artifact I/O and append validation
-│       ├── provider-detect.mjs   — Shared detectProvider() for concurrency hooks
-│       ├── config-validator.mjs  — Schema validation for model-routing.jsonc
-│       ├── autonomy.mjs          — Ship policy config loader/validator (.ao/autonomy.json)
-│       ├── {cost-estimate,changelog,pr-create,ci-watch}.mjs — Planning, release, and CI helpers
-│       ├── {notify,input-guard,preflight,stuck-recovery}.mjs — Runtime safeguards
-│       ├── run-artifacts.mjs     — Hardened run events, summaries, and verification
-│       ├── run-failure.mjs       — Terminal failure evidence and policy
-│       ├── run-finalization-lock.mjs — Generation-fenced terminalization lock
-│       ├── recovery-claim.mjs    — Crash-reclaimable stale-owner election
-│       ├── eval-failure-candidates.mjs — Sanitized failed-run review queue
-│       ├── session-registry.mjs  — Cross-session metadata tracking and crash recovery
-│       ├── codex-approval.mjs    — Claude permission detection → Codex sandbox-axis mirroring + host-sandbox intersection
-│       ├── gemini-approval.mjs   — Claude permission detection → Gemini approval mode mirroring
-│       ├── gemini-binary.mjs     — Gemini binary resolution (gemini → agy fallback)
-│       ├── gemini-exec.mjs       — Gemini exec adapter (single-turn JSON spawn)
-│       ├── gemini-acp.mjs        — Gemini ACP adapter (multi-turn JSON-RPC 2.0)
-│       ├── claude-cli.mjs        — Claude CLI adapter (headless stream-json)
-│       ├── codex-exec.mjs        — Codex exec adapter (single-turn JSONL)
-│       ├── codex-error-classifier.mjs — Ordered Codex failure classifier
-│       ├── codex-appserver.mjs   — Codex app-server adapter (multi-turn JSON-RPC 2.0)
-│       ├── resolve-binary.mjs    — Binary resolution with caching + buildEnhancedPath()
-│       ├── cli-version.mjs       — Fail-open CLI version probe + advisory minimum-version gate
-│       ├── host-sandbox-detect.mjs — Passive host sandbox detection (LSM, container, seccomp)
-│       ├── permission-detect.mjs — Unified permission detection (settings + runtime layers, shared by all adapters)
-│       ├── runtime-permissions.mjs — Runtime permission_mode capture/load helpers
-│       ├── artifact-pipe.mjs     — Cascade artifact archival pipe for orchestrator stages
-│       ├── browser-handoff.mjs   — Browser pause state persistence for /resume-handoff
-│       ├── design-identity.mjs   — Brand identity loader/writer (.ao/memory/)
-│       ├── memory.mjs            — Durable memory namespace manager (.ao/memory/)
-│       ├── taste-memory.mjs      — Aesthetic preference accumulation (.ao/memory/taste.jsonl)
-│       ├── ask-jobs.mjs          — Job lifecycle for async /ask path
-│       ├── micro-skill-scope.mjs — Micro-skill scope detection for design passes
-│       ├── review-router.mjs     — Review routing logic for design review chain
-│       ├── subagent-context.mjs  — Subagent context builder for hook injection
-│       ├── ui-reference.mjs      — UI reference material loader for design skills
-│       ├── ui-remediate.mjs      — UI remediation chain orchestrator
-│       ├── ui-smell-scan.mjs     — UI smell detection heuristics
-│       ├── ao-keychain-write.mjs — macOS Keychain item writer with partition-list grant
-│       ├── architect-scope.mjs   — Architect agent scope/blast-radius calculator
-│       ├── gemini-credential.mjs — Gemini API key auto-resolver (env/Keychain/libsecret)
-│       ├── light-mode.mjs        — Atlas/Athena lightweight execution path
-│       ├── model-usage.mjs       — Per-subagent model usage logger for Opus-skew analysis
-│       └── stage-escalation.mjs  — Escalation-first model routing for orchestrator stages
-└── config/
-    ├── model-routing.jsonc       — Intent→model routing configuration
-    └── review-routing.jsonc      — Review reviewer-set routing configuration
+├── .claude-plugin/     — plugin.json + marketplace.json (version-synced)
+├── hooks/hooks.json    — Hook event registrations (see Hooks below)
+├── agents/             — 19 agent personas (see Agent Roles below)
+├── skills/             — 37 user-facing skills, <name>/SKILL.md (see Skills below)
+├── scripts/            — Hook entry points + CLI helpers (Node.js ESM, zero deps)
+│   ├── lib/            — Shared modules: pipeline, adapters, permissions, state
+│   └── test/           — node:test suites (current: 3326 tests, 134 files)
+├── config/             — model-routing.jsonc, review-routing.jsonc
+├── schemas/            — Codex goal/review structured-output schemas
+├── evals/              — Eval harness (fixture vs live, deterministic graders)
+├── .codex/agents/      — Committed Codex sub-agent definitions
+└── docs/               — development, testing, internals/, plans/
 ```
+
+Every `scripts/*.mjs` and `scripts/lib/*.mjs` file is catalogued in
+[docs/internals/file-map.md](docs/internals/file-map.md); a test fails when one is missing.
 
 ## Conventions
 
@@ -188,7 +69,7 @@ Follow [docs/development.md](docs/development.md) when adding agents, skills, ho
 
 ## Testing
 
-Run the current 3322-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the current 3326-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
