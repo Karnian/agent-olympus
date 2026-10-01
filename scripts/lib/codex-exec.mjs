@@ -556,13 +556,17 @@ function reapDescendants(handle) {
 
 export function collect(handle, timeoutMs = 30000) {
   return new Promise((resolve) => {
-    if (handle.status !== 'running') {
+    const releasable = handle.status === 'completed'
+      && handle._releaseOnTurn === true
+      && handle._exitCode === null;
+    // A finished turn whose process identity cannot be read can never be
+    // released, so it waits for close below instead of being signalled early.
+    const awaitClose = releasable && !captureReleaseIdentity(handle);
+    if (handle.status !== 'running' && !awaitClose) {
       flushPartial(handle);
-      if (handle.status === 'completed' && handle._releaseOnTurn === true && handle._exitCode === null) {
-        // Without a start identity the reaper cannot be armed, so this handle
-        // stays on the signalling shutdown path instead of being released.
-        handle._settledOnTurn = captureReleaseIdentity(handle);
-        if (handle._settledOnTurn) armTurnExitReap(handle);
+      if (releasable) {
+        handle._settledOnTurn = true;
+        armTurnExitReap(handle);
       }
       resolve(monitor(handle));
       return;

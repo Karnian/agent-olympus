@@ -1338,6 +1338,33 @@ test('collect: a release-on-turn handle without a readable start identity waits 
   }
 });
 
+test('collect: a turn finished before collect() with no readable identity still waits for close', async () => {
+  const prev = _setStartIdReader(() => null);
+  try {
+    const child = createOpenStdoutChild(8181);
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+    child.stdout.push(turnCompletedLine());
+    await tick();
+    assert.equal(handle.status, 'completed', 'precondition: turn finished before collect()');
+
+    const p = collect(handle, 1000);
+    let resolved = false;
+    p.then(() => { resolved = true; });
+    await tick();
+    await tick();
+    assert.equal(resolved, false, 'must not return early, or shutdown() would signal the teardown');
+    assert.notEqual(handle._settledOnTurn, true);
+
+    child.emit('exit', 0);
+    child.emit('close', 0);
+    const result = await p;
+    assert.equal(result.status, 'completed');
+  } finally {
+    _setStartIdReader(prev);
+  }
+});
+
 test('shutdown: releases a turn-settled handle instead of signalling it', async () => {
   const calls = [];
   const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
