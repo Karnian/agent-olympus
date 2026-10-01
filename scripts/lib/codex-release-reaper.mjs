@@ -7,8 +7,9 @@
  * waits for the Codex group leader to exit on its own, then SIGTERMs whatever
  * is left in its process group and SIGKILLs any survivor after a grace period.
  * A leader still alive at the deadline is terminated the same way so a hung
- * teardown cannot linger forever, but only when its start identity is known:
- * a changed or unknown identity means the PID may belong to another process.
+ * teardown cannot linger forever, but only when its current start identity
+ * matches the one the launching parent captured: a changed, unreadable, or
+ * missing identity means the PID may belong to another process.
  * POSIX only; codex-exec never releases a handle on Windows.
  *
  * Usage: node codex-release-reaper.mjs <pid> [startId]
@@ -54,31 +55,34 @@ export async function reapReleasedGroup({
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   now = Date.now,
 }) {
-  const identity = startId || readStartId(pid);
-  const reused = () => {
-    if (!identity) return false;
-    const current = readStartId(pid);
-    return current !== null && current !== identity;
-  };
+  // Only the launching parent saw the original Codex process; an identity
+  // read here could already belong to a process that reused the PID.
+  const identity = startId || null;
+
+  // A live PID is Codex only if its current identity matches the original.
+  // Once no process holds the PID, a group signal reaches only survivors of
+  // the Codex group: its PGID cannot be reused while any member is alive.
+  const canSignalGroup = () => (alive(pid)
+    ? identity !== null && readStartId(pid) === identity
+    : readStartId(pid) === null);
 
   const deadline = now() + deadlineMs;
   let outcome = 'reaped';
   while (alive(pid)) {
-    if (reused()) return 'reused';
+    const current = identity ? readStartId(pid) : null;
+    if (current !== null && current !== identity) return 'reused';
     if (now() >= deadline) {
-      // Without a start identity a live PID may not be Codex any more.
-      if (!identity) return 'unverified';
+      if (!canSignalGroup()) return 'unverified';
       outcome = 'terminated';
       break;
     }
     await sleep(pollMs);
   }
 
-  // Once the leader has exited, the PGID cannot be reused while any member
-  // of the group is still alive, so group signals reach only its survivors.
+  if (!canSignalGroup()) return 'reused';
   killGroup(pid, 'SIGTERM');
   await sleep(graceMs);
-  if (groupAlive(pid) && !reused()) killGroup(pid, 'SIGKILL');
+  if (groupAlive(pid) && canSignalGroup()) killGroup(pid, 'SIGKILL');
   return outcome;
 }
 

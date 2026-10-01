@@ -7,89 +7,95 @@ import { reapReleasedGroup } from '../lib/codex-release-reaper.mjs';
 
 const REAPER = fileURLToPath(new URL('../lib/codex-release-reaper.mjs', import.meta.url));
 
-function fakeClock() {
+/**
+ * Drive reapReleasedGroup() against a simulated leader. While the leader is
+ * alive its PID reports `liveIdentity`; once it is gone the PID reports null.
+ */
+function scenario({
+  startId = 'a',
+  liveIdentity = 'a',
+  leaderExitsAt = Infinity,
+  killEndsLeader = false,
+  groupSurvives = false,
+  deadlineMs = 1000,
+} = {}) {
   let t = 0;
-  return { now: () => t, sleep: async (ms) => { t += ms; } };
-}
-
-function run(overrides) {
+  let killed = false;
   const signals = [];
-  const clock = fakeClock();
-  const promise = reapReleasedGroup({
+  const leaderAlive = () => !killed && t < leaderExitsAt;
+  return reapReleasedGroup({
     pid: 4100,
-    startId: 'a',
-    readStartId: () => 'a',
-    groupAlive: () => false,
-    killGroup: (pid, signal) => signals.push([pid, signal]),
-    ...clock,
-    ...overrides,
-  });
-  return promise.then((outcome) => ({ outcome, signals }));
+    startId,
+    deadlineMs,
+    pollMs: 50,
+    graceMs: 100,
+    now: () => t,
+    sleep: async (ms) => { t += ms; },
+    alive: leaderAlive,
+    readStartId: () => (leaderAlive() ? liveIdentity : null),
+    groupAlive: () => groupSurvives,
+    killGroup: (pid, signal) => {
+      signals.push(signal);
+      if (killEndsLeader) killed = true;
+    },
+  }).then((outcome) => ({ outcome, signals }));
 }
 
 test('reaper: SIGTERMs the group once the leader exits on its own', async () => {
-  let polls = 0;
-  const { outcome, signals } = await run({ alive: () => ++polls < 3 });
+  const { outcome, signals } = await scenario({ leaderExitsAt: 200 });
   assert.equal(outcome, 'reaped');
-  assert.deepEqual(signals, [[4100, 'SIGTERM']], 'no SIGKILL once the group is empty');
+  assert.deepEqual(signals, ['SIGTERM'], 'no SIGKILL once the group is empty');
 });
 
 test('reaper: SIGKILLs a descendant that survives the group SIGTERM', async () => {
-  const { outcome, signals } = await run({ alive: () => false, groupAlive: () => true });
+  const { outcome, signals } = await scenario({ leaderExitsAt: 200, groupSurvives: true });
   assert.equal(outcome, 'reaped');
-  assert.deepEqual(signals, [[4100, 'SIGTERM'], [4100, 'SIGKILL']]);
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
 });
 
-test('reaper: terminates a teardown that outlives the deadline', async () => {
-  const { outcome, signals } = await run({
-    deadlineMs: 1000,
-    alive: () => true,
-    groupAlive: () => true,
-  });
+test('reaper: reaps survivors after a natural exit even without a start identity', async () => {
+  const { outcome, signals } = await scenario({ startId: null, leaderExitsAt: 200 });
+  assert.equal(outcome, 'reaped');
+  assert.deepEqual(signals, ['SIGTERM']);
+});
+
+test('reaper: terminates a verified teardown that outlives the deadline', async () => {
+  const { outcome, signals } = await scenario({ groupSurvives: true });
   assert.equal(outcome, 'terminated');
-  assert.deepEqual(signals, [[4100, 'SIGTERM'], [4100, 'SIGKILL']]);
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
 });
 
 test('reaper: escalates on the group even after the leader dies to SIGTERM', async () => {
-  let leaderAlive = true;
-  const signals = [];
-  const { outcome } = await run({
-    deadlineMs: 500,
-    alive: () => leaderAlive,
-    readStartId: () => (leaderAlive ? 'a' : null),
-    groupAlive: () => true, // a descendant ignores SIGTERM
-    killGroup: (pid, signal) => { signals.push([pid, signal]); leaderAlive = false; },
-  });
+  const { outcome, signals } = await scenario({ killEndsLeader: true, groupSurvives: true });
   assert.equal(outcome, 'terminated');
-  assert.deepEqual(signals, [[4100, 'SIGTERM'], [4100, 'SIGKILL']]);
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
 });
 
 test('reaper: never signals a recycled PID', async () => {
-  const { outcome, signals } = await run({ alive: () => true, readStartId: () => 'someone-else' });
+  const { outcome, signals } = await scenario({ liveIdentity: 'someone-else', groupSurvives: true });
   assert.equal(outcome, 'reused');
   assert.deepEqual(signals, []);
 });
 
-test('reaper: without a start identity it never terminates a live PID at the deadline', async () => {
-  const { outcome, signals } = await run({
+test('reaper: without a parent-captured identity it never adopts the live PID (review on 5678e87)', async () => {
+  // Codex exited and its PID now belongs to another process before the reaper
+  // could see it. The reaper must not treat that process as the original.
+  const { outcome, signals } = await scenario({
     startId: null,
-    deadlineMs: 500,
-    alive: () => true,
-    readStartId: () => null,
-    groupAlive: () => true,
+    liveIdentity: 'replacement-process',
+    groupSurvives: true,
   });
   assert.equal(outcome, 'unverified');
   assert.deepEqual(signals, []);
 });
 
-test('reaper: reads the start identity itself when launched without one', async () => {
-  const reads = [];
-  const { outcome, signals } = await run({
-    startId: null,
-    alive: () => true,
-    readStartId: () => { reads.push(1); return reads.length === 1 ? 'a' : 'someone-else'; },
+test('reaper: an unreadable current identity blocks deadline termination (review on 5678e87)', async () => {
+  const { outcome, signals } = await scenario({
+    startId: 'original-process',
+    liveIdentity: null,
+    groupSurvives: true,
   });
-  assert.equal(outcome, 'reused');
+  assert.equal(outcome, 'unverified');
   assert.deepEqual(signals, []);
 });
 

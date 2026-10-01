@@ -2,7 +2,7 @@
 
 ## [1.6.1] - 2026-10-01
 
-`/ask` latency patch. The zero-dependency Node suite is **3344/3344 green
+`/ask` latency patch. The zero-dependency Node suite is **3345/3345 green
 across 135 test files**.
 
 ### Changed
@@ -27,8 +27,9 @@ across 135 test files**.
   Codex process is released. It keeps the issue #74 guarantee by waiting for
   Codex to exit, SIGTERMing its remaining process group, and SIGKILLing
   survivors after a grace period. A teardown that outlives 30s is terminated
-  only when the Codex start identity is verified, so a recycled PID is never
-  signalled.
+  only when the live PID still matches the start identity captured by the
+  launching process; a changed, unreadable, or missing identity is never
+  signalled, so a recycled PID cannot be hit.
 
 ## [1.6.0] - 2026-08-03
 
