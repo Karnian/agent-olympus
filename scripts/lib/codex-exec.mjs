@@ -8,6 +8,8 @@ import { readProcStartId } from './proc-identity.mjs';
 import { fileURLToPath } from 'node:url';
 
 const RELEASE_REAPER_PATH = fileURLToPath(new URL('./codex-release-reaper.mjs', import.meta.url));
+const RELEASE_READY_LINE = 'ready\n';
+const RELEASE_HANDOFF_TIMEOUT_MS = 2000;
 
 /** Valid resolved permission levels (mirrors codex-approval VALID_LEVELS). */
 const VALID_SPAWN_LEVELS = new Set(['suggest', 'auto-edit', 'full-auto']);
@@ -560,6 +562,7 @@ export function collect(handle, timeoutMs = 30000) {
         // Without a start identity the reaper cannot be armed, so this handle
         // stays on the signalling shutdown path instead of being released.
         handle._settledOnTurn = captureReleaseIdentity(handle);
+        if (handle._settledOnTurn) armTurnExitReap(handle);
       }
       resolve(monitor(handle));
       return;
@@ -645,6 +648,7 @@ export function collect(handle, timeoutMs = 30000) {
       settled = true;
       handle._settledOnTurn = true;
       cleanup();
+      armTurnExitReap(handle);
       resolve(monitor(handle));
     }
 
@@ -671,16 +675,37 @@ export function collect(handle, timeoutMs = 30000) {
 // Test seams for the detached reaper launch and the start-identity read;
 // tests override them so no real process is started or inspected.
 let _readStartId = readProcStartId;
-let _spawnReleaseReaper = (pid, startId) => {
-  const reaper = nodeSpawn(
-    process.execPath,
-    [RELEASE_REAPER_PATH, String(pid), startId],
-    { detached: true, stdio: 'ignore' },
-  );
+let _spawnReleaseReaper = (pid, startId) => new Promise((resolve) => {
+  let reaper;
+  try {
+    reaper = nodeSpawn(
+      process.execPath,
+      [RELEASE_REAPER_PATH, String(pid), startId],
+      { detached: true, stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+  } catch {
+    resolve(false);
+    return;
+  }
+  let done = false;
+  let buffered = '';
+  const finish = (ready) => {
+    if (done) return;
+    done = true;
+    clearTimeout(timer);
+    try { reaper.stdout?.destroy?.(); } catch { /* best-effort */ }
+    try { reaper.unref(); } catch { /* best-effort */ }
+    resolve(ready);
+  };
+  const timer = setTimeout(() => finish(false), RELEASE_HANDOFF_TIMEOUT_MS);
   // A launch failure is reported asynchronously; it must not crash the caller.
-  reaper.on('error', () => {});
-  reaper.unref();
-};
+  reaper.on('error', () => finish(false));
+  reaper.on('exit', () => finish(false));
+  reaper.stdout?.on('data', (chunk) => {
+    buffered += chunk.toString();
+    if (buffered.includes(RELEASE_READY_LINE)) finish(true);
+  });
+});
 
 /** @internal Override the start-identity reader (tests only). Returns prev. */
 export function _setStartIdReader(fn) {
@@ -714,20 +739,66 @@ export function _setReleaseReaperSpawn(fn) {
 }
 
 /**
- * Let a turn-settled Codex process finish its own teardown unattended: drop
- * our pipe ends and unref the child so the caller can exit without waiting.
- * Codex keeps running in its own process group, runs its SessionEnd hooks,
- * and exits on its own. The caller can no longer perform the issue #74 group
- * reap, so a detached reaper (codex-release-reaper.mjs) does it once the
- * leader exits, and terminates a teardown that outlives its deadline.
+ * Keep the issue #74 exit reap armed for a turn-settled handle until a release
+ * reaper has taken ownership, so a Codex that exits early is still reaped.
  *
  * @param {CodexHandle} handle
  */
-function release(handle) {
-  try { _spawnReleaseReaper(handle.pid, handle._startId); } catch { /* best-effort */ }
-  try { handle.process.stdout?.destroy?.(); } catch { /* best-effort */ }
-  try { handle.process.stderr?.destroy?.(); } catch { /* best-effort */ }
-  try { handle.process.unref?.(); } catch { /* best-effort */ }
+function armTurnExitReap(handle) {
+  let timer = null;
+  const onExit = () => {
+    timer = setImmediate(() => {
+      timer = null;
+      const out = handle.process.stdout;
+      if (out && out.closed === false) reapDescendants(handle);
+    });
+  };
+  handle.process.once('exit', onExit);
+  handle._disarmExitReap = () => {
+    if (timer) { clearImmediate(timer); timer = null; }
+    handle.process.removeListener('exit', onExit);
+  };
+}
+
+function waitForExit(handle, timeoutMs) {
+  if (handle._exitCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(done, timeoutMs);
+    function done() {
+      clearTimeout(timer);
+      handle.process.removeListener('exit', done);
+      resolve();
+    }
+    handle.process.once('exit', done);
+  });
+}
+
+/**
+ * Hand a turn-settled Codex process over to a detached reaper
+ * (codex-release-reaper.mjs) and let it finish its own teardown, including
+ * SessionEnd hooks, after the caller exits. Ownership moves only once the
+ * reaper reports that it has itself seen the original Codex alive; until then
+ * this process keeps the issue #74 exit reap. Without that confirmation the
+ * handle is not released: Codex is left to exit on its own while armed, and
+ * signalled only if it outlives the grace period.
+ *
+ * @param {CodexHandle} handle
+ * @param {number} graceMs
+ * @returns {Promise<void>}
+ */
+async function releaseOrAwaitExit(handle, graceMs) {
+  let ready = false;
+  try { ready = await _spawnReleaseReaper(handle.pid, handle._startId); } catch { ready = false; }
+  if (handle._exitCode !== null) return; // the armed exit reap already ran
+  if (ready) {
+    handle._disarmExitReap?.();
+    try { handle.process.stdout?.destroy?.(); } catch { /* best-effort */ }
+    try { handle.process.stderr?.destroy?.(); } catch { /* best-effort */ }
+    try { handle.process.unref?.(); } catch { /* best-effort */ }
+    return;
+  }
+  await waitForExit(handle, graceMs);
+  if (handle._exitCode === null) await signalShutdown(handle, graceMs);
 }
 
 /** Grace period before escalating from SIGTERM to SIGKILL (ms) */
@@ -755,11 +826,12 @@ export function shutdown(handle, graceMs = SHUTDOWN_GRACE_MS) {
   if (handle._exitCode !== null) return Promise.resolve();
 
   // The turn finished; signalling now would cut Codex's SessionEnd hooks short.
-  if (handle._settledOnTurn === true) {
-    release(handle);
-    return Promise.resolve();
-  }
+  if (handle._settledOnTurn === true) return releaseOrAwaitExit(handle, graceMs);
 
+  return signalShutdown(handle, graceMs);
+}
+
+function signalShutdown(handle, graceMs) {
   // Send SIGTERM to the whole process group first (negative PID) so orphaned
   // grandchildren that inherited codex's stdout pipe are reaped alongside the
   // direct child — mirroring the SIGKILL-on-group escalation below — then the

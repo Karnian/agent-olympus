@@ -7,7 +7,8 @@
  * waits for the Codex group leader to exit on its own, then SIGTERMs whatever
  * is left in its process group and SIGKILLs any survivor after a grace period.
  * It needs the start identity the launching parent captured, and it reaps a
- * group only after it has itself seen that identity alive.
+ * group only after it has itself seen that identity alive, which it reports
+ * with a `ready` line; the parent keeps its own exit reap until then.
  * A leader still alive at the deadline is terminated the same way so a hung
  * teardown cannot linger forever, but only when its current start identity
  * matches the one the launching parent captured: a changed, unreadable, or
@@ -56,6 +57,7 @@ export async function reapReleasedGroup({
   killGroup = signalGroup,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
   now = Date.now,
+  onConfirmed = () => {},
 }) {
   // Only the launching parent saw the original Codex process; an identity
   // read here could already belong to a process that reused the PID. Without
@@ -79,7 +81,10 @@ export async function reapReleasedGroup({
   while (alive(pid)) {
     const current = readStartId(pid);
     if (current !== null && current !== identity) return 'reused';
-    if (current === identity) confirmed = true;
+    if (current === identity && !confirmed) {
+      confirmed = true;
+      onConfirmed();
+    }
     if (now() >= deadline) {
       if (current !== identity) return 'unverified';
       outcome = 'terminated';
@@ -99,7 +104,14 @@ export async function reapReleasedGroup({
 async function main() {
   const pid = Number(process.argv[2]);
   if (!Number.isInteger(pid) || pid <= 1) return;
-  await reapReleasedGroup({ pid, startId: process.argv[3] || null });
+  // The launching process waits for this line before it lets Codex go; a
+  // write after it stopped listening must not crash the reaper.
+  process.stdout.on('error', () => {});
+  await reapReleasedGroup({
+    pid,
+    startId: process.argv[3] || null,
+    onConfirmed: () => { try { process.stdout.write('ready\n'); } catch { /* listener gone */ } },
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

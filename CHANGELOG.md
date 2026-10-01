@@ -2,7 +2,7 @@
 
 ## [1.6.1] - 2026-10-01
 
-`/ask` latency patch. The zero-dependency Node suite is **3347/3347 green
+`/ask` latency patch. The zero-dependency Node suite is **3350/3350 green
 across 135 test files**.
 
 ### Changed
@@ -30,8 +30,11 @@ across 135 test files**.
   only when the live PID still matches the start identity captured by the
   launching process. The reaper signals nothing without that identity, and
   reaps a group only after it has itself seen the original Codex alive, so a
-  recycled PID or an unrelated group is never hit. A Codex process whose start
-  identity cannot be read is not released and keeps the wait-for-exit path.
+  recycled PID or an unrelated group is never hit. Ownership is handed over
+  only when the reaper reports that sighting; until then `/ask` keeps its own
+  exit reap, and without it Codex is not released but left to exit on its own
+  (signalled only past the grace period). A Codex process whose start identity
+  cannot be read is not released either.
 
 ## [1.6.0] - 2026-08-03
 

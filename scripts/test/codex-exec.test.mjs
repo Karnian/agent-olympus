@@ -34,7 +34,7 @@ import {
 _setGroupKill(() => {});
 // Likewise never launch the real detached release reaper from unit tests, and
 // give every mock pid a readable start identity unless a test says otherwise.
-_setReleaseReaperSpawn(() => {});
+_setReleaseReaperSpawn(() => Promise.resolve(true));
 _setStartIdReader(() => 'test-start-id');
 
 // ─── Mock helpers ──────────────────────────────────────────────────────────────
@@ -1291,7 +1291,7 @@ test('collect: exit before turn.completed data leaves the handle on the close pa
 test('collect: an already-completed release-on-turn handle is released, not signalled', async () => {
   const calls = [];
   const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
-  const prevReaper = _setReleaseReaperSpawn(() => {});
+  const prevReaper = _setReleaseReaperSpawn(() => Promise.resolve(true));
   try {
     const child = createOpenStdoutChild(7676);
     child.unref = () => {};
@@ -1353,7 +1353,10 @@ test('shutdown: releases a turn-settled handle instead of signalling it', async 
     await p;
 
     const reaped = [];
-    const prevReaper = _setReleaseReaperSpawn((pid, startId) => { reaped.push([pid, startId]); });
+    const prevReaper = _setReleaseReaperSpawn((pid, startId) => {
+      reaped.push([pid, startId]);
+      return Promise.resolve(true);
+    });
     try {
       await shutdown(handle, 20);
     } finally {
@@ -1367,6 +1370,70 @@ test('shutdown: releases a turn-settled handle instead of signalling it', async 
     assert.equal(child.stderr.destroyed, true);
   } finally {
     _setGroupKill(prev);
+  }
+});
+
+async function turnSettledHandle(pid) {
+  const child = createOpenStdoutChild(pid);
+  child.unref = () => { child.unrefed = true; };
+  const handle = createHandle(child);
+  handle._releaseOnTurn = true;
+  child.on('exit', (code) => { handle._exitCode = code; });
+  const p = collect(handle, 1000);
+  child.stdout.push(turnCompletedLine());
+  await p;
+  return { child, handle };
+}
+
+test('collect: a Codex that exits right after the turn is still reaped by this process (issue #74)', async () => {
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const { child, handle } = await turnSettledHandle(7878);
+    assert.equal(handle._settledOnTurn, true);
+    child.emit('exit', 0); // before any reaper could take over; a descendant holds stdout
+    await tick();
+    await tick();
+    assert.deepEqual(calls, [[-7878, 'SIGTERM']]);
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+test('shutdown: without a confirmed reaper the handle is not released, and Codex exits unsignalled', async () => {
+  const calls = [];
+  const prevKill = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  const prevReaper = _setReleaseReaperSpawn(() => Promise.resolve(false));
+  try {
+    const { child, handle } = await turnSettledHandle(7979);
+    const done = shutdown(handle, 200);
+    await tick();
+    child.emit('exit', 0); // Codex finishes its teardown on its own
+    await done;
+    assert.equal(child.unrefed, undefined, 'never released without a confirmed owner');
+    assert.equal(child.killed, false, 'Codex exited on its own, so it was never signalled');
+    await tick();
+    await tick();
+    assert.deepEqual(calls, [[-7979, 'SIGTERM']], 'the armed exit reap still cleaned up the group');
+  } finally {
+    _setGroupKill(prevKill);
+    _setReleaseReaperSpawn(prevReaper);
+  }
+});
+
+test('shutdown: without a confirmed reaper a Codex that outlives the grace period is terminated', async () => {
+  const calls = [];
+  const prevKill = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  const prevReaper = _setReleaseReaperSpawn(() => Promise.resolve(false));
+  try {
+    const { child, handle } = await turnSettledHandle(8080);
+    child.kill = (signal) => { child.killed = true; child.emit('exit', 0, signal); };
+    await shutdown(handle, 20);
+    assert.equal(child.killed, true);
+    assert.deepEqual(calls[0], [-8080, 'SIGTERM']);
+  } finally {
+    _setGroupKill(prevKill);
+    _setReleaseReaperSpawn(prevReaper);
   }
 });
 

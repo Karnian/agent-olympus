@@ -22,6 +22,7 @@ function scenario({
 } = {}) {
   let t = 0;
   let killed = false;
+  let confirmations = 0;
   const signals = [];
   const leaderAlive = () => !killed && t < leaderExitsAt;
   return reapReleasedGroup({
@@ -39,12 +40,14 @@ function scenario({
       signals.push(signal);
       if (killEndsLeader) killed = true;
     },
-  }).then((outcome) => ({ outcome, signals }));
+    onConfirmed: () => { confirmations += 1; },
+  }).then((outcome) => ({ outcome, signals, confirmations }));
 }
 
 test('reaper: SIGTERMs the group once the leader exits on its own', async () => {
-  const { outcome, signals } = await scenario({ leaderExitsAt: 200 });
+  const { outcome, signals, confirmations } = await scenario({ leaderExitsAt: 200 });
   assert.equal(outcome, 'reaped');
+  assert.equal(confirmations, 1, 'reports ownership once, on first sight of the original');
   assert.deepEqual(signals, ['SIGTERM'], 'no SIGKILL once the group is empty');
 });
 
@@ -69,9 +72,10 @@ test('reaper: signals nothing without a parent-captured identity, even after the
 });
 
 test('reaper: does not reap a group whose original leader it never saw alive', async () => {
-  const { outcome, signals } = await scenario({ leaderExitsAt: 0, groupSurvives: true });
+  const { outcome, signals, confirmations } = await scenario({ leaderExitsAt: 0, groupSurvives: true });
   assert.equal(outcome, 'unverified');
   assert.deepEqual(signals, []);
+  assert.equal(confirmations, 0, 'never reports ownership, so the parent keeps its own reap')
 });
 
 test('reaper: terminates a verified teardown that outlives the deadline', async () => {
@@ -132,11 +136,14 @@ test('reaper CLI: reaps a descendant that outlives its detached group leader', {
   try {
     // Run the reaper asynchronously so this process keeps reaping the exited
     // leader; a blocked event loop would leave it a zombie that looks alive.
+    let output = '';
     const status = await new Promise((resolve) => {
-      const reaper = spawn(process.execPath, [REAPER, String(leader.pid), startId], { stdio: 'ignore' });
+      const reaper = spawn(process.execPath, [REAPER, String(leader.pid), startId], { stdio: ['ignore', 'pipe', 'ignore'] });
+      reaper.stdout.on('data', (chunk) => { output += chunk; });
       reaper.on('exit', resolve);
     });
     assert.equal(status, 0);
+    assert.equal(output, 'ready\n', 'the reaper confirms ownership to its launcher');
     await new Promise((r) => setTimeout(r, 100));
     assert.equal(alive(descendantPid), false, 'the lingering descendant was reaped');
   } finally {
