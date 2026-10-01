@@ -11,6 +11,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Readable, Writable } from 'node:stream';
+import { spawn as nodeSpawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   parseJSONLEvents,
@@ -1439,9 +1444,7 @@ test('shutdown: without a confirmed reaper the handle is not released, and Codex
     await done;
     assert.equal(child.unrefed, undefined, 'never released without a confirmed owner');
     assert.equal(child.killed, false, 'Codex exited on its own, so it was never signalled');
-    await tick();
-    await tick();
-    assert.deepEqual(calls, [[-7979, 'SIGTERM']], 'the armed exit reap still cleaned up the group');
+    assert.deepEqual(calls, [[-7979, 'SIGTERM']], 'the exit reap already ran when shutdown() returned');
   } finally {
     _setGroupKill(prevKill);
     _setReleaseReaperSpawn(prevReaper);
@@ -1461,6 +1464,53 @@ test('shutdown: without a confirmed reaper a Codex that outlives the grace perio
   } finally {
     _setGroupKill(prevKill);
     _setReleaseReaperSpawn(prevReaper);
+  }
+});
+
+test('shutdown: a failed handoff finishes the exit reap before an immediate caller exit (subprocess)', { skip: process.platform === 'win32' }, async () => {
+  // PR review on cb885bd: the synchronous /ask calls process.exit() right
+  // after shutdown(). A fake Codex prints turn.completed, leaves a stdout-
+  // holding descendant, and exits 300ms later; the reaper handoff fails.
+  const dir = mkdtempSync(join(tmpdir(), 'codex-handoff-'));
+  const pidFile = join(dir, 'descendant.pid');
+  const adapter = fileURLToPath(new URL('../lib/codex-exec.mjs', import.meta.url));
+  const fakeCodex = `echo '{"type":"turn.completed","usage":{}}'; sleep 30 & echo $! > "$PIDFILE"; sleep 0.3`;
+  const caller = `
+    import { spawn as nodeSpawn } from 'node:child_process';
+    const cx = await import(${JSON.stringify(adapter)});
+    cx._setReleaseReaperSpawn(() => Promise.resolve(false));
+    cx._setStartIdReader(() => 'fake-start-id');
+    const fakeCodex = process.env.FAKE_CODEX;
+    const handle = cx.spawn('prompt', {
+      spawn: (bin, args, opts) => nodeSpawn('sh', ['-c', fakeCodex], opts),
+      versionProbe: () => ({ version: '0.143.0', raw: 'codex-cli 0.143.0' }),
+      releaseOnTurnCompleted: true,
+      log: () => {},
+    });
+    await cx.collect(handle, 5000);
+    await cx.shutdown(handle, 2000);
+    process.exit(0);
+  `;
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  let descendant = null;
+  let stderr = '';
+  try {
+    const status = await new Promise((resolve) => {
+      const child = nodeSpawn(process.execPath, ['--input-type=module', '-e', caller], {
+        env: { ...process.env, PIDFILE: pidFile, FAKE_CODEX: fakeCodex },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('exit', resolve);
+    });
+    assert.equal(status, 0, stderr);
+    descendant = Number(readFileSync(pidFile, 'utf-8').trim());
+    assert.ok(Number.isInteger(descendant));
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(alive(descendant), false, 'the stdout-holding descendant was reaped before the caller exited');
+  } finally {
+    if (descendant) { try { process.kill(descendant, 'SIGKILL'); } catch { /* already gone */ } }
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

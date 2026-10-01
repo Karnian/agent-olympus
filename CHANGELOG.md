@@ -2,7 +2,7 @@
 
 ## [1.6.1] - 2026-10-01
 
-`/ask` latency patch. The zero-dependency Node suite is **3351/3351 green
+`/ask` latency patch. The zero-dependency Node suite is **3352/3352 green
 across 135 test files**.
 
 ### Changed

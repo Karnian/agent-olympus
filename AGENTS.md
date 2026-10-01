@@ -34,7 +34,7 @@ agent-olympus/
 ├── skills/             — 37 user-facing skills, <name>/SKILL.md (see Skills below)
 ├── scripts/            — Hook entry points + CLI helpers (Node.js ESM, zero deps)
 │   ├── lib/            — Shared modules: pipeline, adapters, permissions, state
-│   └── test/           — node:test suites (current: 3351 tests, 135 files)
+│   └── test/           — node:test suites (current: 3352 tests, 135 files)
 ├── config/             — model-routing.jsonc, review-routing.jsonc
 ├── schemas/            — Codex goal/review structured-output schemas
 ├── evals/              — Eval harness (fixture vs live, deterministic graders)
@@ -69,7 +69,7 @@ Follow [docs/development.md](docs/development.md) when adding agents, skills, ho
 
 ## Testing
 
-Run the current 3351-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the current 3352-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
