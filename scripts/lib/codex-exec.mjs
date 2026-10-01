@@ -557,7 +557,9 @@ export function collect(handle, timeoutMs = 30000) {
     if (handle.status !== 'running') {
       flushPartial(handle);
       if (handle.status === 'completed' && handle._releaseOnTurn === true && handle._exitCode === null) {
-        handle._settledOnTurn = true;
+        // Without a start identity the reaper cannot be armed, so this handle
+        // stays on the signalling shutdown path instead of being released.
+        handle._settledOnTurn = captureReleaseIdentity(handle);
       }
       resolve(monitor(handle));
       return;
@@ -632,9 +634,14 @@ export function collect(handle, timeoutMs = 30000) {
     // after spawn()'s parser, so the chunk carrying turn.completed has already
     // been parsed (the issue #64 guarantee). If the process has already
     // exited, close is imminent and onExit's reap still has to run, so leave
-    // this to the close path.
+    // this to the close path. A process whose start identity cannot be read
+    // also stays on the close path, since its release could not be reaped.
     function onData() {
       if (settled || handle.status !== 'completed' || handle._exitCode !== null) return;
+      if (!captureReleaseIdentity(handle)) {
+        handle.stdout?.removeListener?.('data', onData);
+        return;
+      }
       settled = true;
       handle._settledOnTurn = true;
       cleanup();
@@ -661,18 +668,43 @@ export function collect(handle, timeoutMs = 30000) {
   });
 }
 
-// Test seam for the detached reaper launch; tests override via
-// _setReleaseReaperSpawn so no real process is started.
-let _spawnReleaseReaper = (pid) => {
+// Test seams for the detached reaper launch and the start-identity read;
+// tests override them so no real process is started or inspected.
+let _readStartId = readProcStartId;
+let _spawnReleaseReaper = (pid, startId) => {
   const reaper = nodeSpawn(
     process.execPath,
-    [RELEASE_REAPER_PATH, String(pid), readProcStartId(pid) || ''],
+    [RELEASE_REAPER_PATH, String(pid), startId],
     { detached: true, stdio: 'ignore' },
   );
   // A launch failure is reported asynchronously; it must not crash the caller.
   reaper.on('error', () => {});
   reaper.unref();
 };
+
+/** @internal Override the start-identity reader (tests only). Returns prev. */
+export function _setStartIdReader(fn) {
+  const prev = _readStartId;
+  if (typeof fn === 'function') _readStartId = fn;
+  return prev;
+}
+
+/**
+ * Capture the running Codex process's start identity so the release reaper can
+ * tell it from a recycled PID. A handle whose identity cannot be read is never
+ * released: it keeps the wait-for-exit lifecycle instead.
+ *
+ * @param {CodexHandle} handle
+ * @returns {boolean} whether the handle may be released
+ */
+function captureReleaseIdentity(handle) {
+  if (typeof handle.pid !== 'number') return false;
+  let startId = null;
+  try { startId = _readStartId(handle.pid); } catch { /* unreadable */ }
+  if (!startId) return false;
+  handle._startId = startId;
+  return true;
+}
 
 /** @internal Override the release-reaper launcher (tests only). Returns prev. */
 export function _setReleaseReaperSpawn(fn) {
@@ -692,9 +724,7 @@ export function _setReleaseReaperSpawn(fn) {
  * @param {CodexHandle} handle
  */
 function release(handle) {
-  if (typeof handle.pid === 'number') {
-    try { _spawnReleaseReaper(handle.pid); } catch { /* best-effort */ }
-  }
+  try { _spawnReleaseReaper(handle.pid, handle._startId); } catch { /* best-effort */ }
   try { handle.process.stdout?.destroy?.(); } catch { /* best-effort */ }
   try { handle.process.stderr?.destroy?.(); } catch { /* best-effort */ }
   try { handle.process.unref?.(); } catch { /* best-effort */ }

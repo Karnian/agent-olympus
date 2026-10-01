@@ -24,6 +24,7 @@ import {
   _buildResumeArgs,
   _setGroupKill,
   _setReleaseReaperSpawn,
+  _setStartIdReader,
 } from '../lib/codex-exec.mjs';
 
 // Neutralize the real process-group signal for the whole file so collect()'s
@@ -31,8 +32,10 @@ import {
 // against the mock pids (which are arbitrary integers). Individual tests that
 // need to assert the reap install their own spy via _setGroupKill and restore.
 _setGroupKill(() => {});
-// Likewise never launch the real detached release reaper from unit tests.
+// Likewise never launch the real detached release reaper from unit tests, and
+// give every mock pid a readable start identity unless a test says otherwise.
 _setReleaseReaperSpawn(() => {});
+_setStartIdReader(() => 'test-start-id');
 
 // ─── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -1310,6 +1313,31 @@ test('collect: an already-completed release-on-turn handle is released, not sign
   }
 });
 
+test('collect: a release-on-turn handle without a readable start identity waits for close', async () => {
+  const prev = _setStartIdReader(() => null);
+  try {
+    const child = createOpenStdoutChild(7777);
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+
+    const p = collect(handle, 1000);
+    let resolved = false;
+    p.then(() => { resolved = true; });
+    child.stdout.push(turnCompletedLine());
+    await tick();
+    await tick();
+    assert.equal(resolved, false, 'an unreapable release must not happen');
+    assert.notEqual(handle._settledOnTurn, true);
+
+    child.emit('exit', 0);
+    child.emit('close', 0);
+    const result = await p;
+    assert.equal(result.status, 'completed');
+  } finally {
+    _setStartIdReader(prev);
+  }
+});
+
 test('shutdown: releases a turn-settled handle instead of signalling it', async () => {
   const calls = [];
   const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
@@ -1325,13 +1353,13 @@ test('shutdown: releases a turn-settled handle instead of signalling it', async 
     await p;
 
     const reaped = [];
-    const prevReaper = _setReleaseReaperSpawn((pid) => { reaped.push(pid); });
+    const prevReaper = _setReleaseReaperSpawn((pid, startId) => { reaped.push([pid, startId]); });
     try {
       await shutdown(handle, 20);
     } finally {
       _setReleaseReaperSpawn(prevReaper);
     }
-    assert.deepEqual(reaped, [7272], 'a detached reaper takes over the issue #74 group reap');
+    assert.deepEqual(reaped, [[7272, 'test-start-id']], 'the reaper gets the identity captured while Codex ran');
     assert.deepEqual(calls, [], 'no group signal: Codex must be free to run its SessionEnd hooks');
     assert.equal(child.killed, false, 'no direct signal either');
     assert.equal(unrefs, 1, 'the child no longer holds the caller event loop');

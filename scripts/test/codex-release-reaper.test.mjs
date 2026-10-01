@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { reapReleasedGroup } from '../lib/codex-release-reaper.mjs';
+import { readProcStartId } from '../lib/proc-identity.mjs';
 
 const REAPER = fileURLToPath(new URL('../lib/codex-release-reaper.mjs', import.meta.url));
 
@@ -53,10 +54,24 @@ test('reaper: SIGKILLs a descendant that survives the group SIGTERM', async () =
   assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
 });
 
-test('reaper: reaps survivors after a natural exit even without a start identity', async () => {
-  const { outcome, signals } = await scenario({ startId: null, leaderExitsAt: 200 });
-  assert.equal(outcome, 'reaped');
-  assert.deepEqual(signals, ['SIGTERM']);
+test('reaper: signals nothing without a parent-captured identity, even after the leader exits', async () => {
+  // Second review on f1778b6: with no original identity, a replacement process
+  // that took the PID as group leader and exited while its children survive
+  // is indistinguishable from Codex. Its group must not be signalled.
+  const { outcome, signals } = await scenario({
+    startId: null,
+    liveIdentity: 'replacement-leader',
+    leaderExitsAt: 200,
+    groupSurvives: true,
+  });
+  assert.equal(outcome, 'unverified');
+  assert.deepEqual(signals, []);
+});
+
+test('reaper: does not reap a group whose original leader it never saw alive', async () => {
+  const { outcome, signals } = await scenario({ leaderExitsAt: 0, groupSurvives: true });
+  assert.equal(outcome, 'unverified');
+  assert.deepEqual(signals, []);
 });
 
 test('reaper: terminates a verified teardown that outlives the deadline', async () => {
@@ -109,6 +124,8 @@ test('reaper CLI: reaps a descendant that outlives its detached group leader', {
   const descendantPid = await new Promise((resolve) => {
     leader.stdout.once('data', (chunk) => resolve(Number(String(chunk).trim())));
   });
+  const startId = readProcStartId(leader.pid); // captured while the leader runs, as release() does
+  assert.ok(startId, 'precondition: leader start identity is readable');
   assert.ok(Number.isInteger(descendantPid));
 
   const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -116,7 +133,7 @@ test('reaper CLI: reaps a descendant that outlives its detached group leader', {
     // Run the reaper asynchronously so this process keeps reaping the exited
     // leader; a blocked event loop would leave it a zombie that looks alive.
     const status = await new Promise((resolve) => {
-      const reaper = spawn(process.execPath, [REAPER, String(leader.pid)], { stdio: 'ignore' });
+      const reaper = spawn(process.execPath, [REAPER, String(leader.pid), startId], { stdio: 'ignore' });
       reaper.on('exit', resolve);
     });
     assert.equal(status, 0);
@@ -135,10 +152,12 @@ test('reaper CLI: SIGKILLs a descendant that ignores SIGTERM', { skip: process.p
   const descendantPid = await new Promise((resolve) => {
     leader.stdout.once('data', (chunk) => resolve(Number(String(chunk).trim())));
   });
+  const startId = readProcStartId(leader.pid); // captured while the leader runs, as release() does
+  assert.ok(startId, 'precondition: leader start identity is readable');
   const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
   try {
     const status = await new Promise((resolve) => {
-      const reaper = spawn(process.execPath, [REAPER, String(leader.pid)], { stdio: 'ignore' });
+      const reaper = spawn(process.execPath, [REAPER, String(leader.pid), startId], { stdio: 'ignore' });
       reaper.on('exit', resolve);
     });
     assert.equal(status, 0);

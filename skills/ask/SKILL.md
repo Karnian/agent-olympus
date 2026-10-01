@@ -57,8 +57,8 @@ logged to stderr.
 In sync mode, Codex output is returned as soon as the turn completes. Codex
 then finishes its own teardown (plugins, MCP servers, SessionEnd hooks) in the
 background after the helper exits, so a `codex` process may briefly outlive
-the command. The read-only fallback waits for Codex to exit, so its post-run
-tree check covers that teardown.
+the command. The read-only fallback, and any run whose Codex process identity
+cannot be read, waits for Codex to exit instead.
 
 For Codex only, append `--no-mcp` to skip user-level Codex configuration for
 that invocation (`codex exec --ignore-user-config ...`), in either sync or

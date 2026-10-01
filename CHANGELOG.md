@@ -2,7 +2,7 @@
 
 ## [1.6.1] - 2026-10-01
 
-`/ask` latency patch. The zero-dependency Node suite is **3345/3345 green
+`/ask` latency patch. The zero-dependency Node suite is **3347/3347 green
 across 135 test files**.
 
 ### Changed
@@ -28,8 +28,10 @@ across 135 test files**.
   Codex to exit, SIGTERMing its remaining process group, and SIGKILLing
   survivors after a grace period. A teardown that outlives 30s is terminated
   only when the live PID still matches the start identity captured by the
-  launching process; a changed, unreadable, or missing identity is never
-  signalled, so a recycled PID cannot be hit.
+  launching process. The reaper signals nothing without that identity, and
+  reaps a group only after it has itself seen the original Codex alive, so a
+  recycled PID or an unrelated group is never hit. A Codex process whose start
+  identity cannot be read is not released and keeps the wait-for-exit path.
 
 ## [1.6.0] - 2026-08-03
 
