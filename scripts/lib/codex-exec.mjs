@@ -745,16 +745,18 @@ export function _setReleaseReaperSpawn(fn) {
 /**
  * Keep the issue #74 exit reap armed for a turn-settled handle until a release
  * reaper has taken ownership, so a Codex that exits early is still reaped.
+ * Exit is tracked from the 'exit' event itself: a signal-terminated child
+ * reports a null exit code.
  *
  * @param {CodexHandle} handle
  */
 function armTurnExitReap(handle) {
   let timer = null;
+  let exited = false;
   let finished;
-  // Resolves once the reap has run (or been disarmed), so shutdown() cannot
-  // return — and let the caller exit — while the reap is still scheduled.
-  handle._exitReapDone = new Promise((resolve) => { finished = resolve; });
+  const reaped = new Promise((resolve) => { finished = resolve; });
   const onExit = () => {
+    exited = true;
     timer = setImmediate(() => {
       timer = null;
       const out = handle.process.stdout;
@@ -762,30 +764,27 @@ function armTurnExitReap(handle) {
       finished();
     });
   };
-  handle.process.once('exit', onExit);
-  handle._disarmExitReap = () => {
+  const disarm = () => {
     if (timer) { clearImmediate(timer); timer = null; }
     handle.process.removeListener('exit', onExit);
     finished();
   };
+  handle.process.once('exit', onExit);
+  handle._turnExitReap = {
+    exited: () => exited,
+    disarm,
+    // Resolve once a pending reap has run, so shutdown() cannot return — and
+    // let the caller exit — while it is still scheduled. A process that never
+    // exited has no reap pending, so it is disarmed instead.
+    settle: async () => {
+      if (exited) await reaped;
+      else disarm();
+    },
+  };
 }
 
-/**
- * Wait for the armed exit reap to finish once the process has exited; a
- * process that has not exited cannot have a reap pending, so it is disarmed.
- *
- * @param {CodexHandle} handle
- */
-async function settleExitReap(handle) {
-  if (handle._exitCode !== null) {
-    await handle._exitReapDone;
-  } else {
-    handle._disarmExitReap?.();
-  }
-}
-
-function waitForExit(handle, timeoutMs) {
-  if (handle._exitCode !== null) return Promise.resolve();
+function waitForExit(handle, exited, timeoutMs) {
+  if (exited()) return Promise.resolve();
   return new Promise((resolve) => {
     const timer = setTimeout(done, timeoutMs);
     function done() {
@@ -811,22 +810,23 @@ function waitForExit(handle, timeoutMs) {
  * @returns {Promise<void>}
  */
 async function releaseOrAwaitExit(handle, graceMs) {
+  const reap = handle._turnExitReap;
+  // Codex already exited: there is nothing to hand over, only our reap to finish.
+  if (reap.exited()) return reap.settle();
+
   let ready = false;
   try { ready = await _spawnReleaseReaper(handle.pid, handle._startId); } catch { ready = false; }
-  if (handle._exitCode !== null) {
-    await settleExitReap(handle); // Codex already exited: finish this process's reap
-    return;
-  }
+  if (reap.exited()) return reap.settle();
   if (ready) {
-    handle._disarmExitReap?.();
+    reap.disarm();
     try { handle.process.stdout?.destroy?.(); } catch { /* best-effort */ }
     try { handle.process.stderr?.destroy?.(); } catch { /* best-effort */ }
     try { handle.process.unref?.(); } catch { /* best-effort */ }
     return;
   }
-  await waitForExit(handle, graceMs);
-  if (handle._exitCode === null) await signalShutdown(handle, graceMs);
-  await settleExitReap(handle);
+  await waitForExit(handle, reap.exited, graceMs);
+  if (!reap.exited()) await signalShutdown(handle, graceMs);
+  await reap.settle();
 }
 
 /** Grace period before escalating from SIGTERM to SIGKILL (ms) */
@@ -850,11 +850,15 @@ const SHUTDOWN_GRACE_MS = 5000;
 export function shutdown(handle, graceMs = SHUTDOWN_GRACE_MS) {
   if (!handle.process || handle.process.killed) return Promise.resolve();
 
+  // The turn finished; signalling now would cut Codex's SessionEnd hooks short.
+  // Checked before the exit test below: an exited turn-settled handle may still
+  // have its exit reap pending.
+  if (handle._settledOnTurn === true && handle._turnExitReap) {
+    return releaseOrAwaitExit(handle, graceMs);
+  }
+
   // If the process already exited, no need to send signals (avoids PID reuse risk)
   if (handle._exitCode !== null) return Promise.resolve();
-
-  // The turn finished; signalling now would cut Codex's SessionEnd hooks short.
-  if (handle._settledOnTurn === true) return releaseOrAwaitExit(handle, graceMs);
 
   return signalShutdown(handle, graceMs);
 }

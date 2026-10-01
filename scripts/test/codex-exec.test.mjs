@@ -1467,6 +1467,48 @@ test('shutdown: without a confirmed reaper a Codex that outlives the grace perio
   }
 });
 
+test('shutdown: a Codex that exited before shutdown() has its reap finished, with no handoff', async () => {
+  const calls = [];
+  const launched = [];
+  const prevKill = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  const prevReaper = _setReleaseReaperSpawn((pid) => { launched.push(pid); return Promise.resolve(true); });
+  try {
+    const { child, handle } = await turnSettledHandle(8282);
+    child.emit('exit', 0); // exits after the turn settled, before shutdown()
+    await shutdown(handle, 200);
+    assert.deepEqual(calls, [[-8282, 'SIGTERM']], 'the scheduled reap ran before shutdown() returned');
+    assert.deepEqual(launched, [], 'nothing left to hand over');
+  } finally {
+    _setGroupKill(prevKill);
+    _setReleaseReaperSpawn(prevReaper);
+  }
+});
+
+test('shutdown: a signal-terminated Codex still gets its exit reap after a failed handoff', async () => {
+  // A child killed by a signal emits exit(null, signal), so the exit code
+  // stays null; the pending reap must not be mistaken for "never exited".
+  const calls = [];
+  const prevKill = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  const prevReaper = _setReleaseReaperSpawn(() => Promise.resolve(false));
+  try {
+    const { child, handle } = await turnSettledHandle(8383);
+    child.kill = (signal) => {
+      child.killed = true;
+      setImmediate(() => child.emit('exit', null, signal));
+    };
+    await shutdown(handle, 30);
+    assert.equal(child.killed, true);
+    assert.deepEqual(
+      calls,
+      [[-8383, 'SIGTERM'], [-8383, 'SIGTERM']],
+      'shutdown SIGTERM, then the exit reap of the still-held stdout before returning',
+    );
+  } finally {
+    _setGroupKill(prevKill);
+    _setReleaseReaperSpawn(prevReaper);
+  }
+});
+
 test('shutdown: a failed handoff finishes the exit reap before an immediate caller exit (subprocess)', { skip: process.platform === 'win32' }, async () => {
   // PR review on cb885bd: the synchronous /ask calls process.exit() right
   // after shutdown(). A fake Codex prints turn.completed, leaves a stdout-
