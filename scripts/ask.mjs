@@ -375,7 +375,14 @@ export async function runOnce(adapterName, prompt, _testInject = {}) {
 
   let handle = null;
   try {
-    handle = adapter.spawn(effectivePrompt, opts);
+    // The caller is waiting on this answer: return at turn.completed and let
+    // Codex finish its own teardown after we exit (see codex-exec release()).
+    // Not under the read-only fallback, whose post-run tree check must also
+    // see writes made during that teardown.
+    const spawnOpts = adapterName === 'codex-exec' && !opts._readonlyFallback
+      ? { ...opts, releaseOnTurnCompleted: true }
+      : opts;
+    handle = adapter.spawn(effectivePrompt, spawnOpts);
   } catch (err) {
     const msg = `Failed to spawn ${adapterName}: ${err && err.message ? err.message : String(err)}`;
     writeArtifact(path, `# Error\n\n${msg}\n`);

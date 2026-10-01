@@ -68,7 +68,8 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Sanitized failed-run feedback loop** *(v1.5.0)*: SessionEnd queues only independently verified, session-linked terminal task failures as metadata/digests. A human must approve and link candidates; prompts, error text, paths, diffs, evidence payloads, and provider output never enter the queue.
 - **Revocable shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`) is overridden by durable user no-ship follow-ups; push/PR operations bind repository, base, branch, and remote HEAD identity. CI aggregates every workflow for the exact pushed SHA and crash recovery links each fix candidate to one failed run and attempt.
 - **Codex MCP recovery + `--no-mcp`** *(v1.5.1)*: `/ask` classifies record-ordered MCP authentication failures across exec and tmux adapters. Codex-only `--no-mcp` skips the entire user-level config, including configured MCP servers, with a fail-closed Codex version gate while preserving authentication and explicit CLI overrides.
-- **3322 unit tests**: v1.6.0 release baseline using `node:test` across 133 test files (previous v1.5.2 baseline: 3365 tests across 134 files)
+- **Fast `/ask codex` return** *(v1.6.1)*: Synchronous `/ask` returns as soon as Codex completes its turn instead of waiting 2–6s for Codex to tear down plugins, MCP servers, and hooks. Codex is released, not killed, so its SessionEnd hooks still run, and a detached reaper cleans up any leftover process group.
+- **3354 unit tests**: v1.6.1 release baseline using `node:test` across 135 test files (previous v1.6.0 baseline: 3322 tests across 133 files)
 - **Fail-safe architecture**: Hooks normally fail open; concurrency admission and the Atlas executable-control gates deliberately block on unsafe, unreadable, or unresolved protected state
 
 ## Installation
@@ -621,7 +622,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (v1.6.0 release baseline: 3322 tests across 133 files; previous v1.5.2 baseline: 3365 tests across 134 files) covers the core hook libraries. To run:
+A `node:test` based test suite (v1.6.1 release baseline: 3354 tests across 135 files; previous v1.6.0 baseline: 3322 tests across 133 files) covers the core hook libraries. To run:
 
 ```bash
 npm test

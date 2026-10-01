@@ -4,7 +4,22 @@
 > harness-engineering review on **2026-06-16** (baseline: `main` @ v1.1.6 +
 > `feat/adapter-worker-supervisor` @ v1.2.0).
 
-## Status & handoff — START HERE (updated 2026-08-03)
+## Status & handoff — START HERE (updated 2026-10-01)
+
+### v1.6.1 implementation addendum — 2026-10-01
+
+- Synchronous `/ask codex` settles at `turn.completed` and releases Codex to
+  finish its own teardown; a detached `codex-release-reaper.mjs` preserves the
+  issue #74 process-group reap. Measured about 11.9s → 7.1s on a trivial prompt.
+- Persisted runs, Windows, the `/ask` read-only fallback, async `/ask`,
+  `/codex-goal`, `/codex-review`, and Atlas/Athena workers keep wait-for-exit.
+- Claude implemented; Codex cross-reviewed over four rounds (SessionEnd hooks
+  skipped by SIGTERM, lost #74 reap, read-only post-check ordering, group-based
+  escalation, exit-before-data ordering, PID-reuse identity, Windows) until
+  the gate passed with no findings.
+- `AGENTS.md` now lists top-level directories only; the script inventory moved
+  to `docs/internals/file-map.md` with a drift test (#91).
+- The v1.6.1 release suite is 3354/3354 across 135 test files.
 
 ### v1.6.0 implementation addendum — 2026-08-03
 
@@ -81,6 +96,7 @@
 - **v1.5.1 (prepared here)** — revocable shipping, exact-SHA all-workflow CI recovery, and Codex MCP diagnostics with fail-closed `--no-mcp`. Suite 2858/2858.
 - **v1.5.2 (prepared here)** — stop-hook WIP ref/reflog lifecycle hardening and 30-day managed-anchor retention. Suite 3365/3365.
 - **v1.6.0 (prepared here)** — remove plugin-global Stop auto-commits, preserve Atlas control gating, and document explicit Git ownership plus legacy-ref migration. Suite 3322/3322.
+- **v1.6.1 (prepared here)** — `/ask codex` returns at `turn.completed` with a released Codex teardown and detached group reaper; `AGENTS.md` script inventory moved to `docs/internals/file-map.md`. Suite 3354/3354.
 
 **Historical 2026-06-19 snapshot (HU-01 and HU-06.3 superseded by the addendum above):** the rest of the backlog was not started (HU-01, HU-02a, HU-03–05, HU-07–20) + the **4 deferred agents** (`metis`, `prometheus`, `hermes`, `ask` — decide read-only/Bash/unrestricted per their bodies). HU-06 `.1`/`.2` shipped in v1.2.3 and `.4` documentation shipped there; `.3` completed in v1.5.0.
 

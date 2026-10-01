@@ -11,6 +11,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Readable, Writable } from 'node:stream';
+import { spawn as nodeSpawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   parseJSONLEvents,
@@ -23,6 +28,8 @@ import {
   _buildSpawnArgs,
   _buildResumeArgs,
   _setGroupKill,
+  _setReleaseReaperSpawn,
+  _setStartIdReader,
 } from '../lib/codex-exec.mjs';
 
 // Neutralize the real process-group signal for the whole file so collect()'s
@@ -30,6 +37,10 @@ import {
 // against the mock pids (which are arbitrary integers). Individual tests that
 // need to assert the reap install their own spy via _setGroupKill and restore.
 _setGroupKill(() => {});
+// Likewise never launch the real detached release reaper from unit tests, and
+// give every mock pid a readable start identity unless a test says otherwise.
+_setReleaseReaperSpawn(() => Promise.resolve(true));
+_setStartIdReader(() => 'test-start-id');
 
 // ─── Mock helpers ──────────────────────────────────────────────────────────────
 
@@ -1195,6 +1206,385 @@ test('issue #74: a timeout that resolves before exit schedules no late reap', as
   } finally {
     _setGroupKill(prev);
   }
+});
+
+// ─── release at turn.completed ───────────────────────────────────────────────
+
+function turnCompletedLine() {
+  return JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }) + '\n';
+}
+
+test('collect: a default handle still waits for close after turn.completed', async () => {
+  const child = createOpenStdoutChild(7070);
+  const handle = createHandle(child);
+
+  const p = collect(handle, 1000);
+  let resolved = false;
+  p.then(() => { resolved = true; });
+  child.stdout.push(turnCompletedLine());
+  await tick();
+  await tick();
+  assert.equal(handle.status, 'completed');
+  assert.equal(resolved, false, 'only release-on-turn handles settle before close');
+
+  child.emit('exit', 0);
+  child.emit('close', 0);
+  const result = await p;
+  assert.equal(result.status, 'completed');
+  assert.equal(handle._settledOnTurn, undefined);
+});
+
+test('collect: a release-on-turn handle settles at turn.completed without waiting for exit', async () => {
+  const child = createOpenStdoutChild(7171); // never exits or closes on its own
+  const handle = createHandle(child);
+  handle._releaseOnTurn = true;
+
+  const p = collect(handle, 1000);
+  child.stdout.push(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'OK' } }) + '\n');
+  child.stdout.push(turnCompletedLine());
+
+  const result = await p;
+  assert.equal(result.status, 'completed');
+  assert.ok(!('error' in result), 'settled before the 1000ms timeout');
+  assert.equal(result.output, 'OK\n');
+  assert.deepEqual(result.usage, { input_tokens: 1, output_tokens: 1 });
+  assert.equal(handle._settledOnTurn, true);
+  assert.equal(handle._exitCode, null, 'the process is still running when collect() resolves');
+});
+
+test('collect: a release-on-turn handle does not settle on a failed item alone', async () => {
+  const child = createOpenStdoutChild(7474);
+  const handle = createHandle(child);
+  handle._releaseOnTurn = true;
+
+  const p = collect(handle, 50);
+  child.stdout.push(JSON.stringify({
+    type: 'item.completed',
+    item: { type: 'command_execution', aggregated_output: '', exit_code: 1, status: 'failed' },
+  }) + '\n');
+  const result = await p;
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.category, 'timeout');
+  assert.notEqual(handle._settledOnTurn, true);
+});
+
+test('collect: exit before turn.completed data leaves the handle on the close path (issue #74)', async () => {
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = createOpenStdoutChild(7575);
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+    child.on('exit', (code) => { handle._exitCode = code; });
+
+    const p = collect(handle, 1000);
+    child.emit('exit', 0);                 // direct child exits first
+    child.stdout.push(turnCompletedLine()); // buffered turn.completed arrives late
+    await tick();
+    await tick();
+
+    assert.notEqual(handle._settledOnTurn, true, 'an exited process is never released');
+    assert.deepEqual(calls, [[-7575, 'SIGTERM']], 'the exit reap still ran');
+    child.emit('close', 0);
+    const result = await p;
+    assert.equal(result.status, 'completed');
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+test('collect: an already-completed release-on-turn handle is released, not signalled', async () => {
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  const prevReaper = _setReleaseReaperSpawn(() => Promise.resolve(true));
+  try {
+    const child = createOpenStdoutChild(7676);
+    child.unref = () => {};
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+    child.stdout.push(turnCompletedLine());
+    await tick();
+    assert.equal(handle.status, 'completed', 'precondition: turn finished before collect()');
+
+    const result = await collect(handle, 1000);
+    assert.equal(result.status, 'completed');
+    assert.equal(handle._settledOnTurn, true);
+    await shutdown(handle, 20);
+    assert.deepEqual(calls, []);
+    assert.equal(child.killed, false);
+  } finally {
+    _setGroupKill(prev);
+    _setReleaseReaperSpawn(prevReaper);
+  }
+});
+
+test('collect: a release-on-turn handle without a readable start identity waits for close', async () => {
+  const prev = _setStartIdReader(() => null);
+  try {
+    const child = createOpenStdoutChild(7777);
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+
+    const p = collect(handle, 1000);
+    let resolved = false;
+    p.then(() => { resolved = true; });
+    child.stdout.push(turnCompletedLine());
+    await tick();
+    await tick();
+    assert.equal(resolved, false, 'an unreapable release must not happen');
+    assert.notEqual(handle._settledOnTurn, true);
+
+    child.emit('exit', 0);
+    child.emit('close', 0);
+    const result = await p;
+    assert.equal(result.status, 'completed');
+  } finally {
+    _setStartIdReader(prev);
+  }
+});
+
+test('collect: a turn finished before collect() with no readable identity still waits for close', async () => {
+  const prev = _setStartIdReader(() => null);
+  try {
+    const child = createOpenStdoutChild(8181);
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+    child.stdout.push(turnCompletedLine());
+    await tick();
+    assert.equal(handle.status, 'completed', 'precondition: turn finished before collect()');
+
+    const p = collect(handle, 1000);
+    let resolved = false;
+    p.then(() => { resolved = true; });
+    await tick();
+    await tick();
+    assert.equal(resolved, false, 'must not return early, or shutdown() would signal the teardown');
+    assert.notEqual(handle._settledOnTurn, true);
+
+    child.emit('exit', 0);
+    child.emit('close', 0);
+    const result = await p;
+    assert.equal(result.status, 'completed');
+  } finally {
+    _setStartIdReader(prev);
+  }
+});
+
+test('shutdown: releases a turn-settled handle instead of signalling it', async () => {
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = createOpenStdoutChild(7272);
+    let unrefs = 0;
+    child.unref = () => { unrefs += 1; };
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+
+    const p = collect(handle, 1000);
+    child.stdout.push(turnCompletedLine());
+    await p;
+
+    const reaped = [];
+    const prevReaper = _setReleaseReaperSpawn((pid, startId) => {
+      reaped.push([pid, startId]);
+      return Promise.resolve(true);
+    });
+    try {
+      await shutdown(handle, 20);
+    } finally {
+      _setReleaseReaperSpawn(prevReaper);
+    }
+    assert.deepEqual(reaped, [[7272, 'test-start-id']], 'the reaper gets the identity captured while Codex ran');
+    assert.deepEqual(calls, [], 'no group signal: Codex must be free to run its SessionEnd hooks');
+    assert.equal(child.killed, false, 'no direct signal either');
+    assert.equal(unrefs, 1, 'the child no longer holds the caller event loop');
+    assert.equal(child.stdout.destroyed, true);
+    assert.equal(child.stderr.destroyed, true);
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+async function turnSettledHandle(pid) {
+  const child = createOpenStdoutChild(pid);
+  child.unref = () => { child.unrefed = true; };
+  const handle = createHandle(child);
+  handle._releaseOnTurn = true;
+  child.on('exit', (code) => { handle._exitCode = code; });
+  const p = collect(handle, 1000);
+  child.stdout.push(turnCompletedLine());
+  await p;
+  return { child, handle };
+}
+
+test('collect: a Codex that exits right after the turn is still reaped by this process (issue #74)', async () => {
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const { child, handle } = await turnSettledHandle(7878);
+    assert.equal(handle._settledOnTurn, true);
+    child.emit('exit', 0); // before any reaper could take over; a descendant holds stdout
+    await tick();
+    await tick();
+    assert.deepEqual(calls, [[-7878, 'SIGTERM']]);
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+test('shutdown: without a confirmed reaper the handle is not released, and Codex exits unsignalled', async () => {
+  const calls = [];
+  const prevKill = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  const prevReaper = _setReleaseReaperSpawn(() => Promise.resolve(false));
+  try {
+    const { child, handle } = await turnSettledHandle(7979);
+    const done = shutdown(handle, 200);
+    await tick();
+    child.emit('exit', 0); // Codex finishes its teardown on its own
+    await done;
+    assert.equal(child.unrefed, undefined, 'never released without a confirmed owner');
+    assert.equal(child.killed, false, 'Codex exited on its own, so it was never signalled');
+    assert.deepEqual(calls, [[-7979, 'SIGTERM']], 'the exit reap already ran when shutdown() returned');
+  } finally {
+    _setGroupKill(prevKill);
+    _setReleaseReaperSpawn(prevReaper);
+  }
+});
+
+test('shutdown: without a confirmed reaper a Codex that outlives the grace period is terminated', async () => {
+  const calls = [];
+  const prevKill = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  const prevReaper = _setReleaseReaperSpawn(() => Promise.resolve(false));
+  try {
+    const { child, handle } = await turnSettledHandle(8080);
+    child.kill = (signal) => { child.killed = true; child.emit('exit', 0, signal); };
+    await shutdown(handle, 20);
+    assert.equal(child.killed, true);
+    assert.deepEqual(calls[0], [-8080, 'SIGTERM']);
+  } finally {
+    _setGroupKill(prevKill);
+    _setReleaseReaperSpawn(prevReaper);
+  }
+});
+
+test('shutdown: a Codex that exited before shutdown() has its reap finished, with no handoff', async () => {
+  const calls = [];
+  const launched = [];
+  const prevKill = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  const prevReaper = _setReleaseReaperSpawn((pid) => { launched.push(pid); return Promise.resolve(true); });
+  try {
+    const { child, handle } = await turnSettledHandle(8282);
+    child.emit('exit', 0); // exits after the turn settled, before shutdown()
+    await shutdown(handle, 200);
+    assert.deepEqual(calls, [[-8282, 'SIGTERM']], 'the scheduled reap ran before shutdown() returned');
+    assert.deepEqual(launched, [], 'nothing left to hand over');
+  } finally {
+    _setGroupKill(prevKill);
+    _setReleaseReaperSpawn(prevReaper);
+  }
+});
+
+test('shutdown: a signal-terminated Codex still gets its exit reap after a failed handoff', async () => {
+  // A child killed by a signal emits exit(null, signal), so the exit code
+  // stays null; the pending reap must not be mistaken for "never exited".
+  const calls = [];
+  const prevKill = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  const prevReaper = _setReleaseReaperSpawn(() => Promise.resolve(false));
+  try {
+    const { child, handle } = await turnSettledHandle(8383);
+    child.kill = (signal) => {
+      child.killed = true;
+      setImmediate(() => child.emit('exit', null, signal));
+    };
+    await shutdown(handle, 30);
+    assert.equal(child.killed, true);
+    assert.deepEqual(
+      calls,
+      [[-8383, 'SIGTERM'], [-8383, 'SIGTERM']],
+      'shutdown SIGTERM, then the exit reap of the still-held stdout before returning',
+    );
+  } finally {
+    _setGroupKill(prevKill);
+    _setReleaseReaperSpawn(prevReaper);
+  }
+});
+
+test('shutdown: a failed handoff finishes the exit reap before an immediate caller exit (subprocess)', { skip: process.platform === 'win32' }, async () => {
+  // PR review on cb885bd: the synchronous /ask calls process.exit() right
+  // after shutdown(). A fake Codex prints turn.completed, leaves a stdout-
+  // holding descendant, and exits 300ms later; the reaper handoff fails.
+  const dir = mkdtempSync(join(tmpdir(), 'codex-handoff-'));
+  const pidFile = join(dir, 'descendant.pid');
+  const adapter = fileURLToPath(new URL('../lib/codex-exec.mjs', import.meta.url));
+  const fakeCodex = `echo '{"type":"turn.completed","usage":{}}'; sleep 30 & echo $! > "$PIDFILE"; sleep 0.3`;
+  const caller = `
+    import { spawn as nodeSpawn } from 'node:child_process';
+    const cx = await import(${JSON.stringify(adapter)});
+    cx._setReleaseReaperSpawn(() => Promise.resolve(false));
+    cx._setStartIdReader(() => 'fake-start-id');
+    const fakeCodex = process.env.FAKE_CODEX;
+    const handle = cx.spawn('prompt', {
+      spawn: (bin, args, opts) => nodeSpawn('sh', ['-c', fakeCodex], opts),
+      versionProbe: () => ({ version: '0.143.0', raw: 'codex-cli 0.143.0' }),
+      releaseOnTurnCompleted: true,
+      log: () => {},
+    });
+    await cx.collect(handle, 5000);
+    await cx.shutdown(handle, 2000);
+    process.exit(0);
+  `;
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  let descendant = null;
+  let stderr = '';
+  try {
+    const status = await new Promise((resolve) => {
+      const child = nodeSpawn(process.execPath, ['--input-type=module', '-e', caller], {
+        env: { ...process.env, PIDFILE: pidFile, FAKE_CODEX: fakeCodex },
+        stdio: ['ignore', 'ignore', 'pipe'],
+      });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('exit', resolve);
+    });
+    assert.equal(status, 0, stderr);
+    descendant = Number(readFileSync(pidFile, 'utf-8').trim());
+    assert.ok(Number.isInteger(descendant));
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(alive(descendant), false, 'the stdout-holding descendant was reaped before the caller exited');
+  } finally {
+    if (descendant) { try { process.kill(descendant, 'SIGKILL'); } catch { /* already gone */ } }
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('shutdown: a release-on-turn handle that timed out is still terminated', async () => {
+  const calls = [];
+  const prev = _setGroupKill((pgid, signal) => { calls.push([pgid, signal]); });
+  try {
+    const child = createMockChildProcess();
+    const handle = createHandle(child);
+    handle._releaseOnTurn = true;
+
+    const result = await collect(handle, 20);
+    assert.equal(result.error.category, 'timeout');
+    await shutdown(handle, 20);
+    assert.deepEqual(calls[0], [-12345, 'SIGTERM']);
+    assert.equal(child.killed, true);
+  } finally {
+    _setGroupKill(prev);
+  }
+});
+
+test('spawn: releaseOnTurnCompleted is honored only for ephemeral runs', () => {
+  const opts = {
+    spawn: () => createMockChildProcess(),
+    versionProbe: () => ({ version: '0.143.0', raw: 'codex-cli 0.143.0\n' }),
+    log: () => {},
+  };
+  const release = { ...opts, releaseOnTurnCompleted: true };
+  assert.equal(spawnCodex('hi', opts)._releaseOnTurn, false);
+  assert.equal(spawnCodex('hi', release)._releaseOnTurn, process.platform !== 'win32');
+  assert.equal(spawnCodex('hi', { ...release, persist: true })._releaseOnTurn, false);
+  assert.equal(spawnResume('thread-1', 'hi', release)._releaseOnTurn, false);
 });
 
 // ─── shutdown ─────────────────────────────────────────────────────────────────

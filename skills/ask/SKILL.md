@@ -54,6 +54,12 @@ spawn → collect → shutdown lifecycle, private `0700` state/artifact director
 creation, and artifact writing. Output goes to stdout; the artifact path is
 logged to stderr.
 
+In sync mode, Codex output is returned as soon as the turn completes. Codex
+then finishes its own teardown (plugins, MCP servers, SessionEnd hooks) in the
+background after the helper exits, so a `codex` process may briefly outlive
+the command. The read-only fallback, and any run whose Codex process identity
+cannot be read, waits for Codex to exit instead.
+
 For Codex only, append `--no-mcp` to skip user-level Codex configuration for
 that invocation (`codex exec --ignore-user-config ...`), in either sync or
 async mode. This disables configured MCP servers by skipping the entire

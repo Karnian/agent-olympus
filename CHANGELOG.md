@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.6.1] - 2026-10-01
+
+`/ask` latency patch. The zero-dependency Node suite is **3354/3354 green
+across 135 test files**.
+
+### Changed
+- **`/ask codex` returns at `turn.completed`** — after answering, `codex exec`
+  spends 2–6s tearing down plugins, MCP servers, and SessionEnd hooks, and the
+  synchronous `/ask` path used to wait for that exit. It now returns as soon as
+  the turn completes (about 11.9s → 7.1s on a trivial prompt). Codex is
+  released rather than signalled, so it still finishes its own teardown and
+  SessionEnd hooks after `/ask` exits; signalling it at that point was verified
+  to skip those hooks. Implemented as the opt-in `releaseOnTurnCompleted`
+  option of the `codex-exec` adapter. It is ignored for persisted (resumable)
+  runs and on Windows, and it is not used by the `/ask` read-only fallback,
+  async `/ask`, `/codex-goal`, `/codex-review`, or Atlas/Athena workers, which
+  keep the wait-for-exit lifecycle.
+- **Shared instructions** — `AGENTS.md` lists top-level directories only
+  (28,655 → ~17.5 KB of the 28 KiB budget); every `scripts/*.mjs` and
+  `scripts/lib/*.mjs` file is catalogued in `docs/internals/file-map.md`, and a
+  test fails on missing or stale rows (#91).
+
+### Added
+- **`scripts/lib/codex-release-reaper.mjs`** — detached reaper started when a
+  Codex process is released. It keeps the issue #74 guarantee by waiting for
+  Codex to exit, SIGTERMing its remaining process group, and SIGKILLing
+  survivors after a grace period. A teardown that outlives 30s is terminated
+  only when the live PID still matches the start identity captured by the
+  launching process. The reaper signals nothing without that identity, and
+  reaps a group only after it has itself seen the original Codex alive, so a
+  recycled PID or an unrelated group is never hit. Ownership is handed over
+  only when the reaper reports that sighting; until then `/ask` keeps its own
+  exit reap, and without it Codex is not released but left to exit on its own
+  (signalled only past the grace period). A Codex process whose start identity
+  cannot be read is not released either.
+
 ## [1.6.0] - 2026-08-03
 
 Explicit Git-ownership release. The global Stop-hook auto-commit feature has
