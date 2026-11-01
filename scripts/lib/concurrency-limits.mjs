@@ -21,6 +21,7 @@ import {
   readRegularArtifact,
   revalidateRegularArtifact,
   writeExclusiveRegularArtifact,
+  HARDENED_FS_VIOLATION_CODE,
 } from './hardened-fs.mjs';
 import { readProcStartId } from './proc-identity.mjs';
 import {
@@ -169,7 +170,8 @@ function processDefinitelyGone(pid, expectedStartId) {
 }
 
 function inspectExistingLock(lockPath) {
-  try { assertSafeDirectory(lockPath, 'concurrency lock'); }
+  let observed;
+  try { observed = assertSafeDirectory(lockPath, 'concurrency lock'); }
   catch (error) {
     // A live holder can release between the contender's existence probe and
     // inspection. Retry acquisition; this never authorizes without winning
@@ -185,6 +187,19 @@ function inspectExistingLock(lockPath) {
   try { owner = readSafeJson(ownerPath, 'concurrency lock owner', 4096); }
   catch (error) {
     if (error.code === 'ENOENT') return { reclaim: false };
+    if (error.code === HARDENED_FS_VIOLATION_CODE) {
+      let current;
+      try { current = assertSafeDirectory(lockPath, 'concurrency lock'); }
+      catch (inspectionError) {
+        if (inspectionError.code === 'ENOENT') return { reclaim: false };
+        throw inspectionError;
+      }
+      // The previous directory generation was released/replaced while its
+      // owner artifact was read. Retry the lock, never trust that stale owner.
+      // Corruption in the same live generation still propagates fail-closed.
+      if (current.dev !== observed.dev || current.ino !== observed.ino
+        || current.birthtimeMs !== observed.birthtimeMs || !existsSync(ownerPath)) return { reclaim: false };
+    }
     throw error;
   }
   if (!owner || typeof owner !== 'object' || typeof owner.token !== 'string'
