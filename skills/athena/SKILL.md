@@ -16,6 +16,26 @@ worker's output is integrated, tested, and reviewed.
 Atlas = one brain delegating.
 Athena = many brains collaborating.
 
+## Managed_Execution_Backend (explicit opt-in)
+
+For explicitly selected persistent-worker/child-agent execution, the executable
+backend is `scripts/athena-runtime.mjs`; read
+`docs/internals/athena-runtime.md` for its commands and compatibility boundary.
+It adds durable supervisor commands, worker-bound `ao_runtime` MCP tools, shared
+parent/child capacity reservations, and verified dependency waves. Run its
+capability diagnostics before selecting providers, and use explicit verification
+commands and child capacity in the runtime options. This requires a clean Git
+checkpoint and quiescent first migration to the v3 admission ledger.
+
+The backend's `completed` result means execution/integration passed its checks.
+It is not full Athena pipeline completion: retain the normal Phase Runner,
+independent review, finalization, and shipping gates. Keep the managed sub-run id
+as execution evidence, resume its exact generation with `status`/`tick`, and
+never adopt its workers through the native-team checkpoint path. Do not mix
+native Task/Agent delegation with broker-managed child capacity. The legacy
+native/mixed workflow below remains the default; do not enable the new backend
+implicitly for existing runs or reinterpret old checkpoint formats.
+
 ## Use_When
 
 - User says "athena", "아테나", "팀으로 해", "같이 해", "team", "collaborate"

@@ -4,7 +4,7 @@ Auto-generated index of all project specifications.
 
 | Project | Scale | Mode | Features/Stories | Status | Last Updated |
 |---------|-------|------|-----------------|--------|-------------|
-| [Athena Parallel Agent Runtime](./athena-parallel-runtime/spec.md) | L | engineering-change | persistent workers + managed child agents + dependency scheduling | proposed (review revised) | 2026-11-01 |
+| [Athena Parallel Agent Runtime](./athena-parallel-runtime/spec.md) | L | engineering-change | persistent workers + managed child agents + dependency scheduling | implemented (explicit execution opt-in) | 2026-11-01 |
 | [Event-Backed Run System](./event-backed-runs/spec.md) | M | forward | 8 stories (US-001~008) | implemented (v0.9.2) | 2026-04-01 |
 | [Superpowers Methodology Integration](./superpowers-methodology-integration/spec.md) | L | forward | 18 stories | draft | 2026-03-29 |
 | [Agent Olympus Reverse PRD](./reverse-prd/spec.md) | L | reverse | 11 features | analyzed | 2026-03-27 |

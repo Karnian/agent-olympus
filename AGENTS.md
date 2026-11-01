@@ -34,7 +34,7 @@ agent-olympus/
 ├── skills/             — 37 user-facing skills, <name>/SKILL.md (see Skills below)
 ├── scripts/            — Hook entry points + CLI helpers (Node.js ESM, zero deps)
 │   ├── lib/            — Shared modules: pipeline, adapters, permissions, state
-│   └── test/           — node:test suites (current: 3354 tests, 135 files)
+│   └── test/           — node:test suites (current: 3370 tests, 142 files)
 ├── config/             — model-routing.jsonc, review-routing.jsonc
 ├── schemas/            — Codex goal/review structured-output schemas
 ├── evals/              — Eval harness (fixture vs live, deterministic graders)
@@ -51,7 +51,7 @@ Every `scripts/*.mjs` and `scripts/lib/*.mjs` file is catalogued in
 - Scripts are zero-dependency Node.js ESM (`.mjs`), except `scripts/run.cjs` for cross-platform hook wrapping.
 - Hooks exit 0 and normally fail open; only concurrency admission and the Atlas executable-control gates (skill-init after proven identity, skill-scoped Stop) fail closed — [hooks.md](docs/internals/hooks.md).
 - State writes use atomic tmp+rename helpers; state files use mode `0600` and state directories use `0700`.
-- Persisted formats are independently versioned (the concurrency ledger is v2); authorization and admission formats fail closed on unknown versions. See [docs/development.md](docs/development.md).
+- Persisted formats are independently versioned (concurrency defaults to v2; managed Athena opts into v3); authorization and admission formats fail closed on unknown versions. See [docs/development.md](docs/development.md).
 - State lives under `.ao/`: `state/` is transient, `memory/` is durable, and run/team artifacts are swept by lifecycle rules.
 
 ## Worker Adapter System
@@ -62,6 +62,7 @@ Every `scripts/*.mjs` and `scripts/lib/*.mjs` file is catalogued in
 - Session names use stable prefixes such as `atlas-codex-<N>`, `athena-<slug>-gemini-<N>`, and `*-xval-<story-id>`.
 - Key files: `scripts/lib/worker-spawn.mjs`, `codex-appserver.mjs`, `codex-exec.mjs`, `claude-cli.mjs`, `gemini-acp.mjs`, `gemini-exec.mjs`, `permission-detect.mjs`.
 - Detached worker supervisor -> [docs/internals/worker-adapters.md](docs/internals/worker-adapters.md); permission mirroring -> [docs/internals/permission-mirroring.md](docs/internals/permission-mirroring.md); Gemini credentials -> [docs/internals/credentials.md](docs/internals/credentials.md).
+- Managed Athena execution -> [docs/internals/athena-runtime.md](docs/internals/athena-runtime.md): opt-in persistent workers, broker-managed leaves, and verified dependency waves. Task execution completion is distinct from full pipeline review/shipping.
 
 ## Contributing
 
@@ -69,7 +70,7 @@ Follow [docs/development.md](docs/development.md) when adding agents, skills, ho
 
 ## Testing
 
-Run the current 3354-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the current 3370-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
@@ -230,7 +231,7 @@ Run the current 3354-test Node suite and syntax checks from [docs/testing.md](do
 | `.ao/state/checkpoint-atlas[-sessionId].json` | Atlas session recovery checkpoint (session-scoped) | Auto-expires after 24h |
 | `.ao/state/checkpoint-athena[-sessionId].json` | Athena session recovery checkpoint (session-scoped) | Auto-expires after 24h |
 | `.ao/state/ao-intent.json` | Last classified intent | Updated per prompt |
-| `.ao/state/ao-concurrency.json` | Schema-v2 active task tracking and recovery barrier | Updated per task spawn/complete; never generic-TTL swept |
+| `.ao/state/ao-concurrency.json` | Default-v2 / managed-v3 admission, reservations, and recovery barrier | Updated per task spawn/complete; never generic-TTL swept |
 | `.ao/memory/` | Durable design identity and taste memory (`schemaVersion:1`) | Survives SessionEnd and cancel |
 | `.ao/state/supervisor/<runId>/` | Detached worker snapshots/manifests | Swept per inactive run |
 | `.ao/artifacts/runs/<runId>/` | Run evidence, failure marker, task ledger | Retained for audit/candidate review |

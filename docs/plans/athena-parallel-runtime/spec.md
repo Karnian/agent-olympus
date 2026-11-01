@@ -1,8 +1,16 @@
 # Athena Parallel Agent Runtime
 
-Status: proposed; runtime implementation has not started.
-Updated: 2026-11-01 (PR #93 review revision)
+Status: opt-in runtime implemented; provider launch controls are configured,
+with hermetic process/MCP tests and separate provider transport diagnostics.
+Full model-turn provider validation is not claimed.
+Updated: 2026-11-01 (PR #93 implementation)
 Investigation base: `db474cd` (main, v1.6.1).
+
+Implementation and usage: [Managed Athena runtime](../../internals/athena-runtime.md).
+The evidence table below records the pre-implementation investigation base.
+Default native-team runs retain their prior behavior; the executable managed
+backend is an explicit execution sub-run, with full pipeline review/shipping
+still governed by the existing Phase Runner and orchestrator workflow.
 
 Related plans: [Adapter Worker Supervisor](../adapter-worker-supervisor/PLAN.md),
 [Native Agent Teams](../native-agent-teams/spec.md), and
@@ -74,8 +82,11 @@ removing Task/Agent from the available tool set from simply omitting them from
 an auto-approval list. Codex and Gemini need version-specific capability and
 restriction checks, not guessed flags or prompt-only prohibitions.
 
-An unsupported or unverified restriction reports managed-child capability as
-unavailable and prevents entry to the bounded-child mode for that path. A
+An unsupported restriction reports managed-child capability as unavailable.
+Provider diagnostics distinguish configured controls from live verification;
+configured-only execution advertises a managed-task-graph cap, never a verified
+bound on all provider-native descendants. Unverified paths cannot advertise
+the stronger bounded-descendant mode. A
 diagnostic must explain the missing control. Existing batch behavior may stay
 available with its existing limitations, but cannot be relabeled as enforcing
 the new descendant limit. Test both argument/configuration propagation and
@@ -308,9 +319,9 @@ No unlimited recursive orchestration, shared writable worker directories, or
 promise of identical provider-native agent APIs. No change to Atlas, `/ask`,
 or review-worker lifetime as an incidental effect of Athena persistence.
 
-This proposal requires executable modules, adapters, schema changes, tests,
-and documentation together. Editing the Athena prompt alone cannot implement
-the requested behavior.
+The implementation includes executable modules, adapters, schema changes,
+process tests, and operational documentation. Full pipeline review/shipping is
+not inferred from the standalone execution backend's terminal task state.
 
 ## Investigation validation
 
@@ -321,4 +332,13 @@ the existing implementation; they do not prove this proposed runtime exists.
 
 Review revision checks: re-read the launch/option/ledger code and the historical
 Codex Interop probe record; inspect local `claude --help` without a model call.
-No current-provider native-child or MCP-connection smoke test was performed.
+No current-provider native-child or MCP-connection smoke test was performed at
+that initial review stage.
+
+Implementation diagnostics subsequently checked installed Claude Code 2.1.278
+(`--bare` stdio control initialization and connected `ao_runtime` MCP), Codex
+0.162.1 (app-server initialization, resolved native multi-agent flags disabled,
+and runtime MCP registration), and Gemini CLI 0.50.0 (current ACP initialization
+and successful `session/new`). No provider model task turn was started. Native
+tool-attempt tests and full model-driven delegation remain distinct from these
+transport checks and from the detached fixture/MCP lifecycle tests.

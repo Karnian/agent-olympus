@@ -71,6 +71,12 @@ No SendMessage — orchestrator mediates communication by reading outputs and in
 ## Codex Integration (via adapter chain)
 Codex workers use the adapter chain: codex-appserver > codex-exec > tmux.
 
+For explicit managed execution, consult `docs/internals/athena-runtime.md` and
+use `scripts/athena-runtime.mjs`. Its persistent worker backend and MCP broker
+support parallel leaf delegation and verified dependency waves. Treat its
+completion as task execution evidence, preserving the normal pipeline review
+and shipping gates. Native-team checkpoints cannot adopt managed sub-run state.
+
 ## Gemini Integration (via adapter chain)
 Gemini workers use the adapter chain: gemini-acp > gemini-exec > tmux.
 

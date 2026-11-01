@@ -63,7 +63,12 @@ Every persisted format carries an independently versioned `schemaVersion`:
 - **Writer rule**: writers emit the format's current exported schema constant rather than assuming every format remains at version 1.
 - **Migration policy**: a version increment requires an explicit migration path for supported older versions or a clear upgrade message. Never silently reinterpret an unknown future version.
 
-The concurrency ledger is `schemaVersion: 2`. Version 2 makes its recovery
+The default concurrency ledger is `schemaVersion: 2`. The explicit managed
+Athena runtime opts into v3 for parent/child reservations; all current admission
+consumers preserve that version and count its reserved slots. Migration and
+downgrade require quiescence, and old v2 readers reject v3. See
+[managed runtime compatibility](internals/athena-runtime.md#ledger-compatibility-and-current-control-limits).
+Version 2 makes its recovery
 barrier part of the compatibility boundary so a v1 reader rejects it instead
 of discarding admission-critical metadata. The v2 loader durably migrates a
 valid ordinary v1 ledger; unknown versions and v1 artifacts containing
