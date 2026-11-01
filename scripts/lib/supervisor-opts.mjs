@@ -23,10 +23,13 @@
  * the key never touches the manifest on disk).
  * @param {Object} m - the validated supervisor manifest
  */
+import { effectiveRuntimeLevel } from './runtime-provider.mjs';
+
 export function buildExecOpts(m) {
   const readOnly = m.readOnly === true;
+  const runtimeLevel = m.managed || m.runtimeLeaf ? effectiveRuntimeLevel(m) : null;
   return {
-    cwd: m.cwd, model: m.model, readOnly, level: readOnly ? 'suggest' : m.level,
+    cwd: m.cwd, model: m.model, readOnly, level: readOnly ? 'suggest' : (runtimeLevel || m.level),
     appendSystemPrompt: m.systemPrompt, maxBudgetUsd: m.maxBudgetUsd,
     // A read-only Codex review must not load project/user MCP servers or other
     // mutable user configuration. Other exec adapters ignore this option.
@@ -35,12 +38,19 @@ export function buildExecOpts(m) {
     skipGitRepoCheck: readOnly ? true : undefined,
     strictConfig: readOnly ? true : undefined,
     configOverrides: readOnly
-      ? ['project_doc_max_bytes=0', 'skills.bundled.enabled=false']
-      : m.configOverrides,
-    approvalMode: readOnly ? 'plan' : m.approvalMode,
-    permissionMode: readOnly ? 'plan' : m.permissionMode,
+      ? ['project_doc_max_bytes=0', 'skills.bundled.enabled=false', ...(m.runtimeOptions?.configOverrides || [])]
+      : (m.runtimeOptions?.configOverrides || m.configOverrides),
+    approvalMode: readOnly ? 'plan' : (runtimeLevel
+      ? ({ 'full-auto': 'yolo', 'auto-edit': 'auto_edit', suggest: 'plan' }[runtimeLevel]) : m.approvalMode),
+    permissionMode: readOnly ? 'plan' : (runtimeLevel
+      ? ({ 'full-auto': 'bypassPermissions', 'auto-edit': 'acceptEdits', suggest: 'plan' }[runtimeLevel]) : m.permissionMode),
     allowedTools: readOnly ? ['Read', 'Glob', 'Grep'] : m.allowedTools,
     credential: m.geminiCredential,
+    ...(m.runtimeOptions ? {
+      tools: m.runtimeOptions.tools, mcpConfig: m.runtimeOptions.mcpConfig,
+      strictConfig: true, env: m.runtimeOptions.env,
+      allowedTools: [...(readOnly ? ['Read', 'Glob', 'Grep'] : m.allowedTools || []), ...(m.runtimeOptions.allowedTools || [])],
+    } : {}),
   };
 }
 
@@ -54,6 +64,7 @@ export function buildAppserverThreadOpts(m) {
     level: m.readOnly === true ? 'suggest' : m.level,
     ephemeral: true,
     serviceName: `agent-olympus:${m.teamName}`,
+    ...(m.model ? { model: m.model } : {}),
   };
 }
 
@@ -64,13 +75,15 @@ export function buildAppserverThreadOpts(m) {
  */
 export function buildGeminiAcpSessionOpts(m) {
   const readOnly = m.readOnly === true;
+  const runtimeLevel = m.managed || m.runtimeLeaf ? effectiveRuntimeLevel(m) : null;
   return {
     cwd: m.cwd,
-    approvalMode: readOnly ? 'plan' : m.approvalMode,
+    approvalMode: readOnly ? 'plan' : (runtimeLevel
+      ? ({ 'full-auto': 'yolo', 'auto-edit': 'auto_edit', suggest: 'plan' }[runtimeLevel]) : m.approvalMode),
     // Legacy sessions warn and continue when the server cannot change modes.
     // A cross-validation worker cannot safely do that: plan mode is part of
     // its execution security contract, so createSession must fail closed.
-    requireApprovalMode: readOnly,
+    requireApprovalMode: readOnly || m.managed === true,
     model: m.model,
   };
 }

@@ -22,6 +22,7 @@ test('read-only Gemini settings are private, external, restrictive, and disposab
     assert.equal(statSync(artifact.path).mode & 0o777, 0o600);
     const settings = JSON.parse(readFileSync(artifact.path, 'utf8'));
     assert.equal(settings.hooksConfig.enabled, false);
+    assert.equal(settings.experimental.enableAgents, false);
     assert.equal(settings.skills.enabled, false);
     assert.equal(settings.admin.secureModeEnabled, true);
     assert.equal(settings.admin.extensions.enabled, false);

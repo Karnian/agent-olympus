@@ -37,6 +37,8 @@ Invoked by skills, CI, or maintainers — not registered as hooks.
 | File | Purpose |
 |------|---------|
 | `orchestrator-runtime.mjs` | Code-owned Atlas/Athena phase-control CLI (positional commands only) |
+| `athena-runtime.mjs` | Opt-in managed worker scheduling, commands, status, cancellation, and ledger migration |
+| `runtime-mcp.mjs` | Worker-bound stdio MCP proxy with single-use broker bootstrap |
 | `ask.mjs` | `/ask` helper: sync query plus async job subcommands |
 | `codex-goal.mjs` | `/codex-goal` helper: one Codex spawn/resume turn with structured result |
 | `codex-review.mjs` | `/codex-review` helper: read-only Codex review gate for the current diff |
@@ -63,7 +65,7 @@ Invoked by skills, CI, or maintainers — not registered as hooks.
 | `review-router.mjs` | Reviewer-set routing for the review chain |
 | `subagent-context.mjs` | Subagent context builder for hook injection |
 | `provider-detect.mjs` | Shared `detectProvider()` for concurrency hooks |
-| `concurrency-limits.mjs` | Schema-v2 concurrency ledger: limits, reservations, and release |
+| `concurrency-limits.mjs` | Shared v2/v3 admission ledger, subtree reservations, migration, and release |
 
 ### Orchestration pipeline
 
@@ -117,6 +119,11 @@ Invoked by skills, CI, or maintainers — not registered as hooks.
 | `adapter-worker-supervisor.mjs` | Detached adapter owner and disk reporter |
 | `supervisor-state.mjs` | Run-scoped snapshots and heartbeat |
 | `supervisor-opts.mjs` | Pure manifest→adapter option builders |
+| `supervisor-mailbox.mjs` | Generation-bound, durable supervisor commands and task results |
+| `persistent-worker.mjs` | Detached supervisor assignment loop, steering, and explicit shutdown |
+| `worker-broker.mjs` | Parent-bound child admission, isolated execution, collection, integration, and cancellation |
+| `runtime-provider.mjs` | Provider capability diagnostics and invocation-local native-agent/MCP configuration |
+| `athena-scheduler.mjs` | Durable dependency waves with integration and verification before dependent launch |
 | `proc-identity.mjs` | PID start-time identity and reuse detection |
 | `worker-status.mjs` | Real-time worker status dashboard (inline markdown) |
 | `worktree.mjs` | Git worktree isolation for Athena parallel workers |

@@ -227,6 +227,8 @@ export function startServer(opts = {}) {
     'app-server',
     '--listen', 'stdio://',
   ];
+  if (opts.strictConfig) args.push('--strict-config');
+  for (const override of opts.configOverrides || []) args.push('-c', override);
 
   const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;
   const child = spawnImpl(codexPath, args, {

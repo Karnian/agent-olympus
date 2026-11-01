@@ -29,8 +29,8 @@
  */
 
 import { readFileSync, writeFileSync, unlinkSync, existsSync } from 'fs';
-import { spawn } from 'child_process';
-import { isAbsolute } from 'node:path';
+import { spawn, execFileSync } from 'child_process';
+import { isAbsolute, join } from 'node:path';
 import { readProcStartId } from './proc-identity.mjs';
 import { atomicWriteFileSync } from './fs-atomic.mjs';
 import {
@@ -38,6 +38,10 @@ import {
   HEARTBEAT_INTERVAL_MS,
 } from './supervisor-state.mjs';
 import { buildExecOpts, buildAppserverThreadOpts, buildGeminiAcpSessionOpts } from './supervisor-opts.mjs';
+import { runPersistentWorker } from './persistent-worker.mjs';
+import { createWorkerBroker } from './worker-broker.mjs';
+import { createRuntimeProviderOptions, probeRuntimeProvider, effectiveRuntimeLevel } from './runtime-provider.mjs';
+import { bindRuntimeProcess, releaseRuntimeSubtree } from './concurrency-limits.mjs';
 import {
   REVIEW_TREE_OID_PATTERN,
   assertCrossValidationPromptIdentity,
@@ -65,6 +69,9 @@ let liveShutdown = null;          // (h, graceMs) => Promise | void
 let base = null;                  // base snapshot fields (identity)
 let snapPath = null;
 let outPath = null;
+let broker = null;
+let runtimeProvider = null;
+let runtimeManifest = null;
 
 function nowMs() { return Date.now(); }
 
@@ -105,7 +112,15 @@ async function settle(status, error, output, extra = {}) {
   settled = true;
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (watchdogTimer) clearTimeout(watchdogTimer);
+  if (broker) {
+    try { await broker.close(); }
+    catch (failure) { status = 'failed'; error = { category: 'children_unresolved', message: failure.message }; }
+  }
   await shutdownAdapter();
+  runtimeProvider?.cleanup();
+  if (runtimeManifest?.managed) {
+    try { releaseRuntimeSubtree(runtimeManifest.projectRoot, runtimeManifest.parentEntryId); } catch {}
+  }
 
   const text = typeof output === 'string' ? output : '';
   let outputBytes = 0;
@@ -183,6 +198,7 @@ function onWorkerMeta(h) {
 // import). run* below MUST use them so the tested contract is what production runs.
 
 async function runExec(mod, m) {
+  if (liveHandle) await shutdownAdapter();
   const h = mod.spawn(m.prompt, buildExecOpts(m));
   liveHandle = h; liveShutdown = mod.shutdown;
   onAdapterPid(h.pid);
@@ -191,7 +207,12 @@ async function runExec(mod, m) {
 }
 
 async function runCodexAppserver(mod, m) {
-  const h = mod.startServer({ cwd: m.cwd });
+  if (m.persistent && liveHandle?.threadId) {
+    const turn = await mod.startTurn(liveHandle, m.prompt);
+    if (turn?.error) return normalize({ status: 'failed', error: turn.error });
+    return normalize(await mod.collectTurnResult(liveHandle, m.timeoutMs));
+  }
+  const h = mod.startServer({ cwd: m.cwd, ...(m.runtimeOptions || {}) });
   liveHandle = h; liveShutdown = mod.shutdownServer;
   onAdapterPid(h.pid);
   onWorkerMeta(h);
@@ -207,12 +228,17 @@ async function runCodexAppserver(mod, m) {
 }
 
 async function runGeminiAcp(mod, m) {
+  if (m.persistent && liveHandle?._sessionId) {
+    return normalize(await mod.sendPrompt(liveHandle, m.prompt, { timeout: m.timeoutMs }));
+  }
   // model belongs on createSession (→ unstable_setSessionModel), NOT startServer
   // which ignores it. Mirrors the pre-FLIP in-process worker-spawn path.
   const h = mod.startServer({
     cwd: m.cwd,
     credential: m.geminiCredential,
     readOnly: m.readOnly === true,
+    ...(m.runtimeOptions ? { env: m.runtimeOptions.env } : {}),
+    modernAcp: !!m.runtimeOptions,
   });
   liveHandle = h; liveShutdown = mod.shutdownServer;
   onAdapterPid(h.pid);
@@ -230,8 +256,9 @@ async function runGeminiAcp(mod, m) {
 
 async function runFixture(m) {
   const fx = m.fixture || {};
+  if (fx.delegate && broker) await broker.dispatch('spawn', fx.delegate);
   const delay = Math.min(Math.max(0, Number(fx.delayMs) || 0), FIXTURE_MAX_DELAY_MS);
-  let out = typeof fx.output === 'string' ? fx.output : '';
+  let out = fx.echoPrompt === true ? m.prompt : (typeof fx.output === 'string' ? fx.output : '');
   if (Buffer.byteLength(out, 'utf-8') > FIXTURE_MAX_OUTPUT_BYTES) {
     out = Buffer.from(out, 'utf-8').slice(0, FIXTURE_MAX_OUTPUT_BYTES).toString('utf-8');
   }
@@ -256,6 +283,16 @@ async function runFixture(m) {
     }
   }
   const exitCode = Number.isInteger(fx.exitCode) ? fx.exitCode : 0;
+  if (fx.change && exitCode === 0) {
+    const change = fx.change;
+    if (!/^[a-zA-Z0-9_-]+\.txt$/.test(change.path || '')) throw new Error('invalid fixture file');
+    if (change.expectPath && readFileSync(join(m.cwd, change.expectPath), 'utf8') !== change.expectContent) {
+      throw new Error('fixture did not observe its integrated dependency');
+    }
+    writeFileSync(join(m.cwd, change.path), change.content);
+    execFileSync('git', ['-C', m.cwd, 'add', '--', change.path]);
+    execFileSync('git', ['-C', m.cwd, '-c', 'user.name=AO Fixture', '-c', 'user.email=ao@example.test', 'commit', '-qm', 'fixture change']);
+  }
   if (exitCode === 0) return { status: 'completed', output: out, error: null };
   const category = typeof fx.category === 'string' && /^[a-z_]+$/.test(fx.category) ? fx.category : 'nonzero_exit';
   return { status: 'failed', output: out, error: { category, message: `fixture exit ${exitCode}` } };
@@ -336,6 +373,12 @@ async function main() {
   m.readOnly = m.readOnly === true;
   m.reviewTreeOid = m.readOnly ? m.reviewTreeOid : null;
   m.validationIdentity = m.readOnly ? normalizedValidationIdentity : null;
+  // Launch options are constructed here, never trusted from project-local manifests.
+  delete m.runtimeOptions;
+  if (m.persistent !== undefined && typeof m.persistent !== 'boolean') {
+    throw new Error('invalid persistent worker mode');
+  }
+  if (m.persistent && m.readOnly) throw new Error('review workers cannot opt into persistent execution');
 
   // Derive trusted paths from IDs (NOT from the manifest).
   let basePaths;
@@ -364,13 +407,53 @@ async function main() {
 
   heartbeatTimer = setInterval(writeRunningSnapshot, HEARTBEAT_INTERVAL_MS);
   if (heartbeatTimer.unref) heartbeatTimer.unref();
+  const lifetimeMs = m.persistent
+    ? Math.min(MAX_TIMEOUT_MS, Number.isInteger(m.maxRuntimeMs) && m.maxRuntimeMs > 0 ? m.maxRuntimeMs : 3600000)
+    : m.timeoutMs;
   watchdogTimer = setTimeout(() => {
-    settle('failed', { category: 'timeout', message: `worker exceeded ${m.timeoutMs}ms` }, '');
-  }, m.timeoutMs + 2000); // backstop margin over the adapter's own collect timeout
+    settle('failed', { category: 'timeout', message: `worker exceeded ${lifetimeMs}ms` }, '');
+  }, lifetimeMs + 2000); // backstop margin over the adapter's own collect timeout
   if (watchdogTimer.unref) watchdogTimer.unref();
 
   try {
-    const res = await runAdapter(m);
+    if (m.managed || m.runtimeLeaf) {
+      m.level = effectiveRuntimeLevel(m);
+      if (m.adapterName !== 'fixture') {
+        const provider = m.adapterName.startsWith('codex') ? 'codex' : m.adapterName.startsWith('gemini') ? 'gemini' : 'claude';
+        const capability = probeRuntimeProvider(provider);
+        if (!capability.supported) throw new Error(`managed worker capability unavailable: ${provider}`);
+      }
+      if (m.managed) {
+        runtimeManifest = m;
+        bindRuntimeProcess(m.projectRoot, m.parentEntryId, process.pid);
+        broker = await createWorkerBroker(m);
+      }
+      runtimeProvider = createRuntimeProviderOptions(m, broker?.bootstrap());
+      m.runtimeOptions = runtimeProvider.options;
+    }
+    const res = m.persistent ? await runPersistentWorker({
+      identity: m,
+      initialPrompt: m.prompt,
+      execute: async prompt => {
+        const value = await runAdapter({ ...m, prompt });
+        if (value.status === 'completed') broker?.assertResolved();
+        return value;
+      },
+      stop: shutdownAdapter,
+      idleTimeoutMs: Math.min(MAX_TIMEOUT_MS,
+        Number.isInteger(m.idleTimeoutMs) && m.idleTimeoutMs > 0 ? m.idleTimeoutMs : 300000),
+      onState: state => {
+        base.workerMeta = { ...(base.workerMeta || {}), ...state };
+        writeRunningSnapshot();
+      },
+      ...(m.adapterName === 'codex-appserver' ? {
+        steer: async prompt => (await import('./codex-appserver.mjs')).steerTurn(liveHandle, prompt),
+        interrupt: async () => (await import('./codex-appserver.mjs')).interruptTurn(liveHandle),
+      } : {}),
+      ...(m.adapterName === 'gemini-acp' ? {
+        interrupt: async () => (await import('./gemini-acp.mjs')).cancelPrompt(liveHandle),
+      } : {}),
+    }) : await runAdapter(m);
     await settle(res.status, res.error, res.output);
   } catch (e) {
     await fail('crash', e && e.message);

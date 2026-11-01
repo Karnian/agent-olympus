@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 export const GEMINI_READONLY_SYSTEM_SETTINGS = Object.freeze({
+  experimental: Object.freeze({ enableAgents: false }),
   hooksConfig: Object.freeze({ enabled: false }),
   skills: Object.freeze({ enabled: false }),
   // System-layer registration allowlist: user-tier policy rules can override

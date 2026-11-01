@@ -187,6 +187,8 @@ export function _buildSpawnArgs(prompt, opts = {}) {
   }
 
   // Allowed tools
+  if (opts.tools) args.push('--tools', opts.tools.join(','));
+  if (opts.mcpConfig) args.push('--strict-mcp-config', '--mcp-config', opts.mcpConfig);
   if (opts.allowedTools && opts.allowedTools.length > 0) {
     // `--allowedTools <tools...>` is variadic. Pass the whitelist as one
     // comma-delimited value so it cannot consume the final prompt.
