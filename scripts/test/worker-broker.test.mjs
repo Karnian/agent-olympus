@@ -33,6 +33,9 @@ test('broker: two leaf processes overlap within reserved capacity, result collec
   const broker = await createWorkerBroker(m);
   let proxy;
   try {
+    m.level = 'suggest';
+    await assert.rejects(broker.dispatch('spawn', { id: 'f'.repeat(16), provider: 'codex', scope: ['file.txt'], prompt: 'write' }), /read-only/);
+    m.level = 'auto-edit';
     const request = id => ({ id, provider: 'codex', scope: ['file.txt'], readOnly: true, prompt: 'child result' });
     const one = await broker.dispatch('spawn', request('c'.repeat(16)));
     const two = await broker.dispatch('spawn', request('d'.repeat(16)));
@@ -50,6 +53,9 @@ test('broker: two leaf processes overlap within reserved capacity, result collec
       assert.equal(result.status, 'completed'); assert.equal(result.output, 'child result');
     }
     broker.assertResolved();
+    m.level = 'suggest';
+    await assert.rejects(broker.dispatch('integrate', { id: one.id }), /integration writes/);
+    m.level = 'auto-edit';
     assert.equal(readActiveConcurrencyCounts(root).global, 3);
     const attach = broker.bootstrap('leaf');
     const credentials = JSON.parse(readFileSync(attach));

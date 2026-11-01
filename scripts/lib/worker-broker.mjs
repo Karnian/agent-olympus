@@ -90,6 +90,7 @@ export async function createWorkerBroker(m) {
     if (identity.role !== 'parent') throw new Error('leaf connections cannot delegate');
     if (closing) throw new Error('parent admission is fenced');
     if (name === 'spawn') {
+      if (m.level === 'suggest' && args.readOnly !== true) throw new Error('parent grant permits read-only children only');
       if (!/^[0-9a-f]{16,64}$/.test(args.id || '') || !['claude', 'codex', 'gemini'].includes(args.provider)
         || typeof args.prompt !== 'string' || !args.prompt.trim() || Buffer.byteLength(args.prompt) > 65536
         || !validateChangedPathsAgainstScope(args.scope, m.scope).ok
@@ -166,6 +167,7 @@ export async function createWorkerBroker(m) {
       const status = await inspect(item);
       if (!['completed', 'failed', 'cancelled'].includes(status.status)) throw new Error('child must be terminal before resolution');
       if (name === 'integrate') {
+        if (m.level === 'suggest') throw new Error('parent grant does not permit integration writes');
         if (status.status !== 'completed') throw new Error('failed child cannot be integrated');
         clean(item.cwd); clean(m.cwd);
         const parentChanged = parseNulDelimitedGitPaths(git(m.cwd, ['diff', '--name-only', '-z', item.baseCommit, 'HEAD']));
