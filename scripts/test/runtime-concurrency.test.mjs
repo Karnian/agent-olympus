@@ -33,7 +33,8 @@ test('concurrent processes cannot claim more children than the pre-reserved capa
     migrateRuntimeLedger(root);
     const tree = reserveRuntimeSubtree(root, { runId: 'a'.repeat(16), parentId: 'parent', provider: 'claude', children: { codex: 2 } });
     const modulePath = fileURLToPath(new URL('../lib/concurrency-limits.mjs', import.meta.url));
-    const outcomes = await Promise.all([0, 1, 2, 3].map(index => promisify(execFile)(process.execPath, ['--input-type=module', '-e',
+    const fault = fileURLToPath(new URL('./fixtures/runtime-lock-release.mjs', import.meta.url));
+    const outcomes = await Promise.all([0, 1, 2, 3].map(index => promisify(execFile)(process.execPath, ['--import', fault, '--input-type=module', '-e',
       `import { claimRuntimeChild } from ${JSON.stringify(modulePath)}; console.log(JSON.stringify(claimRuntimeChild(${JSON.stringify(root)},${JSON.stringify(tree.parentEntryId)},{childId:'child-${index}',provider:'codex'})));`,
     ]).then(response => JSON.parse(response.stdout))));
     assert.equal(outcomes.filter(value => value.ok).length, 2);

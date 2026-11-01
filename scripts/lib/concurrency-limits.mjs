@@ -169,12 +169,24 @@ function processDefinitelyGone(pid, expectedStartId) {
 }
 
 function inspectExistingLock(lockPath) {
-  assertSafeDirectory(lockPath, 'concurrency lock');
+  try { assertSafeDirectory(lockPath, 'concurrency lock'); }
+  catch (error) {
+    // A live holder can release between the contender's existence probe and
+    // inspection. Retry acquisition; this never authorizes without winning
+    // the atomic candidate rename.
+    if (error.code === 'ENOENT') return { reclaim: false };
+    throw error;
+  }
   const ownerPath = join(lockPath, 'owner.json');
   // A missing owner is ambiguous (the holder may have been descheduled during
   // an upgrade-era mkdir+write acquisition), so it fails closed.
   if (!existsSync(ownerPath)) return { reclaim: false };
-  const owner = readSafeJson(ownerPath, 'concurrency lock owner', 4096);
+  let owner;
+  try { owner = readSafeJson(ownerPath, 'concurrency lock owner', 4096); }
+  catch (error) {
+    if (error.code === 'ENOENT') return { reclaim: false };
+    throw error;
+  }
   if (!owner || typeof owner !== 'object' || typeof owner.token !== 'string'
     || !Number.isInteger(owner.pid) || owner.pid <= 1
     || !Number.isFinite(Date.parse(owner.acquiredAt))
