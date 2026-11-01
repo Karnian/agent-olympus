@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { atomicWriteFileSync } from '../../lib/fs-atomic.mjs';
 
 import {
   releaseConcurrencyReservation,
@@ -9,7 +10,8 @@ import {
 const [action, cwd, identity, readyPath, startPath, resultPath, finishPath] = process.argv.slice(2);
 
 function writeResult(value) {
-  writeFileSync(resultPath, JSON.stringify(value), { encoding: 'utf8', mode: 0o600 });
+  // The parent polls existence: publish only a complete JSON generation.
+  atomicWriteFileSync(resultPath, JSON.stringify(value), { mode: 0o600, durable: true });
 }
 
 if (action === 'reserve') {
