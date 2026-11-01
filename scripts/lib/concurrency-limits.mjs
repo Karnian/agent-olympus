@@ -40,6 +40,7 @@ export const DEFAULT_CONCURRENCY_LIMITS = Object.freeze({
 // metadata and authorizing work from an apparently empty ledger.
 export const CONCURRENCY_SCHEMA_VERSION = 2;
 export const RUNTIME_CONCURRENCY_SCHEMA_VERSION = 3;
+export const RUNTIME_LEDGER_MARKER_SCHEMA_VERSION = 1;
 const LEGACY_CONCURRENCY_SCHEMA_VERSION = 1;
 
 const STALE_HOOK_MS = 3 * 60 * 1000;
@@ -641,7 +642,7 @@ function readLedger(paths, now, options = {}) {
   const protectedRuntime = existsSync(marker);
   if (protectedRuntime) {
     const value = readSafeJson(marker, 'runtime ledger marker', 1024);
-    if (value.schemaVersion !== 1 || value.ledgerVersion !== 3) throw new Error('unsupported runtime ledger marker');
+    if (value.schemaVersion !== RUNTIME_LEDGER_MARKER_SCHEMA_VERSION || value.ledgerVersion !== RUNTIME_CONCURRENCY_SCHEMA_VERSION) throw new Error('unsupported runtime ledger marker');
   }
   const artifact = readRegularArtifact(
     paths.ledgerPath,
@@ -1035,8 +1036,8 @@ export function migrateRuntimeLedger(cwd, options = {}) {
       writeLedger(paths, state);
       if (existsSync(marker)) unlinkSync(marker);
     } else {
-      atomicWriteFileSync(marker, JSON.stringify({ schemaVersion: 1, ledgerVersion: 3 }), { durable: true });
-      state.schemaVersion = 3;
+      atomicWriteFileSync(marker, JSON.stringify({ schemaVersion: RUNTIME_LEDGER_MARKER_SCHEMA_VERSION, ledgerVersion: RUNTIME_CONCURRENCY_SCHEMA_VERSION }), { durable: true });
+      state.schemaVersion = RUNTIME_CONCURRENCY_SCHEMA_VERSION;
     }
     return { ok: true, schemaVersion: state.schemaVersion };
   });

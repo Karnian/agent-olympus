@@ -17,6 +17,8 @@ import { readProcStartId } from './proc-identity.mjs';
 
 const supervisor = fileURLToPath(new URL('./adapter-worker-supervisor.mjs', import.meta.url));
 const MAX_FRAME = 1024 * 1024;
+export const WORKER_BROKER_SCHEMA_VERSION = 1;
+export const RUNTIME_BOOTSTRAP_SCHEMA_VERSION = 1;
 export function runtimeChildrenPath(m) {
   return join(supervisorRunDir(m.projectRoot, m.runId), `${m.workerRunId}.children.json`);
 }
@@ -40,7 +42,7 @@ export async function createWorkerBroker(m) {
   let mutation = Promise.resolve();
   const save = () => {
     revalidateDirectoryBinding(context, 'worker broker');
-    atomicWriteFileSync(recordPath, JSON.stringify({ schemaVersion: 1,
+    atomicWriteFileSync(recordPath, JSON.stringify({ schemaVersion: WORKER_BROKER_SCHEMA_VERSION,
       runId: m.runId, workerRunId: m.workerRunId, parentEntryId: m.parentEntryId,
       closing, children: [...children.values()].map(({ process, ...item }) => item),
     }), { durable: true });
@@ -214,7 +216,7 @@ export async function createWorkerBroker(m) {
     const token = randomBytes(32).toString('hex');
     tokens.set(token, { role, expiresAt: Date.now() + 60000 });
     const path = join(dir, 'attach.json');
-    writeFileSync(path, JSON.stringify({ schemaVersion: 1, port: server.address().port, token }), { mode: 0o600, flag: 'wx' });
+    writeFileSync(path, JSON.stringify({ schemaVersion: RUNTIME_BOOTSTRAP_SCHEMA_VERSION, port: server.address().port, token }), { mode: 0o600, flag: 'wx' });
     return path;
   }
   return {

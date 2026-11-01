@@ -13,6 +13,8 @@ import { probeRuntimeProvider } from './runtime-provider.mjs';
 import { resolveTrustedVcsBinary, sanitizedVcsEnvironment } from './trusted-vcs.mjs';
 import { readProcStartId } from './proc-identity.mjs';
 import { acquireRecoveryClaim, statGeneration } from './recovery-claim.mjs';
+export const ATHENA_RUNTIME_SCHEMA_VERSION = 1;
+export const ATHENA_TICK_LOCK_SCHEMA_VERSION = 1;
 
 const git = (cwd, args) => execFileSync(resolveTrustedVcsBinary('git'), ['-C', cwd, ...args], { env: sanitizedVcsEnvironment({ git: true }), maxBuffer: 4 * 1024 * 1024 });
 const head = cwd => git(cwd, ['rev-parse', 'HEAD']).toString().trim();
@@ -38,7 +40,7 @@ function acquireTickLock(cwd, id) {
     if (error.code !== 'EEXIST') throw error;
     const oldBinding = ensureSafeDirectoryPath(path, 'Athena tick lock', { trustedRoot: cwd });
     const owner = JSON.parse(readRegularArtifact(ownerPath, 'Athena tick owner', 4096).text);
-    if (owner.schemaVersion !== 1 || !Number.isInteger(owner.pid) || owner.pid <= 1 || typeof owner.token !== 'string') throw new Error('ambiguous tick lock owner');
+    if (owner.schemaVersion !== ATHENA_TICK_LOCK_SCHEMA_VERSION || !Number.isInteger(owner.pid) || owner.pid <= 1 || typeof owner.token !== 'string') throw new Error('ambiguous tick lock owner');
     const current = readProcStartId(owner.pid);
     let gone = false;
     try { process.kill(owner.pid, 0); } catch (failure) { if (failure.code === 'ESRCH') gone = true; }
@@ -53,7 +55,7 @@ function acquireTickLock(cwd, id) {
     unlinkSync(ownerPath); rmdirSync(path); mkdirSync(path, { mode: 0o700 });
   }
   const token = randomBytes(16).toString('hex');
-  atomicWriteFileSync(ownerPath, JSON.stringify({ schemaVersion: 1, token, pid: process.pid, startId: readProcStartId(process.pid) }), { durable: true });
+  atomicWriteFileSync(ownerPath, JSON.stringify({ schemaVersion: ATHENA_TICK_LOCK_SCHEMA_VERSION, token, pid: process.pid, startId: readProcStartId(process.pid) }), { durable: true });
   return () => {
     const owner = JSON.parse(readRegularArtifact(ownerPath, 'Athena tick owner', 4096).text);
     if (owner.token !== token) throw new Error('tick lock ownership changed');
@@ -66,7 +68,7 @@ export function readAthenaRuntime(cwd, id) {
   const state = JSON.parse(readRegularArtifact(file, 'Athena runtime state', 4 * 1024 * 1024, {
     revalidateContext: () => revalidateDirectoryBinding(binding, 'Athena runtime'),
   }).text);
-  if (state.schemaVersion !== 1 || state.id !== id || state.projectRoot !== resolve(cwd)
+  if (state.schemaVersion !== ATHENA_RUNTIME_SCHEMA_VERSION || state.id !== id || state.projectRoot !== resolve(cwd)
     || !Array.isArray(state.tasks) || !Array.isArray(state.waves)) throw new Error('invalid or unsupported Athena runtime state');
   return state;
 }
@@ -95,7 +97,7 @@ export function createAthenaRuntime({ cwd = process.cwd(), prd, verification, ch
   }
   migrateRuntimeLedger(cwd);
   const id = randomBytes(8).toString('hex');
-  const state = { schemaVersion: 1, id, projectRoot: cwd, status: 'ready', expectedHead: head(cwd),
+  const state = { schemaVersion: ATHENA_RUNTIME_SCHEMA_VERSION, id, projectRoot: cwd, status: 'ready', expectedHead: head(cwd),
     prdDigest: createHash('sha256').update(JSON.stringify(prd)).digest('hex'), verification, childCapacity,
     capabilities, waves: [], tasks: prd.userStories.map(story => ({ story, status: 'pending' })) };
   save(cwd, state);

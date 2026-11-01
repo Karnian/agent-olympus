@@ -4,11 +4,12 @@ import { connect } from 'node:net';
 import { createInterface } from 'node:readline';
 import { unlinkSync } from 'node:fs';
 import { readRegularArtifact } from './lib/hardened-fs.mjs';
+import { RUNTIME_BOOTSTRAP_SCHEMA_VERSION } from './lib/worker-broker.mjs';
 
 const path = process.argv[2];
 const bootstrap = JSON.parse(readRegularArtifact(path, 'runtime bootstrap', 4096).text);
 unlinkSync(path);
-if (bootstrap.schemaVersion !== 1 || !Number.isInteger(bootstrap.port)
+if (bootstrap.schemaVersion !== RUNTIME_BOOTSTRAP_SCHEMA_VERSION || !Number.isInteger(bootstrap.port)
   || !/^[a-f0-9]{64}$/.test(bootstrap.token || '')) throw new Error('invalid runtime bootstrap');
 const socket = connect(bootstrap.port, '127.0.0.1');
 let sequence = 0, buffer = '';

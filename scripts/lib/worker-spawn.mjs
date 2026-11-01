@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { readProcStartId } from './proc-identity.mjs';
 import { submitCommand, readCommandResult } from './supervisor-mailbox.mjs';
 import { readRegularArtifact, bindSafeDirectoryPath, revalidateDirectoryBinding } from './hardened-fs.mjs';
+import { WORKER_BROKER_SCHEMA_VERSION } from './worker-broker.mjs';
 import { acquireRecoveryClaim, statGeneration } from './recovery-claim.mjs';
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession, WORKER_EXIT_MARKER } from './tmux-session.mjs';
 import { readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
@@ -598,7 +599,7 @@ export async function shutdownSupervisorWorker(state, worker) {
     });
     if (artifact.present) {
       const record = JSON.parse(artifact.text);
-      if (record.schemaVersion !== 1 || record.runId !== state.runId
+      if (record.schemaVersion !== WORKER_BROKER_SCHEMA_VERSION || record.runId !== state.runId
         || record.workerRunId !== h.workerRunId || record.parentEntryId !== worker._concurrencyEntryId
         || !Array.isArray(record.children)) throw new Error('runtime child recovery identity mismatch');
       for (const item of record.children) {
