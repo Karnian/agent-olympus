@@ -225,8 +225,10 @@ function acquireLedgerLock(paths, options = {}) {
         acquired = true;
         return { token };
       } catch (error) {
-        const contention = existsSync(paths.lockPath)
-          && ['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error?.code);
+        // The holder may have removed its lock after rename failed. Classify
+        // the syscall result, not a later existence probe; inspection below
+        // handles a disappeared holder and the next loop retries acquisition.
+        const contention = ['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error?.code);
         if (!contention) throw error;
       }
 
