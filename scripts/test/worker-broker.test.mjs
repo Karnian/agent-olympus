@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { migrateRuntimeLedger, reserveRuntimeSubtree, readActiveConcurrencyCounts, releaseRuntimeSubtree, bindRuntimeProcess } from '../lib/concurrency-limits.mjs';
-import { createWorkerBroker } from '../lib/worker-broker.mjs';
+import { createWorkerBroker, buildRuntimeLeafManifest } from '../lib/worker-broker.mjs';
 import { createRuntimeProviderOptions, effectiveRuntimeLevel } from '../lib/runtime-provider.mjs';
 import { reassignProvider } from '../lib/worker-spawn.mjs';
 import { buildExecOpts } from '../lib/supervisor-opts.mjs';
@@ -133,4 +133,26 @@ test('legacy provider failover cannot silently replace a managed subtree', async
   assert.equal(result.blocked, true);
   assert.equal(result.fallbackNeeded, false);
   assert.equal(result.replacementWorker, null);
+});
+
+test('cross-provider leaves inherit only identity and bounded grants, never parent model, prompt, budget, or MCP configuration', () => {
+  const parent = { projectRoot: '/project', runId: 'a'.repeat(16), teamName: 'test', parentEntryId: 'parent',
+    level: 'auto-edit', timeoutMs: 5000, model: 'opus', systemPrompt: 'parent-only instructions',
+    maxBudgetUsd: 25, runtimeOptions: { secret: 'parent capability' }, allowedTools: ['Agent'],
+    geminiCredential: { source: 'env' }, permissionMode: 'bypassPermissions' };
+  for (const provider of ['claude', 'codex', 'gemini']) {
+    const item = { id: 'b'.repeat(16), workerRunId: 'c'.repeat(16), cwd: '/leaf', scope: ['file.txt'], provider, readOnly: false, branch: 'leaf' };
+    const leaf = buildRuntimeLeafManifest(parent, item, 'child-only assignment');
+    const opts = buildExecOpts(leaf);
+    assert.equal(leaf.runtimeLeaf, true);
+    assert.equal(opts.level, 'auto-edit');
+    assert.equal(opts.model, undefined);
+    assert.equal(opts.appendSystemPrompt, undefined);
+    assert.equal(opts.maxBudgetUsd, undefined);
+    assert.equal(leaf.runtimeOptions, undefined);
+    assert.equal(leaf.allowedTools, undefined);
+    assert.equal(leaf.permissionMode, undefined);
+    assert.equal(leaf.geminiCredential, provider === 'gemini' ? parent.geminiCredential : undefined);
+    assert.ok(!leaf.prompt.includes(parent.systemPrompt));
+  }
 });

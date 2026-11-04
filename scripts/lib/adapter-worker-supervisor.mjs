@@ -6,7 +6,7 @@
  *   node adapter-worker-supervisor.mjs <manifestPath>
  *
  * It owns the adapter's live handle (which the orchestrator's stripped, disk-
- * loaded state cannot), runs ONE prompt to terminal completion, and writes
+ * loaded state cannot), runs one prompt (or opt-in persistent assignments), and writes
  * atomic DISK snapshots + durable output so a later fresh orchestrator process
  * can read the worker's outcome.
  *
@@ -256,6 +256,23 @@ async function runGeminiAcp(mod, m) {
 
 async function runFixture(m) {
   const fx = m.fixture || {};
+  // Exercise the real one-use stdio bootstrap without starting a model turn.
+  if (fx.probeRuntimeMcp) {
+    const server = JSON.parse(readFileSync(m.runtimeOptions.mcpConfig, 'utf8')).mcpServers.ao_runtime;
+    const tools = await new Promise((resolve, reject) => {
+      const child = spawn(server.command, server.args, { stdio: ['pipe', 'pipe', 'pipe'] });
+      let output = '', diagnostic = '';
+      child.stdout.on('data', data => { output += data; });
+      child.stderr.on('data', data => { diagnostic += data; });
+      child.once('error', reject);
+      child.once('exit', () => {
+        try { resolve(JSON.parse(output.trim()).result.tools.map(tool => tool.name)); }
+        catch { reject(new Error(`fixture MCP connection failed: ${diagnostic}`)); }
+      });
+      child.stdin.end(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n');
+    });
+    if (!tools.includes('spawn')) throw new Error('fixture MCP lost parent delegation tools');
+  }
   if (fx.delegate && broker) await broker.dispatch('spawn', fx.delegate);
   const delay = Math.min(Math.max(0, Number(fx.delayMs) || 0), FIXTURE_MAX_DELAY_MS);
   let out = fx.echoPrompt === true ? m.prompt : (typeof fx.output === 'string' ? fx.output : '');
@@ -299,6 +316,18 @@ async function runFixture(m) {
 }
 
 async function runAdapter(m) {
+  if (m.managed || m.runtimeLeaf) {
+    const reusingSession = (m.adapterName === 'codex-appserver' && liveHandle?.threadId)
+      || (m.adapterName === 'gemini-acp' && liveHandle?._sessionId);
+    if (!reusingSession) {
+      // Each batch invocation starts a new MCP process. Its bootstrap is a
+      // one-use capability, so retire the old process/config before minting one.
+      await shutdownAdapter();
+      runtimeProvider?.cleanup();
+      runtimeProvider = createRuntimeProviderOptions(m, broker?.bootstrap());
+    }
+    m.runtimeOptions = runtimeProvider.options;
+  }
   if (m.adapterName === 'fixture') return runFixture(m);
   const mod = await import(`./${m.adapterName}.mjs`); // adapterName is allowlisted
   if (m.adapterName === 'codex-appserver') return runCodexAppserver(mod, m);
@@ -416,6 +445,9 @@ async function main() {
   if (watchdogTimer.unref) watchdogTimer.unref();
 
   try {
+    // Enforce this at the executable boundary as well as spawnTeam. Otherwise
+    // a batch manifest could bypass assertResolved and discard child results.
+    if (m.managed && m.persistent !== true) throw new Error('managed workers require persistent mode');
     if (m.managed || m.runtimeLeaf) {
       m.level = effectiveRuntimeLevel(m);
       if (m.adapterName !== 'fixture') {
@@ -428,8 +460,6 @@ async function main() {
         bindRuntimeProcess(m.projectRoot, m.parentEntryId, process.pid);
         broker = await createWorkerBroker(m);
       }
-      runtimeProvider = createRuntimeProviderOptions(m, broker?.bootstrap());
-      m.runtimeOptions = runtimeProvider.options;
     }
     const res = m.persistent ? await runPersistentWorker({
       identity: m,
