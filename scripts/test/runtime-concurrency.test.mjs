@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { migrateRuntimeLedger, reserveRuntimeSubtree, claimRuntimeChild, finishRuntimeChild,
   releaseRuntimeSubtree, readActiveConcurrencyCounts, reserveWorkerBatchConcurrency,
+  inspectRuntimeReservations, reconcileRuntimeReservation,
 } from '../lib/concurrency-limits.mjs';
+import { snapshotPath } from '../lib/supervisor-state.mjs';
+import { atomicWriteFileSync } from '../lib/fs-atomic.mjs';
 test('v3 subtree reservations retain parent capacity and convert children without double charging', () => {
   const root = mkdtempSync(join(tmpdir(), 'ao-runtime-ledger-'));
   try {
@@ -25,6 +28,44 @@ test('v3 subtree reservations retain parent capacity and convert children withou
     finishRuntimeChild(root, tree.parentEntryId, 'two');
     assert.equal(releaseRuntimeSubtree(root, tree.parentEntryId).ok, true);
     assert.equal(readActiveConcurrencyCounts(root).global, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('offline reconciliation requires acknowledgement, rejects live evidence and stale digests, and audits an orphaned launch before releasing slots', () => {
+  const root = mkdtempSync(join(tmpdir(), 'ao-runtime-reconcile-'));
+  try {
+    migrateRuntimeLedger(root);
+    const live = reserveRuntimeSubtree(root, { runId: 'a'.repeat(16), parentId: 'live', provider: 'claude', children: { codex: 1 } });
+    const inspected = inspectRuntimeReservations(root)[0];
+    assert.throws(() => reconcileRuntimeReservation(root, live.parentEntryId, { digest: inspected.digest }), /acknowledgement/);
+    assert.throws(() => reconcileRuntimeReservation(root, live.parentEntryId, { digest: inspected.digest, confirmStopped: true }), /live or unproven/);
+    claimRuntimeChild(root, live.parentEntryId, { childId: 'new-generation', provider: 'codex' });
+    assert.throws(() => reconcileRuntimeReservation(root, live.parentEntryId, { digest: inspected.digest, confirmStopped: true }), /changed/);
+    finishRuntimeChild(root, live.parentEntryId, 'new-generation');
+    releaseRuntimeSubtree(root, live.parentEntryId);
+
+    const modulePath = fileURLToPath(new URL('../lib/concurrency-limits.mjs', import.meta.url));
+    execFileSync(process.execPath, ['--input-type=module', '-e',
+      `import { reserveRuntimeSubtree, claimRuntimeChild } from ${JSON.stringify(modulePath)};
+       const tree=reserveRuntimeSubtree(${JSON.stringify(root)}, {runId:'${'b'.repeat(16)}',parentId:'orphan',provider:'claude',children:{codex:1}});
+       claimRuntimeChild(${JSON.stringify(root)}, tree.parentEntryId, {childId:'unrecorded-launch',provider:'codex'});`,
+    ]);
+    const orphan = inspectRuntimeReservations(root)[0];
+    const snapshot = snapshotPath(root, 'b'.repeat(16), 'c'.repeat(16));
+    atomicWriteFileSync(snapshot, JSON.stringify({ schemaVersion: 1, runId: 'b'.repeat(16),
+      supervisorPid: null, adapterPid: process.pid }));
+    assert.throws(() => reconcileRuntimeReservation(root, orphan.parentEntryId, { digest: orphan.digest, confirmStopped: true }), /live or unproven/);
+    rmSync(snapshot);
+    const cli = fileURLToPath(new URL('../athena-runtime.mjs', import.meta.url));
+    const result = JSON.parse(execFileSync(process.execPath, [cli, 'reconcile', orphan.parentEntryId, orphan.digest, '--confirm-stopped'], { cwd: root, encoding: 'utf8' }));
+    assert.equal(result.released, 2);
+    assert.equal(readActiveConcurrencyCounts(root).global, 0);
+    const audit = JSON.parse(readFileSync(result.auditPath, 'utf8'));
+    assert.equal(audit.schemaVersion, 1);
+    assert.equal(audit.digest, orphan.digest);
+    assert.deepEqual(audit.entries, orphan.entries);
+    assert.equal(audit.confirmStopped, true);
+    assert.throws(() => reconcileRuntimeReservation(root, orphan.parentEntryId, { digest: orphan.digest, confirmStopped: true }), /changed/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 test('concurrent processes cannot claim more children than the pre-reserved capacity', async () => {

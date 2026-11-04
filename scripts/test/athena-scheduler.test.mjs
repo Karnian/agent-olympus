@@ -4,7 +4,8 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createAthenaRuntime, tickAthenaRuntime, cancelAthenaRuntime } from '../lib/athena-scheduler.mjs';
+import { createAthenaRuntime, tickAthenaRuntime, cancelAthenaRuntime, readAthenaRuntime } from '../lib/athena-scheduler.mjs';
+import { readActiveConcurrencyCounts } from '../lib/concurrency-limits.mjs';
 import { validateExecutionPrd } from '../lib/execution-prd.mjs';
 const spec = {
   projectName: 'runtime-test', mode: 'engineering-change', scale: 'M',
@@ -20,6 +21,66 @@ test('dependency waves are opt-in; legacy execution still rejects cross-worker d
   assert.equal(validateExecutionPrd(spec, { orchestrator: 'athena' }).ok, false);
   assert.equal(validateExecutionPrd(spec, { orchestrator: 'athena', allowDependencyWaves: true }).ok, true);
 });
+
+for (const scenario of ['verification', 'worker']) {
+  test(`scheduler ${scenario} failure is durable, stops its wave, releases reserved capacity, and never repeats execution`, async () => {
+    const original = process.cwd();
+    const root = mkdtempSync(join(tmpdir(), 'ao-scheduler-failure-'));
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['-C', root, 'config', 'user.name', 'AO Test']);
+    execFileSync('git', ['-C', root, 'config', 'user.email', 'ao@example.test']);
+    writeFileSync(join(root, '.gitignore'), '.ao/\n');
+    execFileSync('git', ['-C', root, 'add', '.']);
+    execFileSync('git', ['-C', root, 'commit', '-qm', 'initial']);
+    process.chdir(root);
+    let state;
+    try {
+      const verification = scenario === 'verification'
+        ? "require('fs').appendFileSync('.ao/check-count','x'); process.exit(7)" : 'process.exit(0)';
+      state = createAthenaRuntime({ cwd: root, prd: spec,
+        verification: [{ command: process.execPath, args: ['-e', verification] }],
+        childCapacity: { one: { codex: 1 }, two: { codex: 1 } },
+        _inject: { probeProvider: provider => ({ provider, supported: true }) } });
+      const initialHead = state.expectedHead;
+      const inject = {
+        spawnOptions: { supervisor: { adapterName: 'fixture', env: { AO_SUPERVISOR_ALLOW_FIXTURE: '1' } } },
+        fixtureForStory: story => scenario === 'worker'
+          ? { delayMs: story.id === 'US-001' ? 10 : 20000, exitCode: story.id === 'US-001' ? 1 : 0 }
+          : { delayMs: 10, change: { path: story.scope[0], content: story.id } },
+      };
+      const deadline = Date.now() + 15000;
+      do {
+        state = await tickAthenaRuntime(root, state.id, inject);
+        if (state.status !== 'failed') await new Promise(resolve => setTimeout(resolve, 40));
+      } while (state.status !== 'failed' && Date.now() < deadline);
+      assert.equal(state.status, 'failed', JSON.stringify(state));
+      assert.equal(state.waves.length, 1); // dependent story must never launch
+      assert.equal(state.waves[0].shutdownState, 'completed');
+      assert.equal(state.waves[0].cleanupError, undefined);
+      assert.equal(readActiveConcurrencyCounts(root).global, 0);
+      assert.equal(readAthenaRuntime(root, state.id).status, 'failed');
+      assert.match(state.failure.recovery, /retained branches/);
+      const failed = JSON.stringify(state);
+      state = await tickAthenaRuntime(root, state.id, inject);
+      assert.equal(JSON.stringify(state), failed);
+      if (scenario === 'verification') {
+        assert.equal(state.failure.category, 'verification_failed');
+        assert.notEqual(state.expectedHead, initialHead);
+        assert.equal(readFileSync(join(root, '.ao/check-count'), 'utf8'), 'x');
+        assert.equal(readFileSync(join(root, 'first.txt'), 'utf8'), 'US-001');
+        assert.ok(state.waves[0].workers.every(worker => worker.mergeCommit));
+        assert.equal(state.tasks[0].status, 'merged_unverified');
+      } else {
+        assert.equal(state.tasks[0].status, 'failed');
+        assert.equal(state.tasks[1].status, 'cancelled');
+      }
+    } finally {
+      if (state) await cancelAthenaRuntime(root, state.id);
+      process.chdir(original);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 test('scheduler executes independent detached workers, verifies integration, then launches a dependent worker from the new revision', async () => {
   const cwd = process.cwd();
   const root = mkdtempSync(join(tmpdir(), 'ao-scheduler-'));

@@ -12,7 +12,7 @@ import {
   writeFileSync,
   unlinkSync,
 } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { basename, join, resolve } from 'node:path';
 
@@ -21,6 +21,7 @@ import {
   readRegularArtifact,
   revalidateRegularArtifact,
   writeExclusiveRegularArtifact,
+  ensureSafeDirectoryPath,
   HARDENED_FS_VIOLATION_CODE,
 } from './hardened-fs.mjs';
 import { readProcStartId } from './proc-identity.mjs';
@@ -42,6 +43,7 @@ export const DEFAULT_CONCURRENCY_LIMITS = Object.freeze({
 export const CONCURRENCY_SCHEMA_VERSION = 2;
 export const RUNTIME_CONCURRENCY_SCHEMA_VERSION = 3;
 export const RUNTIME_LEDGER_MARKER_SCHEMA_VERSION = 1;
+export const RUNTIME_RECOVERY_AUDIT_SCHEMA_VERSION = 1;
 const LEGACY_CONCURRENCY_SCHEMA_VERSION = 1;
 
 const STALE_HOOK_MS = 3 * 60 * 1000;
@@ -1169,5 +1171,63 @@ export function releaseRuntimeSubtree(cwd, parentEntryId, options = {}) {
       && !processDefinitelyGone(parent.processPid, parent.processStartId)) return { ok: false, reason: 'parent_process_live' };
     state.activeTasks = state.activeTasks.filter(e => e.parentEntryId !== parentEntryId);
     return { ok: true };
+  });
+}
+
+const runtimeDigest = entries => createHash('sha256').update(JSON.stringify(entries)).digest('hex');
+
+/** Operator inspection only: runtime reservations are never age-reclaimed. */
+export function inspectRuntimeReservations(cwd) {
+  return withLockedLedger(cwd, {}, state => {
+    const ids = [...new Set(state.activeTasks.filter(entry => entry.kind === 'runtime').map(entry => entry.parentEntryId))];
+    return ids.map(parentEntryId => {
+      const entries = state.activeTasks.filter(entry => entry.kind === 'runtime' && entry.parentEntryId === parentEntryId);
+      return { parentEntryId, digest: runtimeDigest(entries), entries };
+    });
+  });
+}
+
+/** Explicit offline recovery after the operator has stopped ALL run processes.
+ * The acknowledgement covers launches which died before recording a PID. Known
+ * live owners/processes still block, and a digest prevents releasing newer work.
+ */
+export function reconcileRuntimeReservation(cwd, parentEntryId, { digest, confirmStopped } = {}) {
+  if (confirmStopped !== true || !/^[a-f0-9]{64}$/.test(digest || '')) {
+    throw new Error('reconciliation requires an inspected digest and explicit stopped-process acknowledgement');
+  }
+  return withLockedLedger(cwd, {}, (state, paths) => {
+    if (state.schemaVersion !== RUNTIME_CONCURRENCY_SCHEMA_VERSION || state.recovery) throw new Error('runtime ledger unavailable');
+    const entries = state.activeTasks.filter(entry => entry.kind === 'runtime' && entry.parentEntryId === parentEntryId);
+    if (!entries.length || runtimeDigest(entries) !== digest) throw new Error('runtime reservation changed; inspect again');
+    const assertGone = (pid, startId) => {
+      if (pid == null) return;
+      if (!Number.isInteger(pid) || pid <= 1 || !processDefinitelyGone(pid, startId || null)) {
+        throw new Error('recorded runtime process is live or unproven; stop all participants first');
+      }
+    };
+    for (const entry of entries) {
+      assertGone(entry.ownerPid, entry.ownerStartId);
+      assertGone(entry.processPid, entry.processStartId);
+    }
+    // An adapter can outlive its supervisor. Inspect every snapshot in the run,
+    // conservatively blocking recovery while another participant is still live.
+    const runId = entries[0].runId;
+    const runDir = join(paths.stateDir, 'supervisor', runId);
+    if (existsSync(runDir)) {
+      ensureSafeDirectoryPath(runDir, 'runtime supervisor evidence', { trustedRoot: resolve(cwd) });
+      for (const file of readdirSync(runDir).filter(name => name.endsWith('.snapshot.json'))) {
+        const snapshot = readSafeJson(join(runDir, file), 'runtime snapshot', MAX_SUPERVISOR_SNAPSHOT_BYTES);
+        if (snapshot.schemaVersion !== SUPERVISOR_SCHEMA_VERSION || snapshot.runId !== runId) throw new Error('unproven runtime snapshot');
+        assertGone(snapshot.supervisorPid, snapshot.supervisorStartId);
+        assertGone(snapshot.adapterPid, snapshot.adapterStartId);
+      }
+    }
+    const audit = ensureSafeDirectoryPath(join(resolve(cwd), '.ao/artifacts/runtime-recovery'), 'runtime recovery audit', { trustedRoot: resolve(cwd) });
+    const auditPath = join(audit.path, `${randomUUID()}.json`);
+    atomicWriteFileSync(auditPath, JSON.stringify({ schemaVersion: RUNTIME_RECOVERY_AUDIT_SCHEMA_VERSION,
+      action: 'reconcile-request', requestedAt: new Date().toISOString(), confirmStopped: true, digest, entries,
+    }), { durable: true });
+    state.activeTasks = state.activeTasks.filter(entry => !entries.some(removed => removed.id === entry.id));
+    return { ok: true, released: entries.length, auditPath };
   });
 }
