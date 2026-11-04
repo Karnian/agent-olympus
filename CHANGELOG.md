@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-11-05
+
+Managed Athena execution, released as an explicit opt-in backend. The local
+Node suite passes **3376/3376 across 142 test files**; Linux CI passes 3375 with
+one platform-specific skip. Full model-driven delegation remains unverified;
+provider transport diagnostics and hermetic lifecycle tests are separate evidence.
+
 ### Added
 - Explicit managed Athena execution backend: persistent supervisors and durable
   commands, worker-bound MCP delegation to parallel leaves, parent/child capacity
