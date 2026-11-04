@@ -1,5 +1,7 @@
 # Managed Athena execution runtime
 
+Available in **v1.6.2** ([release notes](../../CHANGELOG.md#162---2026-11-05)).
+
 This opt-in backend supports concurrent provider workers and broker-managed
 leaf agents. Legacy Athena/native teams, Atlas, `/ask`, and read-only review
 workers retain their existing lifecycle. The runtime performs local task
@@ -8,6 +10,8 @@ release approval, a PR, or successful shipping.
 
 Run commands from the project root, using the plugin's absolute script path
 when the target project does not contain the plugin sources.
+Update every participating plugin installation before the first v3 migration;
+the plugin version and the independently versioned admission ledger are distinct.
 
 ```sh
 node scripts/athena-runtime.mjs capabilities

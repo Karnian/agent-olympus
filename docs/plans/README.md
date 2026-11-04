@@ -4,14 +4,14 @@ Auto-generated index of all project specifications.
 
 | Project | Scale | Mode | Features/Stories | Status | Last Updated |
 |---------|-------|------|-----------------|--------|-------------|
-| [Athena Parallel Agent Runtime](./athena-parallel-runtime/spec.md) | L | engineering-change | persistent workers + managed child agents + dependency scheduling | implemented (explicit execution opt-in) | 2026-11-01 |
+| [Athena Parallel Agent Runtime](./athena-parallel-runtime/spec.md) | L | engineering-change | persistent workers + managed child agents + dependency scheduling | released v1.6.2 (explicit execution opt-in) | 2026-11-05 |
 | [Event-Backed Run System](./event-backed-runs/spec.md) | M | forward | 8 stories (US-001~008) | implemented (v0.9.2) | 2026-04-01 |
 | [Superpowers Methodology Integration](./superpowers-methodology-integration/spec.md) | L | forward | 18 stories | draft | 2026-03-29 |
 | [Agent Olympus Reverse PRD](./reverse-prd/spec.md) | L | reverse | 11 features | analyzed | 2026-03-27 |
 | [v0.9 Source-Informed Improvements](./v0.9-source-informed-improvements/spec.md) | M | forward | 10 items (4 done, 4 merged, 2 done via G) | done | 2026-04-01 |
-| [v0.9.1 Hook System + Hygiene](./improvements.md#f-hook-system-extensions-v091) | S | forward | 4 items (4 done) | done | 2026-04-01 |
+| [v0.9.1 Hook System + Hygiene](./improvements.md) | S | forward | 4 items (4 done) | done | 2026-04-01 |
 | [v0.9.5 Deferred Items](./v0.9.5-deferred/spec.md) | M | forward | 2 items (blocked) | backlog | 2026-04-02 |
-| [v0.9.3 Cross-Session Management](./improvements.md#h-cross-session-management-v093) | S | forward | 1 item (1 done) | done | 2026-04-02 |
+| [v0.9.3 Cross-Session Management](./improvements.md) | S | forward | 1 item (1 done) | done | 2026-04-02 |
 | [C3-R Pragmatic Memory](./c3r-pragmatic-memory/spec.md) | S | forward | 3 stories (US-C3R-001~003) | plan (R1) | 2026-04-04 |
 | [Improvement Tracker](./improvements.md) | — | — | 53+6 items | 53 done + J1~J6 (v0.9.8) | 2026-04-05 |
 | [Claude Code Integration Research](./claude-code-integration/research-report.md) | L | forward | 22 recommendations (P0~P3) | P0 fixed (v0.9.8) | 2026-04-05 |
@@ -20,4 +20,4 @@ Auto-generated index of all project specifications.
 | [Native Agent Teams (G#4)](./native-agent-teams/spec.md) | M | forward | autonomy.json fallback | implemented | 2026-04-04 |
 | [/ask Adapter Migration](./ask-adapter-migration/spec.md) | S | forward | tmux → adapter system | implemented | 2026-04-08 |
 | [/ask Job-Based Async](./ask-job-based/spec.md) | S | forward | async/status/collect/cancel/list | implemented | 2026-04-10 |
-| [Harness Upgrade Roadmap](./harness-upgrade/README.md) | L | forward | 17 items (HU-01~17, P0~P3) + [eval-harness spec](./harness-upgrade/eval-harness-spec.md) | roadmap | 2026-06-16 |
+| [Harness Upgrade Roadmap](./harness-upgrade/README.md) | L | forward | 17 items (HU-01~17, P0~P3) + [eval-harness spec](./harness-upgrade/eval-harness-spec.md) | roadmap + v1.6.2 implementation addendum | 2026-11-05 |

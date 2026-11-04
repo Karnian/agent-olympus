@@ -8,6 +8,8 @@ Agent Olympus는 Claude Code를 위한 독립형 플러그인으로, 소프트�
 
 2개의 오케스트레이터, 19개의 전문 에이전트, 37개의 워크플로우 스킬. npm 의존성 제로.
 
+현재 릴리스: **v1.6.2** — [변경 기록](CHANGELOG.md#162---2026-11-05).
+
 ## 무엇을 하는가
 
 Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시하는 대신, 목표만 설명하면 오케스트레이터가 모든 복잡성을 처리합니다. 계획 수립, 전문 에이전트에게 작업 분배, 결과 통합, 실패 처리, 모든 기준이 충족될 때까지 반복.
@@ -69,7 +71,8 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 - **취소 가능한 shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`)보다 영속 user no-ship 후속 지시가 우선하며, push/PR은 repository·base·branch·remote HEAD identity에 바인딩. CI는 정확히 push된 SHA의 모든 workflow를 집계하고 crash recovery의 fix candidate를 단일 failed run과 attempt에 연결
 - **Codex MCP 복구 + `--no-mcp`** *(v1.5.1)*: `/ask`가 exec/tmux 어댑터에서 레코드 순서대로 MCP 인증 실패를 분류. Codex 전용 `--no-mcp`는 설정된 MCP server를 포함한 user-level config 전체를 건너뛰며, 인증과 명시적 CLI override는 유지하고 Codex 버전이 불명확하거나 미지원이면 fail-closed
 - **빠른 `/ask codex` 응답** *(v1.6.1)*: 동기 `/ask`는 Codex가 플러그인·MCP 서버·훅을 정리하느라 걸리는 2–6초를 기다리지 않고, 턴이 끝나는 즉시 결과를 반환. Codex는 강제 종료하지 않고 놓아주므로 SessionEnd 훅은 그대로 실행되며, 남은 프로세스 그룹은 분리된 reaper가 정리
-- **3354개 단위 테스트**: v1.6.1 릴리스 기준선은 `node:test` 기반 135개 파일(이전 v1.6.0 기준선: 133개 파일, 3322개 테스트)
+- **관리형 Athena 실행** *(v1.6.2, 명시적 선택)*: 지속 워커가 후속 작업을 받고, 워커에 바인딩된 MCP 도구로 병렬 하위 에이전트에 위임합니다. 실행 전에 provider별 자식 슬롯을 예약하며, 선행 작업을 통합·검증한 뒤 의존 작업을 시작합니다. 실패 시 동료 워커를 종료하고 작업을 보존하며, 고아 슬롯의 수동 복구도 지원합니다. [운영 안내](docs/internals/athena-runtime.md)를 참고하세요.
+- **3376개 단위 테스트**: v1.6.2는 `node:test` 기반 142개 파일로 검증합니다(v1.6.1 기준선: 135개 파일, 3354개 테스트). Linux CI는 3375개 통과, 플랫폼 전용 1개 건너뜀입니다.
 - **페일-세이프 아키텍처**: 훅은 보통 오류 시 개방하지만, 동시성 admission과 Atlas 실행 제어 게이트는 보호 상태가 안전하지 않거나 읽을 수 없거나 해소되지 않으면 의도적으로 차단
 
 ## 설치
@@ -89,7 +92,15 @@ Agent Olympus는 **감독 문제**를 해결합니다. AI에게 일일이 지시
 git clone https://github.com/Karnian/agent-olympus.git ~/.claude/plugins/agent-olympus
 ```
 
-### v1.5.2에서 업그레이드
+### v1.6.2로 업그레이드
+
+관리형 Athena 백엔드를 선택하기 전에 플러그인을 v1.6.2로 업데이트하세요.
+기존 네이티브 팀의 수명주기는 유지됩니다. 관리형 실행은 실행 중인 작업이 없는
+v2 프로젝트에서 명시적으로 ledger v3에 진입합니다. 구버전 플러그인은 v3를
+거부하므로 기존 세션을 종료하고 모든 참여자를 함께 업그레이드해야 합니다.
+실행 중인 ledger를 삭제하지 마세요. [마이그레이션·다운그레이드·복구 안내](docs/internals/athena-runtime.md)를 참고하세요.
+
+### v1.5.2의 기존 복구 ref
 
 v1.6.0은 업그레이드 과정에서 저장 작업을 삭제하지 않도록 기존 로컬
 `refs/ao-wip/v1/*` 복구 ref를 그대로 둡니다. 각 ref를 삭제하기 전에
@@ -152,6 +163,26 @@ Athena가 자동으로:
 6. **Verify & Review** — 검증과 첫 routed review 실행
 7. **Finalize & final review** — 정확한 최종 트리를 재검증·재리뷰한 뒤 커밋
 8. **Loop** — 모든 워커 출력과 최종 변경이 테스트되고 승인될 때까지 반복
+
+#### 관리형 실행 (v1.6.2, 명시적 선택)
+
+지속적인 작업 할당, 관리되는 하위 에이전트, wave 간 의존성이 필요할 때 선택합니다.
+변경 사항이 없는 프로젝트 루트에서 설치된 플러그인의 절대 경로를 사용하세요.
+
+```sh
+node /path/to/agent-olympus/scripts/athena-runtime.mjs capabilities
+node /path/to/agent-olympus/scripts/athena-runtime.mjs start .ao/prd.json .ao/runtime-options.json
+node /path/to/agent-olympus/scripts/athena-runtime.mjs tick <run-id>
+node /path/to/agent-olympus/scripts/athena-runtime.mjs status <run-id>
+```
+
+PRD에는 실행 배정 정보가, 옵션에는 검증 명령이 필요합니다. 하위 에이전트에
+위임할 때는 자식 용량을 명시적으로 예약합니다.
+진행 중에는 tick을 계속 호출합니다. `completed`는 실행 검증의 통과를 뜻하며,
+전체 Athena 리뷰·최종화·shipping 게이트도 수행해야 합니다.
+[옵션·취소·복구 안내](docs/internals/athena-runtime.md)를 참고하세요.
+입장 제한은 관리되는 작업 그래프에 적용됩니다. 실제 모델의 위임 및 네이티브
+spawn 도구 시도는 hermetic 테스트와 별도로 검증해야 합니다.
 
 ### 중단된 작업 재개
 
@@ -445,9 +476,16 @@ hooks/               훅 이벤트 등록 (hooks.json)
 - Codex/Gemini 통신을 위한 워커별 디렉토리 (어댑터 관리)
 - 팀 완료 후 자동 정리
 
+**관리형 런타임** (`.ao/state/athena-runtime/<id>.json`):
+- wave, 작업 결과, 통합 커밋, 최종 실패와 정리 상태를 기록
+- 훅과 v3 입장 ledger를 공유하며 부모·자식 예약은 TTL로 회수하지 않음
+- 수동 복구 요청은 `.ao/artifacts/runtime-recovery/`에 보존
+
 **Worktrees** (`.ao/worktrees/<slug>/<worker>/`):
 - 각 병렬 워커를 위한 격리된 git worktree
 - 워커 간 파일 충돌 방지
+- 관리형 워커와 자식의 worktree는 완료·취소·폐기 후에도 보존하며,
+  [명시적인 정리 절차](docs/internals/athena-runtime.md#retained-worktree-cleanup)로 제거
 - `/codex-goal`은 goal마다 고유 worktree를 만들고, 예정된 경로나 브랜치가
   이미 있으면 기존 산출물을 변경하지 않고 중단
 - 기존 교체 정책은 폐기 가능한 stale/cancelled 워커 전용이며, 미병합 커밋은
@@ -608,7 +646,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## 테스트
 
-`node:test` 기반 테스트 스위트(v1.6.1 릴리스 기준선: 135개 파일, 3354개 테스트; 이전 v1.6.0 기준선: 133개 파일, 3322개 테스트)가 핵심 훅 라이브러리를 커버합니다:
+`node:test` 기반 테스트 스위트(v1.6.2: 142개 파일, 3376개 테스트; v1.6.1 기준선: 135개 파일, 3354개 테스트)가 훅·어댑터·관리형 런타임 수명주기를 검증합니다:
 
 ```bash
 npm test
@@ -618,7 +656,9 @@ node scripts/run-tests.mjs
 
 **대표 커버 모듈:** phase-runner, run-artifacts, run-failure, recovery-claim,
 hardened-fs, athena-recovery, orphan-run-recovery, eval-failure-candidates,
-worker-spawn, checkpoint, worktree
+worker-spawn, checkpoint, worktree, athena-scheduler, persistent-worker,
+supervisor-mailbox, worker-broker. 구문·매니페스트·hermetic 평가 검증과 실제
+모델 검증의 범위는 [테스트 안내](docs/testing.md)를 참고하세요.
 
 추가 통합 검증:
 

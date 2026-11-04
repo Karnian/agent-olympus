@@ -37,7 +37,7 @@ Invoked by skills, CI, or maintainers — not registered as hooks.
 | File | Purpose |
 |------|---------|
 | `orchestrator-runtime.mjs` | Code-owned Atlas/Athena phase-control CLI (positional commands only) |
-| `athena-runtime.mjs` | Opt-in managed worker scheduling, commands, status, cancellation, and ledger migration |
+| `athena-runtime.mjs` | Opt-in scheduling, worker commands, cancellation, ledger migration, and offline reservation inspection/reconciliation |
 | `runtime-mcp.mjs` | Worker-bound stdio MCP proxy with single-use broker bootstrap |
 | `ask.mjs` | `/ask` helper: sync query plus async job subcommands |
 | `codex-goal.mjs` | `/codex-goal` helper: one Codex spawn/resume turn with structured result |
@@ -65,7 +65,7 @@ Invoked by skills, CI, or maintainers — not registered as hooks.
 | `review-router.mjs` | Reviewer-set routing for the review chain |
 | `subagent-context.mjs` | Subagent context builder for hook injection |
 | `provider-detect.mjs` | Shared `detectProvider()` for concurrency hooks |
-| `concurrency-limits.mjs` | Shared v2/v3 admission ledger, subtree reservations, migration, and release |
+| `concurrency-limits.mjs` | Shared v2/v3 admission ledger, subtree reservations, migration, release, and audited offline reconciliation |
 
 ### Orchestration pipeline
 
@@ -123,7 +123,7 @@ Invoked by skills, CI, or maintainers — not registered as hooks.
 | `persistent-worker.mjs` | Detached supervisor assignment loop, steering, and explicit shutdown |
 | `worker-broker.mjs` | Parent-bound child admission, isolated execution, collection, integration, and cancellation |
 | `runtime-provider.mjs` | Provider capability diagnostics and invocation-local native-agent/MCP configuration |
-| `athena-scheduler.mjs` | Durable dependency waves with integration and verification before dependent launch |
+| `athena-scheduler.mjs` | Durable dependency waves, integration/verification, and terminal failure cleanup without task replay |
 | `proc-identity.mjs` | PID start-time identity and reuse detection |
 | `worker-status.mjs` | Real-time worker status dashboard (inline markdown) |
 | `worktree.mjs` | Git worktree isolation for Athena parallel workers |

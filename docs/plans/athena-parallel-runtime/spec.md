@@ -1,9 +1,9 @@
 # Athena Parallel Agent Runtime
 
-Status: opt-in runtime implemented; provider launch controls are configured,
+Status: released in v1.6.2 as an explicit opt-in runtime; provider launch controls are configured,
 with hermetic process/MCP tests and separate provider transport diagnostics.
 Full model-turn provider validation is not claimed.
-Updated: 2026-11-01 (PR #93 implementation)
+Updated: 2026-11-05 (PR #93 merged; v1.6.2 release)
 Investigation base: `db474cd` (main, v1.6.1).
 
 Implementation and usage: [Managed Athena runtime](../../internals/athena-runtime.md).
@@ -29,22 +29,37 @@ The second form must be an observable part of the Athena run. Merely enabling
 a provider's internal agent feature does not establish admission, ownership,
 recovery, or cancellation in Agent Olympus.
 
-## Evidence from the current implementation
+## Released implementation
 
-| Area | Current behavior | Source |
+PR #93 implements persistent assignments, parent-bound MCP leaf delegation,
+provider-specific pre-reserved capacity, and verified dependency waves. Review
+fixes refresh one-use bootstrap credentials per batch invocation, isolate child
+provider options, enforce persistent mode at the supervisor boundary, and persist
+terminal failures before wave shutdown. Offline reservation reconciliation and
+retained-worktree cleanup are documented in the runtime guide.
+
+Validation: 3376 local tests across 142 files pass; Linux CI passes 3375 with one
+platform-specific skip, alongside baseline and fixture green/red proof. These
+results verify the managed lifecycle, not full model-driven delegation or an
+OS-wide process/spend limit. The design sections below retain the investigation
+and acceptance criteria behind this release.
+
+## Evidence from the investigation base (v1.6.1)
+
+| Area | Behavior at investigation base | Source |
 |------|------------------|--------|
 | Parallel launch | Launches detached supervisors without awaiting each worker's task completion; reserves the external batch in the shared concurrency ledger | `scripts/lib/worker-spawn.mjs`, `scripts/lib/concurrency-limits.mjs` |
 | External worker lifetime | Starts one prompt/turn, collects its result, shuts down the adapter, writes terminal evidence, and exits | `scripts/lib/adapter-worker-supervisor.mjs` |
 | Provider messaging | Codex has `steerTurn`; Gemini ACP has `enqueueMessage`. These need live in-process handles. The detached supervisor has no command ingress connecting Athena to these functions | `scripts/lib/codex-appserver.mjs`, `scripts/lib/gemini-acp.mjs` |
 | Task scheduling | Athena requires one parallel group and rejects dependencies between different workers | `scripts/lib/execution-prd.mjs` |
 | Child agents | Repository role definitions exist, but the Athena worker definitions and supervisor manifest do not carry a child-agent policy or a managed parent/child lifecycle | `.codex/agents/`, `scripts/lib/execution-prd.mjs`, `scripts/lib/worker-spawn.mjs` |
-| Current native child exposure | Writable Claude descriptors default to `allowedTools: null`; the CLI builder does not restrict the built-in tool set or explicitly deny Task/Agent. Codex worker launch does not set an explicit native-child prohibition. Existing Codex Interop notes record native child execution in a trusted repository on CLI 0.140.0. These establish a possible existing untracked path, not a verified result for the current Athena workers | `scripts/lib/worker-spawn.mjs`, `scripts/lib/claude-cli.mjs`, `scripts/lib/supervisor-opts.mjs`, `scripts/lib/codex-appserver.mjs`, [historical probe record](../codex-interop/PLAN.md#cross-review-resolutions-rev-1--rev-2) |
+| Native child exposure (investigation) | Writable Claude descriptors default to `allowedTools: null`; the CLI builder does not restrict the built-in tool set or explicitly deny Task/Agent. Codex worker launch does not set an explicit native-child prohibition. Existing Codex Interop notes record native child execution in a trusted repository on CLI 0.140.0. These establish a possible existing untracked path at that baseline, not a verified result for managed Athena workers | `scripts/lib/worker-spawn.mjs`, `scripts/lib/claude-cli.mjs`, `scripts/lib/supervisor-opts.mjs`, `scripts/lib/codex-appserver.mjs`, [historical probe record](../codex-interop/PLAN.md#cross-review-resolutions-rev-1--rev-2) |
 | Hook coverage | Claude CLI workers default to `--bare`; nested admission cannot depend on Olympus hooks running inside those workers | `scripts/lib/claude-cli.mjs` |
 
 One task turn may already involve many model/tool interactions. The limitation
 is the worker lifecycle and coordination boundary, not a single inference.
 
-**Current exposure remains unverified at runtime.** Absence of an explicit
+**Native exposure was unverified at investigation time.** Absence of an explicit
 tool restriction does not prove that a particular CLI/version exposes a native
 spawn tool, and `allowedTools` alone is not evidence of tool removal. No current
 Athena worker was launched to test native child creation in this investigation.
@@ -53,7 +68,7 @@ count of all provider-native descendants. Audit Claude native teammates,
 fallback subagents, and each external adapter separately rather than assuming
 the Claude CLI path describes all Claude workers.
 
-## Proposed architecture
+## Runtime architecture
 
 ```text
 Athena lead
@@ -323,12 +338,12 @@ The implementation includes executable modules, adapters, schema changes,
 process tests, and operational documentation. Full pipeline review/shipping is
 not inferred from the standalone execution backend's terminal task state.
 
-## Investigation validation
+## Historical investigation validation
 
 `node --test` over `athena-native-team-contract`, `athena-start`,
 `athena-recovery`, `execution-prd`, `worker-spawn-integration`, and
-`adapter-worker-supervisor`: 102 tests passed, zero failures. These validate
-the existing implementation; they do not prove this proposed runtime exists.
+`adapter-worker-supervisor`: 102 tests passed, zero failures. These initial
+checks validated the pre-implementation baseline; release validation is listed above.
 
 Review revision checks: re-read the launch/option/ledger code and the historical
 Codex Interop probe record; inspect local `claude --help` without a model call.

@@ -4,7 +4,21 @@
 > harness-engineering review on **2026-06-16** (baseline: `main` @ v1.1.6 +
 > `feat/adapter-worker-supervisor` @ v1.2.0).
 
-## Status & handoff — START HERE (updated 2026-10-01)
+## Status & handoff — START HERE (updated 2026-11-05)
+
+### v1.6.2 implementation addendum — 2026-11-05
+
+- PR #93 adds the explicit [managed Athena execution backend](../../internals/athena-runtime.md):
+  persistent worker assignments, parent-bound MCP leaf delegation, pre-reserved
+  provider capacity, and integration/verification before dependent waves launch.
+- Batch follow-ups receive fresh one-use credentials; child options do not inherit
+  parent model, system prompt, budget, or MCP settings. Failed waves stop peers;
+  offline slot reconciliation and retained-worktree cleanup preserve evidence.
+- Default native-team execution and full pipeline review/shipping remain distinct.
+  Managed execution does not close HU-21's OS-wide/time/token/spend-policy gap.
+- The release suite passes 3376/3376 locally across 142 files; Linux CI passes
+  3375 with one platform-specific skip. Provider transport checks did not run
+  model turns; full model-driven delegation/native spawn trials remain open.
 
 ### v1.6.1 implementation addendum — 2026-10-01
 
@@ -97,6 +111,7 @@
 - **v1.5.2 (prepared here)** — stop-hook WIP ref/reflog lifecycle hardening and 30-day managed-anchor retention. Suite 3365/3365.
 - **v1.6.0 (prepared here)** — remove plugin-global Stop auto-commits, preserve Atlas control gating, and document explicit Git ownership plus legacy-ref migration. Suite 3322/3322.
 - **v1.6.1 (prepared here)** — `/ask codex` returns at `turn.completed` with a released Codex teardown and detached group reaper; `AGENTS.md` script inventory moved to `docs/internals/file-map.md`. Suite 3354/3354.
+- **v1.6.2** — explicit managed Athena execution, parallel leaves, verified dependency waves, and failed-wave/offline recovery. Suite 3376/3376 across 142 files.
 
 **Historical 2026-06-19 snapshot (HU-01 and HU-06.3 superseded by the addendum above):** the rest of the backlog was not started (HU-01, HU-02a, HU-03–05, HU-07–20) + the **4 deferred agents** (`metis`, `prometheus`, `hermes`, `ask` — decide read-only/Bash/unrestricted per their bodies). HU-06 `.1`/`.2` shipped in v1.2.3 and `.4` documentation shipped there; `.3` completed in v1.5.0.
 

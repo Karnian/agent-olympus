@@ -54,6 +54,23 @@ Add a row for every new `scripts/*.mjs` or `scripts/lib/*.mjs` file to
 fails on missing or stale rows. Do not grow the `AGENTS.md` directory tree; it
 lists top-level directories only.
 
+## Release Metadata and Documentation
+
+The current release is **v1.6.2**. Keep `package.json`,
+`.claude-plugin/plugin.json`, and both marketplace version fields synchronized.
+Move shipped changes from `Unreleased` to a dated `CHANGELOG.md` entry, update
+the English/Korean README feature and test baselines, and reconcile relevant
+operational guides and specification status. Historical release records and
+investigation bases retain their original versions. Plugin releases do not
+implicitly change persisted schema versions or migrate a project's ledger.
+
+Run `node scripts/check-version-sync.mjs` and the applicable checks in
+[testing.md](testing.md) before committing. Managed runtime release validation
+must distinguish hermetic lifecycle tests, provider transport diagnostics, and
+actual model-driven delegation; one does not establish the others.
+
+## Persisted State
+
 ### schemaVersion Convention (v1.0.2+)
 
 Every persisted format carries an independently versioned `schemaVersion`:

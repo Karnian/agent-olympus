@@ -1,9 +1,13 @@
 # Detached Worker Supervisor (v1.2.0+)
 
-The original one-task lifecycle described below remains the default. The new
-explicit [managed Athena runtime](athena-runtime.md) adds persistent supervisors,
+The original one-task lifecycle described below remains the default. Since v1.6.2,
+the explicit [managed Athena runtime](athena-runtime.md) adds persistent supervisors,
 generation-bound command mailboxes, and broker-managed leaves. It does not change
 `/ask`, Atlas, or review-worker lifetime implicitly.
+Managed batch assignments mint a fresh MCP bootstrap each time; Codex app-server
+and Gemini ACP reuse their live sessions. Child manifests copy only identity,
+scope, timeout, and resolved grants. Failed waves stop peers and retain their
+worktrees; the runtime guide covers offline slot recovery and explicit Git cleanup.
 > Moved verbatim from CLAUDE.md (Codex Interop v1, Ship order 1).
 
 ### Detached Worker Supervisor (v1.2.0+)
@@ -15,7 +19,7 @@ generation-bound command mailboxes, and broker-managed leaves. It does not chang
 - **Run identity** — `allocateTeamRunId()` lets Athena mint the random 16-hex generation before launch, persist it in both the pipeline ledger and checkpoint, and pass it through `spawnTeam(..., { runId })`. Callers that omit the option retain the old behavior: `spawnTeam` allocates the generation internally. The exact ID is stamped into team state together with absolute `projectRoot`; each worker gets a `workerRunId`, and the persisted `_handle = { supervisorPid, supervisorStartId, runId, workerRunId }` is fully serializable. Athena adoption proofs, monitor completion evidence, and runtime team state must all match that preallocated generation, so a same-slug prior team cannot be adopted. The supervisor's snapshot/output/manifest paths are DERIVED from the absolute `projectRoot` + these validated hex IDs (the manifest is NOT consulted for any explicit module/snapshot/output path), so a STALE supervisor from a prior same-name run can never be read as the current one.
 - **Snapshot lifecycle** (`scripts/lib/supervisor-state.mjs`, schemaVersion:1) — atomic `writeSnapshot` (0600, clamped output tail), `readSnapshot(path, expected)` with a 5-way result (`missing` / `corrupt` / `unsupported` / `mismatch` / `ok`), heartbeat freshness (future-skew bounded), HEARTBEAT_INTERVAL 10s / STALE 90s / STARTUP_GRACE 10s.
 - **Readers** (`worker-spawn.mjs`) — `monitorSupervisorWorker` maps a snapshot → MonitorResult: terminal status wins; `running` + dead supervisor (PID start-time identity mismatch) → crash; `running` + stale heartbeat → crash on the 2nd consecutive poll (`_supStaleSeen` latch); missing snapshot past startup grace (or a future `startedAt`) → crash; `mismatch`/`corrupt` → invalid. `collectResults` reads the durable output file (under `.ao/artifacts/team/`). `shutdownSupervisorWorker` is **supervisor-first**: signal the supervisor group (its SIGTERM handler shuts the adapter down) → re-read the snapshot → reap a surviving adapter group via the F3 start-id-checked kill → scrub the prompt-bearing manifest.
-- **Adapter dispatch** — the supervisor's `run*` functions use pure manifest→option builders in `scripts/lib/supervisor-opts.mjs` (`buildExecOpts` / `buildAppserverThreadOpts` / `buildGeminiAcpSessionOpts`), kept in a CLI-free module so the wiring is unit-testable without importing the supervisor (which runs `main()` on import). gemini `model` rides on `createSession` (→ `unstable_setSessionModel`), NOT `startServer`.
+- **Adapter dispatch** — the supervisor's `run*` functions use pure manifest→option builders in `scripts/lib/supervisor-opts.mjs` (`buildExecOpts` / `buildAppserverThreadOpts` / `buildGeminiAcpSessionOpts`), kept in a CLI-free module so the wiring is unit-testable without importing the supervisor (which runs `main()` on import). Gemini `model` belongs on `createSession`, not `startServer`: the legacy protocol uses `unstable_setSessionModel`, while managed ACP uses current `session/set_model` methods.
 - **Manifest hygiene** — the manifest carries the raw prompt. It is DATA for behavior (and supplies `projectRoot`/`cwd`), but NO explicit module/snapshot/output path is ever read from it — those are derived from the absolute `projectRoot` + validated IDs. The supervisor truncates+unlinks it on startup; a launch failure or an early shutdown also truncates+unlinks it so the prompt never lingers to the 24h sweep.
 - **SessionEnd** — `session-end.mjs` sweeps the supervisor tree **per-run** (never wholesale) and skips a run with a `running` snapshot that has a fresh heartbeat OR a live supervisor PID (identity-checked when a `supervisorStartId` is recorded and readable; otherwise it fails open to a bare `kill(pid,0)` existence probe).
 - **Security** — the built-in `fixture` adapter (test-only) is selectable ONLY when `AO_SUPERVISOR_ALLOW_FIXTURE==='1'`, which `spawnTeam` STRIPS from the child env in production; tests opt in via `_inject.supervisor.env`.

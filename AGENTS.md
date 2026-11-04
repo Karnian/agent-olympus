@@ -2,6 +2,7 @@
 
 Standalone multi-model orchestrator plugin for Claude Code.
 Atlas + Athena orchestrate 19 agents, 37 skills, Claude/Codex/Gemini execution, and adapter-based workers.
+Current release: **v1.6.2** — managed Athena execution is explicit opt-in.
 
 ## Architecture
 
@@ -236,10 +237,11 @@ Run the current 3376-test Node suite and syntax checks from [docs/testing.md](do
 | `.ao/state/supervisor/<runId>/` | Detached worker snapshots/manifests | Swept per inactive run |
 | `.ao/artifacts/runs/<runId>/` | Run evidence, failure marker, task ledger | Retained for audit/candidate review |
 | `.ao/artifacts/ask/<jobId>.*` | Async `/ask` raw and rendered outputs | Job-addressable artifacts |
+| `.ao/artifacts/runtime-recovery/` | Offline reservation reconciliation requests with original entries | Retained for audit; no automatic capacity release |
 | `.ao/artifacts/pipe/` | Stage handoff/archive pipe (`plan`, `execute`, `verify`, etc.) | 24h SessionEnd sweep |
 | `.ao/sessions/<sessionId>.json` | Cross-session registry metadata | 90-day TTL |
 | `.ao/teams/<slug>/` | Inbox/outbox for team workers (Claude/Codex/Gemini) | Created by Athena, cleaned on completion |
-| `.ao/worktrees/<slug>/<worker>/` | Isolated git worktrees for Athena workers | Created per worker, merged + cleaned on completion |
+| `.ao/worktrees/<slug>/<worker>/` | Isolated git worktrees for Athena workers | Legacy: merge + cleanup; managed: retained until explicit Git cleanup |
 
 ## Key Design Decisions
 

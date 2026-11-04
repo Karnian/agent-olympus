@@ -8,6 +8,8 @@ Agent Olympus is a standalone Claude Code plugin that transforms how you build s
 
 Two orchestrators, 19 specialized agents, 37 workflow skills. Zero npm dependencies.
 
+Current release: **v1.6.2** — [release notes](CHANGELOG.md#162---2026-11-05).
+
 ## What It Does
 
 Agent Olympus solves the **supervision problem**: you shouldn't have to babysit AI. Instead, you describe the goal and the orchestrator handles the complexity — planning, routing work to specialized agents, integrating results, catching failures, and looping until the task is truly complete.
@@ -69,7 +71,8 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Revocable shipping + exact-SHA CI** *(v1.5.1)*: `ship.mode` (`never` / `ask` / `auto`) is overridden by durable user no-ship follow-ups; push/PR operations bind repository, base, branch, and remote HEAD identity. CI aggregates every workflow for the exact pushed SHA and crash recovery links each fix candidate to one failed run and attempt.
 - **Codex MCP recovery + `--no-mcp`** *(v1.5.1)*: `/ask` classifies record-ordered MCP authentication failures across exec and tmux adapters. Codex-only `--no-mcp` skips the entire user-level config, including configured MCP servers, with a fail-closed Codex version gate while preserving authentication and explicit CLI overrides.
 - **Fast `/ask codex` return** *(v1.6.1)*: Synchronous `/ask` returns as soon as Codex completes its turn instead of waiting 2–6s for Codex to tear down plugins, MCP servers, and hooks. Codex is released, not killed, so its SessionEnd hooks still run, and a detached reaper cleans up any leftover process group.
-- **3354 unit tests**: v1.6.1 release baseline using `node:test` across 135 test files (previous v1.6.0 baseline: 3322 tests across 133 files)
+- **Managed Athena execution** *(v1.6.2, explicit opt-in)*: Persistent provider workers accept follow-ups and delegate to parallel leaf agents through worker-bound MCP tools. Provider-specific child slots are reserved before launch; dependency waves integrate and verify inputs before dependent tasks begin. Failures stop peers, retain work, and expose offline reservation recovery. See the [runtime guide](docs/internals/athena-runtime.md).
+- **3376 unit tests**: v1.6.2 uses `node:test` across 142 test files (v1.6.1 baseline: 3354 tests across 135 files). Linux CI passes 3375 with one platform-specific skip.
 - **Fail-safe architecture**: Hooks normally fail open; concurrency admission and the Atlas executable-control gates deliberately block on unsafe, unreadable, or unresolved protected state
 
 ## Installation
@@ -89,7 +92,15 @@ Clone the repository and reference it in your Claude Code plugin directory:
 git clone https://github.com/Karnian/agent-olympus.git ~/.claude/plugins/agent-olympus
 ```
 
-### Upgrading from v1.5.2
+### Upgrading to v1.6.2
+
+Update the plugin to v1.6.2 before selecting the managed Athena backend. Existing
+native-team runs keep their lifecycle. Managed execution explicitly opts into
+ledger v3 from a quiescent v2 project; old plugin readers reject v3, so stop old
+sessions and upgrade all participants together. Do not delete a live ledger.
+See [migration, downgrade, and recovery](docs/internals/athena-runtime.md).
+
+### Legacy recovery refs from v1.5.2
 
 v1.6.0 leaves existing local `refs/ao-wip/v1/*` recovery refs untouched so an
 upgrade cannot delete saved work. Inspect each ref before deleting it:
@@ -151,6 +162,26 @@ Athena will:
 6. **Verify** and run the initial routed review
 7. **Finalize, re-verify, and re-review** the exact final tree before commit
 8. **Loop** until all worker outputs and final mutations are tested and approved
+
+#### Managed execution (v1.6.2, explicit opt-in)
+
+Select this backend when workers need persistent assignments, managed child
+agents, or dependencies across waves. From a clean project root, use the installed
+plugin's absolute path to `scripts/athena-runtime.mjs`:
+
+```sh
+node /path/to/agent-olympus/scripts/athena-runtime.mjs capabilities
+node /path/to/agent-olympus/scripts/athena-runtime.mjs start .ao/prd.json .ao/runtime-options.json
+node /path/to/agent-olympus/scripts/athena-runtime.mjs tick <run-id>
+node /path/to/agent-olympus/scripts/athena-runtime.mjs status <run-id>
+```
+
+The PRD needs execution assignments; options require verification commands.
+Reserve explicit child capacity when delegating. Continue ticking while active.
+`completed` means the execution checks passed; Athena's full review/finalization/shipping gates still
+apply. See the [options, cancellation, and recovery guide](docs/internals/athena-runtime.md).
+Admission bounds the managed graph. Actual model-driven delegation and native
+spawn-tool attempts have not been validated by the hermetic suite.
 
 ### Resume Interrupted Work
 
@@ -452,8 +483,16 @@ hooks/               Hook event registrations (hooks.json)
 - Per-worker communication directories for Codex/Gemini (adapter-managed)
 - Cleaned up after team completion
 
+**Managed runtime** (`.ao/state/athena-runtime/<id>.json`):
+- Tracks waves, task results, merge commits, terminal failures, and cleanup status
+- Shares the v3 admission ledger with hook callers; parent and child reservations
+  are not reclaimed by TTL. Offline recovery requests are retained in
+  `.ao/artifacts/runtime-recovery/`
+
 **Worktrees** (`.ao/worktrees/<slug>/<worker>/`):
 - Isolate parallel workers so file changes do not collide
+- Managed workers and children retain worktrees after completion, cancellation,
+  or discard; use the [explicit cleanup procedure](docs/internals/athena-runtime.md#retained-worktree-cleanup)
 - `/codex-goal` gives every goal a unique worktree and fails without mutation if
   its intended path or branch already exists
 - The legacy replacement policy is only for disposable stale/cancelled workers:
@@ -622,7 +661,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (v1.6.1 release baseline: 3354 tests across 135 files; previous v1.6.0 baseline: 3322 tests across 133 files) covers the core hook libraries. To run:
+A `node:test` based test suite (v1.6.2: 3376 tests across 142 files; v1.6.1 baseline: 3354 tests across 135 files) covers hooks, adapters, and managed runtime lifecycles. To run:
 
 ```bash
 npm test
@@ -632,7 +671,9 @@ node scripts/run-tests.mjs
 
 **Representative covered modules:** phase-runner, run-artifacts, run-failure,
 recovery-claim, hardened-fs, athena-recovery, orphan-run-recovery,
-eval-failure-candidates, worker-spawn, checkpoint, worktree
+eval-failure-candidates, worker-spawn, checkpoint, worktree, athena-scheduler,
+persistent-worker, supervisor-mailbox, worker-broker. See [testing](docs/testing.md)
+for syntax, manifest, and hermetic eval gates plus live-validation boundaries.
 
 Additional integration verification:
 
