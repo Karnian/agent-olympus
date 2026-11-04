@@ -19,6 +19,15 @@
   admission and do not claim an OS-wide process or spend boundary.
 - Execution completion remains separate from full pipeline review and shipping.
 
+### Fixed
+- Managed batch follow-ups receive fresh one-use broker credentials. Child
+  manifests use a provider-specific allowlist instead of inheriting parent model,
+  prompt, budget, or MCP configuration. The supervisor enforces persistent mode.
+- Failed tasks and verification stop their wave and release confirmed subtrees;
+  later ticks retry only unfinished cleanup. Integrated commits remain available
+  with failure/recovery guidance. Offline reservation reconciliation records an
+  audit request and rejects stale identities and known live processes.
+
 ## [1.6.1] - 2026-10-01
 
 `/ask` latency patch. The zero-dependency Node suite is **3354/3354 green

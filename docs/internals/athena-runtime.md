@@ -62,6 +62,9 @@ Command JSON uses `type: assign` with `prompt`, `steer` with `prompt` and
 `expectedTaskId`, `interrupt` with `expectedTaskId`, or `shutdown`. Reusing an id
 with different content fails; accepted work from a lost supervisor is not
 automatically replayed. Idle and total worker lifetimes are bounded.
+Each batch assignment receives a fresh one-use broker bootstrap and private
+provider configuration. Session adapters retain their existing connection across
+turns. The supervisor independently rejects managed non-persistent manifests.
 
 Each managed parent receives `ao_runtime` MCP tools: `spawn`, `inspect`,
 `followup`, `cancel`, `integrate`, and `discard`. A spawn request specifies a
@@ -70,6 +73,10 @@ The broker takes parent identity from the connection, never from request fields.
 Children are leaves with native delegation disabled and no inherited parent MCP
 configuration or bootstrap credentials. Bootstrap files are private, single-use,
 short-lived, and outside the project; child tools cannot mint a parent identity.
+Child manifests copy only execution identity, scope, timeout, and the resolved
+permission grant. They use the chosen provider's default model and do not inherit
+the parent's model, system prompt, per-invocation budget, or MCP/tool options.
+A parent's `maxBudgetUsd` is not a shared subtree spending limit.
 
 Child capacity is reserved before the parent launches, by provider. Reserved to
 active conversion does not increase the charged slot count. A request exceeding
@@ -92,6 +99,59 @@ capacity. A fresh process can reap recorded children after a killed parent.
 Ambiguous child launches or unconfirmed termination retain evidence and slots.
 Managed worktrees and branches are retained for inspection, including discarded
 child work; cancellation does not force-delete them.
+
+## Failure and recovery
+
+Task, scope, integration, and verification failures persist `status: failed`
+before stopping the current wave. Every peer is shut down and its subtree slots
+are released only after confirmed termination. Subsequent ticks return the
+failure; they only retry unfinished cleanup, never assignments or verification.
+An unproven termination retains capacity and records `cleanupError` on the wave.
+
+Verification can fail after some branches have already been merged. The state
+retains each `mergeCommit`, the wave's `baseCommit`, expected/observed HEAD, and
+the failure message. These merged tasks are `merged_unverified`; dependent work
+does not launch. Inspect the commits, preserve any subsequent user changes, and
+either repair and verify them or explicitly revert the recorded merges in reverse
+order with `git revert -m 1 <merge-commit>`. The runtime does not reset or revert
+the user's branch automatically. Start a new run from a clean checkpoint after
+reviewing the retained failure.
+
+Use `cancel <run-id>` for ordinary recovery, including after a killed supervisor.
+If missing team evidence or an unrecorded launch prevents cancellation:
+
+1. Stop every launcher, supervisor, adapter, and descendant for that run. Inspect
+   `.ao/state/supervisor/<runId>/` snapshots and child sidecars, plus the OS process
+   list. A missing PID does not prove that a process was never started. Preserve
+   run state, outputs, branches, and any uncommitted work before proceeding.
+2. Run `node scripts/athena-runtime.mjs reservations` and identify the exact
+   `parentEntryId`, entries, and digest of the orphaned subtree.
+3. Only after confirming **all** its processes and launchers are stopped, run:
+
+   ```sh
+   node scripts/athena-runtime.mjs reconcile <parent-entry-id> <digest> --confirm-stopped
+   ```
+
+   This is an explicit offline operator acknowledgement for unrecorded launches,
+   not automatic liveness proof. The command refuses changed reservations and
+   known live/unproven owners, supervisors, or adapters. It writes an audit request
+   containing the original entries under `.ao/artifacts/runtime-recovery/` before
+   releasing only that subtree. Reinspect after any refusal; never reuse a digest
+   for changed work. Run participants must remain stopped throughout recovery.
+4. Retain the failed generation for audit and start a new run. Do not resume its
+   saved commands. Downgrade remains possible only after the entire project is
+   quiescent; reconciliation does not bypass that rule or repair corrupt formats.
+
+### Retained worktree cleanup
+
+After confirmed shutdown/reconciliation, inspect `git worktree list --porcelain`
+and match worker/child paths and branches to the saved wave/child records. For
+each selected worktree, inspect `git -C <path> status --short` and save any needed
+uncommitted files or commits. Then use `git worktree remove <path>` without
+`--force`; dirty worktrees remain protected. Branches remain recoverable after
+removal. Delete a branch only after checking its result is integrated or exported;
+`git branch -d <branch>` refuses branches which are not merged. Do not recursively
+delete `.ao/worktrees` while workers are active. Retain state and audit records.
 
 ## Ledger compatibility and current control limits
 
