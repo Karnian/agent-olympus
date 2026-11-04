@@ -1,4 +1,9 @@
 # Detached Worker Supervisor (v1.2.0+)
+
+The original one-task lifecycle described below remains the default. The new
+explicit [managed Athena runtime](athena-runtime.md) adds persistent supervisors,
+generation-bound command mailboxes, and broker-managed leaves. It does not change
+`/ask`, Atlas, or review-worker lifetime implicitly.
 > Moved verbatim from CLAUDE.md (Codex Interop v1, Ship order 1).
 
 ### Detached Worker Supervisor (v1.2.0+)

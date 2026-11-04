@@ -2,6 +2,9 @@ import { createHash, randomBytes } from 'crypto';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { readProcStartId } from './proc-identity.mjs';
+import { submitCommand, readCommandResult } from './supervisor-mailbox.mjs';
+import { readRegularArtifact, bindSafeDirectoryPath, revalidateDirectoryBinding } from './hardened-fs.mjs';
+import { WORKER_BROKER_SCHEMA_VERSION } from './worker-broker.mjs';
 import { acquireRecoveryClaim, statGeneration } from './recovery-claim.mjs';
 import { createTeamSession, spawnWorkerInSession, capturePane, killTeamSessions, buildWorkerCommand, sessionName, validateTmux, killSession, WORKER_EXIT_MARKER } from './tmux-session.mjs';
 import { readOutbox, readAllOutboxes, cleanupTeam } from './inbox-outbox.mjs';
@@ -47,6 +50,8 @@ import {
   releaseConcurrencyEntries,
   releaseConcurrencyReservation,
   reserveWorkerBatchConcurrency,
+  releaseRuntimeSubtree,
+  finishRuntimeChild,
 } from './concurrency-limits.mjs';
 import {
   REVIEW_TREE_OID_PATTERN,
@@ -552,7 +557,11 @@ export function monitorSupervisorWorker(state, worker, now) {
       }
       return { status: 'running', output: tail, _staleSeen: true };
     }
-    return { status: 'running', output: tail };
+    return { status: 'running', output: tail,
+      ...(worker.persistent && s.workerMeta ? {
+        taskState: s.workerMeta.taskState, taskId: s.workerMeta.taskId,
+      } : {}),
+    };
   }
 
   if (r.kind === 'missing') {
@@ -580,6 +589,32 @@ export async function shutdownSupervisorWorker(state, worker) {
   const h = worker._handle;
   // Phase 1: the supervisor (longer grace than the adapter's own 5s).
   await killProcessGroups([{ pid: h.supervisorPid, startId: h.supervisorStartId }], SUPERVISOR_KILL_GRACE_MS);
+  // A SIGKILLed parent cannot run its broker cleanup. Reap its recorded leaves
+  // from durable identities before releasing capacity or deleting team state.
+  if (worker.managed) {
+    const dir = join(state.projectRoot, '.ao/state/supervisor', state.runId);
+    const context = bindSafeDirectoryPath(dir, 'runtime children', { trustedRoot: state.projectRoot });
+    const artifact = readRegularArtifact(join(dir, `${h.workerRunId}.children.json`), 'runtime children', 1024 * 1024, {
+      allowMissing: true, revalidateContext: () => revalidateDirectoryBinding(context, 'runtime children'),
+    });
+    if (artifact.present) {
+      const record = JSON.parse(artifact.text);
+      if (record.schemaVersion !== WORKER_BROKER_SCHEMA_VERSION || record.runId !== state.runId
+        || record.workerRunId !== h.workerRunId || record.parentEntryId !== worker._concurrencyEntryId
+        || !Array.isArray(record.children)) throw new Error('runtime child recovery identity mismatch');
+      for (const item of record.children) {
+        if (!supIsValidId(item.workerRunId) || !Number.isInteger(item.supervisorPid)) {
+          throw new Error('ambiguous child launch; preserve runtime state');
+        }
+        await shutdownSupervisorWorker(state, { name: item.id, _handle: {
+          supervisorPid: item.supervisorPid, supervisorStartId: item.supervisorStartId,
+          runId: state.runId, workerRunId: item.workerRunId,
+        } });
+        const release = finishRuntimeChild(state.projectRoot, worker._concurrencyEntryId, item.id);
+        if (!release.ok) throw new Error('child termination unconfirmed; preserve runtime reservation');
+      }
+    }
+  }
   // Phase 2: re-read AFTER phase 1 so an adapterPid recorded during the race is
   // seen; reap it only if it survived the supervisor's graceful shutdown.
   try {
@@ -1133,6 +1168,11 @@ export async function reassignProvider(teamName, workerName, originalPrompt, fai
     // Prefer in-memory live state (has _liveHandle), fall back to disk-loaded state
     state = opts.liveState || loadTeamState(teamName);
     worker = state?.workers?.find(w => w.name === workerName) || opts.worker;
+    if (worker?.managed) return {
+      fallbackNeeded: false, blocked: true, teamName, workerName,
+      prompt: originalPrompt, reason: 'managed_subtree_requires_reconciliation',
+      targetProvider: null, replacementWorker: null,
+    };
     if (worker) assertWorkerSecurityContract(worker);
     const adapterName = worker?._adapterName || 'tmux';
     const registryEntry = ADAPTER_REGISTRY[adapterName];
@@ -2093,6 +2133,10 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
     throw new Error('spawnTeam requires at least one worker');
   }
   for (const worker of workers) assertWorkerSecurityContract(worker);
+  for (const worker of workers) {
+    if (worker.managed && (!worker.persistent || worker.readOnly || !Array.isArray(worker.scope)
+      || worker.scope.length === 0)) throw new Error('managed workers require persistent mode and explicit scope');
+  }
   // ─── Codex permission mirroring + demotion + host sandbox warning ──────
   // Resolve the effective codex level once (intersects permissions.allow
   // with host sandbox detection).
@@ -2149,6 +2193,10 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
 
   // Determine adapter per worker (after demotion)
   const adapterNames = workers.map(w => selectAdapter(w, capabilities));
+  if (workers.some((worker, i) => worker.persistent === true
+    && (worker.readOnly === true || adapterNames[i] === 'tmux'))) {
+    throw new Error('persistent execution requires a writable non-tmux supervisor');
+  }
   const needsTmux = adapterNames.some(a => a === 'tmux');
 
   // Tmux availability check — tests can inject a fake validator
@@ -2238,6 +2286,12 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
         : (Array.isArray(worker.allowedTools) ? worker.allowedTools : null),
       geminiCredential: wantsGemini ? geminiCredential : null,
       timeoutMs: Number.isInteger(worker.timeoutMs) ? worker.timeoutMs : 600000,
+      ...(worker.persistent === true ? {
+        persistent: true, idleTimeoutMs: worker.idleTimeoutMs, maxRuntimeMs: worker.maxRuntimeMs,
+      } : {}),
+      ...(worker.managed ? {
+        managed: true, parentEntryId: concurrency.entryIds[i], scope: worker.scope,
+      } : {}),
     };
     if (worker.fixture) manifest.fixture = worker.fixture;                       // test-only params
     if (_inject?.supervisor?.adapterName) manifest.adapterName = _inject.supervisor.adapterName; // test-only
@@ -2362,6 +2416,10 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
     .filter(worker => worker.status === 'failed' && worker._concurrencyEntryId)
     .map(worker => worker._concurrencyEntryId);
   if (failedEntryIds.length > 0) {
+    for (const worker of state.workers.filter(worker => worker.managed && worker.status === 'failed')) {
+      const released = releaseRuntimeSubtree(projectRoot, worker._concurrencyEntryId);
+      if (!released.ok) throw new Error('failed runtime launch retained active child capacity');
+    }
     const release = releaseConcurrencyEntries(projectRoot, failedEntryIds);
     if (release.ok) {
       const releasedAt = new Date().toISOString();
@@ -2395,9 +2453,36 @@ export async function spawnTeam(teamName, workers, cwd, capabilities = {}, _inje
       } catch {}
       try { cleanupTeam(teamName); } catch {}
     }
+    for (const [index, worker] of workers.entries()) {
+      if (worker.managed) {
+        try { releaseRuntimeSubtree(cwd, concurrency.entryIds[index]); } catch {}
+      }
+    }
     releaseConcurrencyReservation(cwd, concurrency.reservationId);
     throw error;
   }
+}
+
+/** Commands require the caller's pinned generation; a reused team slug is never authority. */
+export function commandWorker(teamName, workerName, expectedRunId, command) {
+  const state = loadTeamState(teamName);
+  const worker = state?.workers?.find(item => item.name === workerName);
+  if (!state || state.runId !== expectedRunId || !worker?.persistent
+    || !isSupervisorWorker(state, worker)) throw new Error('persistent worker identity mismatch');
+  return submitCommand({
+    projectRoot: state.projectRoot, runId: state.runId, workerRunId: worker._handle.workerRunId,
+  }, command);
+}
+
+export function collectWorkerCommand(teamName, workerName, expectedRunId, commandId) {
+  const state = loadTeamState(teamName);
+  const worker = state?.workers?.find(item => item.name === workerName);
+  if (!state || state.runId !== expectedRunId || !isSupervisorWorker(state, worker)) {
+    throw new Error('persistent worker identity mismatch');
+  }
+  return readCommandResult({
+    projectRoot: state.projectRoot, runId: state.runId, workerRunId: worker._handle.workerRunId,
+  }, commandId);
 }
 
 export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _claudeCliModule, _geminiExecModule, _geminiAcpModule) {
@@ -2468,7 +2553,7 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
       state.workers[i].lastOutputHash = currentHash;
       state.workers[i].lastActivityAt = new Date(now).toISOString();
       stateChanged = true;
-    } else if (worker.status === 'running' && worker.lastActivityAt) {
+    } else if (worker.status === 'running' && worker.lastActivityAt && monitorResult.taskState !== 'idle') {
       const stalledMs = now - new Date(worker.lastActivityAt).getTime();
       if (stalledMs > STALL_THRESHOLD_MS && !worker.stalled) {
         state.workers[i].stalled = true;
@@ -2530,6 +2615,7 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
       originalPrompt: worker.originalPrompt || worker.prompt || '',
       lastOutput: monitorResult.output || null,
       ...publicWorkerReviewIdentity(worker),
+      ...(worker.persistent ? { taskState: monitorResult.taskState || 'starting', taskId: monitorResult.taskId || null } : {}),
     };
     if (fallbackCompletion) {
       workerEntry.fallbackProvider = fallbackCompletion.provider;
@@ -2576,7 +2662,9 @@ export function monitorTeam(teamName, _codexExecModule, _codexAppServerModule, _
     if (CONCURRENCY_TERMINAL_STATUSES.has(resolvedStatus)
       && state.workers[i]._concurrencyEntryId
       && !state.workers[i]._concurrencyReleasedAt) {
-      const release = releaseConcurrencyEntries(
+      const release = worker.managed ? releaseRuntimeSubtree(
+        state.projectRoot || state.cwd || process.cwd(), worker._concurrencyEntryId,
+      ) : releaseConcurrencyEntries(
         state.projectRoot || state.cwd || process.cwd(),
         [state.workers[i]._concurrencyEntryId],
       );
@@ -2705,7 +2793,13 @@ export async function shutdownTeam(teamName, cwd) {
   }
 
   // Supervisor workers: supervisor-first graceful shutdown, then adapter reap.
-  for (const w of supWorkers) { await shutdownSupervisorWorker(state, w); }
+  for (const w of supWorkers) {
+    await shutdownSupervisorWorker(state, w);
+    if (w.managed) {
+      const released = releaseRuntimeSubtree(state.projectRoot, w._concurrencyEntryId);
+      if (!released.ok) throw new Error('runtime subtree termination is unconfirmed');
+    }
+  }
   // Signal orphaned detached process groups (SIGTERM → grace → SIGKILL).
   await killProcessGroups(orphanPids);
 
@@ -2717,7 +2811,7 @@ export async function shutdownTeam(teamName, cwd) {
   });
   cleanupTeam(teamName);
 
-  if (cwd) {
+  if (cwd && !state?.workers?.some(worker => worker.managed)) {
     try { cleanupTeamWorktrees(cwd, teamName); } catch {}
   }
 

@@ -350,6 +350,8 @@ export function startServer(opts = {}) {
     _draining: false,
     _deadLetters: [],
     _readOnly: opts.readOnly === true,
+    _modernAcp: opts.modernAcp === true,
+    _cwd: opts.cwd || process.cwd(),
     _securityViolation: null,
     workerMeta: { binaryFlavor: binary.flavor, binaryResolved: binary.resolved },
     // Account name used to resolve GEMINI_API_KEY for this session — the auth
@@ -395,7 +397,7 @@ export function startServer(opts = {}) {
         // Writable legacy sessions retain the old empty-result behavior.
         try {
           let response;
-          if (handle._readOnly && (
+          if ((handle._readOnly || handle._modernAcp) && (
             msg.method === 'session/request_permission'
             || msg.method === 'requestPermission'
             || msg.method === 'approvalRequest'
@@ -495,6 +497,18 @@ function _formatSpawnErrorMessage(err, binary) {
 function _processNotification(handle, notification) {
   const method = notification.method || '';
   const params = notification.params || {};
+
+  if (method === 'session/update' && handle._modernAcp) {
+    const update = params.update || {};
+    if (update.sessionUpdate === 'agent_message_chunk' && update.content?.type === 'text') {
+      handle._output += update.content.text || '';
+    } else if (update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update') {
+      const index = handle._items.findIndex(item => item.id === update.toolCallId);
+      const item = { ...(index >= 0 ? handle._items[index] : {}), ...update, id: update.toolCallId };
+      if (index >= 0) handle._items[index] = item; else handle._items.push(item);
+    }
+    return;
+  }
 
   switch (method) {
     case NOTIFY.SESSION_STARTED:
@@ -631,6 +645,13 @@ export function sendRequest(handle, method, params, timeoutMs = RPC_TIMEOUT_MS) 
       return;
     }
 
+    if (handle._modernAcp) {
+      if (method === 'newSession') { method = 'session/new'; params = { cwd: params.workingDirectory || handle._cwd, mcpServers: [] }; }
+      else if (method === 'loadSession') { method = 'session/load'; params = { ...params, cwd: handle._cwd, mcpServers: [] }; }
+      else if (method === 'setSessionMode') { method = 'session/set_mode'; params = { sessionId: params.sessionId, modeId: params.mode }; }
+      else if (method === 'unstable_setSessionModel') { method = 'session/set_model'; params = { sessionId: params.sessionId, modelId: params.model }; }
+      else if (method === 'prompt') { method = 'session/prompt'; params = { sessionId: params.sessionId, prompt: [{ type: 'text', text: params.text }] }; }
+    }
     const req = createRpcRequest(method, params);
 
     const timer = setTimeout(() => {
@@ -839,6 +860,11 @@ export async function sendPrompt(handle, prompt, opts = {}) {
   // If the server returned a final result synchronously (no streaming),
   // extract output from the result payload
   if (response.result) {
+    if (handle._modernAcp && response.result.stopReason && response.result.stopReason !== 'end_turn') {
+      handle.status = 'failed';
+      handle._turnError = { category: response.result.stopReason === 'cancelled' ? 'cancelled' : 'incomplete',
+        message: `ACP prompt stopped: ${response.result.stopReason}` };
+    }
     const syncOutput = response.result.text || response.result.output || handle._output;
     if (syncOutput && !handle._output) handle._output = syncOutput;
     if (handle.status === 'running') handle.status = 'completed';
@@ -860,6 +886,14 @@ export async function cancelPrompt(handle) {
     return { error: { code: -10, message: 'No active session to cancel.' } };
   }
 
+  if (handle._modernAcp) {
+    // ACP cancellation is a notification. Completion remains owned by the
+    // active session/prompt response; never wait for a nonexistent RPC reply.
+    try {
+      handle.process.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'session/cancel', params: { sessionId: handle._sessionId } }) + '\n');
+      return {};
+    } catch (error) { return { error: { category: 'crash', message: error.message } }; }
+  }
   const response = await sendRequest(handle, 'cancel', { sessionId: handle._sessionId });
   return response.error ? { error: response.error } : {};
 }
@@ -896,7 +930,8 @@ export function monitor(handle) {
     const stderr = handle._stderrChunks.join('');
     const turnErr = handle._turnError;
     const message = (turnErr && turnErr.message) || stderr || 'Gemini ACP process failed';
-    const category = mapGeminiAcpError(turnErr || { message });
+    const category = handle._modernAcp && ['cancelled', 'incomplete'].includes(turnErr?.category)
+      ? turnErr.category : mapGeminiAcpError(turnErr || { message });
 
     result.error = {
       category,

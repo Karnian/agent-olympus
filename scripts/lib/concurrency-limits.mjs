@@ -10,8 +10,9 @@ import {
   renameSync,
   rmSync,
   writeFileSync,
+  unlinkSync,
 } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { basename, join, resolve } from 'node:path';
 
@@ -20,6 +21,8 @@ import {
   readRegularArtifact,
   revalidateRegularArtifact,
   writeExclusiveRegularArtifact,
+  ensureSafeDirectoryPath,
+  HARDENED_FS_VIOLATION_CODE,
 } from './hardened-fs.mjs';
 import { readProcStartId } from './proc-identity.mjs';
 import {
@@ -38,6 +41,9 @@ export const DEFAULT_CONCURRENCY_LIMITS = Object.freeze({
 // reader rejects v2 instead of silently discarding the v2-only `recovery`
 // metadata and authorizing work from an apparently empty ledger.
 export const CONCURRENCY_SCHEMA_VERSION = 2;
+export const RUNTIME_CONCURRENCY_SCHEMA_VERSION = 3;
+export const RUNTIME_LEDGER_MARKER_SCHEMA_VERSION = 1;
+export const RUNTIME_RECOVERY_AUDIT_SCHEMA_VERSION = 1;
 const LEGACY_CONCURRENCY_SCHEMA_VERSION = 1;
 
 const STALE_HOOK_MS = 3 * 60 * 1000;
@@ -166,12 +172,38 @@ function processDefinitelyGone(pid, expectedStartId) {
 }
 
 function inspectExistingLock(lockPath) {
-  assertSafeDirectory(lockPath, 'concurrency lock');
+  let observed;
+  try { observed = assertSafeDirectory(lockPath, 'concurrency lock'); }
+  catch (error) {
+    // A live holder can release between the contender's existence probe and
+    // inspection. Retry acquisition; this never authorizes without winning
+    // the atomic candidate rename.
+    if (error.code === 'ENOENT') return { reclaim: false };
+    throw error;
+  }
   const ownerPath = join(lockPath, 'owner.json');
   // A missing owner is ambiguous (the holder may have been descheduled during
   // an upgrade-era mkdir+write acquisition), so it fails closed.
   if (!existsSync(ownerPath)) return { reclaim: false };
-  const owner = readSafeJson(ownerPath, 'concurrency lock owner', 4096);
+  let owner;
+  try { owner = readSafeJson(ownerPath, 'concurrency lock owner', 4096); }
+  catch (error) {
+    if (error.code === 'ENOENT') return { reclaim: false };
+    if (error.code === HARDENED_FS_VIOLATION_CODE) {
+      let current;
+      try { current = assertSafeDirectory(lockPath, 'concurrency lock'); }
+      catch (inspectionError) {
+        if (inspectionError.code === 'ENOENT') return { reclaim: false };
+        throw inspectionError;
+      }
+      // The previous directory generation was released/replaced while its
+      // owner artifact was read. Retry the lock, never trust that stale owner.
+      // Corruption in the same live generation still propagates fail-closed.
+      if (current.dev !== observed.dev || current.ino !== observed.ino
+        || current.birthtimeMs !== observed.birthtimeMs || !existsSync(ownerPath)) return { reclaim: false };
+    }
+    throw error;
+  }
   if (!owner || typeof owner !== 'object' || typeof owner.token !== 'string'
     || !Number.isInteger(owner.pid) || owner.pid <= 1
     || !Number.isFinite(Date.parse(owner.acquiredAt))
@@ -210,8 +242,10 @@ function acquireLedgerLock(paths, options = {}) {
         acquired = true;
         return { token };
       } catch (error) {
-        const contention = existsSync(paths.lockPath)
-          && ['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error?.code);
+        // The holder may have removed its lock after rename failed. Classify
+        // the syscall result, not a later existence probe; inspection below
+        // handles a disappeared holder and the next loop retries acquisition.
+        const contention = ['EEXIST', 'ENOTEMPTY', 'EPERM'].includes(error?.code);
         if (!contention) throw error;
       }
 
@@ -277,8 +311,18 @@ function normalizeEntry(entry) {
   // null is corrupt content: treating it as a hook would let hook-release and
   // hook-TTL semantics steal a durable team reservation.
   const kind = hasOwn(entry, 'kind') ? entry.kind : 'hook';
-  if (kind !== 'hook' && kind !== 'team') {
+  if (kind !== 'hook' && kind !== 'team' && kind !== 'runtime') {
     throw new Error('concurrency ledger entry kind is invalid');
+  }
+  if (kind === 'runtime') {
+    if (typeof entry.parentEntryId !== 'string' || !entry.parentEntryId
+      || !/^[0-9a-f]{16}$/.test(entry.runId || '')
+      || !['parent', 'reserved', 'active'].includes(entry.slotState)
+      || !Number.isInteger(entry.ownerPid) || entry.ownerPid <= 1
+      || typeof entry.parentId !== 'string' || !entry.parentId
+      || (entry.slotState === 'active' && typeof entry.childId !== 'string')) {
+      throw new Error('invalid runtime concurrency entry');
+    }
   }
   if (kind === 'team') {
     if (typeof entry.reservationId !== 'string' || entry.reservationId.length === 0
@@ -333,7 +377,7 @@ function serializeLedger(state) {
   // reducing write volume, it avoids turning a valid compact legacy artifact
   // into an oversized pretty-printed replacement during migration.
   const serialized = JSON.stringify({
-    schemaVersion: CONCURRENCY_SCHEMA_VERSION,
+    schemaVersion: state.schemaVersion,
     activeTasks: state.activeTasks,
     queue: state.queue || [],
     ...(state.recovery ? { recovery: state.recovery } : {}),
@@ -365,7 +409,8 @@ function parseLedgerArtifact(artifact) {
     ? parsed.schemaVersion
     : LEGACY_CONCURRENCY_SCHEMA_VERSION;
   if (schemaVersion !== LEGACY_CONCURRENCY_SCHEMA_VERSION
-    && schemaVersion !== CONCURRENCY_SCHEMA_VERSION) {
+    && schemaVersion !== CONCURRENCY_SCHEMA_VERSION
+    && schemaVersion !== RUNTIME_CONCURRENCY_SCHEMA_VERSION) {
     // An unknown version may carry admission semantics this reader cannot
     // preserve. Leave the artifact untouched and block instead of quarantining
     // it as corruption and eventually treating it as empty.
@@ -389,14 +434,18 @@ function parseLedgerArtifact(artifact) {
   try {
     return {
       state: {
-        schemaVersion: CONCURRENCY_SCHEMA_VERSION,
-        activeTasks: parsed.activeTasks.map(normalizeEntry),
+        schemaVersion: schemaVersion === RUNTIME_CONCURRENCY_SCHEMA_VERSION
+          ? RUNTIME_CONCURRENCY_SCHEMA_VERSION : CONCURRENCY_SCHEMA_VERSION,
+        activeTasks: parsed.activeTasks.map(entry => {
+          if (schemaVersion !== 3 && entry?.kind === 'runtime') throw new Error('runtime entries require ledger v3');
+          return normalizeEntry(entry);
+        }),
         queue: hasQueue ? parsed.queue : [],
-        ...(schemaVersion === CONCURRENCY_SCHEMA_VERSION && hasRecovery
+        ...(schemaVersion >= CONCURRENCY_SCHEMA_VERSION && hasRecovery
           ? { recovery: normalizeRecovery(parsed.recovery) }
           : {}),
       },
-      needsMigration: schemaVersion !== CONCURRENCY_SCHEMA_VERSION
+      needsMigration: schemaVersion === LEGACY_CONCURRENCY_SCHEMA_VERSION
         || !hasQueue
         || parsed.activeTasks.some(entry => entry && !hasOwn(entry, 'kind')),
     };
@@ -619,7 +668,13 @@ function recoverCorruptLedger(paths, error, now) {
   return state;
 }
 
-function readLedger(paths, now) {
+function readLedger(paths, now, options = {}) {
+  const marker = join(paths.stateDir, 'ao-runtime-ledger.json');
+  const protectedRuntime = existsSync(marker);
+  if (protectedRuntime) {
+    const value = readSafeJson(marker, 'runtime ledger marker', 1024);
+    if (value.schemaVersion !== RUNTIME_LEDGER_MARKER_SCHEMA_VERSION || value.ledgerVersion !== RUNTIME_CONCURRENCY_SCHEMA_VERSION) throw new Error('unsupported runtime ledger marker');
+  }
   const artifact = readRegularArtifact(
     paths.ledgerPath,
     `concurrency ledger (${paths.ledgerPath})`,
@@ -627,13 +682,21 @@ function readLedger(paths, now) {
     { allowMissing: true, allowEmpty: true, generationPolicy: 'full' },
   );
   if (!artifact.present) {
+    if (protectedRuntime) throw new Error('protected runtime ledger is missing; preserve runtime evidence');
     return { state: emptyLedger(), present: false, needsMigration: false };
   }
   assertCurrentOwner(artifact.stat, paths.ledgerPath, 'concurrency ledger');
   try {
     const parsed = parseLedgerArtifact(artifact);
+    if (parsed.state.schemaVersion === 3 && !protectedRuntime) {
+      throw new Error('concurrency ledger schemaVersion 3 is unsupported without its migration marker');
+    }
+    if (protectedRuntime && parsed.state.schemaVersion !== 3 && !options.allowRuntimeMigration) {
+      throw new Error('runtime ledger migration is incomplete; admission blocked');
+    }
     return { ...parsed, present: true };
   } catch (error) {
+    if (protectedRuntime) throw error;
     if (error?.code !== LEDGER_CONTENT_ERROR) throw error;
     return {
       state: recoverCorruptLedger(paths, error, now),
@@ -696,6 +759,8 @@ function readDurableTeamLiveness(paths, entry) {
 }
 
 function shouldReclaimEntry(paths, entry, now) {
+  // Never TTL-reclaim a reservation or descendant after losing its parent.
+  if (entry.kind === 'runtime') return false;
   const age = now - Date.parse(entry.startedAt);
   if (entry.kind !== 'team') return age >= STALE_HOOK_MS;
 
@@ -755,7 +820,7 @@ function withLockedLedger(cwd, options, operation) {
     ensureLedgerDirectories(paths);
     lock = acquireLedgerLock(paths, options);
     const now = Number.isFinite(options?.now) ? options.now : Date.now();
-    const loaded = readLedger(paths, now);
+    const loaded = readLedger(paths, now, options);
     const state = loaded.state;
     const before = serializeLedger(state);
     pruneStaleEntries(paths, state, now);
@@ -847,7 +912,16 @@ export function reserveWorkerBatchConcurrency(cwd, workers, options = {}) {
           key, Math.max(actual[key], Number(supplied[key] || 0)),
         ]))
         : actual;
-      const validation = validateWorkerBatchConcurrency(workers, {
+      const allWorkers = workers.flatMap(worker => {
+        if (!worker.managed) return [worker];
+        if (state.schemaVersion !== 3) throw new Error('managed workers require explicit ledger v3 migration');
+        const children = Object.entries(worker.childCapacity || {}).flatMap(([type, count]) => {
+          if (!PROVIDERS.has(type) || !Number.isInteger(count) || count < 0 || count > 10) throw new Error('invalid child capacity');
+          return Array(count).fill({ type });
+        });
+        return [worker, ...children];
+      });
+      const validation = validateWorkerBatchConcurrency(allWorkers, {
         limits: options.limits || loadConcurrencyLimits(options),
         active,
       });
@@ -874,13 +948,24 @@ export function reserveWorkerBatchConcurrency(cwd, workers, options = {}) {
           workerIndex: index,
         } : {}),
       }));
+      const parentEntryIds = entries.map(entry => entry.id);
+      for (const [index, worker] of workers.entries()) {
+        if (!worker.managed) continue;
+        const parent = entries[index];
+        Object.assign(parent, { kind: 'runtime', parentEntryId: parent.id,
+          parentId: worker.name, slotState: 'parent' });
+        for (const [provider, count] of Object.entries(worker.childCapacity || {})) {
+          for (let slot = 0; slot < count; slot++) entries.push({ ...parent,
+            id: randomUUID(), provider, slotState: 'reserved' });
+        }
+      }
       // Validate newly constructed entries before making them durable.
       state.activeTasks.push(...entries.map(normalizeEntry));
       return {
         ...validation,
         ok: true,
         reservationId,
-        entryIds: entries.map(entry => entry.id),
+        entryIds: parentEntryIds,
         entries,
       };
     });
@@ -912,7 +997,7 @@ export function releaseConcurrencyEntries(cwd, entryIds, options = {}) {
   try {
     return withLockedLedger(cwd, options, state => {
       const before = state.activeTasks.length;
-      state.activeTasks = state.activeTasks.filter(entry => !ids.has(entry.id));
+      state.activeTasks = state.activeTasks.filter(entry => entry.kind === 'runtime' || !ids.has(entry.id));
       return { ok: true, released: before - state.activeTasks.length, entryIds: [...ids] };
     });
   } catch (error) {
@@ -924,7 +1009,7 @@ export function releaseConcurrencyReservation(cwd, reservationId, options = {}) 
   try {
     return withLockedLedger(cwd, options, state => {
       const before = state.activeTasks.length;
-      state.activeTasks = state.activeTasks.filter(entry => entry.reservationId !== reservationId);
+      state.activeTasks = state.activeTasks.filter(entry => entry.kind === 'runtime' || entry.reservationId !== reservationId);
       return { ok: true, released: before - state.activeTasks.length, reservationId };
     });
   } catch (error) {
@@ -936,7 +1021,7 @@ export function releaseConcurrencyReservation(cwd, reservationId, options = {}) 
 export function releaseHookConcurrency(cwd, request = {}, options = {}) {
   try {
     return withLockedLedger(cwd, options, state => {
-      const hooks = state.activeTasks.filter(entry => entry.kind !== 'team');
+      const hooks = state.activeTasks.filter(entry => entry.kind === 'hook');
       let target = request.taskId
         ? hooks.find(entry => entry.id === request.taskId)
         : null;
@@ -962,4 +1047,187 @@ export function releaseHookConcurrency(cwd, request = {}, options = {}) {
   } catch (error) {
     return { ok: false, released: 0, error: error?.message || String(error) };
   }
+}
+
+/** Explicit, quiescent opt-in; ordinary callers keep the v2 format until migration. */
+export function migrateRuntimeLedger(cwd, options = {}) {
+  return withLockedLedger(cwd, { ...options, allowRuntimeMigration: true }, (state, paths) => {
+    if (state.schemaVersion === 3 && options.downgrade !== true) return { ok: true, schemaVersion: 3 };
+    if (state.activeTasks.length || state.queue?.length || state.recovery) {
+      throw new Error('runtime ledger migration requires a quiescent project');
+    }
+    const durable = durableTeamRecovery(paths, new Date(Date.now() + STALE_HOOK_MS).toISOString());
+    if (durable.activeTasks.length || durable.unresolvedArtifacts.length
+      || ['atlas-state.json', 'athena-state.json'].some(file => existsSync(join(paths.stateDir, file)))) {
+      throw new Error('runtime ledger migration requires quiescent team and session evidence');
+    }
+    const marker = join(paths.stateDir, 'ao-runtime-ledger.json');
+    if (options.downgrade === true) {
+      state.schemaVersion = 2;
+      writeLedger(paths, state);
+      if (existsSync(marker)) unlinkSync(marker);
+    } else {
+      atomicWriteFileSync(marker, JSON.stringify({ schemaVersion: RUNTIME_LEDGER_MARKER_SCHEMA_VERSION, ledgerVersion: RUNTIME_CONCURRENCY_SCHEMA_VERSION }), { durable: true });
+      state.schemaVersion = RUNTIME_CONCURRENCY_SCHEMA_VERSION;
+    }
+    return { ok: true, schemaVersion: state.schemaVersion };
+  });
+}
+
+export function reserveRuntimeSubtree(cwd, request, options = {}) {
+  return withLockedLedger(cwd, options, (state, paths, now) => {
+    if (state.schemaVersion !== 3 || state.recovery) throw new Error('runtime ledger v3 is required');
+    if (!/^[0-9a-f]{16}$/.test(request.runId || '') || typeof request.parentId !== 'string'
+      || !request.parentId || !PROVIDERS.has(request.provider)) throw new Error('invalid subtree identity');
+    if (state.activeTasks.some(e => e.kind === 'runtime' && e.runId === request.runId && e.parentId === request.parentId)) {
+      throw new Error('subtree identity already reserved');
+    }
+    const providers = [request.provider];
+    for (const [provider, count] of Object.entries(request.children || {})) {
+      if (!PROVIDERS.has(provider) || !Number.isInteger(count) || count < 0 || count > 10) throw new Error('invalid child capacity');
+      providers.push(...Array(count).fill(provider));
+    }
+    const validation = validateWorkerBatchConcurrency(providers.map(type => ({ type })), {
+      limits: options.limits || loadConcurrencyLimits(options), active: countEntries(state.activeTasks),
+    });
+    if (!validation.ok) return validation;
+    const parentEntryId = randomUUID();
+    const entries = providers.map((provider, index) => normalizeEntry({
+      id: index === 0 ? parentEntryId : randomUUID(), kind: 'runtime', provider,
+      parentEntryId, runId: request.runId, parentId: request.parentId,
+      slotState: index === 0 ? 'parent' : 'reserved',
+      ownerPid: process.pid, ownerStartId: readProcStartId(process.pid),
+      startedAt: new Date(now).toISOString(),
+    }));
+    state.activeTasks.push(...entries);
+    return { ok: true, parentEntryId, slots: entries };
+  });
+}
+
+export function claimRuntimeChild(cwd, parentEntryId, request, options = {}) {
+  return withLockedLedger(cwd, options, state => {
+    if (state.schemaVersion !== 3 || state.recovery) throw new Error('runtime ledger unavailable');
+    const parent = state.activeTasks.find(e => e.id === parentEntryId && e.slotState === 'parent');
+    if (!parent || parent.closing) return { ok: false, reason: 'parent_closed' };
+    if (typeof request.childId !== 'string' || !request.childId || !PROVIDERS.has(request.provider)) throw new Error('invalid child identity');
+    const prior = state.activeTasks.find(e => e.parentEntryId === parentEntryId && e.childId === request.childId);
+    if (prior) return { ok: prior.provider === request.provider, slot: prior };
+    const slot = state.activeTasks.find(e => e.parentEntryId === parentEntryId && e.slotState === 'reserved' && e.provider === request.provider);
+    if (!slot) return { ok: false, reason: 'reserved_capacity_exhausted' };
+    Object.assign(slot, { slotState: 'active', childId: request.childId });
+    return { ok: true, slot };
+  });
+}
+
+export function bindRuntimeProcess(cwd, entryId, pid, options = {}) {
+  return withLockedLedger(cwd, options, state => {
+    const entry = state.activeTasks.find(e => e.id === entryId && e.kind === 'runtime');
+    if (!entry || !Number.isInteger(pid) || pid <= 1) throw new Error('runtime binding is unavailable');
+    if (entry.processPid && entry.processPid !== pid
+      && !processDefinitelyGone(entry.processPid, entry.processStartId)) throw new Error('runtime entry is already bound to a live process');
+    entry.processPid = pid;
+    entry.processStartId = readProcStartId(pid);
+    return { ok: true };
+  });
+}
+
+export function assertRuntimeParent(cwd, parentEntryId, identity) {
+  return withLockedLedger(cwd, {}, state => {
+    const parent = state.activeTasks.find(entry => entry.id === parentEntryId && entry.kind === 'runtime' && entry.slotState === 'parent');
+    if (!parent || parent.runId !== identity.runId || parent.parentId !== identity.parentId
+      || parent.processPid !== process.pid || parent.processStartId !== readProcStartId(process.pid)
+      || parent.closing) throw new Error('broker parent is not bound to this live supervisor');
+    return true;
+  });
+}
+
+export function finishRuntimeChild(cwd, parentEntryId, childId, options = {}) {
+  return withLockedLedger(cwd, options, state => {
+    const entry = state.activeTasks.find(e => e.parentEntryId === parentEntryId && e.childId === childId);
+    if (!entry) return { ok: true };
+    if (entry.processPid && !processDefinitelyGone(entry.processPid, entry.processStartId)) {
+      return { ok: false, reason: 'child_process_live' };
+    }
+    entry.slotState = 'reserved';
+    delete entry.childId; delete entry.processPid; delete entry.processStartId;
+    return { ok: true };
+  });
+}
+
+export function fenceRuntimeSubtree(cwd, parentEntryId, options = {}) {
+  return withLockedLedger(cwd, options, state => {
+    const parent = state.activeTasks.find(e => e.id === parentEntryId && e.slotState === 'parent');
+    if (parent) parent.closing = true;
+    return { ok: true };
+  });
+}
+
+export function releaseRuntimeSubtree(cwd, parentEntryId, options = {}) {
+  return withLockedLedger(cwd, options, state => {
+    const entries = state.activeTasks.filter(e => e.parentEntryId === parentEntryId);
+    if (entries.some(e => e.slotState === 'active')) return { ok: false, reason: 'children_active' };
+    const parent = entries.find(e => e.slotState === 'parent');
+    if (parent?.processPid && parent.processPid !== process.pid
+      && !processDefinitelyGone(parent.processPid, parent.processStartId)) return { ok: false, reason: 'parent_process_live' };
+    state.activeTasks = state.activeTasks.filter(e => e.parentEntryId !== parentEntryId);
+    return { ok: true };
+  });
+}
+
+const runtimeDigest = entries => createHash('sha256').update(JSON.stringify(entries)).digest('hex');
+
+/** Operator inspection only: runtime reservations are never age-reclaimed. */
+export function inspectRuntimeReservations(cwd) {
+  return withLockedLedger(cwd, {}, state => {
+    const ids = [...new Set(state.activeTasks.filter(entry => entry.kind === 'runtime').map(entry => entry.parentEntryId))];
+    return ids.map(parentEntryId => {
+      const entries = state.activeTasks.filter(entry => entry.kind === 'runtime' && entry.parentEntryId === parentEntryId);
+      return { parentEntryId, digest: runtimeDigest(entries), entries };
+    });
+  });
+}
+
+/** Explicit offline recovery after the operator has stopped ALL run processes.
+ * The acknowledgement covers launches which died before recording a PID. Known
+ * live owners/processes still block, and a digest prevents releasing newer work.
+ */
+export function reconcileRuntimeReservation(cwd, parentEntryId, { digest, confirmStopped } = {}) {
+  if (confirmStopped !== true || !/^[a-f0-9]{64}$/.test(digest || '')) {
+    throw new Error('reconciliation requires an inspected digest and explicit stopped-process acknowledgement');
+  }
+  return withLockedLedger(cwd, {}, (state, paths) => {
+    if (state.schemaVersion !== RUNTIME_CONCURRENCY_SCHEMA_VERSION || state.recovery) throw new Error('runtime ledger unavailable');
+    const entries = state.activeTasks.filter(entry => entry.kind === 'runtime' && entry.parentEntryId === parentEntryId);
+    if (!entries.length || runtimeDigest(entries) !== digest) throw new Error('runtime reservation changed; inspect again');
+    const assertGone = (pid, startId) => {
+      if (pid == null) return;
+      if (!Number.isInteger(pid) || pid <= 1 || !processDefinitelyGone(pid, startId || null)) {
+        throw new Error('recorded runtime process is live or unproven; stop all participants first');
+      }
+    };
+    for (const entry of entries) {
+      assertGone(entry.ownerPid, entry.ownerStartId);
+      assertGone(entry.processPid, entry.processStartId);
+    }
+    // An adapter can outlive its supervisor. Inspect every snapshot in the run,
+    // conservatively blocking recovery while another participant is still live.
+    const runId = entries[0].runId;
+    const runDir = join(paths.stateDir, 'supervisor', runId);
+    if (existsSync(runDir)) {
+      ensureSafeDirectoryPath(runDir, 'runtime supervisor evidence', { trustedRoot: resolve(cwd) });
+      for (const file of readdirSync(runDir).filter(name => name.endsWith('.snapshot.json'))) {
+        const snapshot = readSafeJson(join(runDir, file), 'runtime snapshot', MAX_SUPERVISOR_SNAPSHOT_BYTES);
+        if (snapshot.schemaVersion !== SUPERVISOR_SCHEMA_VERSION || snapshot.runId !== runId) throw new Error('unproven runtime snapshot');
+        assertGone(snapshot.supervisorPid, snapshot.supervisorStartId);
+        assertGone(snapshot.adapterPid, snapshot.adapterStartId);
+      }
+    }
+    const audit = ensureSafeDirectoryPath(join(resolve(cwd), '.ao/artifacts/runtime-recovery'), 'runtime recovery audit', { trustedRoot: resolve(cwd) });
+    const auditPath = join(audit.path, `${randomUUID()}.json`);
+    atomicWriteFileSync(auditPath, JSON.stringify({ schemaVersion: RUNTIME_RECOVERY_AUDIT_SCHEMA_VERSION,
+      action: 'reconcile-request', requestedAt: new Date().toISOString(), confirmStopped: true, digest, entries,
+    }), { durable: true });
+    state.activeTasks = state.activeTasks.filter(entry => !entries.some(removed => removed.id === entry.id));
+    return { ok: true, released: entries.length, auditPath };
+  });
 }

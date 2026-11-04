@@ -489,7 +489,7 @@ export function validateExecutionPrd(prd, options = {}) {
         const dependency = storyById.get(dependencyId);
         if (!dependency) continue;
         if (orchestrator === 'athena') {
-          if (dependency.assignedWorker !== story.assignedWorker) {
+          if (dependency.assignedWorker !== story.assignedWorker && options.allowDependencyWaves !== true) {
             errors.push(`${story.id} cannot depend on ${dependencyId} assigned to another concurrently launched worker`);
           } else if (storyIndexes.get(dependencyId) >= index) {
             errors.push(`${story.id} dependency ${dependencyId} must appear earlier for its sequential worker`);
@@ -509,7 +509,7 @@ export function validateExecutionPrd(prd, options = {}) {
       .filter(isObject)
       .map(story => story.parallelGroup)
       .filter(nonEmpty));
-    if (groups.size > 1) {
+    if (groups.size > 1 && options.allowDependencyWaves !== true) {
       errors.push('Athena currently supports exactly one concurrently launched parallelGroup');
     }
   } else {

@@ -1,5 +1,33 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Explicit managed Athena execution backend: persistent supervisors and durable
+  commands, worker-bound MCP delegation to parallel leaves, parent/child capacity
+  reservations, and dependency waves verified after integration. The default
+  native-team workflow and other callers keep their existing lifecycle.
+- Opt-in ledger v3 migration/downgrade with quiescence checks, protected recovery
+  state, exact subtree release, and fresh-process descendant cancellation.
+- Managed Gemini ACP support for current `session/*` methods and streaming
+  updates, while retaining the legacy adapter contract for existing callers.
+
+### Changed
+- Invocation-local managed provider controls disable native child delegation.
+  Claude receives explicit MCP configuration under bare mode; Gemini read-only
+  settings also disable experimental agents. These controls enforce managed
+  admission and do not claim an OS-wide process or spend boundary.
+- Execution completion remains separate from full pipeline review and shipping.
+
+### Fixed
+- Managed batch follow-ups receive fresh one-use broker credentials. Child
+  manifests use a provider-specific allowlist instead of inheriting parent model,
+  prompt, budget, or MCP configuration. The supervisor enforces persistent mode.
+- Failed tasks and verification stop their wave and release confirmed subtrees;
+  later ticks retry only unfinished cleanup. Integrated commits remain available
+  with failure/recovery guidance. Offline reservation reconciliation records an
+  audit request and rejects stale identities and known live processes.
+
 ## [1.6.1] - 2026-10-01
 
 `/ask` latency patch. The zero-dependency Node suite is **3354/3354 green
