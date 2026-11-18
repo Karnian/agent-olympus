@@ -3,7 +3,7 @@
 Status: released in v1.6.2 as an explicit opt-in runtime; provider launch controls are configured,
 with hermetic process/MCP tests and separate provider transport diagnostics.
 Full model-turn provider validation is not claimed.
-Updated: 2026-11-05 (PR #93 merged; v1.6.2 release)
+Updated: 2026-11-18 (v1.6.3 compatibility patch)
 Investigation base: `db474cd` (main, v1.6.1).
 
 Implementation and usage: [Managed Athena runtime](../../internals/athena-runtime.md).
@@ -38,7 +38,10 @@ provider options, enforce persistent mode at the supervisor boundary, and persis
 terminal failures before wave shutdown. Offline reservation reconciliation and
 retained-worktree cleanup are documented in the runtime guide.
 
-Validation: 3376 local tests across 142 files pass; Linux CI passes 3375 with one
+v1.6.3 accepts external provider model IDs and excludes untracked runtime
+artifacts from clean-checkpoint checks, including generated Git worktrees.
+
+v1.6.2 validation: 3376 local tests across 142 files pass; Linux CI passes 3375 with one
 platform-specific skip, alongside baseline and fixture green/red proof. These
 results verify the managed lifecycle, not full model-driven delegation or an
 OS-wide process/spend limit. The design sections below retain the investigation

@@ -11,7 +11,7 @@ const readRepoFile = relativePath => readFileSync(
 );
 
 const agent = readRepoFile('agents/athena.md');
-const skill = readRepoFile('skills/athena/SKILL.md');
+const skill = readRepoFile('skills/athena/reference.md');
 const athenaContracts = `${agent}\n${skill}`;
 
 test('Athena uses the current implicit native-team lifecycle', () => {

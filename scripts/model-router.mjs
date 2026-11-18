@@ -12,27 +12,28 @@
 
 import fs from 'fs';
 import path from 'path';
+import { classifyIntent, intentStateFilename } from './lib/intent-patterns.mjs';
 import { readStdin } from './lib/stdin.mjs';
 import { routeByIntent } from './lib/model-router.mjs';
 
 const STATE_DIR = '.ao/state';
-const INTENT_FILE = 'ao-intent.json';
 
 /**
- * Load the saved intent state from .ao/state/ao-intent.json.
+ * Load the matching session’s routing cache (or the legacy sessionless cache).
  * Returns null if file is missing, unreadable, or stale (> 10 min old).
  * @param {string} directory
  * @returns {{ category: string, confidence: number, scores: Record<string, number> }|null}
  */
-function loadIntentState(directory) {
+function loadIntentState(directory, sessionId) {
   try {
-    const statePath = path.join(directory, STATE_DIR, INTENT_FILE);
+    const statePath = path.join(directory, STATE_DIR, intentStateFilename(sessionId));
     const raw = fs.readFileSync(statePath, 'utf-8');
     const state = JSON.parse(raw);
 
+    if (state.schemaVersion !== undefined && state.schemaVersion !== 1) return null;
     // Discard stale intent (older than 10 minutes)
     const savedAt = new Date(state.savedAt).getTime();
-    if (Number.isFinite(savedAt) && Date.now() - savedAt > 10 * 60 * 1000) {
+    if (!Number.isFinite(savedAt) || Date.now() - savedAt > 10 * 60 * 1000) {
       return null;
     }
 
@@ -112,16 +113,19 @@ async function main() {
 
     // Only act on Task or Agent tool invocations
     const toolName = data.tool_name || '';
-    if (toolName !== 'Task' && toolName !== 'Agent') {
+    const hasModel = typeof data.tool_input?.model === 'string' && data.tool_input.model.trim().length > 0;
+    if ((toolName !== 'Task' && toolName !== 'Agent') || hasModel) {
       process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
       return;
     }
 
     const directory = data.cwd || data.directory || process.cwd();
-    const { subagentType } = extractTaskInput(data);
+    const { subagentType, prompt } = extractTaskInput(data);
 
     // Load intent from state written by intent-gate.mjs
-    const intentResult = loadIntentState(directory);
+    const taskIntent = typeof prompt === 'string' && prompt.trim() ? classifyIntent(prompt) : null;
+    const intentResult = taskIntent && taskIntent.category !== 'unknown'
+      ? taskIntent : loadIntentState(directory, data.session_id);
     if (!intentResult || intentResult.category === 'unknown') {
       // No meaningful intent state — pass through without adding noise
       process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
@@ -129,6 +133,11 @@ async function main() {
     }
 
     const routing = routeByIntent(intentResult);
+    // An explicit plugin persona owns its role even in a mixed-purpose run.
+    if (subagentType.startsWith('agent-olympus:') && subagentType !== routing.recommendedAgent) {
+      process.stdout.write(JSON.stringify({ continue: true, suppressOutput: true }));
+      return;
+    }
     const additionalContext = buildModelRoutingContext(routing, subagentType);
 
     process.stdout.write(JSON.stringify({

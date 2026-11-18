@@ -2,8 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Readable, Writable } from 'node:stream';
-import { startServer, initializeServer, createSession, sendPrompt, cancelPrompt, shutdownServer } from '../lib/gemini-acp.mjs';
-function fixture(stopReason = 'end_turn') {
+import { startServer, initializeServer, createSession, sendPrompt, cancelPrompt, enqueueMessage, shutdownServer } from '../lib/gemini-acp.mjs';
+function fixture(stopReason = 'end_turn', managed = true) {
   const child = new EventEmitter();
   const calls = [];
   child.pid = 12345; child.killed = false;
@@ -13,7 +13,8 @@ function fixture(stopReason = 'end_turn') {
     const request = JSON.parse(chunk.toString()); calls.push(request);
     queueMicrotask(() => {
       if (request.method === 'session/cancel') return;
-      if (request.method === 'session/new') reply(request.id, { sessionId: 'session-one' });
+      if (request.method === 'initialize') reply(request.id, { protocolVersion: 1 });
+      else if (request.method === 'session/new') reply(request.id, { sessionId: 'session-one' });
       else if (request.method === 'session/prompt') {
         child.stdout.push(JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: 'session-one',
           update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'first ' } } } }) + '\n');
@@ -24,7 +25,7 @@ function fixture(stopReason = 'end_turn') {
     }); done();
   } });
   child.kill = () => { child.killed = true; queueMicrotask(() => child.emit('exit', 0)); };
-  const handle = startServer({ modernAcp: true, cwd: '/tmp', credential: { useKeychain: false },
+  const handle = startServer({ modernAcp: managed, cwd: '/tmp', credential: { useKeychain: false },
     spawn: () => child, resolveGeminiBinary: () => ({ path: 'fixture', flavor: 'gemini', resolved: true }) });
   return { handle, calls };
 }
@@ -49,5 +50,32 @@ test('managed ACP does not report a cancelled prompt as successful work', async 
     await initializeServer(handle); await createSession(handle, { cwd: '/tmp' });
     const result = await sendPrompt(handle, 'work');
     assert.equal(result.status, 'failed'); assert.equal(result.error.category, 'cancelled');
+  } finally { await shutdownServer(handle); }
+});
+
+test('ordinary ACP negotiates session/new and rejects a missing completion reason', async () => {
+  const { handle, calls } = fixture(null, false);
+  try {
+    await initializeServer(handle);
+    assert.equal((await createSession(handle)).sessionId, 'session-one');
+    assert.equal(calls[1].method, 'session/new');
+    const result = await sendPrompt(handle, 'work');
+    assert.equal(result.status, 'failed');
+    assert.equal(result.error.category, 'incomplete');
+  } finally { await shutdownServer(handle); }
+});
+
+test('ACP v1 delivers a follow-up queued during the first turn', async () => {
+  const { handle, calls } = fixture('end_turn', false);
+  try {
+    await initializeServer(handle);
+    await createSession(handle);
+    const initial = sendPrompt(handle, 'initial');
+    enqueueMessage(handle, 'follow-up');
+    assert.equal((await initial).output, 'first second');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(calls.filter(c => c.method === 'session/prompt').map(c => c.params.prompt[0].text),
+      ['initial', 'follow-up']);
+    assert.equal(handle._messageQueue.length, 0);
   } finally { await shutdownServer(handle); }
 });

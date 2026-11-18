@@ -482,7 +482,8 @@ test('startServer: sets workerMeta from Gemini-compatible binary resolver', () =
   });
 
   assert.equal(spawnPath, '/opt/antigravity/bin/agy');
-  assert.deepEqual(spawnArgs, ['--acp']);
+  assert.deepEqual(spawnArgs, ['acp']);
+  assert.equal(handle._modernAcp, true);
   assert.deepEqual(handle.workerMeta, {
     binaryFlavor: 'agy',
     binaryResolved: true,
@@ -679,6 +680,23 @@ test('createSession: sends newSession and extracts sessionId', async () => {
   const result = await promise;
   assert.equal(result.sessionId, 'ses-xyz-001');
   assert.equal(handle._sessionId, 'ses-xyz-001');
+});
+
+test('createSession: modern ACP applies the advertised model selector and records the confirmed value', async () => {
+  const child = createMockChildProcess();
+  const writes = [];
+  child.stdin = new Writable({ write(chunk, _enc, cb) { writes.push(JSON.parse(chunk)); cb(); } });
+  const handle = createHandle(child, true);
+  handle._modernAcp = true;
+  const promise = createSession(handle, { model: 'target' });
+  const selector = { id: 'provider-model', category: 'model', currentValue: 'default' };
+  emitResponse(child, writes[0].id, { sessionId: 's', configOptions: [selector] });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(writes[1].method, 'session/set_config_option');
+  assert.deepEqual(writes[1].params, { sessionId: 's', configId: selector.id, value: 'target' });
+  emitResponse(child, writes[1].id, { configOptions: [{ ...selector, currentValue: 'target' }] });
+  assert.deepEqual(await promise, { sessionId: 's' });
+  assert.equal(handle.workerMeta.reportedModel, 'target');
 });
 
 test('createSession: returns error on server error', async () => {

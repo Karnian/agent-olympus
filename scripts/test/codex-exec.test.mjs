@@ -1737,3 +1737,12 @@ test('all required exports are present and callable', async () => {
   assert.equal(typeof mod.parseJSONLEvents, 'function', 'parseJSONLEvents must be exported');
   assert.equal(typeof mod.mapJsonlErrorToCategory, 'function', 'mapJsonlErrorToCategory must be exported');
 });
+
+test('new and resumed exec commands forward the requested model', () => {
+  const opts = { level: 'suggest', model: 'gpt-6.2-astra' };
+  for (const argv of [_buildSpawnArgs(opts), _buildResumeArgs('test-thread', opts)]) {
+    const i = argv.indexOf('--model');
+    assert.ok(i > argv.indexOf('exec'));
+    assert.equal(argv[i + 1], opts.model);
+  }
+});

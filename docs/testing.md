@@ -6,7 +6,7 @@ Run `node scripts/check-agents-size.mjs` to verify `AGENTS.md` stays under the 2
 ## Testing
 
 ```bash
-# Run unit tests (v1.6.2: 3376 tests, 142 files; v1.6.1: 3354 tests, 135 files)
+# Run unit tests (v1.6.3: 3,388 tests, 142 files)
 npm test
 
 # Or invoke the cross-platform Node test enumerator directly
@@ -34,6 +34,11 @@ grep -r '\.omc/' scripts/ skills/ agents/                   # should return noth
 The pull-request workflow runs the same unit, baseline, and fixture gates when
 the PR has the `run-evals` label. Live Atlas/Athena evals are paid,
 operator-controlled runs and are intentionally excluded from CI.
+
+v1.6.3 adds regression checks for installed Athena startup, negotiated Gemini
+ACP v1 sessions and queued messages, external model selection, and pricing of
+approved worker assignments. Model-quality and billing comparisons require live
+model tasks.
 
 The v1.6.2 local suite passed all 3376 tests. Linux CI passed 3375 and skipped
 one platform-specific test, with zero failures. Managed runtime regressions cover

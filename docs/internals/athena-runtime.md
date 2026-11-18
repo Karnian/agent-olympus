@@ -1,6 +1,6 @@
 # Managed Athena execution runtime
 
-Available in **v1.6.2** ([release notes](../../CHANGELOG.md#162---2026-11-05)).
+Introduced in **v1.6.2** ([release notes](../../CHANGELOG.md#162---2026-11-05)).
 
 This opt-in backend supports concurrent provider workers and broker-managed
 leaf agents. Legacy Athena/native teams, Atlas, `/ask`, and read-only review
@@ -8,18 +8,22 @@ workers retain their existing lifecycle. The runtime performs local task
 execution and integration; its `completed` status is not full pipeline review,
 release approval, a PR, or successful shipping.
 
-Run commands from the project root, using the plugin's absolute script path
-when the target project does not contain the plugin sources.
+Run commands from the project root. In a standalone shell, set
+`CLAUDE_PLUGIN_ROOT` to the absolute path of the installed plugin first.
 Update every participating plugin installation before the first v3 migration;
 the plugin version and the independently versioned admission ledger are distinct.
 
 ```sh
-node scripts/athena-runtime.mjs capabilities
-node scripts/athena-runtime.mjs start .ao/prd.json .ao/runtime-options.json
-node scripts/athena-runtime.mjs tick <run-id>
-node scripts/athena-runtime.mjs status <run-id>
-node scripts/athena-runtime.mjs cancel <run-id>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/athena-runtime.mjs" capabilities
+node "${CLAUDE_PLUGIN_ROOT}/scripts/estimate-prd-cost.mjs" .ao/prd.json --managed
+node "${CLAUDE_PLUGIN_ROOT}/scripts/athena-runtime.mjs" start .ao/prd.json .ao/runtime-options.json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/athena-runtime.mjs" tick <run-id>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/athena-runtime.mjs" status <run-id>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/athena-runtime.mjs" cancel <run-id>
 ```
+
+The optional cost estimate counts one parent launch per story in managed mode.
+Extra child assignments, retries and follow-up turns are outside that estimate.
 
 `start` requires a clean committed tree, an execution-enriched AO_SPEC PRD,
 available provider launch controls, and explicit verification commands. Options:
@@ -36,6 +40,12 @@ available provider launch controls, and explicit verification commands. Options:
   }
 }
 ```
+
+Commit the user-authored runtime options for a clean checkpoint, or store the
+options outside the project and pass their absolute path. Untracked AO runtime
+state and worker worktrees are excluded automatically. Ordinary untracked and
+tracked user changes still block the run. An external story can optionally set
+`model` to the provider's model ID. Omitting it uses the provider default.
 
 Choose verification commands for the target project. No shell parses these
 argument arrays. The lead calls `tick` while work is active and reports changes
@@ -58,8 +68,8 @@ reuse their sessions; exec adapters use explicit task chaining. Codex app-server
 supports steering of the pinned active task. Unsupported steering is rejected.
 
 ```sh
-node scripts/athena-runtime.mjs command <team> <worker> <generation> .ao/command.json
-node scripts/athena-runtime.mjs result <team> <worker> <generation> <command-id>
+node "${CLAUDE_PLUGIN_ROOT}/scripts/athena-runtime.mjs" command <team> <worker> <generation> .ao/command.json
+node "${CLAUDE_PLUGIN_ROOT}/scripts/athena-runtime.mjs" result <team> <worker> <generation> <command-id>
 ```
 
 Command JSON uses `type: assign` with `prompt`, `steer` with `prompt` and
@@ -128,12 +138,12 @@ If missing team evidence or an unrecorded launch prevents cancellation:
    `.ao/state/supervisor/<runId>/` snapshots and child sidecars, plus the OS process
    list. A missing PID does not prove that a process was never started. Preserve
    run state, outputs, branches, and any uncommitted work before proceeding.
-2. Run `node scripts/athena-runtime.mjs reservations` and identify the exact
+2. Run `node "${CLAUDE_PLUGIN_ROOT}/scripts/athena-runtime.mjs" reservations` and identify the exact
    `parentEntryId`, entries, and digest of the orphaned subtree.
 3. Only after confirming **all** its processes and launchers are stopped, run:
 
    ```sh
-   node scripts/athena-runtime.mjs reconcile <parent-entry-id> <digest> --confirm-stopped
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/athena-runtime.mjs" reconcile <parent-entry-id> <digest> --confirm-stopped
    ```
 
    This is an explicit offline operator acknowledgement for unrecorded launches,
@@ -176,9 +186,8 @@ Claude receives an explicit built-in tool set without Task/Agent and an explicit
 strict MCP config even under `--bare`. Codex disables both native multi-agent
 features through strict config. The inspected Gemini 0.50.x settings contract
 disables experimental agents through invocation-specific system settings;
-unrecognized versions are unavailable pending validation. Managed Gemini ACP
-uses current `session/*` methods and `session/update` text streaming; legacy
-callers keep their prior protocol. No global provider configuration is rewritten.
+unrecognized versions are unavailable pending validation. Gemini workers select current `session/*` methods and `session/update` text
+streaming when the server negotiates ACP v1, including outside managed mode. No global provider configuration is rewritten.
 
 The enforced admission cap covers the **managed task graph**. Unrestricted shell
 tools and hostile same-user processes are outside that boundary. This backend

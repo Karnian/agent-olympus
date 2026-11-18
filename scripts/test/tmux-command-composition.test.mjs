@@ -372,7 +372,7 @@ test('gemini worker command uses resolveGeminiBinary (AO_GEMINI_BINARY honored)'
     );
     reapPromptFiles(command);
     assert.ok(
-      command.includes('"/fake/agy-compatible-binary"'),
+      command.startsWith("'/fake/agy-compatible-binary' "),
       `gemini command should spawn the override binary, got:\n${command}`
     );
   } finally {

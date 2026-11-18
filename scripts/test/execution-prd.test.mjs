@@ -1,4 +1,9 @@
 import { describe, it } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import {
   CLAUDE_EXECUTION_AGENT_TYPES,
@@ -304,7 +309,7 @@ describe('Athena execution PRD', () => {
     });
     const result = validateExecutionPrd(input, { orchestrator: 'athena' });
     assert.equal(result.ok, false);
-    assert.match(result.errors.join('\n'), /model must be omitted/);
+    assert.doesNotMatch(result.errors.join('\n'), /provider model ID/);
     assert.match(result.errors.join('\n'), /conflicting workerType\/model\/agentType/);
   });
 
@@ -611,4 +616,28 @@ describe('NUL-delimited Git path parsing', () => {
     );
     assert.deepEqual(parseNulDelimitedGitPaths(Buffer.alloc(0)), []);
   });
+});
+
+it('cost CLI prices validated worker launches and rejects an unassigned planning PRD', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'ao-cost-'));
+  const file = join(dir, 'prd.json');
+  const cli = fileURLToPath(new URL('../estimate-prd-cost.mjs', import.meta.url));
+  const estimate = (stories, ...options) => {
+    writeFileSync(file, JSON.stringify(prd({ userStories: stories })));
+    return spawnSync(process.execPath, [cli, file, ...options], { cwd: dir, encoding: 'utf8' });
+  };
+  try {
+    const assignment = { assignedWorker: 'build', workerType: 'codex', model: 'gpt-6.2-sol', agentType: undefined };
+    const stories = [story(assignment), story({ ...assignment, id: 'US-002' })];
+    const result = estimate(stories);
+    const managed = estimate(stories, '--managed');
+    assert.equal(managed.status, 0, managed.stderr);
+    assert.equal(JSON.parse(managed.stdout).breakdown[0].count, 2);
+    assert.equal(result.status, 0, result.stderr);
+    const { breakdown, estimatedCostUSD } = JSON.parse(result.stdout);
+    assert.equal(breakdown[0].count, 1);
+    assert.equal(estimatedCostUSD, 0.028);
+    assert.equal(JSON.parse(estimate([story({ assignTo: 'codex', agentType: undefined })]).stdout).estimatedCostUSD, null);
+    assert.notEqual(estimate([story({ assignTo: undefined })]).status, 0);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

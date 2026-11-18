@@ -56,7 +56,7 @@ lists top-level directories only.
 
 ## Release Metadata and Documentation
 
-The current release is **v1.6.2**. Keep `package.json`,
+The current release is **v1.6.3**. Keep `package.json`,
 `.claude-plugin/plugin.json`, and both marketplace version fields synchronized.
 Move shipped changes from `Unreleased` to a dated `CHANGELOG.md` entry, update
 the English/Korean README feature and test baselines, and reconcile relevant

@@ -49,6 +49,7 @@ const HARNESS_RUNTIME_FILES = [
   { absolutePath: path.join(EVAL_LIB_DIR, 'score.mjs'), relativePath: 'harness/score.mjs' },
   { absolutePath: path.join(EVAL_LIB_DIR, 'tasks.mjs'), relativePath: 'harness/tasks.mjs' },
   { absolutePath: path.join(REPO_ROOT, 'hooks/hooks.json'), relativePath: 'harness/hooks.json' },
+  { absolutePath: path.join(REPO_ROOT, 'scripts/athena-bootstrap.mjs'), relativePath: 'harness/athena-bootstrap.mjs' },
   { absolutePath: path.join(REPO_ROOT, 'scripts/orchestrator-runtime.mjs'), relativePath: 'harness/orchestrator-runtime.mjs' },
   { absolutePath: path.join(REPO_ROOT, 'scripts/orchestrator-skill-init.mjs'), relativePath: 'harness/orchestrator-skill-init.mjs' },
   { absolutePath: path.join(REPO_ROOT, 'scripts/orchestrator-stop-gate.mjs'), relativePath: 'harness/orchestrator-stop-gate.mjs' },

@@ -12,7 +12,7 @@
 import fs from 'fs';
 import path from 'path';
 import { readStdin } from './lib/stdin.mjs';
-import { classifyIntent } from './lib/intent-patterns.mjs';
+import { classifyIntent, intentStateFilename } from './lib/intent-patterns.mjs';
 import { atomicWriteFileSync } from './lib/fs-atomic.mjs';
 
 /**
@@ -48,7 +48,6 @@ function readCapabilityCache(directory) {
 }
 
 const STATE_DIR = '.ao/state';
-const INTENT_FILE = 'ao-intent.json';
 
 /**
  * Extract prompt text from various UserPromptSubmit JSON shapes.
@@ -79,14 +78,15 @@ function extractPrompt(data) {
 }
 
 /**
- * Persist intent result to .ao/state/ao-intent.json for downstream hooks.
+ * Persist this session’s intent for downstream hooks.
  * @param {string} directory - Project root (cwd)
  * @param {object} intentResult
  */
-function saveIntentState(directory, intentResult) {
+function saveIntentState(directory, sessionId, intentResult) {
   try {
-    const dest = path.join(directory, STATE_DIR, INTENT_FILE);
+    const dest = path.join(directory, STATE_DIR, intentStateFilename(sessionId));
     atomicWriteFileSync(dest, JSON.stringify({
+      schemaVersion: 1,
       ...intentResult,
       savedAt: new Date().toISOString(),
     }, null, 2));
@@ -201,7 +201,7 @@ async function main() {
     const intentResult = classifyIntent(prompt);
 
     // Persist for downstream hooks (model-router.mjs)
-    saveIntentState(directory, intentResult);
+    saveIntentState(directory, data.session_id, intentResult);
 
     // If intent is unknown with zero confidence, pass through without noise
     if (intentResult.category === 'unknown' && intentResult.confidence === 0) {

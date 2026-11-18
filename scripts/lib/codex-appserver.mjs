@@ -619,6 +619,9 @@ export async function createThread(handle, opts = {}) {
     return { error: response.error };
   }
 
+  if (typeof response.result?.model === 'string') {
+    handle.workerMeta = { ...handle.workerMeta, reportedModel: response.result.model };
+  }
   // Wire: result.thread.id (not result.threadId)
   const threadId = response.result?.thread?.id || handle.threadId;
   if (threadId) handle.threadId = threadId;

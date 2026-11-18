@@ -1,7 +1,8 @@
 /**
  * Gemini ACP adapter — JSON-RPC 2.0 over stdio.
  *
- * Wire protocol for `gemini --acp` (ACP = Agent Communication Protocol):
+ * Current Agent Client Protocol v1 uses session/* methods. The handshake
+ * selects v1 for ordinary workers too. Older servers use this legacy dialect:
  *   1. Client sends `initialize` with `clientInfo` and `protocolVersion`.
  *      Server responds with server info / capabilities.
  *   2. Client sends `newSession` with `workingDirectory`.
@@ -35,7 +36,7 @@
 import { spawn as nodeSpawn } from 'child_process';
 import { EventEmitter } from 'events';
 import { buildEnhancedPath } from './resolve-binary.mjs';
-import { resolveGeminiBinary } from './gemini-binary.mjs';
+import { assertGeminiIsolation, resolveGeminiBinary } from './gemini-binary.mjs';
 import { createGeminiReadOnlySettings } from './gemini-readonly.mjs';
 import {
   resolveGeminiApiKey,
@@ -284,7 +285,9 @@ export function startServer(opts = {}) {
   const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;
   const resolveBin = typeof opts.resolveGeminiBinary === 'function' ? opts.resolveGeminiBinary : resolveGeminiBinary;
   const binary = resolveBin();
-  const args = ['--acp'];
+  assertGeminiIsolation(binary, opts);
+  const args = binary.flavor === 'agy' ? ['acp'] : ['--acp'];
+  if (binary.flavor === 'agy' && opts.approvalMode === 'yolo') args.push('--dangerously-skip-permissions');
   const readOnlySettings = opts.readOnly === true
     ? createGeminiReadOnlySettings()
     : null;
@@ -350,7 +353,7 @@ export function startServer(opts = {}) {
     _draining: false,
     _deadLetters: [],
     _readOnly: opts.readOnly === true,
-    _modernAcp: opts.modernAcp === true,
+    _modernAcp: opts.modernAcp === true || binary.flavor === 'agy',
     _cwd: opts.cwd || process.cwd(),
     _securityViolation: null,
     workerMeta: { binaryFlavor: binary.flavor, binaryResolved: binary.resolved },
@@ -709,9 +712,10 @@ export async function initializeServer(handle, clientInfo) {
 
   if (response.error) {
     _maybeInvalidateOnAuthError(handle, response.error);
-    return { error: response.error };
+    return { error: { ...response.error, category: mapGeminiAcpError(response.error) } };
   }
 
+  if (response.result?.protocolVersion === PROTOCOL_VERSION) handle._modernAcp = true;
   handle._initialized = true;
   handle.status = 'ready';
   return { serverInfo: response.result || {} };
@@ -745,21 +749,25 @@ export async function createSession(handle, opts = {}) {
 
   if (response.error) {
     _maybeInvalidateOnAuthError(handle, response.error);
-    return { error: response.error };
+    return { error: { ...response.error, category: mapGeminiAcpError(response.error) } };
   }
 
   const sessionId = response.result?.sessionId;
-  if (sessionId) handle._sessionId = sessionId;
+  if (typeof sessionId !== 'string' || !sessionId.trim()) {
+    return { error: { category: 'crash', message: 'ACP server returned no session ID' } };
+  }
 
   // Configure approval mode and model before returning — await to ensure
   // the worker operates in the intended permission mode from the first prompt.
   // Note: sendRequest never rejects — it resolves with { error } on failure,
   // so we check response.error instead of using try/catch.
-  if (sessionId && opts.approvalMode) {
-    const resp = await sendRequest(handle, 'setSessionMode', { sessionId, mode: opts.approvalMode });
+  const agy = handle.workerMeta?.binaryFlavor === 'agy';
+  const mode = agy ? ({ plan: 'plan', auto_edit: 'accept-edits' }[opts.approvalMode]) : opts.approvalMode;
+  if (mode) {
+    const resp = await sendRequest(handle, 'setSessionMode', { sessionId, mode });
     if (resp.error) {
       _maybeInvalidateOnAuthError(handle, resp.error);
-      if (opts.requireApprovalMode === true) {
+      if (opts.requireApprovalMode === true || agy) {
         return {
           error: {
             ...resp.error,
@@ -772,14 +780,25 @@ export async function createSession(handle, opts = {}) {
       handle._warnings.push(`setSessionMode("${opts.approvalMode}") failed: ${resp.error.message || 'unknown error'} — worker may use default mode`);
     }
   }
-  if (sessionId && opts.model) {
-    const resp = await sendRequest(handle, 'unstable_setSessionModel', { sessionId, model: opts.model });
+  const modelOption = (result) => Array.isArray(result?.configOptions)
+    ? result.configOptions.find(option => option?.category === 'model' && typeof option.id === 'string')
+    : undefined;
+  const advertised = modelOption(response.result);
+  let reportedModel = advertised?.currentValue ?? response.result?.models?.currentModelId;
+  if (opts.model) {
+    const resp = advertised && handle._modernAcp
+      ? await sendRequest(handle, 'session/set_config_option', { sessionId, configId: advertised.id, value: opts.model })
+      : await sendRequest(handle, 'unstable_setSessionModel', { sessionId, model: opts.model });
     if (resp.error) {
-      handle._warnings = handle._warnings || [];
-      handle._warnings.push(`unstable_setSessionModel("${opts.model}") failed: ${resp.error.message || 'unknown error'} — worker may use default model`);
+      return { error: { ...resp.error, category: mapGeminiAcpError(resp.error), message: `Requested model "${opts.model}" was rejected: ${resp.error.message || 'unknown error'}` } };
     }
+    reportedModel = modelOption(resp.result)?.currentValue ?? resp.result?.models?.currentModelId;
   }
 
+  if (typeof reportedModel === 'string') {
+    handle.workerMeta = { ...handle.workerMeta, reportedModel };
+  }
+  handle._sessionId = sessionId;
   return { sessionId };
 }
 
@@ -801,7 +820,7 @@ export async function loadSession(handle, sessionId) {
 
   if (response.error) {
     _maybeInvalidateOnAuthError(handle, response.error);
-    return { error: response.error };
+    return { error: { ...response.error, category: mapGeminiAcpError(response.error) } };
   }
 
   const resumedId = response.result?.sessionId || sessionId;
@@ -859,8 +878,11 @@ export async function sendPrompt(handle, prompt, opts = {}) {
 
   // If the server returned a final result synchronously (no streaming),
   // extract output from the result payload
-  if (response.result) {
-    if (handle._modernAcp && response.result.stopReason && response.result.stopReason !== 'end_turn') {
+  if (handle._modernAcp && !response.result?.stopReason) {
+    handle.status = 'failed';
+    handle._turnError = { category: 'incomplete', message: 'ACP prompt returned no stopReason' };
+  } else if (response.result) {
+    if (handle._modernAcp && response.result.stopReason !== 'end_turn') {
       handle.status = 'failed';
       handle._turnError = { category: response.result.stopReason === 'cancelled' ? 'cancelled' : 'incomplete',
         message: `ACP prompt stopped: ${response.result.stopReason}` };
@@ -870,7 +892,12 @@ export async function sendPrompt(handle, prompt, opts = {}) {
     if (handle.status === 'running') handle.status = 'completed';
   }
 
-  return collectPromptResult(handle, timeoutMs);
+  const result = await collectPromptResult(handle, timeoutMs);
+  if (handle._modernAcp && result.status === 'completed' && handle._messageQueue?.length && !handle._draining) {
+    // Capture the completed result before the next prompt resets the handle.
+    _drainQueue(handle).catch(() => {});
+  }
+  return result;
 }
 
 /**

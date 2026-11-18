@@ -88,8 +88,8 @@ export const resolveGeminiBinary = _createGeminiResolver();
  */
 function _flavorFromBasename(p) {
   const base = String(p).split(/[\\/]/).filter(Boolean).pop() || '';
-  if (base === 'gemini') return 'gemini';
-  if (base === 'agy') return 'agy';
+  const executable = base.toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
+  if (executable === 'gemini' || executable === 'agy') return executable;
   return 'custom';
 }
 
@@ -104,4 +104,21 @@ function _isResolvedBinary(candidate, name) {
   if (typeof candidate !== 'string' || !candidate) return false;
   if (candidate === name && !/[\\/]/.test(candidate)) return false;
   return path.isAbsolute(candidate) || path.win32.isAbsolute(candidate);
+}
+
+/** Gemini system settings cannot isolate an Antigravity review or managed leaf. */
+export function assertGeminiIsolation(binary, opts) {
+  if (binary.flavor === 'agy' && (opts.readOnly || opts.env?.GEMINI_CLI_SYSTEM_SETTINGS_PATH)) {
+    throw new Error('This isolated worker requires Gemini CLI system settings. Select the gemini binary.');
+  }
+}
+
+export function agyApprovalArgs(mode) {
+  switch (mode) {
+    case 'plan': return ['--mode', 'plan'];
+    case 'auto_edit': return ['--mode', 'accept-edits'];
+    case 'yolo': return ['--dangerously-skip-permissions'];
+    case undefined: case null: case 'default': return [];
+    default: throw new Error('Unsupported Antigravity execution mode');
+  }
 }

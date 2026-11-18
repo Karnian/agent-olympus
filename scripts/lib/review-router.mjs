@@ -63,6 +63,7 @@ const REVIEW_POLICY_PATHS = new Set([
   'scripts/lib/review-router.mjs',
   'scripts/lib/run-artifacts.mjs',
   'skills/athena/SKILL.md',
+  'skills/athena/reference.md',
   'skills/atlas/SKILL.md',
   'skills/atlas/reference.md',
 ]);

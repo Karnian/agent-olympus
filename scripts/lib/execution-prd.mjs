@@ -219,6 +219,11 @@ function validateCommonSpecFields(prd, errors) {
   }
 }
 
+export function isExternalModelId(model) {
+  return typeof model === 'string' && !CLAUDE_MODELS.has(model)
+    && /^[a-zA-Z0-9][a-zA-Z0-9_./:-]{0,127}$/.test(model);
+}
+
 /**
  * Resolve one validated Athena Claude execution role to the exact plugin agent
  * identifier consumed by Agent()/Task(). Planning/review-only personas are not
@@ -276,7 +281,7 @@ export function buildAthenaWorkerDefinitions(prd, options = {}) {
     return {
       name,
       type,
-      model: type === 'claude' ? (stories[0].model || 'sonnet') : undefined,
+      model: stories[0].model ?? (type === 'claude' ? 'sonnet' : undefined),
       agentType,
       subagentType: agentType ? resolveClaudeExecutionSubagentType(agentType) : null,
       stories,
@@ -459,8 +464,8 @@ export function validateExecutionPrd(prd, options = {}) {
     } else if (story.agentType !== undefined) {
       errors.push(`${prefix}.agentType must be omitted for Codex/Gemini adapter workers`);
     }
-    if ((story.workerType === 'codex' || story.workerType === 'gemini') && story.model !== undefined) {
-      errors.push(`${prefix}.model must be omitted for external workers until provider-specific models are supported`);
+    if ((story.workerType === 'codex' || story.workerType === 'gemini') && story.model !== undefined && !isExternalModelId(story.model)) {
+      errors.push(`${prefix}.model must be a provider model ID for external workers`);
     }
     if (nonEmpty(story.assignedWorker) && WORKER_TYPES.has(story.workerType)) {
       const prior = athenaWorkers.get(story.assignedWorker);

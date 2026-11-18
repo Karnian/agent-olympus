@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runIsolatedCheck } from '../../evals/lib/grader-subprocess.mjs';
 
 const repoRoot = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const HOSTILE_TIMEOUT_MS = 300;
+const STARTUP_AND_CHECK_TIMEOUT_MS = 3_000;
 
 function hostileWorkdir(taskId, relativeCandidatePath, source) {
   const tempRoot = mkdtempSync(path.join(tmpdir(), `ao-hostile-${taskId}-`));
@@ -22,12 +22,12 @@ async function loadGrader(taskId) {
   return import(new URL(`../../evals/tasks/${taskId}/grader.mjs`, import.meta.url));
 }
 
-async function assertHostileCandidateFails({ taskId, candidatePath, source, expectedDetail, inspect }) {
+async function assertHostileCandidateFails({ taskId, candidatePath, source, expectedDetail, inspect, timeoutMs = STARTUP_AND_CHECK_TIMEOUT_MS }) {
   const candidate = hostileWorkdir(taskId, candidatePath, source);
   try {
     const grader = await loadGrader(taskId);
     const startedAt = Date.now();
-    const result = await grader.grade(candidate.workdir, { timeoutMs: HOSTILE_TIMEOUT_MS });
+    const result = await grader.grade(candidate.workdir, { timeoutMs });
     const elapsedMs = Date.now() - startedAt;
 
     assert.equal(result.pass, false);
@@ -50,6 +50,7 @@ test('top-level infinite loop times out without hanging the eval runner', async 
     taskId: 'fix-failing-test',
     candidatePath: 'src/sum.mjs',
     source: 'while (true) {}\n',
+    timeoutMs: 300,
     expectedDetail: /timed out after 300ms/,
   });
 });
@@ -296,6 +297,7 @@ test('never-resolving candidate promise times out without hanging the eval runne
     taskId: 'fix-map-limit',
     candidatePath: 'src/mapLimit.mjs',
     source: 'export async function mapLimit() { return new Promise(() => {}); }\n',
+    timeoutMs: 300,
     expectedDetail: /timed out after 300ms/,
   });
 });

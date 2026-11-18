@@ -10,6 +10,12 @@ scope, timeout, and resolved grants. Failed waves stop peers and retain their
 worktrees; the runtime guide covers offline slot recovery and explicit Git cleanup.
 > Moved verbatim from CLAUDE.md (Codex Interop v1, Ship order 1).
 
+Antigravity uses `agy acp` for ACP and `agy --output-format json -p` for
+headless execution. Select an installation with `AO_GEMINI_BINARY`.
+Isolated reviews and managed Gemini workers require Gemini CLI system settings.
+Worker snapshots distinguish `requestedModel` from `reportedModel` when
+the provider reports its selection. An absent reported model is unknown.
+
 ### Detached Worker Supervisor (v1.2.0+)
 
 **Problem.** Atlas/Athena orchestration is **fresh-process-per-poll**: `monitorTeam` / `collectResults` / `shutdownTeam` each `loadTeamState()` from disk in a brand-new Node process. A live in-process adapter handle (`_liveHandle`) does NOT survive that boundary — `saveTeamState` strips it (`NON_SERIALIZABLE_WORKER_KEYS`). Before v1.2.0 the five non-tmux adapters spawned in-process, so once the orchestrator re-polled in a fresh process their completion was invisible and the workers were stuck `status: 'running'` forever (a fresh `monitorTeam` had no handle to read).
@@ -135,8 +141,7 @@ remains a separate follow-up.
 
 **Gemini workers** (`type: 'gemini'`):
 4. **gemini-acp** — Multi-turn JSON-RPC 2.0 over stdio (`gemini --acp`)
-   - ACP (Agent Communication Protocol): newSession/prompt/cancel/setSessionMode lifecycle
-   - camelCase method names (sessionStarted, promptCompleted, etc.)
+   - Agent Client Protocol v1 selects `session/new`, `session/prompt` and `session/update` after negotiation. Older servers retain their legacy method names.
    - Message queue for team communication: `enqueueMessage()` → auto-drain on turn completion
    - No mid-turn injection (unlike Codex `steerTurn()`) — messages queued between turns
    - Requires `hasGeminiAcp` capability (gemini CLI with `--acp` flag support)
@@ -146,7 +151,7 @@ remains a separate follow-up.
 
 Both Gemini adapters resolve their executable through `scripts/lib/gemini-binary.mjs` without adding a new adapter or changing `ADAPTER_REGISTRY`: `AO_GEMINI_BINARY` verbatim override first, then a real resolved `gemini` path, then a real resolved `agy` path. If neither binary is found, the adapters still spawn bare `gemini` so the existing ENOENT/not_installed flow remains intact, but the error message also explains the 2026-06-18 Gemini CLI tier split and the override.
 
-Detached supervisor snapshots may include `workerMeta.binaryFlavor` (`gemini`, `agy`, or `custom`) and `workerMeta.binaryResolved` from the live adapter handle. Baseline: validated e2e against gemini-cli 0.50.0 (exec JSON roundtrip + ACP initialize; ACP `protocolVersion` is numeric as of 0.50 — 0.37.x has not been re-validated since that change). agy path unit-tested only (no binary available), e2e pending. Preflight capability detection and the tmux gemini command also route through `resolveGeminiBinary()`, so an agy-only install or `AO_GEMINI_BINARY` override still selects the Gemini adapters.
+Detached supervisor snapshots may include `workerMeta.binaryFlavor` (`gemini`, `agy`, or `custom`) and `workerMeta.binaryResolved` from the live adapter handle. Baseline: validated e2e against gemini-cli 0.50.0 (exec JSON roundtrip and ACP session creation with plan mode and an explicit model selection; ACP `protocolVersion` is numeric as of 0.50 — 0.37.x has not been re-validated since that change). Antigravity 1.5.10 passed a live ACP initialization and shutdown. Headless result handling and model selection have fixture coverage. Preflight capability detection and the tmux gemini command also route through `resolveGeminiBinary()`, so an agy-only install or `AO_GEMINI_BINARY` override still selects the Gemini adapters.
 
 **All workers**:
 6. **tmux** — Legacy fallback, works for all worker types

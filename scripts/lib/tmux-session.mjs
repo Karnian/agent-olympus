@@ -4,7 +4,7 @@ import { isAbsolute } from 'path';
 import { createHash, randomUUID } from 'crypto';
 import { createWorkerWorktree } from './worktree.mjs';
 import { resolveBinary, buildEnhancedPath } from './resolve-binary.mjs';
-import { resolveGeminiBinary } from './gemini-binary.mjs';
+import { agyApprovalArgs, assertGeminiIsolation, resolveGeminiBinary } from './gemini-binary.mjs';
 import { createGeminiReadOnlySettings } from './gemini-readonly.mjs';
 import { resolveCodexApproval, buildCodexExecArgs } from './codex-approval.mjs';
 import { codexVersionMeta } from './cli-version.mjs';
@@ -518,7 +518,7 @@ export function buildWorkerCommand(worker, opts = {}) {
         ? ' --ignore-user-config --ignore-rules --skip-git-repo-check --ephemeral'
         : '';
       codexPath ||= opts.codexBinary || resolveBinary('codex');
-      return withExitMarker(`"${codexPath}" ${codexArgs}${isolationOverrides} exec${isolatedExec} -- "$(cat "${safeFile}")"`, safeFile, exitNonce);
+      return withExitMarker(`"${codexPath}" ${codexArgs}${isolationOverrides} exec${isolatedExec}${worker.model ? ` --model ${shellQuote(worker.model)}` : ''} -- "$(cat "${safeFile}")"`, safeFile, exitNonce);
     }
     case 'gemini': {
       // Mirror Claude's permission level to Gemini approval mode
@@ -526,7 +526,10 @@ export function buildWorkerCommand(worker, opts = {}) {
       const gMode = worker.readOnly === true
         ? 'plan'
         : resolveGeminiApproval(gAutonomy, { cwd: opts.cwd });
-      const gFlag = geminiApprovalFlag(gMode);
+      const binary = resolveGeminiBinary();
+      assertGeminiIsolation(binary, worker);
+      const gFlag = binary.flavor === 'agy' ? agyApprovalArgs(gMode).join(' ') : geminiApprovalFlag(gMode);
+      const modelFlag = worker.model ? ` --model ${shellQuote(worker.model)}` : '';
       const gFlagPart = gFlag ? ` ${gFlag}` : '';
       const readOnlySettings = worker.readOnly === true
         ? createGeminiReadOnlySettings()
@@ -538,7 +541,7 @@ export function buildWorkerCommand(worker, opts = {}) {
       // resolveGeminiBinary: honors AO_GEMINI_BINARY and falls back to agy
       // when the gemini CLI is absent (2026-06-18 tier split).
       return withExitMarker(
-        `${configPrefix}"${resolveGeminiBinary().path}"${gFlagPart}${extensionPart} -p "$(cat "${safeFile}")"`,
+        `${configPrefix}${shellQuote(binary.path)}${modelFlag}${gFlagPart}${extensionPart} -p "$(cat "${safeFile}")"`,
         safeFile,
         exitNonce,
         readOnlySettings ? [sanitizeForShellArg(readOnlySettings.path)] : [],

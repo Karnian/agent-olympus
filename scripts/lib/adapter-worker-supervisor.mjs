@@ -188,7 +188,7 @@ function onAdapterPid(pid) {
 function onWorkerMeta(h) {
   const meta = sanitizeWorkerMeta(h && h.workerMeta);
   if (meta) {
-    base.workerMeta = meta;
+    base.workerMeta = { ...base.workerMeta, ...meta };
     writeRunningSnapshot();
   }
 }
@@ -203,7 +203,9 @@ async function runExec(mod, m) {
   liveHandle = h; liveShutdown = mod.shutdown;
   onAdapterPid(h.pid);
   onWorkerMeta(h);
-  return normalize(await mod.collect(h, m.timeoutMs));
+  const result = await mod.collect(h, m.timeoutMs);
+  onWorkerMeta(h);
+  return normalize(result);
 }
 
 async function runCodexAppserver(mod, m) {
@@ -222,6 +224,7 @@ async function runCodexAppserver(mod, m) {
   if (init && init.error) return normalize({ status: 'failed', error: init.error });
   const thread = await mod.createThread(h, buildAppserverThreadOpts(m));
   if (thread && thread.error) return normalize({ status: 'failed', error: thread.error });
+  onWorkerMeta(h);
   const turn = await mod.startTurn(h, m.prompt);
   if (turn && turn.error) return normalize({ status: 'failed', error: turn.error });
   return normalize(await mod.collectTurnResult(h, m.timeoutMs));
@@ -236,6 +239,7 @@ async function runGeminiAcp(mod, m) {
   const h = mod.startServer({
     cwd: m.cwd,
     credential: m.geminiCredential,
+    approvalMode: m.approvalMode,
     readOnly: m.readOnly === true,
     ...(m.runtimeOptions ? { env: m.runtimeOptions.env } : {}),
     modernAcp: !!m.runtimeOptions,
@@ -247,6 +251,7 @@ async function runGeminiAcp(mod, m) {
   if (init && init.error) return normalize({ status: 'failed', error: init.error });
   const sess = await mod.createSession(h, buildGeminiAcpSessionOpts(m));
   if (sess && sess.error) return normalize({ status: 'failed', error: sess.error });
+  onWorkerMeta(h);
   // sendPrompt collects internally (do NOT double-collect). Fall back to
   // collectPromptResult only if it resolves without a status.
   let res = await mod.sendPrompt(h, m.prompt, { timeout: m.timeoutMs });
@@ -430,6 +435,7 @@ async function main() {
     readOnly: m.readOnly,
     reviewTreeOid: m.reviewTreeOid,
     validationIdentity: m.validationIdentity,
+    ...(m.model ? { workerMeta: sanitizeWorkerMeta({ requestedModel: m.model }) } : {}),
     cwd: m.cwd,
   };
   writeRunningSnapshot();

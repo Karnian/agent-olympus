@@ -107,7 +107,10 @@ For a non-trivial task, enter and complete `context`, `spec`, and `plan` in orde
 Use Explore before Metis on unfamiliar code, Hermes as the sole owner of durable
 requirements and acceptance criteria, Prometheus for assignments/DAG/scope, and
 Momus or consensus-plan for plan validation. `complete plan` reads and validates
-the hardened execution PRD; do not pass it arbitrary JSON or a path.
+the hardened execution PRD; do not pass it arbitrary JSON or a path. Before
+dispatch, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/estimate-prd-cost.mjs" .ao/prd.json`
+on that approved plan. Display the estimated worker cost and mark a null total as
+unavailable. Apply a configured USD warning threshold only to a priced total.
 
 ### Execute
 

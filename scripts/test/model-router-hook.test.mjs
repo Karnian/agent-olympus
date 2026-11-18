@@ -17,7 +17,7 @@
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
@@ -296,7 +296,7 @@ describe('model-router-hook: Agent tool_name is treated same as Task', () => {
     const output = runHook(
       {
         tool_name: 'Agent',
-        tool_input: { subagent_type: 'agent-olympus:executor' },
+        tool_input: { subagent_type: 'agent-olympus:architect' },
         cwd: tmpDir,
       },
       { cwd: tmpDir },
@@ -368,4 +368,23 @@ describe('model-router-hook: malformed input handling', () => {
     });
     assert.doesNotThrow(() => JSON.parse(raw.trim()));
   });
+});
+
+it('keeps concurrent sessions and explicit child roles separate', async () => {
+  const cwd = await makeTmpDir();
+  try {
+    for (const [session_id, prompt] of [['A', 'security review'], ['B', 'write documentation and update the README']]) {
+      execFileSync(process.execPath, [path.join(__dirname, '../intent-gate.mjs')], {
+        input: JSON.stringify({ session_id, prompt, cwd }), cwd,
+      });
+    }
+    const route = (session_id, subagent_type, prompt, model) => runHook({ session_id, cwd,
+      tool_name: 'Agent', tool_input: { subagent_type, prompt, model } }, { cwd });
+    assert.equal(route('B', 'agent-olympus:writer', 'write documentation', 'opus').hookSpecificOutput, undefined);
+    assert.match(route('A', 'agent-olympus:security-reviewer').hookSpecificOutput.additionalContext, /security-reviewer/);
+    assert.match(route('B', 'agent-olympus:writer').hookSpecificOutput.additionalContext, /writer/);
+    assert.equal(route('C', 'agent-olympus:writer').hookSpecificOutput, undefined);
+    assert.equal(route('B', 'agent-olympus:security-reviewer').hookSpecificOutput, undefined);
+    assert.match(route('B', 'agent-olympus:security-reviewer', 'security review').hookSpecificOutput.additionalContext, /security-reviewer/);
+  } finally { await removeTmpDir(cwd); }
 });

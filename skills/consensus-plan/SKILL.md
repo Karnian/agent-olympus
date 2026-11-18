@@ -262,8 +262,8 @@ Assignment fields are deliberately different by orchestrator:
   every provider. `agentType` is required for Claude and must be omitted for
   Codex/Gemini.
 - **Athena**: the common fields plus `assignedWorker`, `workerType`, optional
-  Claude `model`, and `agentType` for Claude only. External workers omit both
-  `model` and `agentType`.
+  `model`, and `agentType` for Claude only. External workers may pin a provider
+  model ID or omit it to use the provider default.
 
 Allowed Claude execution roles are `executor`, `designer`, `test-engineer`,
 `debugger`, `hephaestus`, and `writer`. Never assign a provider reported

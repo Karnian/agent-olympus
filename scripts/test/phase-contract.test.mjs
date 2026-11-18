@@ -32,7 +32,7 @@ function callsLoopTick(text, key) {
 function assertShipSafetyContract(skill, orchestrator) {
   assert.match(skill, /const current(?:Atlas|Athena)Request\s*=\s*<user_request>/,
     'the current user-authored request must be captured on every invocation');
-  assert.match(skill, /appendUserTaskUpdate,[\s\S]*?getUserTaskUpdates/,
+  assert.match(skill, /appendUserTaskUpdate[\s\S]*?getUserTaskUpdates/,
     'shipping policy must use the strict atomic task-update ledger API');
   const appendPattern = orchestrator === 'athena'
     ? /const appendedTaskUpdate\s*=\s*appendUserTaskUpdate\(runId,\s*currentAthenaRequest,\s*\{[\s\S]*?allowCreate:\s*athenaAdmission\.created\s*===\s*true/
@@ -45,7 +45,7 @@ function assertShipSafetyContract(skill, orchestrator) {
   const pipelineInit = skill.indexOf(`initPipeline(runId, '${orchestrator}')`);
   assert.ok(taskUpdateAppend >= 0 && taskUpdateAppend < pipelineInit,
     'the latest user constraint must be durable before pipeline work resumes');
-  assert.match(skill, /const readDurableTaskBrief\s*=\s*action\s*=>[\s\S]*?const runRecord\s*=\s*getRun\(runId\)[\s\S]*?const strictUpdates\s*=\s*getUserTaskUpdates\(runId\)/,
+  assert.match(skill, /(?:const readDurableTaskBrief\s*=\s*action\s*=>|function readDurableTaskBrief\(runId, action\))[\s\S]*?const runRecord\s*=\s*getRun\(runId\)[\s\S]*?const strictUpdates\s*=\s*getUserTaskUpdates\(runId\)/,
     'shipping policy must read the durable run record');
   assert.match(skill, new RegExp(`runRecord\\.summary\\?\\.orchestrator !== ['"]${orchestrator}['"]`));
   assert.match(skill, /typeof runRecord\.summary\?\.task !== ['"]string['"][\s\S]*?throw new Error/,
@@ -56,10 +56,12 @@ function assertShipSafetyContract(skill, orchestrator) {
     'shipping policy must include every durable user follow-up');
   assert.match(
     skill,
-    /const resolved\s*=\s*resolveRunShipMode\(config,\s*readDurableTaskBrief\(action\)\)[\s\S]*?configuredShipMode\s*=\s*resolved\.configuredMode[\s\S]*?taskForbidsShipping\s*=\s*resolved\.taskForbidsShipping[\s\S]*?shipMode\s*=\s*resolved\.effectiveMode/,
+    orchestrator === 'athena'
+      ? /resolveRunShipMode\(config, readDurableTaskBrief\(runId, action\)\)[\s\S]*?shipMode: resolved\.effectiveMode/
+      : /const resolved\s*=\s*resolveRunShipMode\(config,\s*readDurableTaskBrief\(action\)\)[\s\S]*?configuredShipMode\s*=\s*resolved\.configuredMode[\s\S]*?taskForbidsShipping\s*=\s*resolved\.taskForbidsShipping[\s\S]*?shipMode\s*=\s*resolved\.effectiveMode/,
     'effective ship mode must be derived from config plus all durable user requests',
   );
-  assert.match(skill, /refreshRunShipPolicy\(['"]pipeline resume['"]\)[\s\S]*?initPipeline/,
+  assert.match(skill, /(?:resolveAthenaShipPolicy\(runId, |refreshRunShipPolicy\()['"]pipeline resume['"]\)[\s\S]*?initPipeline/,
     'fresh-process resume must resolve current task policy before phase restoration');
   assert.doesNotMatch(skill, /taskForbidsShipping\s*=\s*</, 'no task-policy placeholder may remain');
   assert.doesNotMatch(skill, /hasInteractiveUserChannel|userApprovedPush/,
@@ -82,7 +84,7 @@ function assertShipSafetyContract(skill, orchestrator) {
   assert.match(skill, /config\.notify\.onBlocked/);
   assert.ok(
     skill.includes(
-      `node scripts/notify-cli.mjs --event blocked --orchestrator ${orchestrator} --body "branch ready to ship: <branchName>"`,
+      `node ${orchestrator === 'athena' ? '"${CLAUDE_PLUGIN_ROOT}/scripts/notify-cli.mjs"' : 'scripts/notify-cli.mjs'} --event blocked --orchestrator ${orchestrator} --body "branch ready to ship: <branchName>"`,
     ),
     'headless ask must emit the documented blocked notification',
   );
@@ -94,7 +96,9 @@ function assertShipSafetyContract(skill, orchestrator) {
   }
   assert.match(skill, /branch ready: <branchName> — push\/PR은 사용자가 직접/);
 
-  const policyResolution = skill.indexOf('resolveRunShipMode(config, readDurableTaskBrief(action))');
+  const policyResolution = skill.indexOf(orchestrator === 'athena'
+    ? "resolveAthenaShipPolicy(runId, 'pipeline resume')"
+    : 'resolveRunShipMode(config, readDurableTaskBrief(action))');
   const finishBranch = skill.indexOf('Skill(skill="agent-olympus:finish-branch")', policyResolution);
   assert.ok(
     policyResolution >= 0 && finishBranch > policyResolution,
@@ -719,7 +723,18 @@ describe('agents/atlas.md references the runner chokepoint, not loop-guard', () 
 });
 
 describe('athena SKILL.md phase-runner contract', () => {
-  const skill = readSkill('skills/athena/SKILL.md');
+  const instructions = readSkill('skills/athena/SKILL.md');
+  const bootstrap = readSkill('scripts/athena-bootstrap.mjs');
+  const policy = readSkill('scripts/lib/athena-ship-policy.mjs');
+  const reference = readSkill('skills/athena/reference.md');
+  const skill = [bootstrap, policy, reference].join('\n');
+
+  test('Athena entry links a bounded startup guide to its phase reference', () => {
+    assert.ok(instructions.split('\n').length <= 500);
+    assert.match(instructions, /\[.*?\]\(reference\.md\)/);
+    assert.match(instructions, /AO-CONTRACT:runner-init/);
+    assert.match(reference, /AO-CONTRACT:runner-init/);
+  });
   const phaseIds = getPhaseSequence('athena').map(p => p.id);
 
   test('imports the phase-runner and wires every Athena phase', () => {

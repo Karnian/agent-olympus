@@ -1,3 +1,11 @@
+import { createHash } from 'node:crypto';
+
+export function intentStateFilename(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) return 'ao-intent.json';
+  const digest = createHash('sha256').update(sessionId).digest('hex');
+  return `ao-intent-${digest}.json`;
+}
+
 /**
  * Intent classification patterns for agent-olympus Intent Gate
  * Supports English, Korean, Japanese, and Chinese pattern matching

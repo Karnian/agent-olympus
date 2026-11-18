@@ -801,3 +801,24 @@ test('collect(): auth_failed + handle._credentialService unset → does NOT emit
     `missing service field must be safe (no warning); got: ${stderr}`
   );
 });
+
+test('Antigravity uses native arguments and preserves failure, cancellation and usage', () => {
+  const binary = { flavor: 'agy', path: '/test/agy', resolved: true };
+  let argv;
+  spawn('task', { resolveGeminiBinary: () => binary, model: 'gemini-4-carbon-high',
+    approvalMode: 'auto_edit', credential: { useKeychain: false },
+    spawn: (_binary, args) => { argv = args; return createMockChildProcess(); } });
+  assert.deepEqual(argv, ['--output-format', 'json', '--model', 'gemini-4-carbon-high',
+    '--mode', 'accept-edits', '-p', 'task']);
+  assert.throws(() => spawn('task', { readOnly: true, resolveGeminiBinary: () => binary }), /isolated worker/);
+  assert.match(parseGeminiJsonOutput('{"status":"SUCCESS"}', 'agy').error, /Missing Antigravity response/);
+  assert.match(parseGeminiJsonOutput('{}', 'agy').error, /Missing Antigravity result status/);
+  const usage = { input_tokens: 12, output_tokens: 2 };
+  for (const status of ['SUCCESS', 'ERROR', 'CANCELED', 'WAITING']) {
+    const result = parseGeminiJsonOutput(JSON.stringify({ status, usage, response: 'answer',
+      error: status === 'ERROR' ? 'invalid model' : undefined }));
+    assert.deepEqual(result.usage, usage);
+    if (status === 'SUCCESS') assert.deepEqual(result, { usage, output: 'answer', error: null });
+    else assert.equal(result.error, status === 'ERROR' ? 'invalid model' : `Antigravity run ended with status ${status}`);
+  }
+});

@@ -465,7 +465,7 @@ function targetPromptRelativePaths(task) {
     return ['skills/atlas/SKILL.md', 'skills/atlas/reference.md'];
   }
   if (task.orchestrator === 'athena') {
-    return ['skills/athena/SKILL.md', 'skills/atlas/reference.md'];
+    return ['skills/athena/SKILL.md', 'skills/atlas/reference.md', 'skills/athena/reference.md'];
   }
   return [];
 }

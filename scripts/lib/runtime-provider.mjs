@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveGeminiBinary } from './gemini-binary.mjs';
 import { resolveBinary } from './resolve-binary.mjs';
 
 export const RUNTIME_CLAUDE_TOOLS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'];
@@ -26,7 +27,10 @@ export function effectiveRuntimeLevel(m) {
 
 export function probeRuntimeProvider(provider) {
   try {
-    const binary = resolveBinary(provider);
+    const gemini = provider === 'gemini' ? resolveGeminiBinary() : null;
+    if (gemini?.flavor === 'agy') return { provider, supported: false, control: 'unavailable',
+      reason: 'Managed Gemini requires Gemini CLI system settings' };
+    const binary = gemini?.path ?? resolveBinary(provider);
     const help = execFileSync(binary, ['--help'], { encoding: 'utf8', timeout: 10000 });
     const version = execFileSync(binary, ['--version'], { encoding: 'utf8', timeout: 10000 }).trim();
     let supported = false;

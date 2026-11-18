@@ -311,6 +311,9 @@ function _processEvent(handle, event) {
       // Init event: capture session ID
       if (event.subtype === 'init' && event.session_id) {
         handle.sessionId = event.session_id;
+        if (typeof event.model === 'string') {
+          handle.workerMeta = { ...handle.workerMeta, reportedModel: event.model };
+        }
       }
       break;
     }
