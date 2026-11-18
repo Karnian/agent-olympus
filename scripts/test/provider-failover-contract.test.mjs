@@ -21,7 +21,7 @@ for (const skill of ['atlas', 'athena']) {
   test(`${skill} provider fallback recipe consumes targetProvider and dispatches provider child teams`, () => {
     const source = readFileSync(path.join(
       REPO_ROOT,
-      skill === 'atlas' ? 'skills/atlas/reference.md' : 'skills/athena/SKILL.md',
+      `skills/${skill}/reference.md`,
     ), 'utf-8');
     const lifecycle = canonicalProviderLifecycle(source, skill);
     assert.match(lifecycle, /reassignProvider\(/);
@@ -82,11 +82,10 @@ test('atlas integrates committed external worktrees before terminal cleanup', ()
   );
 });
 
-test('athena external workers use provider defaults and preserve work until a clean merge', () => {
-  const source = readFileSync(path.join(REPO_ROOT, 'skills/athena/SKILL.md'), 'utf-8');
-  const executionPrd = readFileSync(path.join(REPO_ROOT, 'scripts/lib/execution-prd.mjs'), 'utf-8');
+test('athena external workers use validated worker definitions and preserve work until a clean merge', () => {
+  const source = readFileSync(path.join(REPO_ROOT, 'skills/athena/reference.md'), 'utf-8');
   assert.match(source, /const workerDefinitions = buildAthenaWorkerDefinitions\(prd, \{ allowCompleted: true \}\)/);
-  assert.match(executionPrd, /model: type === 'claude' \? \(stories\[0\]\.model \|\| 'sonnet'\) : undefined/);
+  assert.match(source, /getReviewWorktreeState\(\{ cwd \}\)\.dirty/);
   assert.match(source, /MANDATORY WORKTREE:/);
   assert.match(source, /Athena parallel worktrees must branch from a committed checkpoint/);
   assert.ok(

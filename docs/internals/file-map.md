@@ -37,6 +37,7 @@ Invoked by skills, CI, or maintainers — not registered as hooks.
 | File | Purpose |
 |------|---------|
 | `orchestrator-runtime.mjs` | Code-owned Atlas/Athena phase-control CLI (positional commands only) |
+| `athena-bootstrap.mjs` | Admit or recover native Athena, append the request, and initialize the phase ledger from the target project |
 | `athena-runtime.mjs` | Opt-in scheduling, worker commands, cancellation, ledger migration, and offline reservation inspection/reconciliation |
 | `runtime-mcp.mjs` | Worker-bound stdio MCP proxy with single-use broker bootstrap |
 | `ask.mjs` | `/ask` helper: sync query plus async job subcommands |
@@ -46,6 +47,7 @@ Invoked by skills, CI, or maintainers — not registered as hooks.
 | `setup-gemini-key.mjs` | `/setup-gemini-auth` wizard: AO-owned macOS Keychain item |
 | `diagnose-sandbox.mjs` | Dump host sandbox + permission detection and derived Codex level |
 | `usage-report.mjs` | Per-agent model-usage summary from recorded JSONL |
+| `estimate-prd-cost.mjs` | Print the preflight USD estimate or null for unpriced worker assignments |
 | `eval-candidates.mjs` | Local HU-17 failed-run review queue CLI (`npm run eval:candidates`) |
 | `run-tests.mjs` | Cross-platform test entry point (`npm test`) |
 | `check-version-sync.mjs` | Verify every manifest carries the same version |
@@ -76,6 +78,7 @@ Invoked by skills, CI, or maintainers — not registered as hooks.
 | `light-mode.mjs` | Atlas/Athena lightweight execution path |
 | `loop-guard.mjs` | Persistent cooperative termination guard for the autonomous loop |
 | `checkpoint.mjs` | Session checkpoint save/restore (24h expiry) |
+| `athena-ship-policy.mjs` | Resolve native Athena shipping constraints from its strict task ledger |
 | `athena-start.mjs` | Checkpoint-friendly START handshake for Athena native teammates |
 | `athena-recovery.mjs` | Generation-bound Athena resume/adoption |
 | `orphan-run-recovery.mjs` | Fail-closed orphan terminalization |

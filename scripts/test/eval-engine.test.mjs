@@ -1098,7 +1098,7 @@ test('Atlas target prompt identity includes its progressive-disclosure reference
     'skills/athena/SKILL.md': skillFingerprint,
   });
   assert.equal(athenaStrict.targetPromptFingerprint, null);
-  assert.deepEqual(athenaStrict.missingTargetPromptPaths, ['skills/atlas/reference.md']);
+  assert.deepEqual(athenaStrict.missingTargetPromptPaths, ['skills/atlas/reference.md', 'skills/athena/reference.md']);
 });
 
 test('live Atlas and Athena evals reject incomplete target prompt resource sets', async () => {

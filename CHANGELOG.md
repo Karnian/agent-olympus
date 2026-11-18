@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-11-18
+
+- Athena starts and resumes from an installed plugin in the target project. Its
+  entry skill loads phase instructions on demand. Runtime-owned untracked files
+  no longer block clean Git checkpoints. User changes still block execution.
+- Session-specific intent caches isolate routing advice between concurrent
+  Claude Code sessions. An explicitly selected model suppresses redundant routing
+  advice. Athena accepts explicit Codex and Gemini model IDs.
+  Worker snapshots distinguish requested models from provider-reported models.
+- Worker cost estimates use the validated execution plan. Native Athena counts
+  each assigned worker once. Managed estimates count one parent launch per story.
+  Unknown prices produce a null total.
+- Ordinary Gemini workers negotiate ACP v1. Queued messages are delivered after
+  the current turn and incomplete replies produce a failed result. Antigravity
+  uses its native ACP and headless arguments and result format.
+  Isolated review and managed Gemini workers continue to require Gemini CLI.
+- English and Korean installation guides cover marketplace registration and upgrades.
+
 ## [1.6.2] - 2026-11-05
 
 Managed Athena execution, released as an explicit opt-in backend. The local

@@ -156,7 +156,7 @@ function decodeUtf8(buffer, label) {
   return text;
 }
 
-function parseNullPaths(buffer, label) {
+function parseNullPaths(buffer, label, { allowRuntimeWorktrees = false } = {}) {
   if (buffer.length === 0) return [];
   if (buffer.length > MAX_PATH_LIST_BYTES) {
     throw new ReviewPackageError('EVIDENCE_TOO_LARGE', `${label} path list exceeds the output cap`);
@@ -169,7 +169,11 @@ function parseNullPaths(buffer, label) {
   let start = 0;
   for (let index = 0; index < buffer.length; index += 1) {
     if (buffer[index] !== 0) continue;
-    const entry = decodeUtf8(buffer.subarray(start, index), `${label} path`);
+    let entry = decodeUtf8(buffer.subarray(start, index), `${label} path`);
+    // Git lists a nested untracked worktree as one directory ending in "/".
+    if (allowRuntimeWorktrees && entry.startsWith('.ao/worktrees/') && entry.endsWith('/')) {
+      entry = entry.slice(0, -1);
+    }
     if (!isSafeRepoRelativePath(entry)) {
       throw new ReviewPackageError('UNSAFE_PATH', `${label} contains an unsafe repo-relative path`);
     }
@@ -200,6 +204,7 @@ function untrackedReviewPaths(cwd) {
       maxBuffer: MAX_PATH_LIST_BYTES + 1,
     }),
     'untracked',
+    { allowRuntimeWorktrees: true },
   );
   return {
     reviewable: all.filter(value => !isReviewExcludedUntrackedPath(value)),

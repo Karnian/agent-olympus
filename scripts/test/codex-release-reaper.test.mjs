@@ -119,11 +119,11 @@ test('reaper: an unreadable current identity blocks deadline termination (review
 });
 
 test('reaper CLI: reaps a descendant that outlives its detached group leader', { skip: process.platform === 'win32' }, async () => {
-  // Leader exits after 0.3s, leaving a long `sleep` in the same process group:
-  // the lingering tool-call descendant from issue #74.
-  const leader = spawn('sh', ['-c', 'sleep 30 & echo $!; sleep 0.3'], {
+  // End the leader only after the reaper has observed its identity, leaving
+  // the lingering tool-call descendant from issue #74 in the same group.
+  const leader = spawn('sh', ['-c', 'sleep 30 & echo $!; read done'], {
     detached: true,
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stdio: ['pipe', 'pipe', 'ignore'],
   });
   const descendantPid = await new Promise((resolve) => {
     leader.stdout.once('data', (chunk) => resolve(Number(String(chunk).trim())));
@@ -139,7 +139,7 @@ test('reaper CLI: reaps a descendant that outlives its detached group leader', {
     let output = '';
     const status = await new Promise((resolve) => {
       const reaper = spawn(process.execPath, [REAPER, String(leader.pid), startId], { stdio: ['ignore', 'pipe', 'ignore'] });
-      reaper.stdout.on('data', (chunk) => { output += chunk; });
+      reaper.stdout.on('data', (chunk) => { output += chunk; if (output.includes('ready\n')) leader.stdin.end(); });
       reaper.on('exit', resolve);
     });
     assert.equal(status, 0);
@@ -147,14 +147,15 @@ test('reaper CLI: reaps a descendant that outlives its detached group leader', {
     await new Promise((r) => setTimeout(r, 100));
     assert.equal(alive(descendantPid), false, 'the lingering descendant was reaped');
   } finally {
+    leader.stdin.end();
     try { process.kill(descendantPid, 'SIGKILL'); } catch { /* already gone */ }
   }
 });
 
 test('reaper CLI: SIGKILLs a descendant that ignores SIGTERM', { skip: process.platform === 'win32' }, async () => {
-  const leader = spawn('sh', ['-c', "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & echo $!; sleep 0.3"], {
+  const leader = spawn('sh', ['-c', "sh -c 'trap \"\" TERM; while :; do sleep 1; done' & echo $!; read done"], {
     detached: true,
-    stdio: ['ignore', 'pipe', 'ignore'],
+    stdio: ['pipe', 'pipe', 'ignore'],
   });
   const descendantPid = await new Promise((resolve) => {
     leader.stdout.once('data', (chunk) => resolve(Number(String(chunk).trim())));
@@ -164,13 +165,15 @@ test('reaper CLI: SIGKILLs a descendant that ignores SIGTERM', { skip: process.p
   const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
   try {
     const status = await new Promise((resolve) => {
-      const reaper = spawn(process.execPath, [REAPER, String(leader.pid), startId], { stdio: 'ignore' });
+      const reaper = spawn(process.execPath, [REAPER, String(leader.pid), startId], { stdio: ['ignore', 'pipe', 'ignore'] });
+      reaper.stdout.once('data', () => leader.stdin.end());
       reaper.on('exit', resolve);
     });
     assert.equal(status, 0);
     await new Promise((r) => setTimeout(r, 100));
     assert.equal(alive(descendantPid), false, 'the SIGTERM-resistant descendant was killed');
   } finally {
+    leader.stdin.end();
     try { process.kill(-leader.pid, 'SIGKILL'); } catch { /* already gone */ }
   }
 });

@@ -133,3 +133,5 @@ Unlike Codex app-server (which supports `steerTurn()` for mid-turn injection), G
 - Messages auto-drain as sequential turns when current turn completes
 - Failed messages retry once, then move to dead letters (`handle._deadLetters`)
 - Queue capped at `MAX_QUEUE_DEPTH=200` to prevent memory leaks
+
+Antigravity workers inherit the configured Gemini credential environment. For the CLI’s API-key mode, select `modelProvider: "gemini"` in its settings and supply `GEMINI_API_KEY`. The default account sign-in uses the CLI’s own session. [Google’s authentication guide](https://antigravity.google/docs/cli/install/)

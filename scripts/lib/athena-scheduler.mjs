@@ -27,6 +27,7 @@ import {
   monitorTeam,
   shutdownTeam,
 } from './worker-spawn.mjs';
+import { getReviewWorktreeState } from './review-package.mjs';
 import { createWorkerWorktree, mergeWorkerBranch } from './worktree.mjs';
 import { probeRuntimeProvider } from './runtime-provider.mjs';
 import { resolveTrustedVcsBinary, sanitizedVcsEnvironment } from './trusted-vcs.mjs';
@@ -42,7 +43,7 @@ const git = (cwd, args) =>
   });
 const head = (cwd) => git(cwd, ['rev-parse', 'HEAD']).toString().trim();
 const clean = (cwd) => {
-  if (git(cwd, ['status', '--porcelain', '-z']).length)
+  if (getReviewWorktreeState({ cwd }).dirty)
     throw new Error('runtime requires a clean committed checkpoint');
 };
 function location(cwd, id) {
@@ -427,7 +428,7 @@ export async function tickAthenaRuntime(cwd, id, _inject = {}) {
       workers.push({
         name,
         type: task.story.workerType,
-        model: task.story.workerType === 'claude' ? task.story.model : undefined,
+        model: task.story.model,
         cwd: worktree.worktreePath,
         worktreePath: worktree.worktreePath,
         branchName: worktree.branchName,

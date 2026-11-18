@@ -8,7 +8,7 @@ Agent Olympus is a standalone Claude Code plugin that transforms how you build s
 
 Two orchestrators, 19 specialized agents, 37 workflow skills. Zero npm dependencies.
 
-Current release: **v1.6.2** — [release notes](CHANGELOG.md#162---2026-11-05).
+Current release: **v1.6.3** — [release notes](CHANGELOG.md#163---2026-11-18).
 
 ## What It Does
 
@@ -72,29 +72,30 @@ Both loop until every acceptance criterion is met, the build passes, tests pass,
 - **Codex MCP recovery + `--no-mcp`** *(v1.5.1)*: `/ask` classifies record-ordered MCP authentication failures across exec and tmux adapters. Codex-only `--no-mcp` skips the entire user-level config, including configured MCP servers, with a fail-closed Codex version gate while preserving authentication and explicit CLI overrides.
 - **Fast `/ask codex` return** *(v1.6.1)*: Synchronous `/ask` returns as soon as Codex completes its turn instead of waiting 2–6s for Codex to tear down plugins, MCP servers, and hooks. Codex is released, not killed, so its SessionEnd hooks still run, and a detached reaper cleans up any leftover process group.
 - **Managed Athena execution** *(v1.6.2, explicit opt-in)*: Persistent provider workers accept follow-ups and delegate to parallel leaf agents through worker-bound MCP tools. Provider-specific child slots are reserved before launch; dependency waves integrate and verify inputs before dependent tasks begin. Failures stop peers, retain work, and expose offline reservation recovery. See the [runtime guide](docs/internals/athena-runtime.md).
-- **3376 unit tests**: v1.6.2 uses `node:test` across 142 test files (v1.6.1 baseline: 3354 tests across 135 files). Linux CI passes 3375 with one platform-specific skip.
+- **3,388 unit tests** across 142 files cover the orchestrators, hooks and worker adapters.
 - **Fail-safe architecture**: Hooks normally fail open; concurrency admission and the Atlas executable-control gates deliberately block on unsafe, unreadable, or unresolved protected state
 
 ## Installation
 
-### Via Marketplace (Recommended)
+Run these commands in Claude Code to register the marketplace and install the plugin.
 
-1. Open Claude Code
-2. Go to **Marketplace** → **Productivity**
-3. Find **Agent Olympus** by Karnian
-4. Click **Install**
-
-### Manual Install
-
-Clone the repository and reference it in your Claude Code plugin directory:
-
-```bash
-git clone https://github.com/Karnian/agent-olympus.git ~/.claude/plugins/agent-olympus
+```text
+/plugin marketplace add Karnian/agent-olympus
+/plugin install agent-olympus@agent-olympus
 ```
 
-### Upgrading to v1.6.2
+### Upgrading to v1.6.3
 
-Update the plugin to v1.6.2 before selecting the managed Athena backend. Existing
+Refresh the marketplace and plugin in your installation, then restart Claude Code.
+
+```sh
+claude plugin marketplace update agent-olympus
+claude plugin update agent-olympus@agent-olympus
+```
+
+Athena loads detailed instructions by phase. External workers accept an explicit
+provider model ID. The estimate uses the approved worker assignments and shows
+an unknown total when any assigned model has no known price. Existing
 native-team runs keep their lifecycle. Managed execution explicitly opts into
 ledger v3 from a quiescent v2 project; old plugin readers reject v3, so stop old
 sessions and upgrade all participants together. Do not delete a live ledger.
@@ -661,7 +662,7 @@ grep -r '\.omc/' scripts/ skills/ agents/
 
 ## Testing Notes
 
-A `node:test` based test suite (v1.6.2: 3376 tests across 142 files; v1.6.1 baseline: 3354 tests across 135 files) covers hooks, adapters, and managed runtime lifecycles. To run:
+A `node:test` based test suite (v1.6.3: 3,388 tests across 142 files) covers hooks, adapters, and managed runtime lifecycles. To run:
 
 ```bash
 npm test

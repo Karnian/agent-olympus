@@ -110,6 +110,26 @@ function contextRunId(output) {
   return context.match(/^runId: ([A-Za-z0-9._-]+)$/m)?.[1] ?? null;
 }
 
+describe('installed Athena bootstrap', () => {
+  it('creates then resumes one native run outside the plugin checkout', () => {
+    const cwd = project();
+    try {
+      const cli = join(ROOT, 'scripts', 'athena-bootstrap.mjs');
+      const first = invoke(cli, { cwd, rawInput: 'Implement the fixture.' }).json;
+      const resumed = invoke(cli, { cwd, rawInput: 'Keep all changes local.' }).json;
+      assert.equal(first.created, true);
+      assert.equal(resumed.created, false);
+      assert.equal(resumed.runId, first.runId);
+      assert.equal(first.resumePhase, 'triage');
+      const updates = getUserTaskUpdates(first.runId, {
+        base: join(cwd, '.ao/artifacts/runs'), trustedRoot: cwd,
+      });
+      assert.deepEqual(updates.updates.map(update => update.task),
+        ['Implement the fixture.', 'Keep all changes local.']);
+    } finally { clean(cwd); }
+  });
+});
+
 describe('Atlas executable bootstrap', () => {
   it('adopts a preallocated eval run and appends with resume semantics', () => {
     const cwd = project();

@@ -25,7 +25,7 @@
 
 import { spawn as nodeSpawn } from 'child_process';
 import { buildEnhancedPath } from './resolve-binary.mjs';
-import { resolveGeminiBinary } from './gemini-binary.mjs';
+import { agyApprovalArgs, assertGeminiIsolation, resolveGeminiBinary } from './gemini-binary.mjs';
 import { createGeminiReadOnlySettings } from './gemini-readonly.mjs';
 import {
   resolveGeminiApiKey,
@@ -73,7 +73,7 @@ const SHUTDOWN_GRACE_MS = 5000;
  * @param {string} raw - Raw stdout string from the gemini process
  * @returns {{ output: string, usage: object|null, error: string|null }}
  */
-export function parseGeminiJsonOutput(raw) {
+export function parseGeminiJsonOutput(raw, flavor) {
   if (!raw || !raw.trim()) {
     return { output: '', usage: null, error: 'Empty response from Gemini CLI' };
   }
@@ -83,6 +83,25 @@ export function parseGeminiJsonOutput(raw) {
     parsed = JSON.parse(raw.trim());
   } catch {
     return { output: '', usage: null, error: `Malformed JSON output: ${raw.slice(0, 100)}` };
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { output: '', usage: null, error: 'Invalid Gemini result envelope' };
+  }
+  if (flavor === 'agy' && typeof parsed.status !== 'string') {
+    return { output: '', usage: parsed.usage ?? null, error: 'Missing Antigravity result status' };
+  }
+  if (typeof parsed.status === 'string') {
+    const usage = parsed.usage ?? null;
+    if (parsed.status !== 'SUCCESS' || parsed.error) {
+      const error = typeof parsed.error === 'string' && parsed.error
+        ? parsed.error : `Antigravity run ended with status ${parsed.status}`;
+      return { output: '', usage, error };
+    }
+    if (typeof parsed.response !== 'string') {
+      return { output: '', usage, error: 'Missing Antigravity response' };
+    }
+    return { output: parsed.response, usage, error: null };
   }
 
   // Error field takes precedence
@@ -137,9 +156,11 @@ function _flushOutput(handle) {
   const raw = handle._partial;
   if (!raw || !raw.trim()) return;
 
-  const { output, usage, error } = parseGeminiJsonOutput(raw);
+  const { output, usage, error } = parseGeminiJsonOutput(raw, handle.workerMeta?.binaryFlavor);
   handle._output = output;
   handle._usage = usage;
+  const models = Object.keys(usage?.models || {});
+  if (models.length === 1) handle.workerMeta = { ...handle.workerMeta, reportedModel: models[0] };
   handle._partial = '';
 
   // Push a synthetic event so callers can inspect the parsed result
@@ -174,6 +195,7 @@ export function spawn(prompt, opts = {}) {
   const spawnImpl = typeof opts.spawn === 'function' ? opts.spawn : nodeSpawn;
   const resolveBin = typeof opts.resolveGeminiBinary === 'function' ? opts.resolveGeminiBinary : resolveGeminiBinary;
   const binary = resolveBin();
+  assertGeminiIsolation(binary, opts);
 
   const args = ['--output-format', 'json'];
 
@@ -187,11 +209,13 @@ export function spawn(prompt, opts = {}) {
 
   // Model selection: -m <model>
   if (opts.model) {
-    args.push('-m', opts.model);
+    args.push(binary.flavor === 'agy' ? '--model' : '-m', opts.model);
   }
 
   // Approval mode: --approval-mode <mode>
-  if (opts.approvalMode) {
+  if (binary.flavor === 'agy') {
+    args.push(...agyApprovalArgs(opts.approvalMode));
+  } else if (opts.approvalMode) {
     args.push('--approval-mode', opts.approvalMode);
   }
 
@@ -252,6 +276,7 @@ export function spawn(prompt, opts = {}) {
     _output: '',
     _usage: null,
     _exitCode: null,
+    _stdioClosed: false,
     _stderrChunks: [],
     workerMeta: { binaryFlavor: binary.flavor, binaryResolved: binary.resolved },
     // Account name used to resolve GEMINI_API_KEY for this spawn — the error
@@ -279,14 +304,17 @@ export function spawn(prompt, opts = {}) {
     }
   });
 
-  // On exit: parse accumulated JSON output, determine final status
+  // Exit releases process resources. The last JSON bytes may still be in the pipe.
   child.on('exit', (code) => {
     readOnlySettings?.cleanup();
     handle._exitCode = code;
+  });
+  child.once('close', () => {
+    handle._stdioClosed = true;
     _flushOutput(handle);
-    // Non-zero exit with no parsed content → failed
-    if (code !== 0 && handle.status === 'running') {
+    if (handle.status === 'running') {
       handle.status = 'failed';
+      handle._stderrChunks.push('Gemini CLI closed without a result');
     }
   });
 
@@ -406,7 +434,7 @@ export function collect(handle, timeoutMs = 30000) {
     }
 
     // Guard: if exit already happened before we attached the listener
-    if (handle._exitCode !== null) {
+    if (handle._exitCode !== null && handle._stdioClosed !== false) {
       _flushOutput(handle);
       resolve(monitor(handle));
       return;

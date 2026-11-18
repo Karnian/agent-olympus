@@ -87,7 +87,7 @@ test('scheduler executes independent detached workers, verifies integration, the
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['-C', root, 'config', 'user.name', 'AO Test']);
   execFileSync('git', ['-C', root, 'config', 'user.email', 'ao@example.test']);
-  writeFileSync(join(root, '.gitignore'), '.ao/\n');
+  writeFileSync(join(root, 'README.md'), 'Test project without AO ignore rules.\n');
   execFileSync('git', ['-C', root, 'add', '.']); execFileSync('git', ['-C', root, 'commit', '-qm', 'initial']);
   process.chdir(root);
   let state;

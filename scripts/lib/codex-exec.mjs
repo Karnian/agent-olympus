@@ -127,7 +127,7 @@ function buildConfigOverrideArgs(opts = {}) {
 }
 
 function buildExecConfigArgs(opts = {}) {
-  const args = [];
+  const args = opts.model ? ['--model', opts.model] : [];
   if (opts.ignoreUserConfig === true) args.push('--ignore-user-config');
   if (opts.ignoreRules === true) args.push('--ignore-rules');
   if (opts.skipGitRepoCheck === true) args.push('--skip-git-repo-check');

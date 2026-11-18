@@ -215,12 +215,14 @@ match, and whose `benchmarkFingerprint` matches. That fingerprint covers
 For Atlas, the target prompt identity is a domain-separated composite of the
 concise `skills/atlas/SKILL.md` and its progressive-disclosure
 `skills/atlas/reference.md`; minimal legacy test fixtures that omit the
-reference retain their single-file identity.
+reference retain their single-file identity. Athena fingerprints its entry skill,
+its phase reference, and the shared Atlas reference that its workflow uses.
 
 The measurement machinery has a separate `pipelineProtocolFingerprint` over
 the live harness, pipeline-evidence policy, and production
 phase/loop-guard/run-artifact roots, the Atlas bootstrap/runtime/Stop gates,
-and the installed hook registry, plus their repo-local relative-import closure.
+the Athena bootstrap, and the installed hook registry, plus their repo-local
+relative-import closure.
 Builtins, packages, and unreferenced SUT files are excluded. A
 protocol-only change therefore does
 not erase an otherwise valid outcome delta. It sets

@@ -2,7 +2,7 @@
 
 Standalone multi-model orchestrator plugin for Claude Code.
 Atlas + Athena orchestrate 19 agents, 37 skills, Claude/Codex/Gemini execution, and adapter-based workers.
-Current release: **v1.6.2** — managed Athena execution is explicit opt-in.
+Current release: **v1.6.3** — managed Athena execution is explicit opt-in.
 
 ## Architecture
 
@@ -35,7 +35,7 @@ agent-olympus/
 ├── skills/             — 37 user-facing skills, <name>/SKILL.md (see Skills below)
 ├── scripts/            — Hook entry points + CLI helpers (Node.js ESM, zero deps)
 │   ├── lib/            — Shared modules: pipeline, adapters, permissions, state
-│   └── test/           — node:test suites (current: 3376 tests, 142 files)
+│   └── test/           — node:test suites (142 files)
 ├── config/             — model-routing.jsonc, review-routing.jsonc
 ├── schemas/            — Codex goal/review structured-output schemas
 ├── evals/              — Eval harness (fixture vs live, deterministic graders)
@@ -71,14 +71,14 @@ Follow [docs/development.md](docs/development.md) when adding agents, skills, ho
 
 ## Testing
 
-Run the current 3376-test Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
+Run the complete Node suite and syntax checks from [docs/testing.md](docs/testing.md). Keep this file under 28 KiB with `node scripts/check-agents-size.mjs`.
 
 ## Dependencies
 
 - Runtime: Node.js >= 20.0.0.
 - Optional: tmux for legacy worker fallback and Athena team mode.
 - Optional: Codex CLI (`npm install -g @openai/codex`) for Codex workers.
-- Optional: Gemini CLI (`npm install -g @google/gemini-cli`) for Gemini workers, or Antigravity `agy` as drop-in fallback.
+- Optional: Gemini CLI (`npm install -g @google/gemini-cli`) for Gemini workers, or Antigravity `agy` for ordinary ACP and headless workers. Isolated read-only and managed Gemini workers require Gemini CLI.
 - npm packages: none at runtime.
 
 ## Known Limitations
@@ -231,7 +231,7 @@ Run the current 3376-test Node suite and syntax checks from [docs/testing.md](do
 | `.ao/wisdom.jsonl` | Cross-iteration learnings (JSONL format) | Accumulated, NEVER deleted (survives cancel) |
 | `.ao/state/checkpoint-atlas[-sessionId].json` | Atlas session recovery checkpoint (session-scoped) | Auto-expires after 24h |
 | `.ao/state/checkpoint-athena[-sessionId].json` | Athena session recovery checkpoint (session-scoped) | Auto-expires after 24h |
-| `.ao/state/ao-intent.json` | Last classified intent | Updated per prompt |
+| `.ao/state/ao-intent[-<session-hash>].json` | Last classified intent | Updated per prompt |
 | `.ao/state/ao-concurrency.json` | Default-v2 / managed-v3 admission, reservations, and recovery barrier | Updated per task spawn/complete; never generic-TTL swept |
 | `.ao/memory/` | Durable design identity and taste memory (`schemaVersion:1`) | Survives SessionEnd and cancel |
 | `.ao/state/supervisor/<runId>/` | Detached worker snapshots/manifests | Swept per inactive run |

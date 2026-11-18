@@ -1,4 +1,4 @@
-import { assertExecutionPrd } from './execution-prd.mjs';
+import { assertExecutionPrd, isExternalModelId } from './execution-prd.mjs';
 
 export const CONSENSUS_ASSIGNMENT_PLAN_CONTRACT = 'AO_CONSENSUS_ASSIGNMENT_PLAN_V1';
 export const CONSENSUS_ASSIGNMENT_PLAN_SCHEMA_VERSION = 1;
@@ -98,7 +98,7 @@ function assertProviderFields(assignment, index, orchestrator) {
     if (!nonEmpty(assignment.assignedWorker)) {
       throw new Error(`${label}.assignedWorker is required`);
     }
-    if (assignment.model !== undefined && !MODELS.has(assignment.model)) {
+    if (provider === 'claude' && assignment.model !== undefined && !MODELS.has(assignment.model)) {
       throw new Error(`${label}.model must be opus, sonnet, or haiku when present`);
     }
   }
@@ -111,8 +111,8 @@ function assertProviderFields(assignment, index, orchestrator) {
     if (assignment.agentType !== undefined) {
       throw new Error(`${label}.agentType must be omitted for external workers`);
     }
-    if (orchestrator === 'athena' && assignment.model !== undefined) {
-      throw new Error(`${label}.model must be omitted for Athena external workers`);
+    if (orchestrator === 'athena' && assignment.model !== undefined && !isExternalModelId(assignment.model)) {
+      throw new Error(`${label}.model must be a provider model ID for external workers`);
     }
   }
 }

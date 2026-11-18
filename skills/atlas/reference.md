@@ -843,16 +843,6 @@ from and merge into a clean committed root, while Claude may dirty the root only
 after all external integration is finished. If the desired dependency order
 cannot satisfy this invariant, reassign the story provider or use Athena.
 
-**Cost Estimation** — before execution, estimate and display projected cost:
-```
-node -e "import('./scripts/lib/cost-estimate.mjs').then(m => {
-  const tiers = prd.userStories.map(s => ({ model: s.model || 'sonnet', count: 1 }));
-  const est = m.estimateCost({ stories: tiers.length, modelTiers: tiers });
-  console.log('Estimated cost: $' + est.estimatedCostUSD.toFixed(2));
-})"
-```
-Display cost breakdown per model tier to user. If `.ao/autonomy.json` has `budget.warnThresholdUsd` set and estimate exceeds it, warn (but do not block — unattended mode must not be interrupted).
-
 **PRD QUALITY RULE**: Generic criteria are FORBIDDEN. These are NOT acceptable:
 - ❌ "Implementation is complete"
 - ❌ "Code compiles without errors"
@@ -899,6 +889,13 @@ assertExecutionPrd(plannedPrd, { orchestrator: 'atlas', allowCompleted: false })
 ```
 // await runtimeComplete(runId, 'plan', null, { checkpointData: { prdSnapshot: <prd.json contents> } })  — see Phase 2 entry; carries the PRD snapshot into the checkpoint.
 ```
+
+**Cost Estimation** — before execution, estimate and display projected cost:
+```
+node "${CLAUDE_PLUGIN_ROOT}/scripts/estimate-prd-cost.mjs" .ao/prd.json
+```
+Show an unavailable estimate for a null USD value. Apply the USD warning threshold only to a priced total.
+Display cost breakdown per model tier to user. If `.ao/autonomy.json` has `budget.warnThresholdUsd` set and estimate exceeds it, warn (but do not block — unattended mode must not be interrupted).
 
 <!-- AO-PHASE:plan:end -->
 <!-- AO-PHASE:execute:start -->
@@ -1054,10 +1051,8 @@ import {
 const atlasProjectSlug = buildExecutionTeamSlug(prd.projectName, { orchestrator: 'atlas' });
 const safeGroup = String(parallelGroup).replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 40);
 const teamSlug = `${atlasProjectSlug}-${safeGroup}`;
-const rootStatus = execFileSync('git', ['-C', cwd, 'status', '--porcelain'], {
-  encoding: 'utf-8',
-}).trim();
-if (rootStatus) {
+import { getReviewWorktreeState } from '${CLAUDE_PLUGIN_ROOT}/scripts/lib/review-package.mjs';
+if (getReviewWorktreeState({ cwd }).dirty) {
   throw new Error(
     'External worktrees must branch from a committed Atlas checkpoint; preserve current changes and route this group serially until the root is clean',
   );

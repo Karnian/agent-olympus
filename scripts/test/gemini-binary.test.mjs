@@ -115,3 +115,10 @@ test('resolver never throws when injected resolver throws', () => {
     attempted: ['gemini', 'agy'],
   });
 });
+
+test('Windows Antigravity override selects native Antigravity arguments', () => {
+  const override = String.raw`C:\Tools\agy.exe`;
+  const result = _createGeminiResolver({ env: { AO_GEMINI_BINARY: override } })();
+  assert.equal(result.path, override);
+  assert.equal(result.flavor, 'agy');
+});

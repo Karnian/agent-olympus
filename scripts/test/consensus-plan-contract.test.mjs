@@ -1,3 +1,4 @@
+import { buildAthenaWorkerDefinitions } from '../lib/execution-prd.mjs';
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -161,6 +162,22 @@ describe('AO_CONSENSUS_ASSIGNMENT_PLAN_V1', () => {
     assert.equal(candidate.userStories[1].assignedWorker, 'claude-implementation');
   });
 
+  it('carries an explicit provider model from an Athena assignment into its worker definition', () => {
+    const assignments = athenaAssignments();
+    assignments[0].model = 'gpt-6.2-sol';
+    const plan = parseConsensusAssignmentPlan(JSON.stringify(envelope('athena', assignments)), { orchestrator: 'athena' });
+    const candidate = buildConsensusExecutionPrd(planningPrd(), plan, {
+      orchestrator: 'athena', sourcePrdGeneration: GENERATION, hasCodex: true,
+    });
+    const worker = buildAthenaWorkerDefinitions(candidate).find(entry => entry.type === 'codex');
+    assert.equal(worker.model, 'gpt-6.2-sol');
+    for (const invalid of ['--invalid', 'opus', 'a b']) {
+      assignments[0].model = invalid;
+      assert.throws(() => parseConsensusAssignmentPlan(JSON.stringify(envelope('athena', assignments)),
+        { orchestrator: 'athena' }), /provider model ID/);
+    }
+  });
+
   it('fails closed on unknown fields, reordered stories, and stale generations', () => {
     const withUnknown = atlasAssignments();
     withUnknown[0].title = 'must not rewrite the planning story';
@@ -221,7 +238,7 @@ describe('AO_CONSENSUS_ASSIGNMENT_PLAN_V1', () => {
 describe('consensus-plan skill integration contract', () => {
   const skill = readFileSync(path.join(ROOT, 'skills/consensus-plan/SKILL.md'), 'utf8');
   const atlas = readFileSync(path.join(ROOT, 'skills/atlas/reference.md'), 'utf8');
-  const athena = readFileSync(path.join(ROOT, 'skills/athena/SKILL.md'), 'utf8');
+  const athena = readFileSync(path.join(ROOT, 'skills/athena/reference.md'), 'utf8');
 
   it('returns an assignment-only contract and forbids authoritative PRD writes', () => {
     assert.match(skill, /AO_CONSENSUS_ASSIGNMENT_PLAN_V1/);

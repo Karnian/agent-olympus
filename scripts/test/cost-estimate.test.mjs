@@ -149,3 +149,13 @@ test('estimateCost: mixed Claude + Gemini tiers produce correct breakdown', () =
   assert.ok(result.breakdown[0].costUSD > result.breakdown[1].costUSD,
     'sonnet should cost more than gemini-flash per spawn');
 });
+
+test('unpriced assignments keep their tokens and make a mixed total unavailable', () => {
+  const estimate = estimateCost({ modelTiers: [
+    { model: 'gpt-6.2-sol', count: 1 }, { model: 'provider-default', count: 1 },
+  ] });
+  assert.equal(estimate.totalTokens, 12000);
+  assert.equal(estimate.breakdown[0].costUSD, 0.028);
+  assert.equal(estimate.breakdown[1].costUSD, null);
+  assert.equal(estimate.estimatedCostUSD, null);
+});

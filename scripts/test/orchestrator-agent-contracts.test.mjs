@@ -37,7 +37,7 @@ describe('provider-aware planning and Athena applicability', () => {
   it('Athena is consistently limited to non-overlapping collaborative packages', () => {
     const english = readRepoFile('README.md');
     const korean = readRepoFile('README.ko.md');
-    const athena = readRepoFile('skills/athena/SKILL.md');
+    const athena = readRepoFile('skills/athena/reference.md');
     for (const source of [english, athena]) {
       assert.match(source, /Non-overlapping work packages that benefit from discovery sharing/i);
       assert.doesNotMatch(source, /Interdependent tasks/i);
@@ -51,7 +51,7 @@ describe('typed Hermes artifact integration', () => {
   const hermes = readRepoFile('agents/hermes.md');
   const orchestrators = [
     ['atlas', readRepoFile('skills/atlas/reference.md')],
-    ['athena', readRepoFile('skills/athena/SKILL.md')],
+    ['athena', readRepoFile('skills/athena/reference.md')],
   ];
 
   it('defines one strict AO_SPEC_V1 envelope', () => {
@@ -94,7 +94,7 @@ describe('typed review-gate integration', () => {
   const atlasEvidence = readRepoFile('scripts/lib/orchestrator-review-evidence.mjs');
   const orchestrators = [
     ['atlas', readRepoFile('skills/atlas/reference.md')],
-    ['athena', readRepoFile('skills/athena/SKILL.md')],
+    ['athena', readRepoFile('skills/athena/reference.md')],
   ];
 
   for (const [name, skill] of orchestrators) {
@@ -159,7 +159,7 @@ describe('typed review-gate integration', () => {
 describe('post-mutation final review integration', () => {
   const orchestrators = [
     ['atlas', readRepoFile('skills/atlas/reference.md'), 'verify'],
-    ['athena', readRepoFile('skills/athena/SKILL.md'), 'integrate'],
+    ['athena', readRepoFile('skills/athena/reference.md'), 'integrate'],
   ];
 
   for (const [name, skill, rewind] of orchestrators) {
@@ -253,7 +253,7 @@ describe('immutable review-base integration', () => {
   const atlasRuntime = readRepoFile('scripts/orchestrator-runtime.mjs');
   const orchestrators = [
     ['atlas', readRepoFile('skills/atlas/reference.md')],
-    ['athena', readRepoFile('skills/athena/SKILL.md')],
+    ['athena', readRepoFile('skills/athena/reference.md')],
   ];
 
   for (const [name, skill] of orchestrators) {
@@ -298,7 +298,7 @@ describe('immutable review-base integration', () => {
 
 describe('execution PRD integration', () => {
   const atlas = readRepoFile('skills/atlas/reference.md');
-  const athena = readRepoFile('skills/athena/SKILL.md');
+  const athena = readRepoFile('skills/athena/reference.md');
 
   it('validates Atlas plans before completion and dispatch', () => {
     assert.match(atlas, /readPlanningPrdForExecution\(\{ cwd \}\)/);
@@ -353,13 +353,13 @@ describe('execution PRD integration', () => {
 describe('canonical external validation lifecycle', () => {
   const orchestrators = [
     ['atlas', readRepoFile('skills/atlas/reference.md')],
-    ['athena', readRepoFile('skills/athena/SKILL.md')],
+    ['athena', readRepoFile('skills/athena/reference.md')],
   ];
 
   it('bans raw tmux command construction from every skill', () => {
     const skillsRoot = fileURLToPath(new URL('../../skills', import.meta.url));
     const skillFiles = readdirSync(skillsRoot, { recursive: true })
-      .filter(path => String(path).endsWith('SKILL.md'));
+      .filter(path => String(path).endsWith('SKILL.md') || String(path) === join('athena', 'reference.md'));
     assert.ok(skillFiles.length >= 37);
     for (const path of skillFiles) {
       const source = readFileSync(join(skillsRoot, String(path)), 'utf8');
@@ -399,7 +399,7 @@ describe('canonical external validation lifecycle', () => {
 
 describe('deterministic Claude execution context', () => {
   const atlas = readRepoFile('skills/atlas/reference.md');
-  const athena = readRepoFile('skills/athena/SKILL.md');
+  const athena = readRepoFile('skills/athena/reference.md');
   const athenaAgent = readRepoFile('agents/athena.md');
 
   it('never dispatches an unresolved role placeholder', () => {

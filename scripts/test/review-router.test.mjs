@@ -253,6 +253,7 @@ describe('review-router: routeReviewers basic scopes', () => {
         'scripts/lib/run-artifacts.mjs',
         'scripts/lib/phase-runner.mjs',
         'skills/athena/SKILL.md',
+        'skills/athena/reference.md',
         'skills/atlas/SKILL.md',
         'skills/atlas/reference.md',
       ]) {
